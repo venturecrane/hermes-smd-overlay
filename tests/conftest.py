@@ -49,15 +49,30 @@ def load_plugin(plugin_name: str) -> ModuleType:
     machinery by loading the plugin's ``__init__.py`` directly via
     ``importlib.util.spec_from_file_location``. The resulting module is
     registered under a sanitized name (``plugin_hermes_smd_audit``).
+
+    The sanitized name is also registered in ``sys.modules`` BEFORE the
+    loader executes so that relative imports inside ``__init__.py``
+    (``from . import emit, schemas, ...``) resolve correctly. Without
+    pre-registration, Python's import machinery can't find the parent
+    package and the submodule imports raise ``ImportError``.
     """
+    import sys
+
     root = Path(__file__).parent.parent
     init_path = root / "plugins" / plugin_name / "__init__.py"
-    sanitized = plugin_name.replace("-", "_")
+    sanitized = f"plugin_{plugin_name.replace('-', '_')}"
     spec = importlib.util.spec_from_file_location(
-        f"plugin_{sanitized}", init_path
+        sanitized,
+        init_path,
+        submodule_search_locations=[str(init_path.parent)],
     )
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load plugin spec for {plugin_name!r}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[sanitized] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(sanitized, None)
+        raise
     return module

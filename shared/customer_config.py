@@ -1,56 +1,235 @@
-"""customer.yaml + per-profile config loader.
+"""customer.yaml loader.
 
-Reads the customer's authored ``customer.yaml`` from the Fly volume at
-``/opt/data/customer.yaml`` and the materialized per-profile Hermes config at
-``$HERMES_HOME/profiles/<slug>/config.yaml``. The bootstrap CLI is responsible
-for translating the former into the latter (see ``bootstrap/translate.py``);
-this module is the read path used by plugins at runtime.
+Reads the authored ``customer.yaml`` from the Fly volume (typically
+``/opt/data/customer.yaml``) and exposes typed accessors. The bootstrap
+CLI translates this into per-profile Hermes config (see
+``bootstrap/translate.py``); plugins at runtime consume the same
+authored file directly through this loader.
 
 Structural-vs-non-structural change rule (ADR 0019)
 ---------------------------------------------------
-A ``customer.yaml`` field is **structural** when changing it requires the
-Machine to re-provision: adding or removing a persona, swapping a connector
-backend, adding or revoking an OAuth scope, changing the trust ceiling
-schema. Structural changes go through Captain re-provision — the bootstrap
-CLI rewrites profile directories and the Machine restarts.
+A ``customer.yaml`` field is **structural** when changing it requires
+the Machine to re-provision: adding or removing a persona, swapping a
+connector backend, adding or revoking an OAuth scope, changing the
+trust ceiling schema. Structural changes go through Captain
+re-provision — the bootstrap CLI rewrites profile directories and the
+Machine restarts.
 
-A field is **non-structural** when it can be hot-reloaded: tone tweaks,
-review thresholds, voice samples, skill pin bumps within the same catalog,
-content policy adjustments. The ``customer-sync`` sidecar polls R2 for these
-and signals SIGHUP to reload without restart.
+A field is **non-structural** when it can be hot-reloaded: tone
+tweaks, review thresholds, voice samples, skill pin bumps within the
+same catalog, content policy adjustments. The customer-sync sidecar
+polls R2 for these and signals SIGHUP to reload without restart.
 
-Real loader logic ports from
-ss-console/ai-employee/adapter/validate_customer_yaml.py in §7.
+This loader does not differentiate at read time — it surfaces the full
+authored shape. The sidecar's diff logic compares two ``CustomerConfig``
+instances field-by-field to decide whether a change is structural.
+
+Ported from ``ss-console/ai-employee/adapter/validate_customer_yaml.py``;
+the validation logic itself lives in ``bootstrap/validate.py`` so the
+bootstrap CLI can validate before translation. The runtime loader here
+parses the YAML and exposes accessors; structural validation is the
+bootstrap CLI's responsibility (translation refuses to run against an
+invalid file). Callers that want validation in-process should import
+``bootstrap.validate.validate_customer_yaml`` directly — the dependency
+edge runs ``bootstrap -> shared``, not the reverse, to keep the shared
+package free of bootstrap imports.
 """
 
 import logging
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError as exc:  # pragma: no cover - import-time guard
+    raise ImportError(
+        "PyYAML is required by shared.customer_config; install with `pip install pyyaml`"
+    ) from exc
 
 logger = logging.getLogger(__name__)
 
 
-class CustomerConfig:
-    """In-memory view of ``customer.yaml`` plus resolved per-profile config. Stub.
+DEFAULT_VOLUME_PATH = "/opt/data/customer.yaml"
 
-    The real implementation:
-      - parses YAML with safe_load
-      - validates against the schema in ss-console
-      - resolves skill pins
-      - exposes typed accessors for personas, connectors, trust ceilings, and
-        non-structural reload-eligible fields
+
+class CustomerConfigError(ValueError):
+    """Raised when ``customer.yaml`` is missing, unparseable, or invalid."""
+
+
+class CustomerConfig:
+    """In-memory view of an authored ``customer.yaml``.
+
+    The class wraps the parsed YAML document and exposes typed
+    accessors for the fields plugins consume at runtime. Construction
+    parses the YAML and asserts the root is a mapping; structural
+    schema validation is performed by
+    :func:`bootstrap.validate.validate_customer_yaml` (the dependency
+    edge runs ``bootstrap -> shared``, never the reverse). Accessors
+    that touch missing required fields raise
+    :class:`CustomerConfigError` so a malformed file is caught the
+    first time a plugin reaches for a field it needs.
+
+    The instance is read-only by convention. Mutations should go through
+    the authored source (R2 → volume → :meth:`from_volume`) so the audit
+    trail is preserved.
     """
 
+    def __init__(self, data: dict[str, Any]) -> None:
+        """Construct from an already-parsed dict.
+
+        Most callers should use :meth:`from_volume` instead. This
+        constructor is the seam tests use to inject synthetic
+        documents without touching the filesystem.
+        """
+        if not isinstance(data, dict):
+            raise CustomerConfigError(
+                f"customer.yaml root must be a mapping; got {type(data).__name__}"
+            )
+        self._data = data
+
     @classmethod
-    def from_volume(cls, path: str = "/opt/data/customer.yaml") -> "CustomerConfig":
+    def from_volume(cls, path: str = DEFAULT_VOLUME_PATH) -> "CustomerConfig":
         """Load a customer config from the Fly volume.
 
         Args:
-            path: Absolute path to ``customer.yaml`` on the Machine's volume.
-                Defaults to the standard mount point.
+            path: Absolute path to ``customer.yaml`` on the Machine's
+                volume. Defaults to ``/opt/data/customer.yaml``.
 
         Returns:
-            A parsed and validated ``CustomerConfig``.
+            A parsed and validated :class:`CustomerConfig`.
 
         Raises:
-            NotImplementedError: Until §7 of the build plan lands.
+            CustomerConfigError: If the file is missing, unparseable,
+                or fails schema validation.
         """
-        raise NotImplementedError("ported in §7")
+        file_path = Path(path)
+        if not file_path.exists():
+            raise CustomerConfigError(f"customer.yaml not found at {path}")
+        try:
+            with file_path.open() as handle:
+                data = yaml.safe_load(handle)
+        except yaml.YAMLError as exc:
+            raise CustomerConfigError(f"customer.yaml at {path} is not valid YAML: {exc}") from exc
+        if data is None:
+            raise CustomerConfigError(f"customer.yaml at {path} is empty")
+        return cls(data)
+
+    # ------------------------------------------------------------------
+    # Identity
+    # ------------------------------------------------------------------
+
+    @property
+    def slug(self) -> str:
+        """Return the customer slug (``customer_id``).
+
+        Raises:
+            CustomerConfigError: If ``customer_id`` is missing.
+        """
+        value = self._data.get("customer_id")
+        if not value:
+            raise CustomerConfigError("customer.yaml: customer_id is missing")
+        return str(value)
+
+    @property
+    def customer_name(self) -> str:
+        """Return the human-readable customer name."""
+        return str(self._data.get("customer_name", ""))
+
+    @property
+    def vertical(self) -> str:
+        """Return the vertical slug (e.g. ``law-firm``)."""
+        return str(self._data.get("vertical", ""))
+
+    # ------------------------------------------------------------------
+    # Personas
+    # ------------------------------------------------------------------
+
+    @property
+    def personas(self) -> list[dict[str, Any]]:
+        """Return the list of authored personas.
+
+        Each entry is the raw persona mapping from ``customer.yaml``
+        (``slug``, ``name``, ``status``, ``title``, ``tone``,
+        ``skills``, ...). Returns an empty list if no personas are
+        authored — the bootstrap validator catches that separately as
+        a structural error.
+        """
+        raw = self._data.get("personas") or []
+        if not isinstance(raw, list):
+            raise CustomerConfigError(
+                "customer.yaml: personas must be a list; "
+                f"got {type(raw).__name__}"
+            )
+        return list(raw)
+
+    # ------------------------------------------------------------------
+    # Scope
+    # ------------------------------------------------------------------
+
+    @property
+    def scope(self) -> dict[str, Any]:
+        """Return the scope mapping (visible/blind folders, blocks, ...)."""
+        raw = self._data.get("scope") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                "customer.yaml: scope must be a mapping; "
+                f"got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    # ------------------------------------------------------------------
+    # Connectors
+    # ------------------------------------------------------------------
+
+    @property
+    def connectors(self) -> dict[str, dict[str, Any]]:
+        """Return the connectors mapping (one entry per capability).
+
+        Each value is the raw connector record from ``customer.yaml``
+        (``adapter``, ``backend``, ``enabled``, optional configuration).
+        The ``backend`` prefix (``mcp:``, ``build:``, ``composio:``,
+        ``synthetic:``) dictates how the runtime wires the connector;
+        see ADR 0020.
+        """
+        raw = self._data.get("connectors") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                "customer.yaml: connectors must be a mapping; "
+                f"got {type(raw).__name__}"
+            )
+        return {str(k): dict(v) if isinstance(v, dict) else {} for k, v in raw.items()}
+
+    # ------------------------------------------------------------------
+    # Voice library
+    # ------------------------------------------------------------------
+
+    @property
+    def voice_library(self) -> dict[str, Any]:
+        """Return the voice library mapping (samples path, etc.)."""
+        raw = self._data.get("voice_library") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                "customer.yaml: voice_library must be a mapping; "
+                f"got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    # ------------------------------------------------------------------
+    # Escape hatch
+    # ------------------------------------------------------------------
+
+    @property
+    def raw(self) -> dict[str, Any]:
+        """Return the underlying parsed document.
+
+        Use sparingly. Most consumers should prefer typed accessors so
+        the schema's structural surface is grep-able.
+        """
+        return dict(self._data)
+
+
+__all__ = [
+    "DEFAULT_VOLUME_PATH",
+    "CustomerConfig",
+    "CustomerConfigError",
+]
