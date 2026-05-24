@@ -1,0 +1,19 @@
+name: hermes-smd-hook-probe
+version: "0.1.0"
+description: "Runtime hook-firing verification probe. Emits structured JSON log lines proving each documented hook fires in the expected order against a stock Hermes container."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
+  - post_llm_call
+  - transform_tool_result
+  - on_session_end
+hooks:
+  - pre_tool_call
+  - post_tool_call
+  - pre_llm_call
+  - post_llm_call
+  - transform_tool_result
+  - on_session_end

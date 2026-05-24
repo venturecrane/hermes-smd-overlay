@@ -1,0 +1,12 @@
+name: hermes-smd-trust
+version: "0.1.0"
+description: "Content-class trust ceilings + Composio per-connection isolation guard."
+author: VentureCrane
+requires_env:
+  - SMD_CUSTOMER_SLUG
+provides_hooks:
+  - pre_tool_call
+  - transform_tool_result
+hooks:
+  - pre_tool_call
+  - transform_tool_result

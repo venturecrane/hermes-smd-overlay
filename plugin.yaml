@@ -1,0 +1,10 @@
+name: hermes-smd-overlay
+version: "0.1.0"
+description: "Plugin overlay for the Nous Hermes Agent — adds audit emission, trust ceilings, sample-driven voice transformation, and memory mirroring without modifying Hermes core."
+author: VentureCrane
+plugins:
+  - plugins/hermes-smd-audit
+  - plugins/hermes-smd-trust
+  - plugins/hermes-smd-voice
+  - plugins/hermes-smd-memory-mirror
+  - plugins/hermes-smd-hook-probe
