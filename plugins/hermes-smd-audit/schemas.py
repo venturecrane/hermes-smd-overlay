@@ -1,10 +1,15 @@
-"""Audit row shape, accepted action_type vocabulary, and tool registry.
+"""Audit row shape and accepted action_type vocabulary.
 
 Ported from ss-console/ai-employee/adapter/audit_log.py (the ACCEPTED_ACTION_TYPES
-frozenset + ActorRole enum + AuditEvent dataclass) and from
-ss-console/ai-employee/adapter/audit_emit_points.py (the BANNED_TOOLS set, the
-TOOL_ACTION_CLASS_MAP registry, and the HookActionClass enum that the registry
-keys against).
+frozenset + ActorRole enum + AuditEvent dataclass).
+
+The tool-action-class vocabulary (``ActionClass``, ``BANNED_TOOLS``,
+``BANNED_REASON``, ``TOOL_ACTION_CLASS_MAP``, ``BannedToolError``,
+``ToolClassification``, ``classify_tool``) lives in ``shared.action_classes``
+— the audit and trust plugins both import from there to keep one source of
+truth (consolidation: task #33). ``HookActionClass`` is preserved here as a
+deprecated alias for ``ActionClass`` so downstream audit consumers
+(``emit.py``, ``test_audit_emit.py``) keep working without churn.
 
 GEPA removal
 ------------
@@ -36,8 +41,14 @@ Audit table column shape (mirrors the per-customer D1 schema):
 
 import enum
 from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import Mapping, Optional
+from typing import Optional
+
+from shared.action_classes import (
+    BANNED_REASON,
+    BANNED_TOOLS,
+    TOOL_ACTION_CLASS_MAP,
+    ActionClass,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -126,23 +137,18 @@ class ActorRole(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
-# Hook action classes — the trust-ceiling enforcer keys on these.
+# Deprecated alias for the action-class enum.
 #
-# Ported from the original adapter.hermes_hook module so the audit plugin can
-# tag every per-tool row with the action class the substrate considers the
-# tool to belong to. The trust-ceiling plugin (hermes-smd-trust) owns the
-# enforcement decision; this module owns the vocabulary.
+# The vocabulary moved to ``shared.action_classes.ActionClass`` (task #33
+# consolidation). ``HookActionClass`` is retained as a module-level alias
+# so existing audit-side consumers (``emit.py``, ``test_audit_emit.py``,
+# anything that imports ``schemas.HookActionClass``) keep working without
+# touching every call site. New code should import ``ActionClass`` directly
+# from ``shared.action_classes``.
 # ---------------------------------------------------------------------------
 
 
-class HookActionClass(str, enum.Enum):
-    """Closed vocabulary of action classes a tool call can belong to."""
-
-    READ = "read"
-    INTERNAL_WRITE = "internal_write"
-    COMMITMENT = "commitment"
-    EXTERNAL_SEND = "external_send"
-    DESTRUCTIVE = "destructive"
+HookActionClass = ActionClass
 
 
 @dataclass(frozen=True)
@@ -176,141 +182,13 @@ class AuditEvent:
     metadata: Optional[dict] = field(default=None)
 
 
-# ---------------------------------------------------------------------------
-# Banned tools - Pattern A / Pattern B forbidden capabilities
-#
-# A tool name in this set NEVER reaches trust-ceiling enforcement. The
-# `classify_tool()` helper in emit.py raises ``BannedToolError`` immediately;
-# the overlay's dispatch path translates that into a refusal audit row.
-# ---------------------------------------------------------------------------
-
-
-BANNED_TOOLS: frozenset[str] = frozenset(
-    {
-        # Pattern A - autonomous outbound from the agent identity. ADR 0005
-        # locks reviewer-as-sender; the agent NEVER sends from its own
-        # identity. The draft-creation path is allowed (DRAFT_CREATE);
-        # the send path is permanently banned at this layer.
-        "email_send",
-        "email_send_message",
-        "email_reply",
-        "email_reply_all",
-        "email_forward",
-        # SMS / messaging - same rationale as email_send. Pattern A.
-        "sms_send",
-        "sms_send_message",
-        # Money movement - never autonomous.
-        "payments_initiate_transfer",
-        "payments_send_payment",
-        "payments_refund",
-        "payments_authorize_charge",
-        "payments_void_authorization",
-        # Calendar / matter destructive - irreversible state changes.
-        "calendar_delete_event",
-        "practice_management_delete_matter",
-        "practice_management_close_matter_permanent",
-        # Connector-level destructive operations.
-        "connector_revoke_oauth",
-        "connector_unbind_permanent",
-    }
-)
-
-
-# Reason classification for BANNED tool names. The dispatch path uses this to
-# render a more specific customer message ("autonomous send is disabled" vs
-# "destructive operation is disabled") without needing a second lookup.
-BANNED_REASON: Mapping[str, str] = MappingProxyType(
-    {
-        "email_send": "banned_tool_pattern_a",
-        "email_send_message": "banned_tool_pattern_a",
-        "email_reply": "banned_tool_pattern_a",
-        "email_reply_all": "banned_tool_pattern_a",
-        "email_forward": "banned_tool_pattern_a",
-        "sms_send": "banned_tool_pattern_a",
-        "sms_send_message": "banned_tool_pattern_a",
-        "payments_initiate_transfer": "banned_tool_destructive",
-        "payments_send_payment": "banned_tool_destructive",
-        "payments_refund": "banned_tool_destructive",
-        "payments_authorize_charge": "banned_tool_destructive",
-        "payments_void_authorization": "banned_tool_destructive",
-        "calendar_delete_event": "banned_tool_destructive",
-        "practice_management_delete_matter": "banned_tool_destructive",
-        "practice_management_close_matter_permanent": "banned_tool_destructive",
-        "connector_revoke_oauth": "banned_tool_destructive",
-        "connector_unbind_permanent": "banned_tool_destructive",
-    }
-)
-
-
-# ---------------------------------------------------------------------------
-# Tool-name -> action_class registry
-#
-# Keys: every tool name the v1 capability surface exposes (read /
-# internal-write / commitment). Email send + money movement are DELIBERATELY
-# ABSENT from this map and present in BANNED_TOOLS instead - adding them here
-# is a P0 doctrine violation.
-# ---------------------------------------------------------------------------
-
-
-_RAW_TOOL_ACTION_CLASS_MAP: dict[str, HookActionClass] = {
-    # Email - read-only + draft-creation only. SEND is BANNED.
-    "email_list_messages": HookActionClass.READ,
-    "email_get_message": HookActionClass.READ,
-    "email_search": HookActionClass.READ,
-    "email_get_thread": HookActionClass.READ,
-    "email_list_labels": HookActionClass.READ,
-    "email_create_draft": HookActionClass.INTERNAL_WRITE,
-    "email_update_draft": HookActionClass.INTERNAL_WRITE,
-    "email_delete_draft": HookActionClass.INTERNAL_WRITE,
-    # SMS - read-only + draft-creation only. SEND is BANNED.
-    "sms_list_messages": HookActionClass.READ,
-    "sms_get_message": HookActionClass.READ,
-    "sms_create_draft": HookActionClass.INTERNAL_WRITE,
-    # Calendar - read + non-destructive scheduling state changes.
-    "calendar_list_events": HookActionClass.READ,
-    "calendar_get_event": HookActionClass.READ,
-    "calendar_search_events": HookActionClass.READ,
-    "calendar_check_availability": HookActionClass.READ,
-    "calendar_create_event_draft": HookActionClass.INTERNAL_WRITE,
-    "calendar_propose_time": HookActionClass.COMMITMENT,
-    "calendar_respond_invitation_draft": HookActionClass.INTERNAL_WRITE,
-    # Practice management - read + non-destructive matter updates.
-    "practice_management_search_matters": HookActionClass.READ,
-    "practice_management_get_matter": HookActionClass.READ,
-    "practice_management_list_documents": HookActionClass.READ,
-    "practice_management_get_document": HookActionClass.READ,
-    "practice_management_list_tasks": HookActionClass.READ,
-    "practice_management_create_note": HookActionClass.INTERNAL_WRITE,
-    "practice_management_create_task_draft": HookActionClass.INTERNAL_WRITE,
-    "practice_management_update_matter_field": HookActionClass.INTERNAL_WRITE,
-    "practice_management_open_matter_draft": HookActionClass.COMMITMENT,
-    # Memory - read-only via this registry.
-    "memory_search": HookActionClass.READ,
-    "memory_get_rule": HookActionClass.READ,
-    "memory_list_rules": HookActionClass.READ,
-    # Voice gate - read-only against the voice corpus.
-    "voice_score_draft": HookActionClass.READ,
-    "voice_list_judge_history": HookActionClass.READ,
-    # Connector lifecycle - read-only here.
-    "connector_get_status": HookActionClass.READ,
-    "connector_list_bindings": HookActionClass.READ,
-}
-
-
-# Public read-only view. Callers must not mutate the registry at runtime;
-# changes ship as a PR + test + spec update. MappingProxyType raises
-# TypeError on any mutation attempt, making the constraint enforceable.
-TOOL_ACTION_CLASS_MAP: Mapping[str, HookActionClass] = MappingProxyType(
-    _RAW_TOOL_ACTION_CLASS_MAP
-)
-
-
 # Scope keys lifted into per-tool audit metadata.
 SCOPE_KEYS: tuple[str, ...] = ("matter_id", "customer_segment")
 
 
 __all__ = [
     "ACCEPTED_ACTION_TYPES",
+    "ActionClass",
     "ActorRole",
     "AuditEvent",
     "BANNED_REASON",

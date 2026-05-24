@@ -3,8 +3,13 @@
 Ported from ss-console/ai-employee/adapter/audit_log.py (AuditLogWriter,
 SHA-256 digesting, ULID generation, ISO-8601 timestamps, action_type
 validation) and from ss-console/ai-employee/adapter/audit_emit_points.py
-(classify_tool, ToolCallTimer, build_per_tool_metadata, scope-aware
-metadata extraction).
+(ToolCallTimer, build_per_tool_metadata, scope-aware metadata extraction).
+
+The tool-classification helpers (``BannedToolError``, ``ToolClassification``,
+``classify_tool``) live in ``shared.action_classes`` so the audit and trust
+plugins share one source of truth (consolidation: task #33). They are
+re-exported from this module's ``__all__`` so existing audit consumers
+continue to import them by their original names.
 
 In ss-console the writer talked to an injectable ``Executor`` Protocol with
 two production implementations (Cloudflare D1 HTTP API and in-process
@@ -33,16 +38,18 @@ import json
 import logging
 import secrets
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from shared.action_classes import (
+    BannedToolError,
+    ToolClassification,
+    classify_tool,
+)
+
 from .schemas import (
     ACCEPTED_ACTION_TYPES,
-    BANNED_REASON,
-    BANNED_TOOLS,
     SCOPE_KEYS,
-    TOOL_ACTION_CLASS_MAP,
     ActorRole,
     AuditEvent,
     HookActionClass,
@@ -65,21 +72,6 @@ class AuditWriteError(RuntimeError):
     enforcer (hermes-smd-trust) is the gate that blocks pre-call, not this
     observer plugin.
     """
-
-
-class BannedToolError(Exception):
-    """Raised when a tool name appears in ``BANNED_TOOLS``.
-
-    The dispatch path catches this and translates to a refusal audit row
-    via the per-tool emit helper. ``tool_name`` carries the offending name
-    for metadata; ``reason`` is the closed-set classification ("banned_tool_pattern_a"
-    for autonomous send, "banned_tool_destructive" for irreversible ops).
-    """
-
-    def __init__(self, *, tool_name: str, reason: str = "banned_tool") -> None:
-        super().__init__(f"tool {tool_name!r} is banned: {reason}")
-        self.tool_name = tool_name
-        self.reason = reason
 
 
 # ---------------------------------------------------------------------------
@@ -223,47 +215,12 @@ class AuditLogWriter:
 
 
 # ---------------------------------------------------------------------------
-# Per-tool classification + timing + metadata builder
+# Per-tool timing + metadata builder
+#
+# Tool classification (``classify_tool`` / ``ToolClassification`` /
+# ``BannedToolError``) is imported from ``shared.action_classes`` above and
+# re-exported via ``__all__``.
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ToolClassification:
-    """Outcome of ``classify_tool()``.
-
-    ``action_class`` is the action class the trust-ceiling enforcer should
-    use for this tool call. ``unmapped`` is True if the tool name was not
-    in ``TOOL_ACTION_CLASS_MAP`` (the helper returned the READ default).
-    """
-
-    action_class: HookActionClass
-    unmapped: bool
-
-
-def classify_tool(tool_name: str) -> ToolClassification:
-    """Map a tool name to its action class.
-
-    Raises:
-        ValueError: ``tool_name`` is empty.
-        BannedToolError: ``tool_name`` is in ``BANNED_TOOLS``.
-    """
-    if not tool_name:
-        raise ValueError("tool_name is required")
-
-    if tool_name in BANNED_TOOLS:
-        reason = BANNED_REASON.get(tool_name, "banned_tool")
-        raise BannedToolError(tool_name=tool_name, reason=reason)
-
-    mapped = TOOL_ACTION_CLASS_MAP.get(tool_name)
-    if mapped is not None:
-        return ToolClassification(action_class=mapped, unmapped=False)
-
-    logger.warning(
-        "classify_tool: tool_name=%s not in TOOL_ACTION_CLASS_MAP; "
-        "defaulting to READ and tagging metadata.unmapped_tool=true",
-        tool_name,
-    )
-    return ToolClassification(action_class=HookActionClass.READ, unmapped=True)
 
 
 class ToolCallTimer:

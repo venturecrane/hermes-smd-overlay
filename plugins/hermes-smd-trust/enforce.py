@@ -1,10 +1,12 @@
 """Trust-ceiling enforcement — the safety floor under every tool call.
 
 Ported from ``ss-console/ai-employee/adapter/trust_ceiling.py`` (the policy
-core) plus ``ai-employee/adapter/audit_emit_points.py`` (the per-tool
-classification registry the policy needs as input). Consolidated here so
-the plugin has exactly one enforcement entry point — ``evaluate_tool_call``
-— that the ``pre_tool_call`` hook calls without further glue.
+core). The per-tool classification vocabulary (``ActionClass``,
+``BANNED_TOOLS``, ``TOOL_ACTION_CLASS_MAP``, ``BannedToolError``,
+``ToolClassification``, ``classify_tool``) lives in
+``shared.action_classes`` so the audit and trust plugins share one source
+of truth (consolidation: task #33). This module imports those names and
+re-exports them via ``__all__`` so downstream trust consumers keep working.
 
 Per-customer ceiling resolution
 -------------------------------
@@ -56,11 +58,20 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping, Optional
 
+from shared.action_classes import (
+    BANNED_TOOLS,
+    TOOL_ACTION_CLASS_MAP,
+    ActionClass,
+    BannedToolError,
+    ToolClassification,
+    classify_tool,
+)
+
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Closed-vocabulary enums
+# Trust-ceiling enum
 #
 # String values match the ss-console adapter exactly so the two enforcement
 # surfaces (TS validators on the authoring side, Python enforcement here)
@@ -74,16 +85,6 @@ class Ceiling(str, enum.Enum):
     AUTONOMOUS = "autonomous"
     DRAFT_FOR_REVIEW = "draft_for_review"
     REFUSED = "refused"
-
-
-class ActionClass(str, enum.Enum):
-    """Categorization of every tool call by reversibility / blast radius."""
-
-    READ = "read"  # Always allowed
-    INTERNAL_WRITE = "internal_write"  # Notes, drafts, internal state — autonomous OK
-    EXTERNAL_SEND = "external_send"  # Email, SMS, posts — gated
-    COMMITMENT = "commitment"  # Sign, accept terms, agree to dates — never autonomous
-    DESTRUCTIVE = "destructive"  # Delete, drop, irreversible — explicit per-call approval
 
 
 # Strict ordering used by ``_min_ceiling``. Lower index = more restrictive.
@@ -101,45 +102,18 @@ def _min_ceiling(a: Ceiling, b: Ceiling) -> Ceiling:
 
 
 # ---------------------------------------------------------------------------
-# Banned tools — Pattern A / Pattern B forbidden capabilities
+# Banned-tool refusal messages
 #
-# A tool name in this set NEVER reaches policy evaluation. It is refused at
-# the entry. Source of truth: capability-contracts.md and ADR 0005.
+# ``shared.action_classes.BANNED_REASON`` carries the closed-vocabulary
+# category code (``"banned_tool_pattern_a"`` / ``"banned_tool_destructive"``)
+# that the audit plugin persists in ``metadata.banned_reason``. Trust renders
+# its own user-visible refusal sentence at the policy boundary so the
+# operator-facing block message stays readable; the categorical code stays
+# the source of truth on the audit side.
 # ---------------------------------------------------------------------------
 
 
-BANNED_TOOLS: frozenset[str] = frozenset(
-    {
-        # Pattern A — autonomous outbound from the agent identity. ADR 0005
-        # locks reviewer-as-sender; the agent NEVER sends from its own
-        # identity. Draft creation is allowed (INTERNAL_WRITE); send is
-        # permanently banned at this layer.
-        "email_send",
-        "email_send_message",
-        "email_reply",
-        "email_reply_all",
-        "email_forward",
-        # SMS / messaging — same rationale as email_send. Pattern A.
-        "sms_send",
-        "sms_send_message",
-        # Money movement — never autonomous.
-        "payments_initiate_transfer",
-        "payments_send_payment",
-        "payments_refund",
-        "payments_authorize_charge",
-        "payments_void_authorization",
-        # Calendar / matter destructive — irreversible state changes.
-        "calendar_delete_event",
-        "practice_management_delete_matter",
-        "practice_management_close_matter_permanent",
-        # Connector-level destructive operations.
-        "connector_revoke_oauth",
-        "connector_unbind_permanent",
-    }
-)
-
-
-_BANNED_REASON: Mapping[str, str] = MappingProxyType(
+_BANNED_REFUSAL_MESSAGE: Mapping[str, str] = MappingProxyType(
     {
         "email_send": "autonomous email send is forbidden (ADR 0005 reviewer-as-sender)",
         "email_send_message": "autonomous email send is forbidden (ADR 0005)",
@@ -163,66 +137,6 @@ _BANNED_REASON: Mapping[str, str] = MappingProxyType(
 
 
 # ---------------------------------------------------------------------------
-# Tool-name -> action_class registry
-#
-# Closed vocabulary. Unknown tools default to READ via classify_tool() and
-# carry an ``unmapped`` flag so audit review can catch tools added without
-# a registry entry.
-# ---------------------------------------------------------------------------
-
-
-_RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
-    # Email — read-only + draft-creation only. SEND is BANNED.
-    "email_list_messages": ActionClass.READ,
-    "email_get_message": ActionClass.READ,
-    "email_search": ActionClass.READ,
-    "email_get_thread": ActionClass.READ,
-    "email_list_labels": ActionClass.READ,
-    "email_create_draft": ActionClass.INTERNAL_WRITE,
-    "email_update_draft": ActionClass.INTERNAL_WRITE,
-    "email_delete_draft": ActionClass.INTERNAL_WRITE,
-    # SMS — read-only + draft-creation only. SEND is BANNED.
-    "sms_list_messages": ActionClass.READ,
-    "sms_get_message": ActionClass.READ,
-    "sms_create_draft": ActionClass.INTERNAL_WRITE,
-    # Calendar — read + non-destructive scheduling state changes.
-    "calendar_list_events": ActionClass.READ,
-    "calendar_get_event": ActionClass.READ,
-    "calendar_search_events": ActionClass.READ,
-    "calendar_check_availability": ActionClass.READ,
-    "calendar_create_event_draft": ActionClass.INTERNAL_WRITE,
-    "calendar_propose_time": ActionClass.COMMITMENT,
-    "calendar_respond_invitation_draft": ActionClass.INTERNAL_WRITE,
-    # Practice management — read + non-destructive matter updates.
-    "practice_management_search_matters": ActionClass.READ,
-    "practice_management_get_matter": ActionClass.READ,
-    "practice_management_list_documents": ActionClass.READ,
-    "practice_management_get_document": ActionClass.READ,
-    "practice_management_list_tasks": ActionClass.READ,
-    "practice_management_create_note": ActionClass.INTERNAL_WRITE,
-    "practice_management_create_task_draft": ActionClass.INTERNAL_WRITE,
-    "practice_management_update_matter_field": ActionClass.INTERNAL_WRITE,
-    "practice_management_open_matter_draft": ActionClass.COMMITMENT,
-    # Memory — read-only via this registry.
-    "memory_search": ActionClass.READ,
-    "memory_get_rule": ActionClass.READ,
-    "memory_list_rules": ActionClass.READ,
-    # Voice gate — read-only against the voice corpus.
-    "voice_score_draft": ActionClass.READ,
-    "voice_list_judge_history": ActionClass.READ,
-    # Connector lifecycle — read-only here.
-    "connector_get_status": ActionClass.READ,
-    "connector_list_bindings": ActionClass.READ,
-}
-
-
-# Public read-only view. Mutation at runtime raises TypeError.
-TOOL_ACTION_CLASS_MAP: Mapping[str, ActionClass] = MappingProxyType(
-    _RAW_TOOL_ACTION_CLASS_MAP
-)
-
-
-# ---------------------------------------------------------------------------
 # Decision shape
 # ---------------------------------------------------------------------------
 
@@ -236,57 +150,6 @@ class EnforcementDecision:
     allowed: bool
     reason: str
     audit_action: str  # "allow" | "draft" | "refuse"
-
-
-# ---------------------------------------------------------------------------
-# Refusal classes — raised by ``classify_tool``; carried as exception
-# attributes so the hook surface can render structured messages.
-# ---------------------------------------------------------------------------
-
-
-class BannedToolError(Exception):
-    """Raised when a tool name is in ``BANNED_TOOLS``. Never reaches policy."""
-
-    def __init__(self, *, tool_name: str, reason: str = "banned_tool") -> None:
-        super().__init__(f"tool {tool_name!r} is banned: {reason}")
-        self.tool_name = tool_name
-        self.reason = reason
-
-
-@dataclass(frozen=True)
-class ToolClassification:
-    """Output of ``classify_tool``. ``unmapped`` flags tools that fell back
-    to READ because they had no registry entry."""
-
-    action_class: ActionClass
-    unmapped: bool
-
-
-def classify_tool(tool_name: str) -> ToolClassification:
-    """Map a tool name to its ``ActionClass``.
-
-    - Empty / missing tool name -> ``ValueError``.
-    - ``tool_name`` in ``BANNED_TOOLS`` -> ``BannedToolError``.
-    - ``tool_name`` in registry -> mapped action class, ``unmapped=False``.
-    - Otherwise -> default to ``ActionClass.READ``, ``unmapped=True``.
-
-    The unmapped fallback is conservative: an unmapped tool is treated as
-    read-only, so the unconfigured surface cannot drive a write.
-    """
-    if not tool_name:
-        raise ValueError("tool_name is required")
-    if tool_name in BANNED_TOOLS:
-        reason = _BANNED_REASON.get(tool_name, "banned_tool")
-        raise BannedToolError(tool_name=tool_name, reason=reason)
-    mapped = _RAW_TOOL_ACTION_CLASS_MAP.get(tool_name)
-    if mapped is not None:
-        return ToolClassification(action_class=mapped, unmapped=False)
-    logger.debug(
-        "classify_tool: %s not in TOOL_ACTION_CLASS_MAP; "
-        "defaulting to READ and tagging unmapped=true",
-        tool_name,
-    )
-    return ToolClassification(action_class=ActionClass.READ, unmapped=True)
 
 
 # ---------------------------------------------------------------------------
@@ -567,13 +430,18 @@ def evaluate_tool_call(
         # genuine refusal. Allow and let downstream surfaces complain.
         return None
 
-    # 1. Banned tools — refuse before policy runs.
+    # 1. Banned tools — refuse before policy runs. ``err.reason`` is the
+    # categorical code from ``shared.action_classes.BANNED_REASON`` (e.g.
+    # ``"banned_tool_pattern_a"``); render the user-visible message from
+    # ``_BANNED_REFUSAL_MESSAGE`` keyed by tool name, falling back to the
+    # categorical code when an unknown banned tool slips through.
     try:
         classification = classify_tool(tool_name)
     except BannedToolError as err:
+        message = _BANNED_REFUSAL_MESSAGE.get(err.tool_name, err.reason)
         return {
             "action": "block",
-            "message": f"Refused: {err.reason}",
+            "message": f"Refused: {message}",
         }
 
     # 2. Resolve customer + skill ceilings; take the more restrictive.
