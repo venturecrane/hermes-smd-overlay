@@ -1,0 +1,13 @@
+name: hermes-smd-voice
+version: "0.1.0"
+description: "Sample-driven voice transformation for customer-facing drafts."
+author: VentureCrane
+requires_env:
+  - SMD_CUSTOMER_SLUG
+  - SMD_R2_VOICE_BINDING
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
+hooks:
+  - pre_llm_call
+  - post_llm_call

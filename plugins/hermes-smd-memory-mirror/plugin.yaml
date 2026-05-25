@@ -1,0 +1,13 @@
+name: hermes-smd-memory-mirror
+version: "0.1.0"
+description: "Mirror Honcho conclusions to per-customer D1 with provenance. Captain dismissal + TTL archival. ADR 0016."
+author: VentureCrane
+requires_env:
+  - SMD_CUSTOMER_SLUG
+  - SMD_D1_OBSERVATIONS_BINDING
+  - HONCHO_BASE_URL
+  - HONCHO_API_KEY
+provides_hooks:
+  - on_session_end
+hooks:
+  - on_session_end
