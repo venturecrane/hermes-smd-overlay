@@ -378,6 +378,7 @@ def test_fabrication_guard_no_new_phone_numbers():
     profile = _profile()
     result = transform_draft(draft=draft, profile=profile)
     import re
+
     phone = re.compile(r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b")
     assert not phone.findall(result.transformed_draft)
 
@@ -419,11 +420,8 @@ def test_no_new_content_words_introduced():
     phrase fragment, signoff fragment, sentence-join conjunction).
     """
     import re
-    draft = (
-        "Hi Sarah,\n\n"
-        "The motion is filed. Opposing counsel will respond.\n\n"
-        "Sincerely,\nMarcus"
-    )
+
+    draft = "Hi Sarah,\n\nThe motion is filed. Opposing counsel will respond.\n\nSincerely,\nMarcus"
     profile = _profile(
         greeting=GreetingStyle.FIRST_NAME,
         signoff=SignoffStyle.THANKS,
@@ -435,9 +433,23 @@ def test_no_new_content_words_introduced():
     output_words = {w.lower() for w in word_re.findall(result.transformed_draft)}
     new_words = output_words - source_words
     allowed = {
-        "hi", "hello", "dear", "good", "morning", "afternoon", "evening",
-        "best", "thanks", "thank", "you", "regards", "kind", "sincerely",
-        "and", "but", "so",
+        "hi",
+        "hello",
+        "dear",
+        "good",
+        "morning",
+        "afternoon",
+        "evening",
+        "best",
+        "thanks",
+        "thank",
+        "you",
+        "regards",
+        "kind",
+        "sincerely",
+        "and",
+        "but",
+        "so",
     }
     disallowed = new_words - allowed
     assert not disallowed, f"transform introduced disallowed words: {disallowed}"
@@ -466,11 +478,7 @@ def test_sentence_split_when_profile_skews_short():
 
 
 def test_sentence_join_when_profile_skews_long():
-    draft = (
-        "Hi Sarah,\n\n"
-        "The motion is filed. Opposing counsel will respond.\n\n"
-        "Thanks,\nMarcus"
-    )
+    draft = "Hi Sarah,\n\nThe motion is filed. Opposing counsel will respond.\n\nThanks,\nMarcus"
     profile = _profile(
         greeting=GreetingStyle.FIRST_NAME,
         signoff=SignoffStyle.THANKS,
@@ -515,18 +523,12 @@ def test_transform_under_2s_for_very_long_draft():
         "The court has set a hearing for the motion to compel. "
         "We need to prepare our reply brief and supporting exhibits. "
     )
-    draft = (
-        "Hi Sarah,\n\n"
-        + (body_sentence * 50)
-        + "\n\nThanks,\nMarcus"
-    )
+    draft = "Hi Sarah,\n\n" + (body_sentence * 50) + "\n\nThanks,\nMarcus"
     profile = _profile(samples_count=30)
     t0 = time.perf_counter()
     result = transform_draft(draft=draft, profile=profile)
     elapsed_ms = (time.perf_counter() - t0) * 1000
-    assert elapsed_ms < 2000, (
-        f"long-draft latency {elapsed_ms:.1f}ms exceeds 2000ms ceiling"
-    )
+    assert elapsed_ms < 2000, f"long-draft latency {elapsed_ms:.1f}ms exceeds 2000ms ceiling"
     # And the result is still well-formed (didn't crash on the size)
     assert result.transformed_draft
 
@@ -541,9 +543,7 @@ def test_transform_is_idempotent():
     profile = _profile(greeting=GreetingStyle.FIRST_NAME, signoff=SignoffStyle.THANKS)
     first_pass = transform_draft(draft=draft, profile=profile)
     assert first_pass.status == TransformStatus.TRANSFORMED
-    second_pass = transform_draft(
-        draft=first_pass.transformed_draft, profile=profile
-    )
+    second_pass = transform_draft(draft=first_pass.transformed_draft, profile=profile)
     assert second_pass.status == TransformStatus.PASSTHROUGH_NO_CHANGE_NEEDED
     assert second_pass.transformed_draft == first_pass.transformed_draft
 
@@ -569,9 +569,7 @@ def test_round_trip_with_real_extracted_diffs():
         "Hi Sarah,\n\nNoted, thanks.\n\nThanks,\nMarcus",
     ]
     diffs = [
-        extract_structural_diff(
-            body_text=body, subject="Re: matter", recipient_cohort="to-client"
-        )
+        extract_structural_diff(body_text=body, subject="Re: matter", recipient_cohort="to-client")
         for body in sample_bodies
     ]
     profile = build_voice_profile(cohort_id="to-client", samples=diffs)
@@ -647,9 +645,7 @@ def test_bundle_per_user_profile_selected_when_reviewer_id_matches():
     bundle = VoiceProfileBundle(general=general, per_user={"partner-sarah": sarah})
 
     formal_draft = "Dear Mr. Smith,\n\nFollowing up.\n\nSincerely,\nMarcus"
-    result = transform_draft(
-        draft=formal_draft, profile=bundle, reviewer_user_id="partner-sarah"
-    )
+    result = transform_draft(draft=formal_draft, profile=bundle, reviewer_user_id="partner-sarah")
     assert result.selected_voice_user_id == "partner-sarah"
     # Already matches the formal target — no greeting / signoff swap.
     assert "greeting_swap" not in result.changes_applied
@@ -683,9 +679,7 @@ def test_bundle_falls_back_when_per_user_profile_is_insufficient():
     bundle = VoiceProfileBundle(general=general, per_user={"partner-sarah": sarah})
 
     draft = "Dear Mr. Smith,\n\nFollowing up.\n\nSincerely,\nMarcus"
-    result = transform_draft(
-        draft=draft, profile=bundle, reviewer_user_id="partner-sarah"
-    )
+    result = transform_draft(draft=draft, profile=bundle, reviewer_user_id="partner-sarah")
     # Per-user profile was rejected, general kicked in
     assert result.selected_voice_user_id == GENERAL_VOICE_USER_ID
 
@@ -698,9 +692,7 @@ def test_bundle_with_empty_per_user_dict_equivalent_to_bare_profile():
     draft = "Dear Mr. Smith,\n\nFollowing up.\n\nSincerely,\nMarcus"
     via_bare = transform_draft(draft=draft, profile=profile)
     via_bundle = transform_draft(draft=draft, profile=bundle)
-    via_bundle_with_id = transform_draft(
-        draft=draft, profile=bundle, reviewer_user_id="anyone"
-    )
+    via_bundle_with_id = transform_draft(draft=draft, profile=bundle, reviewer_user_id="anyone")
     assert via_bare.transformed_draft == via_bundle.transformed_draft
     assert via_bare.transformed_draft == via_bundle_with_id.transformed_draft
     assert via_bundle.selected_voice_user_id == GENERAL_VOICE_USER_ID

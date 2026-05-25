@@ -31,9 +31,7 @@ def get_secret(name: str) -> str:
     try:
         return os.environ[name]
     except KeyError as exc:
-        raise KeyError(
-            f"required secret {name!r} is not set in the process environment"
-        ) from exc
+        raise KeyError(f"required secret {name!r} is not set in the process environment") from exc
 
 
 def require(*names: str) -> dict[str, str]:

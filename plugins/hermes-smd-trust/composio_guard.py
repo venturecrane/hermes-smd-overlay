@@ -108,9 +108,7 @@ def classify_composio_connection_id(
       * captured slug does not equal ``expected_slug`` (foreign-customer ID)
     """
     if not isinstance(connection_id, str) or not connection_id:
-        return _ConnectionIdDecision(
-            ok=False, found_slug=None, reason="empty connection id"
-        )
+        return _ConnectionIdDecision(ok=False, found_slug=None, reason="empty connection id")
     match = _CONNECTION_ID_PATTERN.match(connection_id)
     if not match:
         return _ConnectionIdDecision(
@@ -199,11 +197,7 @@ class ComposioConnectionGuard:
         decision = classify_composio_connection_id(connection_id, self._slug)
         if decision.ok:
             return
-        attempted = (
-            connection_id
-            if isinstance(connection_id, str)
-            else repr(connection_id)
-        )
+        attempted = connection_id if isinstance(connection_id, str) else repr(connection_id)
         raise ComposioIsolationError(
             expected_slug=self._slug,
             attempted_connection_id=attempted,
@@ -270,9 +264,7 @@ def verify_composio_response(
         A replacement result string (JSON) when the result is missing or
         carries a foreign connection_id.
     """
-    if not isinstance(tool_name, str) or not tool_name.startswith(
-        _COMPOSIO_TOOL_PREFIX
-    ):
+    if not isinstance(tool_name, str) or not tool_name.startswith(_COMPOSIO_TOOL_PREFIX):
         return None
 
     if not expected_connection_id or not isinstance(expected_connection_id, str):
@@ -283,20 +275,15 @@ def verify_composio_response(
             "refusing result",
             tool_name,
         )
-        return _refusal_payload(
-            "missing expected_connection_id for Composio tool — refusing"
-        )
+        return _refusal_payload("missing expected_connection_id for Composio tool — refusing")
 
     actual = _extract_connection_id(result)
     if actual is None:
         logger.warning(
-            "verify_composio_response: tool=%s returned a result with no "
-            "connection_id; refusing",
+            "verify_composio_response: tool=%s returned a result with no connection_id; refusing",
             tool_name,
         )
-        return _refusal_payload(
-            "Composio tool result missing connection_id — refusing"
-        )
+        return _refusal_payload("Composio tool result missing connection_id — refusing")
 
     if actual != expected_connection_id:
         logger.warning(
@@ -304,9 +291,7 @@ def verify_composio_response(
             "(expected does not match returned); refusing",
             tool_name,
         )
-        return _refusal_payload(
-            "Composio tool result connection_id mismatch — refusing"
-        )
+        return _refusal_payload("Composio tool result connection_id mismatch — refusing")
 
     return None
 

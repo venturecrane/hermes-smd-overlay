@@ -93,14 +93,15 @@ def test_inspection_blocks_update_on_audit_log() -> None:
 def test_inspection_blocks_delete_from_audit_log() -> None:
     mod = load_plugin("hermes-smd-audit")
     assert (
-        mod.immutability.is_mutation_against_audit_log("DELETE FROM audit_log WHERE id = ?")
-        is True
+        mod.immutability.is_mutation_against_audit_log("DELETE FROM audit_log WHERE id = ?") is True
     )
 
 
 def test_inspection_blocks_replace_on_audit_log() -> None:
     mod = load_plugin("hermes-smd-audit")
-    assert mod.immutability.is_mutation_against_audit_log("REPLACE INTO audit_log VALUES (?)") is True
+    assert (
+        mod.immutability.is_mutation_against_audit_log("REPLACE INTO audit_log VALUES (?)") is True
+    )
 
 
 def test_inspection_blocks_truncate_drop_alter() -> None:

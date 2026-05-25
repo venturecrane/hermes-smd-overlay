@@ -261,9 +261,7 @@ def _make_runner(
     conn = _conn()
     source = FakeEmailSource(messages or [], next_cursor)
     resolver = (
-        DictCohortResolver(cohort_mapping)
-        if cohort_mapping is not None
-        else StaticCohortResolver()
+        DictCohortResolver(cohort_mapping) if cohort_mapping is not None else StaticCohortResolver()
     )
     r2 = FakeR2Client(customer_slug)
     cursor_store = FakeCursorStore(cursor)
@@ -591,9 +589,7 @@ def test_runner_records_error_when_source_blows_up():
     assert result.status == INGEST_STATUS_ERROR
     assert "connector exploded" in (result.error or "")
     # State row still upserted so the dashboard surfaces the failure.
-    row = conn.execute(
-        "SELECT ingest_status, last_error FROM voice_source_state"
-    ).fetchone()
+    row = conn.execute("SELECT ingest_status, last_error FROM voice_source_state").fetchone()
     assert row[0] == INGEST_STATUS_ERROR
     assert "connector exploded" in (row[1] or "")
 
@@ -684,12 +680,8 @@ def test_retention_enforcer_deletes_expired_items():
         ("2024-01-01T00:00:00.000Z", expired_id),
     )
     conn.commit()
-    r2.objects[
-        "demo-firm/voice/cohort/client/fresh.json"
-    ] = b"{}"
-    r2.objects[
-        "demo-firm/voice/cohort/client/expired.json"
-    ] = b"{}"
+    r2.objects["demo-firm/voice/cohort/client/fresh.json"] = b"{}"
+    r2.objects["demo-firm/voice/cohort/client/expired.json"] = b"{}"
 
     summary = _run(
         enforce_retention(

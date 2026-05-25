@@ -70,24 +70,24 @@ class GreetingStyle(str, enum.Enum):
     captured.
     """
 
-    FORMAL_NAMED = "formal_named"            # "Dear Mr. Smith,"
-    SEMI_FORMAL = "semi_formal"              # "Hi Mr. Smith,"
-    FIRST_NAME = "first_name"                # "Hi Sarah," / "Hello Sarah,"
-    GROUP = "group"                          # "Team," / "All," / "Counsel,"
-    BARE_HI = "bare_hi"                      # "Hi," / "Hello,"
-    NONE = "none"                            # No greeting line
+    FORMAL_NAMED = "formal_named"  # "Dear Mr. Smith,"
+    SEMI_FORMAL = "semi_formal"  # "Hi Mr. Smith,"
+    FIRST_NAME = "first_name"  # "Hi Sarah," / "Hello Sarah,"
+    GROUP = "group"  # "Team," / "All," / "Counsel,"
+    BARE_HI = "bare_hi"  # "Hi," / "Hello,"
+    NONE = "none"  # No greeting line
     UNKNOWN = "unknown"
 
 
 class SignoffStyle(str, enum.Enum):
     """Closed set of signoff categorizations."""
 
-    BEST = "best"                            # "Best," / "Best regards,"
-    THANKS = "thanks"                        # "Thanks," / "Thank you,"
-    REGARDS = "regards"                      # "Regards," / "Kind regards,"
-    SINCERELY = "sincerely"                  # "Sincerely,"
-    INITIAL = "initial"                      # "-S" / "S." (single initial)
-    NAMED = "named"                          # First name only on its own line
+    BEST = "best"  # "Best," / "Best regards,"
+    THANKS = "thanks"  # "Thanks," / "Thank you,"
+    REGARDS = "regards"  # "Regards," / "Kind regards,"
+    SINCERELY = "sincerely"  # "Sincerely,"
+    INITIAL = "initial"  # "-S" / "S." (single initial)
+    NAMED = "named"  # First name only on its own line
     NONE = "none"
     UNKNOWN = "unknown"
 
@@ -217,9 +217,7 @@ def extract_structural_diff(
     word_count = len(words)
     sentence_count = len(sentences)
     paragraph_count = len(paragraphs)
-    avg_sentence_length = (
-        round(word_count / sentence_count, 2) if sentence_count else 0.0
-    )
+    avg_sentence_length = round(word_count / sentence_count, 2) if sentence_count else 0.0
 
     return StructuralDiff(
         schema_version=SCHEMA_VERSION,

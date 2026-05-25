@@ -85,9 +85,7 @@ _INSERT_ARCHIVE_SQL = (
 )
 
 
-_DELETE_LIVE_SQL = (
-    "DELETE FROM persona_observations WHERE observation_id = ?"
-)
+_DELETE_LIVE_SQL = "DELETE FROM persona_observations WHERE observation_id = ?"
 
 
 _SELECT_ARCHIVED_SQL = (
@@ -108,9 +106,7 @@ _INSERT_LIVE_SQL = (
 )
 
 
-_DELETE_ARCHIVE_SQL = (
-    "DELETE FROM persona_observations_archive WHERE observation_id = ?"
-)
+_DELETE_ARCHIVE_SQL = "DELETE FROM persona_observations_archive WHERE observation_id = ?"
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +217,7 @@ def archive_aged_conclusions(
         honcho_conclusion_id = _row_get(row, "honcho_conclusion_id", 1)
         if not observation_id or not honcho_conclusion_id:
             errors += 1
-            logger.warning(
-                "archive: skipping row missing identifiers row=%r", row
-            )
+            logger.warning("archive: skipping row missing identifiers row=%r", row)
             continue
         archived_at = _iso_utc()
         try:
@@ -394,9 +388,7 @@ def restore_from_archive(
     created = honcho_client.create_conclusion(payload)
     new_id = created.get("id") if isinstance(created, dict) else None
     if not new_id:
-        raise HonchoUnreachable(
-            "honcho POST /conclusions returned no id; cannot restore"
-        )
+        raise HonchoUnreachable("honcho POST /conclusions returned no id; cannot restore")
 
     # Build the live row with the new Honcho id but a fresh mirrored_at.
     d1_client.execute(

@@ -133,9 +133,7 @@ def test_translate_embeds_tuned_honcho_block(tmp_path):
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
     )
-    config = yaml.safe_load(
-        (hermes_home / "profiles" / "marcus" / "config.yaml").read_text()
-    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
     honcho = config.get("honcho")
     assert honcho is not None
     assert honcho["recallMode"] == "hybrid"
@@ -155,9 +153,7 @@ def test_translate_carries_customer_identity_into_config(tmp_path):
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
     )
-    config = yaml.safe_load(
-        (hermes_home / "profiles" / "marcus" / "config.yaml").read_text()
-    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
     assert config["customer_id"] == "acme"
     assert config["customer_name"] == "Acme Corp"
     assert config["vertical"] == "law-firm"
@@ -174,9 +170,7 @@ def test_translate_resolves_pending_skill_pin_to_actual_hash(tmp_path):
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
     )
-    config = yaml.safe_load(
-        (hermes_home / "profiles" / "marcus" / "config.yaml").read_text()
-    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
     assert len(config["skills"]) == 1
     pin = config["skills"][0]["version"]
     assert pin != "pending"
@@ -291,6 +285,7 @@ def test_translate_raises_on_missing_skill_directory(tmp_path):
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
     # Wipe the seeded skill — pin resolution must refuse.
     import shutil
+
     shutil.rmtree(skills_dir / "inbox-triage")
     with pytest.raises(TranslateError, match="not found"):
         translate_customer_yaml(
@@ -303,9 +298,7 @@ def test_translate_raises_on_missing_skill_directory(tmp_path):
 def test_translate_raises_on_pin_mismatch(tmp_path):
     # Pin the skill to a deliberate wrong value (6 chars, hex shape).
     pinned_bad = VALID_YAML.replace("version: pending", "version: deadbe")
-    customer_yaml, skills_dir, hermes_home = _seed_repo(
-        tmp_path, customer_yaml_body=pinned_bad
-    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=pinned_bad)
     with pytest.raises(TranslateError, match="pinned version"):
         translate_customer_yaml(
             customer_yaml_path=str(customer_yaml),
@@ -317,20 +310,17 @@ def test_translate_raises_on_pin_mismatch(tmp_path):
 def test_translate_skips_disabled_skills(tmp_path):
     """Disabled skills do not contribute to pin resolution or the config."""
     body = VALID_YAML.replace("enabled: true", "enabled: false")
-    customer_yaml, skills_dir, hermes_home = _seed_repo(
-        tmp_path, customer_yaml_body=body
-    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=body)
     # Wipe the on-disk skill so any attempt to hash it would fail.
     import shutil
+
     shutil.rmtree(skills_dir / "inbox-triage")
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
     )
-    config = yaml.safe_load(
-        (hermes_home / "profiles" / "marcus" / "config.yaml").read_text()
-    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
     assert config["skills"] == []
 
 

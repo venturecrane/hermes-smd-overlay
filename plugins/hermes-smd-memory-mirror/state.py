@@ -166,8 +166,7 @@ class ObservationRecord:
             )
         if self.evidence_status not in VALID_EVIDENCE_STATUSES:
             raise ValueError(
-                f"evidence_status {self.evidence_status!r} not in "
-                f"{sorted(VALID_EVIDENCE_STATUSES)}"
+                f"evidence_status {self.evidence_status!r} not in {sorted(VALID_EVIDENCE_STATUSES)}"
             )
 
     # -- Serialization helpers ------------------------------------------

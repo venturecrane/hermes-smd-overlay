@@ -220,13 +220,9 @@ class HonchoClient:
         except urllib.error.HTTPError as exc:
             # Include the HTTP status code in the message so callers can
             # discriminate 404 from other failures via substring match.
-            raise HonchoUnreachable(
-                f"honcho {method} {path} returned HTTP {exc.code}"
-            ) from exc
+            raise HonchoUnreachable(f"honcho {method} {path} returned HTTP {exc.code}") from exc
         except urllib.error.URLError as exc:
-            raise HonchoUnreachable(
-                f"honcho {method} {path} unreachable: {exc.reason}"
-            ) from exc
+            raise HonchoUnreachable(f"honcho {method} {path} unreachable: {exc.reason}") from exc
         except TimeoutError as exc:
             raise HonchoUnreachable(
                 f"honcho {method} {path} timed out after {self._timeout}s"

@@ -213,9 +213,7 @@ _MARK_ITEMS_DELETED_BY_ID_SQL = (
 )
 
 
-_DELETE_STATE_SQL = (
-    "DELETE FROM voice_source_state WHERE source_kind = ? AND source_id = ?"
-)
+_DELETE_STATE_SQL = "DELETE FROM voice_source_state WHERE source_kind = ? AND source_id = ?"
 
 
 _SELECT_EXISTING_DIGEST_SQL = (
@@ -249,9 +247,7 @@ class IngestionStateUpdate:
 
     def __post_init__(self) -> None:
         if self.status not in VALID_STATUSES:
-            raise ValueError(
-                f"ingest_status {self.status!r} not in {sorted(VALID_STATUSES)}"
-            )
+            raise ValueError(f"ingest_status {self.status!r} not in {sorted(VALID_STATUSES)}")
 
 
 @dataclass
@@ -379,15 +375,11 @@ class VoiceSourceStateStore:
             )
         return out
 
-    async def list_items_for_decommission(
-        self, source_kind: str, source_id: str
-    ) -> list[dict]:
+    async def list_items_for_decommission(self, source_kind: str, source_id: str) -> list[dict]:
         """Enumerate provenance rows still active for one source."""
         if self._query is None:
             raise RuntimeError("list_items_for_decommission requires a query executor")
-        return await self._query.query(
-            _SELECT_ITEMS_FOR_DECOMMISSION_SQL, [source_kind, source_id]
-        )
+        return await self._query.query(_SELECT_ITEMS_FOR_DECOMMISSION_SQL, [source_kind, source_id])
 
     async def list_items_for_retention(self, older_than_iso: str) -> list[dict]:
         """Enumerate active rows ingested before ``older_than_iso``.
@@ -397,13 +389,9 @@ class VoiceSourceStateStore:
         """
         if self._query is None:
             raise RuntimeError("list_items_for_retention requires a query executor")
-        return await self._query.query(
-            _SELECT_ITEMS_FOR_RETENTION_SQL, [older_than_iso]
-        )
+        return await self._query.query(_SELECT_ITEMS_FOR_RETENTION_SQL, [older_than_iso])
 
-    async def mark_items_deleted_by_source(
-        self, source_kind: str, source_id: str
-    ) -> None:
+    async def mark_items_deleted_by_source(self, source_kind: str, source_id: str) -> None:
         """Soft-delete all active items for one source. Called by the
         decommission hook before the state row is removed."""
         await self._write.execute(

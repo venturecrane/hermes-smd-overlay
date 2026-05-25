@@ -209,9 +209,7 @@ class NoopLogpushMirror:
 
     def mirror_audit_event(self, row: MirroredAuditRow) -> None:
         # Never log the metadata or any row payload — only the id + action.
-        logger.debug(
-            "noop logpush mirror: audit row id=%s action=%s", row.id, row.action_type
-        )
+        logger.debug("noop logpush mirror: audit row id=%s action=%s", row.id, row.action_type)
 
 
 # ---------------------------------------------------------------------------

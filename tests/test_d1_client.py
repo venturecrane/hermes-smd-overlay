@@ -151,9 +151,7 @@ def test_query_mentioning_bound_slug_passes_through(client):
         "hermes-acme-vault",
         "acme",
     )
-    rows = client.query(
-        "SELECT key FROM memory_index WHERE key = 'hermes-acme-vault'"
-    )
+    rows = client.query("SELECT key FROM memory_index WHERE key = 'hermes-acme-vault'")
     assert rows == [{"key": "hermes-acme-vault"}]
 
 
@@ -183,17 +181,13 @@ def test_execute_refuses_foreign_vault_index(client):
 
 def test_execute_refuses_foreign_corrections_index(client):
     with pytest.raises(NamespaceAssertionError) as excinfo:
-        client.execute(
-            "SELECT * FROM memory_index WHERE key = 'hermes-other-corrections'"
-        )
+        client.execute("SELECT * FROM memory_index WHERE key = 'hermes-other-corrections'")
     assert excinfo.value.attempted_target == "hermes-other-corrections"
 
 
 def test_query_refuses_foreign_corrections_index(client):
     with pytest.raises(NamespaceAssertionError):
-        client.query(
-            "SELECT * FROM memory_index WHERE key = 'hermes-other-corrections'"
-        )
+        client.query("SELECT * FROM memory_index WHERE key = 'hermes-other-corrections'")
 
 
 def test_execute_many_refuses_foreign_index_before_any_write(client):
@@ -292,7 +286,9 @@ def test_cross_customer_attempt_refused_then_client_remains_usable(client):
     rows after a foreign attempt is caught.
     """
     with pytest.raises(NamespaceAssertionError):
-        client.execute("INSERT INTO memory_index (key, slug) VALUES ('hermes-other-vault', 'other')")
+        client.execute(
+            "INSERT INTO memory_index (key, slug) VALUES ('hermes-other-vault', 'other')"
+        )
     # Same client, valid SQL, works.
     client.execute(
         "INSERT INTO audit_log (id, actor, kind) VALUES (?, ?, ?)",

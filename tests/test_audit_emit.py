@@ -259,7 +259,9 @@ def test_actor_role_accepts_plain_string_for_forward_compat() -> None:
     writer = mod.emit.AuditLogWriter(client)
     writer.write(
         mod.schemas.AuditEvent(
-            action_type="RBAC_EVENT", actor="agent", actor_role="future_role"  # type: ignore[arg-type]
+            action_type="RBAC_EVENT",
+            actor="agent",
+            actor_role="future_role",  # type: ignore[arg-type]
         )
     )
     assert client.rows()[0]["actor_role"] == "future_role"
@@ -317,9 +319,7 @@ def test_registry_and_banned_sets_are_disjoint() -> None:
     """No tool name appears in both the registry and BANNED_TOOLS."""
     mod = load_plugin("hermes-smd-audit")
     overlap = set(mod.schemas.TOOL_ACTION_CLASS_MAP.keys()) & set(mod.schemas.BANNED_TOOLS)
-    assert overlap == set(), (
-        f"tool names appear in BOTH map and BANNED_TOOLS: {sorted(overlap)}"
-    )
+    assert overlap == set(), f"tool names appear in BOTH map and BANNED_TOOLS: {sorted(overlap)}"
 
 
 def test_registry_is_immutable_at_runtime() -> None:
@@ -354,9 +354,7 @@ def test_no_send_tool_appears_in_registry() -> None:
     forbidden_substrings = ("_send", "_send_", "send_message")
     for name in mod.schemas.TOOL_ACTION_CLASS_MAP.keys():
         for substr in forbidden_substrings:
-            assert substr not in name, (
-                f"tool name {name!r} contains forbidden substring {substr!r}"
-            )
+            assert substr not in name, f"tool name {name!r} contains forbidden substring {substr!r}"
 
 
 # ---------------------------------------------------------------------------

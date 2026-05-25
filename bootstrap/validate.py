@@ -156,10 +156,7 @@ def _validate_personas(cfg: dict[str, Any], errors: list[str]) -> None:
             for field in ("name", "version", "trust_ceiling", "enabled"):
                 if field not in skill:
                     _err(f"{sk_prefix}: missing field {field}", errors)
-            if (
-                "trust_ceiling" in skill
-                and skill["trust_ceiling"] not in ACCEPTED_CEILINGS
-            ):
+            if "trust_ceiling" in skill and skill["trust_ceiling"] not in ACCEPTED_CEILINGS:
                 _err(
                     f"{sk_prefix}: trust_ceiling must be one of {sorted(ACCEPTED_CEILINGS)}",
                     errors,
@@ -185,8 +182,7 @@ def _validate_connectors(cfg: dict[str, Any], errors: list[str]) -> None:
             continue
         if not isinstance(backend, str) or not backend.startswith(ACCEPTED_BACKEND_PREFIXES):
             _err(
-                f"{prefix}: backend {backend!r} must start with one of "
-                f"{ACCEPTED_BACKEND_PREFIXES}",
+                f"{prefix}: backend {backend!r} must start with one of {ACCEPTED_BACKEND_PREFIXES}",
                 errors,
             )
 
@@ -216,8 +212,7 @@ def _validate_memory(cfg: dict[str, Any], errors: list[str]) -> None:
         r2_path = memory.get("r2_vault_path", "")
         if r2_path and f"vaults/{customer_id}/" not in r2_path:
             _err(
-                f"memory.r2_vault_path ({r2_path!r}) must contain "
-                f"'vaults/{customer_id}/'",
+                f"memory.r2_vault_path ({r2_path!r}) must contain 'vaults/{customer_id}/'",
                 errors,
             )
         index = memory.get("vectorize_index", "")

@@ -48,9 +48,7 @@ def d1_client_from_env(
         ValueError: If the resolved slug does not match the slug
             regex.
     """
-    slug = customer_slug if customer_slug is not None else os.environ.get(
-        "CUSTOMER_SLUG", ""
-    )
+    slug = customer_slug if customer_slug is not None else os.environ.get("CUSTOMER_SLUG", "")
     if not slug:
         raise RuntimeError(
             "d1_client_from_env: CUSTOMER_SLUG env var unset (and no explicit "

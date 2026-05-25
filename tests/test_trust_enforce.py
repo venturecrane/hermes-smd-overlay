@@ -12,7 +12,6 @@ Covers:
     a raise inside the policy module never propagates to the caller.
 """
 
-
 import pytest
 
 from tests.conftest import load_plugin
@@ -288,9 +287,7 @@ def env_refused(monkeypatch):
 
 def test_evaluate_tool_call_allows_read_under_autonomous(env_autonomous) -> None:
     enforce = _load_trust_module("enforce")
-    result = enforce.evaluate_tool_call(
-        "email_list_messages", {}, "acme"
-    )
+    result = enforce.evaluate_tool_call("email_list_messages", {}, "acme")
     assert result is None
 
 
@@ -304,9 +301,7 @@ def test_evaluate_tool_call_blocks_banned_tool(env_autonomous) -> None:
 
 def test_evaluate_tool_call_blocks_under_refused_ceiling(env_refused) -> None:
     enforce = _load_trust_module("enforce")
-    result = enforce.evaluate_tool_call(
-        "email_list_messages", {}, "acme"
-    )
+    result = enforce.evaluate_tool_call("email_list_messages", {}, "acme")
     assert isinstance(result, dict)
     assert result["action"] == "block"
     assert "refused" in result["message"].lower()
@@ -318,9 +313,7 @@ def test_evaluate_tool_call_drafts_internal_write_under_draft_ceiling(
     enforce = _load_trust_module("enforce")
     # Allowed but tagged as draft — evaluate_tool_call returns None for
     # allow (the audit hint is internal; the hook only blocks).
-    result = enforce.evaluate_tool_call(
-        "email_create_draft", {}, "acme"
-    )
+    result = enforce.evaluate_tool_call("email_create_draft", {}, "acme")
     assert result is None
 
 
@@ -343,9 +336,7 @@ def test_evaluate_tool_call_unknown_tool_defaults_to_read_allowed(
     env_autonomous,
 ) -> None:
     enforce = _load_trust_module("enforce")
-    result = enforce.evaluate_tool_call(
-        "wholly_unknown_tool_xyz", {}, "acme"
-    )
+    result = enforce.evaluate_tool_call("wholly_unknown_tool_xyz", {}, "acme")
     # Default classification is READ; allowed under non-refused ceilings.
     assert result is None
 
@@ -374,7 +365,10 @@ def test_on_pre_tool_call_swallows_internal_exceptions(monkeypatch) -> None:
 
     monkeypatch.setattr(plugin.enforce, "evaluate_tool_call", boom)
     result = plugin.on_pre_tool_call(
-        tool_name="email_list_messages", args={}, task_id="t", session_id="s",
+        tool_name="email_list_messages",
+        args={},
+        task_id="t",
+        session_id="s",
         tool_call_id="c",
     )
     assert result is None

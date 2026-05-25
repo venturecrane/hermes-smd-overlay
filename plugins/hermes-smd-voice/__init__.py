@@ -90,9 +90,7 @@ async def on_pre_llm_call(**kwargs: Any) -> dict | None:
     """
     try:
         if _R2_READER is None or not _CUSTOMER_SLUG:
-            logger.debug(
-                "hermes-smd-voice: pre_llm_call no-op (runtime unbound)"
-            )
+            logger.debug("hermes-smd-voice: pre_llm_call no-op (runtime unbound)")
             return None
 
         query_context: dict = {}

@@ -185,18 +185,13 @@ def enforce(
     if ceiling == Ceiling.REFUSED:
         return EnforcementDecision(
             allowed=False,
-            reason=(
-                f"skill {skill_name} has trust_ceiling=refused; "
-                f"tool {tool_name} blocked"
-            ),
+            reason=(f"skill {skill_name} has trust_ceiling=refused; tool {tool_name} blocked"),
             audit_action="refuse",
         )
 
     # READ always allowed regardless of ceiling (non-REFUSED)
     if action == ActionClass.READ:
-        return EnforcementDecision(
-            allowed=True, reason="read action", audit_action="allow"
-        )
+        return EnforcementDecision(allowed=True, reason="read action", audit_action="allow")
 
     # COMMITMENT — never autonomous without approval (invariant #3).
     if action == ActionClass.COMMITMENT:
@@ -204,8 +199,7 @@ def enforce(
             return EnforcementDecision(
                 allowed=False,
                 reason=(
-                    "draft_for_review skills do not originate commitments; "
-                    "produce draft instead"
+                    "draft_for_review skills do not originate commitments; produce draft instead"
                 ),
                 audit_action="draft",
             )
@@ -227,8 +221,7 @@ def enforce(
             return EnforcementDecision(
                 allowed=False,
                 reason=(
-                    "draft_for_review skills do not originate destructive "
-                    "actions; report instead"
+                    "draft_for_review skills do not originate destructive actions; report instead"
                 ),
                 audit_action="refuse",
             )
@@ -264,10 +257,7 @@ def enforce(
         # draft_for_review: produce the draft, don't send.
         return EnforcementDecision(
             allowed=False,
-            reason=(
-                "skill is draft_for_review; produce draft to notes folder "
-                "instead of sending"
-            ),
+            reason=("skill is draft_for_review; produce draft to notes folder instead of sending"),
             audit_action="draft",
         )
 

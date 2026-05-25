@@ -263,12 +263,8 @@ _SIGNOFF_LINE_PATTERNS = {
         r"^(?:Thanks(?:\s+so\s+much)?|Thank\s+you)[,.!]?\s*$",
         re.IGNORECASE,
     ),
-    SignoffStyle.REGARDS: re.compile(
-        r"^(?:Kind\s+)?Regards[,.]?\s*$", re.IGNORECASE
-    ),
-    SignoffStyle.SINCERELY: re.compile(
-        r"^Sincerely(?:\s+yours)?[,.]?\s*$", re.IGNORECASE
-    ),
+    SignoffStyle.REGARDS: re.compile(r"^(?:Kind\s+)?Regards[,.]?\s*$", re.IGNORECASE),
+    SignoffStyle.SINCERELY: re.compile(r"^Sincerely(?:\s+yours)?[,.]?\s*$", re.IGNORECASE),
 }
 
 
@@ -464,10 +460,7 @@ class VoiceProfileBundle:
                 return cohort_candidate, reviewer_user_id, recipient_cohort
 
         user_candidate = self.per_user.get(reviewer_user_id)
-        if (
-            user_candidate is not None
-            and user_candidate.sample_count >= MIN_PROFILE_SAMPLE_COUNT
-        ):
+        if user_candidate is not None and user_candidate.sample_count >= MIN_PROFILE_SAMPLE_COUNT:
             return user_candidate, reviewer_user_id, GENERAL_VOICE_COHORT
 
         return self.general, GENERAL_VOICE_USER_ID, GENERAL_VOICE_COHORT
@@ -539,9 +532,7 @@ def build_voice_profile(
             paragraph_count_avg=0.0,
         )
 
-    avg_sentence_length = statistics.fmean(
-        s.avg_sentence_length for s in samples
-    )
+    avg_sentence_length = statistics.fmean(s.avg_sentence_length for s in samples)
 
     bucket_totals: dict = {
         "lt_5": 0,
@@ -711,9 +702,7 @@ class DraftTransformer:
                 current = after_sentences
                 pass_changes.extend(sentence_changes)
 
-            after_paragraphs, paragraph_change = _apply_paragraph_density(
-                current, resolved_profile
-            )
+            after_paragraphs, paragraph_change = _apply_paragraph_density(current, resolved_profile)
             if paragraph_change:
                 if _has_introduced_disallowed_tokens(current, after_paragraphs):
                     return _fabrication_guard_passthrough(
@@ -900,9 +889,7 @@ def _apply_sentence_redistribution(draft: str, profile: VoiceProfile) -> tuple:
         + current_dist.get("gte_35", 0.0)
     ) > _BUCKET_DELTA_TOLERANCE
 
-    needs_more_short = (
-        target.get("lt_5", 0.0) + target.get("lt_10", 0.0)
-    ) - (
+    needs_more_short = (target.get("lt_5", 0.0) + target.get("lt_10", 0.0)) - (
         current_dist.get("lt_5", 0.0) + current_dist.get("lt_10", 0.0)
     ) > _BUCKET_DELTA_TOLERANCE
 
@@ -1320,15 +1307,11 @@ def evaluate_draft_voice_fidelity(draft: str, samples: list[dict]) -> float:
         lines = draft.split("\n")
         first_idx = _first_nonempty_index(lines)
         draft_greeting = (
-            _classify_greeting_line(lines[first_idx].strip())[0]
-            if first_idx is not None
-            else None
+            _classify_greeting_line(lines[first_idx].strip())[0] if first_idx is not None else None
         )
         signoff_idx = _last_signoff_index(lines)
         draft_signoff = (
-            _classify_signoff_line(lines[signoff_idx].strip())
-            if signoff_idx is not None
-            else None
+            _classify_signoff_line(lines[signoff_idx].strip()) if signoff_idx is not None else None
         )
 
         greeting_score = 1.0 if draft_greeting == profile.greeting_style else 0.0
@@ -1346,9 +1329,7 @@ def evaluate_draft_voice_fidelity(draft: str, samples: list[dict]) -> float:
         else:
             distribution_score = 0.0
 
-        return round(
-            (greeting_score + signoff_score + distribution_score) / 3.0, 4
-        )
+        return round((greeting_score + signoff_score + distribution_score) / 3.0, 4)
     except Exception:  # noqa: BLE001 — observational; never raise
         log.warning("evaluate_draft_voice_fidelity failed", exc_info=True)
         return 0.0

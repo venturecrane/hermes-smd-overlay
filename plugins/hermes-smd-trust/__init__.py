@@ -117,6 +117,4 @@ def register(ctx) -> None:
     """Plugin entry point. Wires both hooks."""
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("transform_tool_result", on_transform_tool_result)
-    logger.info(
-        "hermes-smd-trust registered: pre_tool_call + transform_tool_result"
-    )
+    logger.info("hermes-smd-trust registered: pre_tool_call + transform_tool_result")

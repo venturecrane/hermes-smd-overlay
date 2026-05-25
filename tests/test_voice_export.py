@@ -68,9 +68,7 @@ export_voice_library = _export_mod.export_voice_library
 
 
 class _FakeReader:
-    def __init__(
-        self, *, states: list[dict], items: list[dict]
-    ) -> None:
+    def __init__(self, *, states: list[dict], items: list[dict]) -> None:
         self._states = states
         self._items = items
 
@@ -257,10 +255,7 @@ def test_export_writes_state_provenance_samples_config(voice_snapshot):
     assert "manifests/voice.json" in writer.files
 
     # Filtered row's R2 key was None -- no sample lands for it.
-    assert all(
-        not p.startswith("voice/samples/cohort/unassigned/01H3")
-        for p in writer.files
-    )
+    assert all(not p.startswith("voice/samples/cohort/unassigned/01H3") for p in writer.files)
 
     kinds = {entry.kind for entry in manifest.entries}
     assert ARTIFACT_KIND_VOICE_STATE in kinds
@@ -284,14 +279,8 @@ def test_sample_bytes_are_copied_verbatim_from_r2(voice_snapshot):
         )
     )
 
-    assert (
-        writer.files["voice/samples/cohort/partners/01H1.json"]
-        == _SAMPLE_JSON_PARTNERS
-    )
-    assert (
-        writer.files["voice/samples/cohort/clients/01H2.json"]
-        == _SAMPLE_JSON_CLIENTS
-    )
+    assert writer.files["voice/samples/cohort/partners/01H1.json"] == _SAMPLE_JSON_PARTNERS
+    assert writer.files["voice/samples/cohort/clients/01H2.json"] == _SAMPLE_JSON_CLIENTS
 
 
 def test_privacy_guard_rejects_forbidden_keys(voice_snapshot):
@@ -396,9 +385,7 @@ def test_missing_r2_object_is_skipped_not_fatal(voice_snapshot):
     assert "voice/samples/cohort/partners/01H1.json" in writer.files
     assert "voice/samples/cohort/clients/01H2.json" not in writer.files
 
-    sample_entries = [
-        e for e in manifest.entries if e.kind == ARTIFACT_KIND_VOICE_SAMPLE
-    ]
+    sample_entries = [e for e in manifest.entries if e.kind == ARTIFACT_KIND_VOICE_SAMPLE]
     paths = {e.path for e in sample_entries}
     assert "voice/samples/cohort/partners/01H1.json" in paths
     assert "voice/samples/cohort/clients/01H2.json" not in paths
@@ -442,13 +429,11 @@ def test_cohort_tag_propagates_into_manifest(voice_snapshot):
     )
 
     partner_entry = next(
-        e for e in manifest.entries
-        if e.path == "voice/samples/cohort/partners/01H1.json"
+        e for e in manifest.entries if e.path == "voice/samples/cohort/partners/01H1.json"
     )
     assert partner_entry.cohort == "partners"
     client_entry = next(
-        e for e in manifest.entries
-        if e.path == "voice/samples/cohort/clients/01H2.json"
+        e for e in manifest.entries if e.path == "voice/samples/cohort/clients/01H2.json"
     )
     assert client_entry.cohort == "clients"
 

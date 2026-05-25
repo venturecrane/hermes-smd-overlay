@@ -157,10 +157,7 @@ def _resolve_skill_pins(
 
             skill_dir = skills_dir / name
             if not skill_dir.exists():
-                errors.append(
-                    f"persona {persona_slug!r}: skill {name!r} not found at "
-                    f"{skill_dir}"
-                )
+                errors.append(f"persona {persona_slug!r}: skill {name!r} not found at {skill_dir}")
                 continue
 
             actual_hash = _skill_content_hash(skill_dir)
@@ -180,9 +177,7 @@ def _resolve_skill_pins(
                 resolved[f"{persona_slug}/{name}"] = actual_pin
 
     if errors:
-        raise TranslateError(
-            "skill pin resolution failed:\n  - " + "\n  - ".join(errors)
-        )
+        raise TranslateError("skill pin resolution failed:\n  - " + "\n  - ".join(errors))
     return resolved
 
 
@@ -350,17 +345,12 @@ def translate_customer_yaml(
     """
     yaml_path = Path(customer_yaml_path)
     home_path = Path(hermes_home)
-    skills_path = Path(
-        skills_dir
-        or os.environ.get("SKILLS_DIR")
-        or (home_path / "skills")
-    )
+    skills_path = Path(skills_dir or os.environ.get("SKILLS_DIR") or (home_path / "skills"))
 
     validation_errors = validate_customer_yaml(yaml_path)
     if validation_errors:
         raise TranslateError(
-            "customer.yaml failed validation:\n  - "
-            + "\n  - ".join(validation_errors)
+            "customer.yaml failed validation:\n  - " + "\n  - ".join(validation_errors)
         )
 
     with yaml_path.open() as handle:

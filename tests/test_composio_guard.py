@@ -69,10 +69,7 @@ def test_slug_validation_accepts_valid_slugs(good_slug) -> None:
 def test_prefix_helper_returns_expected_shape() -> None:
     mod = _load_composio_module()
     assert mod.composio_connection_id_for_slug_prefix("acme") == "conn_acme_"
-    assert (
-        mod.composio_connection_id_for_slug_prefix("smith-pi-firm")
-        == "conn_smith-pi-firm_"
-    )
+    assert mod.composio_connection_id_for_slug_prefix("smith-pi-firm") == "conn_smith-pi-firm_"
 
 
 def test_prefix_helper_rejects_invalid_slug() -> None:
@@ -95,9 +92,7 @@ def test_classify_accepts_well_formed_own_slug_connection_id() -> None:
 
 def test_classify_accepts_long_dashed_slug() -> None:
     mod = _load_composio_module()
-    decision = mod.classify_composio_connection_id(
-        "conn_smith-pi-firm_abcd", "smith-pi-firm"
-    )
+    decision = mod.classify_composio_connection_id("conn_smith-pi-firm_abcd", "smith-pi-firm")
     assert decision.ok is True
     assert decision.found_slug == "smith-pi-firm"
 
@@ -140,9 +135,7 @@ def test_classify_rejects_too_short_suffix() -> None:
 
 def test_classify_rejects_foreign_slug() -> None:
     mod = _load_composio_module()
-    decision = mod.classify_composio_connection_id(
-        "conn_other_xyz-1234", "acme"
-    )
+    decision = mod.classify_composio_connection_id("conn_other_xyz-1234", "acme")
     assert decision.ok is False
     assert decision.found_slug == "other"
     assert "foreign customer slug" in decision.reason
@@ -150,9 +143,7 @@ def test_classify_rejects_foreign_slug() -> None:
 
 def test_classify_rejects_uppercase_slug_segment() -> None:
     mod = _load_composio_module()
-    decision = mod.classify_composio_connection_id(
-        "conn_ACME_xyz-1234", "acme"
-    )
+    decision = mod.classify_composio_connection_id("conn_ACME_xyz-1234", "acme")
     assert decision.ok is False
     assert "does not match" in decision.reason
 
@@ -239,9 +230,7 @@ def test_verify_accepts_matching_connection_id_in_dict_result() -> None:
 
 def test_verify_accepts_matching_connection_id_in_json_string_result() -> None:
     mod = _load_composio_module()
-    payload = json.dumps(
-        {"connection_id": "conn_acme_xyz-1234", "data": []}
-    )
+    payload = json.dumps({"connection_id": "conn_acme_xyz-1234", "data": []})
     result = mod.verify_composio_response(
         "composio.gmail.messages.list", payload, "conn_acme_xyz-1234"
     )
@@ -262,9 +251,7 @@ def test_verify_refuses_missing_connection_id() -> None:
 
 def test_verify_refuses_mismatched_connection_id() -> None:
     mod = _load_composio_module()
-    payload = json.dumps(
-        {"connection_id": "conn_other_zzzz-1111", "data": []}
-    )
+    payload = json.dumps({"connection_id": "conn_other_zzzz-1111", "data": []})
     result = mod.verify_composio_response(
         "composio.gmail.messages.list", payload, "conn_acme_xyz-1234"
     )
@@ -278,12 +265,8 @@ def test_verify_refuses_composio_call_with_missing_expected() -> None:
     """A Composio tool result with no bound expected_connection_id is
     refused — defense in depth against unprovisioned callers."""
     mod = _load_composio_module()
-    payload = json.dumps(
-        {"connection_id": "conn_acme_xyz-1234", "data": []}
-    )
-    result = mod.verify_composio_response(
-        "composio.gmail.messages.list", payload, ""
-    )
+    payload = json.dumps({"connection_id": "conn_acme_xyz-1234", "data": []})
+    result = mod.verify_composio_response("composio.gmail.messages.list", payload, "")
     assert isinstance(result, str)
     body = json.loads(result)
     assert body["error"] == "composio_isolation_violation"

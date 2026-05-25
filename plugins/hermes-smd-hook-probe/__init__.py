@@ -132,9 +132,7 @@ def on_transform_tool_result(**kwargs: Any) -> None:
     try:
         _emit("transform_tool_result", kwargs)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "hermes-smd-hook-probe: transform_tool_result handler error: %s", exc
-        )
+        logger.warning("hermes-smd-hook-probe: transform_tool_result handler error: %s", exc)
 
 
 def on_session_end(**kwargs: Any) -> None:

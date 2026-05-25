@@ -93,13 +93,10 @@ class _AssertingR2Wrapper:
                 key,
             )
             raise NamespaceAssertionError(
-                f"R2 key {key!r} does not match expected customer slug "
-                f"{self._expected_slug!r}"
+                f"R2 key {key!r} does not match expected customer slug {self._expected_slug!r}"
             )
 
-    async def put_object(
-        self, key: str, body: bytes, *, content_type: str
-    ) -> None:
+    async def put_object(self, key: str, body: bytes, *, content_type: str) -> None:
         self._assert_key(key)
         await self._inner.put_object(key, body, content_type=content_type)
 

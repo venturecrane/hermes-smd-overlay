@@ -224,7 +224,9 @@ def _extract_source_messages(conclusion: dict) -> list[str]:
     return []
 
 
-def conclusion_to_record(conclusion: dict, *, session_id: str, mirrored_at: str) -> ObservationRecord:
+def conclusion_to_record(
+    conclusion: dict, *, session_id: str, mirrored_at: str
+) -> ObservationRecord:
     """Translate a Honcho conclusion payload into an :class:`ObservationRecord`.
 
     Raises ``ValueError`` on shapes the mirror cannot make sense of

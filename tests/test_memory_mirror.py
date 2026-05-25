@@ -43,9 +43,7 @@ def test_memory_mirror_registers_expected_hooks(fake_ctx) -> None:
     assert len(fake_ctx.registered["on_session_end"]) == 1
 
 
-def test_on_session_end_is_exception_safe_when_env_missing(
-    monkeypatch, fake_ctx
-) -> None:
+def test_on_session_end_is_exception_safe_when_env_missing(monkeypatch, fake_ctx) -> None:
     """A missing env var must not propagate from on_session_end."""
     # Ensure required secrets are missing.
     for name in (
@@ -305,9 +303,7 @@ def test_mirror_session_writes_provenance_columns() -> None:
     )
     d1 = _FakeD1Client()
 
-    result = mod.mirror.mirror_session(
-        session_id="sess-A", honcho_client=honcho, d1_client=d1
-    )
+    result = mod.mirror.mirror_session(session_id="sess-A", honcho_client=honcho, d1_client=d1)
 
     assert result.conclusions_polled == 1
     assert result.rows_written == 1
@@ -341,9 +337,7 @@ def test_mirror_session_skips_malformed_conclusion() -> None:
     )
     d1 = _FakeD1Client()
 
-    result = mod.mirror.mirror_session(
-        session_id="sess-B", honcho_client=honcho, d1_client=d1
-    )
+    result = mod.mirror.mirror_session(session_id="sess-B", honcho_client=honcho, d1_client=d1)
     assert result.conclusions_polled == 2
     assert result.rows_written == 1
     assert result.rows_skipped == 1
@@ -375,9 +369,7 @@ def test_mirror_session_records_unevidenced_status() -> None:
     )
     d1 = _FakeD1Client()
 
-    result = mod.mirror.mirror_session(
-        session_id="sess-D", honcho_client=honcho, d1_client=d1
-    )
+    result = mod.mirror.mirror_session(session_id="sess-D", honcho_client=honcho, d1_client=d1)
 
     assert result.rows_written == 1
     sql, params = d1.executes[0]
@@ -429,12 +421,10 @@ def test_archive_copies_row_then_physically_deletes_from_honcho_then_live() -> N
     assert any("DELETE FROM persona_observations WHERE" in s for s in insert_sqls)
     # The INSERT archive call comes before the DELETE live call.
     insert_idx = next(
-        i for i, (s, _) in enumerate(d1.executes)
-        if "INSERT INTO persona_observations_archive" in s
+        i for i, (s, _) in enumerate(d1.executes) if "INSERT INTO persona_observations_archive" in s
     )
     delete_idx = next(
-        i for i, (s, _) in enumerate(d1.executes)
-        if "DELETE FROM persona_observations WHERE" in s
+        i for i, (s, _) in enumerate(d1.executes) if "DELETE FROM persona_observations WHERE" in s
     )
     assert insert_idx < delete_idx
 
@@ -495,11 +485,7 @@ def test_archive_halts_sweep_on_honcho_outage() -> None:
 def test_dismiss_conclusion_physical_delete_and_d1_stamp() -> None:
     """Dismissal triggers Honcho DELETE and stamps the D1 mirror row."""
     mod = load_plugin("hermes-smd-memory-mirror")
-    d1 = _FakeD1Client(
-        query_rows=[
-            [{"honcho_conclusion_id": "honcho-7", "dismissed_at": None}]
-        ]
-    )
+    d1 = _FakeD1Client(query_rows=[[{"honcho_conclusion_id": "honcho-7", "dismissed_at": None}]])
     honcho = _FakeHonchoClient([])
 
     result = mod.dismiss.dismiss_conclusion(
@@ -548,9 +534,7 @@ def test_dismiss_conclusion_refuses_already_dismissed() -> None:
     """Re-dismissing a row raises AlreadyDismissed."""
     mod = load_plugin("hermes-smd-memory-mirror")
     d1 = _FakeD1Client(
-        query_rows=[
-            [{"honcho_conclusion_id": "h-1", "dismissed_at": "2026-05-20T00:00:00.000Z"}]
-        ]
+        query_rows=[[{"honcho_conclusion_id": "h-1", "dismissed_at": "2026-05-20T00:00:00.000Z"}]]
     )
     with pytest.raises(mod.dismiss.AlreadyDismissed):
         mod.dismiss.dismiss_conclusion(

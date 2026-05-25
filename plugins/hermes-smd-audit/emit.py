@@ -164,9 +164,7 @@ class AuditLogWriter:
                 wrappers catch this; never re-raise out of a hook.
         """
         if event.action_type not in ACCEPTED_ACTION_TYPES:
-            raise ValueError(
-                f"action_type {event.action_type!r} not in ACCEPTED_ACTION_TYPES"
-            )
+            raise ValueError(f"action_type {event.action_type!r} not in ACCEPTED_ACTION_TYPES")
 
         now_dt = self._clock() if self._clock else None
         now_ms = self._ulid_now_ms() if self._ulid_now_ms else None
@@ -472,9 +470,7 @@ def emit_llm_event(
     """
     user_bytes = user_message.encode("utf-8") if isinstance(user_message, str) else None
     assistant_bytes = (
-        assistant_response.encode("utf-8")
-        if isinstance(assistant_response, str)
-        else None
+        assistant_response.encode("utf-8") if isinstance(assistant_response, str) else None
     )
 
     metadata: dict = {

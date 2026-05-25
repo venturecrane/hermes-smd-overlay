@@ -92,7 +92,7 @@ class SentMessage:
     sent_at: str
     body_text: str | None
     subject: str | None
-    recipients: Sequence[str]              # email addresses; used by the cohort resolver
+    recipients: Sequence[str]  # email addresses; used by the cohort resolver
     likely_agent_drafted: bool | None
 
 
@@ -104,11 +104,11 @@ class IngestionResult:
     source_id: str
     mode: IngestionMode
     items_seen: int
-    items_ingested: int                    # partner_authored=1, R2 object written
-    items_filtered: int                    # partner_authored=0, provenance row only
-    items_skipped_duplicate: int           # already_ingested short-circuit
+    items_ingested: int  # partner_authored=1, R2 object written
+    items_filtered: int  # partner_authored=0, provenance row only
+    items_skipped_duplicate: int  # already_ingested short-circuit
     items_errored: int
-    cohort_histogram: dict                 # cohort_id -> count of ingested
+    cohort_histogram: dict  # cohort_id -> count of ingested
     status: str
     started_at: str
     finished_at: str
@@ -152,9 +152,7 @@ class NoEmailSource:
 
     source_id = "none"
 
-    async def list_sent_since(
-        self, cursor: str | None
-    ) -> tuple[Sequence[SentMessage], str | None]:
+    async def list_sent_since(self, cursor: str | None) -> tuple[Sequence[SentMessage], str | None]:
         return [], cursor
 
 
@@ -330,7 +328,7 @@ class VoiceIngestionRunner:
 
     # ----- single-message ingest path -----
 
-    _latest_cohort: str = COHORT_UNASSIGNED   # set inside _ingest_one for histogramming
+    _latest_cohort: str = COHORT_UNASSIGNED  # set inside _ingest_one for histogramming
 
     async def _ingest_one(
         self,
@@ -340,9 +338,7 @@ class VoiceIngestionRunner:
         """Process one message. Returns 'ingested' | 'filtered' | 'duplicate'."""
         import hashlib
 
-        source_message_digest = hashlib.sha256(
-            message.message_id.encode("utf-8")
-        ).hexdigest()
+        source_message_digest = hashlib.sha256(message.message_id.encode("utf-8")).hexdigest()
 
         # Deduplication: if we already ingested this message, skip without
         # re-writing anything. Lets scheduled re-runs be idempotent.
@@ -412,28 +408,22 @@ class VoiceIngestionRunner:
                 partner_authored=True,
                 sent_at=message.sent_at,
                 filter_reason=ACCEPT_REASON,
-                r2_key=None,                # filled in after the R2 put
+                r2_key=None,  # filled in after the R2 put
                 structural_diff_digest=digest,
                 word_count=diff.word_count,
                 schema_version=DIFF_SCHEMA_VERSION,
             )
         )
 
-        r2_key = (
-            f"{self.r2_client.customer_slug}/voice/cohort/{cohort_id}/{sample_id}.json"
-        )
+        r2_key = f"{self.r2_client.customer_slug}/voice/cohort/{cohort_id}/{sample_id}.json"
         try:
-            await self.r2_client.put(
-                r2_key, diff.to_json_bytes(), "application/json"
-            )
+            await self.r2_client.put(r2_key, diff.to_json_bytes(), "application/json")
         except Exception as e:  # noqa: BLE001
             # The provenance row exists but the R2 object failed. Mark
             # the row soft-deleted so the next run can re-ingest, and
             # raise StorageError so the per-item counter increments.
             await self.state_store.mark_item_deleted(sample_id)
-            raise StorageError(
-                f"R2 put failed for {r2_key}: {type(e).__name__}: {e}"
-            ) from e
+            raise StorageError(f"R2 put failed for {r2_key}: {type(e).__name__}: {e}") from e
 
         # We inserted with r2_key=NULL because the ULID is generated
         # inside the store. Patch the row in-place with the resolved
@@ -459,9 +449,7 @@ class VoiceIngestionRunner:
         return COHORT_UNASSIGNED
 
     @staticmethod
-    def _compute_status(
-        *, items_ingested: int, items_errored: int, run_error: str | None
-    ) -> str:
+    def _compute_status(*, items_ingested: int, items_errored: int, run_error: str | None) -> str:
         if run_error and items_ingested == 0:
             return INGEST_STATUS_ERROR
         if items_errored > 0 and items_ingested == 0:

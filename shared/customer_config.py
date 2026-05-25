@@ -157,8 +157,7 @@ class CustomerConfig:
         raw = self._data.get("personas") or []
         if not isinstance(raw, list):
             raise CustomerConfigError(
-                "customer.yaml: personas must be a list; "
-                f"got {type(raw).__name__}"
+                f"customer.yaml: personas must be a list; got {type(raw).__name__}"
             )
         return list(raw)
 
@@ -172,8 +171,7 @@ class CustomerConfig:
         raw = self._data.get("scope") or {}
         if not isinstance(raw, dict):
             raise CustomerConfigError(
-                "customer.yaml: scope must be a mapping; "
-                f"got {type(raw).__name__}"
+                f"customer.yaml: scope must be a mapping; got {type(raw).__name__}"
             )
         return dict(raw)
 
@@ -194,8 +192,7 @@ class CustomerConfig:
         raw = self._data.get("connectors") or {}
         if not isinstance(raw, dict):
             raise CustomerConfigError(
-                "customer.yaml: connectors must be a mapping; "
-                f"got {type(raw).__name__}"
+                f"customer.yaml: connectors must be a mapping; got {type(raw).__name__}"
             )
         return {str(k): dict(v) if isinstance(v, dict) else {} for k, v in raw.items()}
 
@@ -209,8 +206,7 @@ class CustomerConfig:
         raw = self._data.get("voice_library") or {}
         if not isinstance(raw, dict):
             raise CustomerConfigError(
-                "customer.yaml: voice_library must be a mapping; "
-                f"got {type(raw).__name__}"
+                f"customer.yaml: voice_library must be a mapping; got {type(raw).__name__}"
             )
         return dict(raw)
 

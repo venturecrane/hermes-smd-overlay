@@ -53,9 +53,7 @@ logger = logging.getLogger(__name__)
 
 
 _SELECT_FOR_DISMISS_SQL = (
-    "SELECT honcho_conclusion_id, dismissed_at "
-    "FROM persona_observations "
-    "WHERE observation_id = ?"
+    "SELECT honcho_conclusion_id, dismissed_at FROM persona_observations WHERE observation_id = ?"
 )
 
 

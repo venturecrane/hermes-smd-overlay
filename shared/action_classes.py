@@ -180,9 +180,7 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
 # Public read-only view. Callers must not mutate the registry at runtime;
 # changes ship as a PR + test + spec update. MappingProxyType raises
 # TypeError on any mutation attempt, making the constraint enforceable.
-TOOL_ACTION_CLASS_MAP: Mapping[str, ActionClass] = MappingProxyType(
-    _RAW_TOOL_ACTION_CLASS_MAP
-)
+TOOL_ACTION_CLASS_MAP: Mapping[str, ActionClass] = MappingProxyType(_RAW_TOOL_ACTION_CLASS_MAP)
 
 
 # ---------------------------------------------------------------------------
