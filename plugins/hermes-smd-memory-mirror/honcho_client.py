@@ -37,7 +37,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ class HonchoClient:
         self,
         *,
         session_id: str,
-        since: Optional[str] = None,
+        since: str | None = None,
     ) -> list[dict]:
         """Fetch conclusions for a session, optionally bounded by created_at.
 
@@ -127,7 +127,7 @@ class HonchoClient:
             return []
         return [c for c in conclusions if isinstance(c, dict)]
 
-    def get_conclusion(self, conclusion_id: str) -> Optional[dict]:
+    def get_conclusion(self, conclusion_id: str) -> dict | None:
         """Fetch a single conclusion by id.
 
         Returns ``None`` if Honcho reports a 404 (the row has already been
@@ -195,9 +195,9 @@ class HonchoClient:
     def _get(self, path: str) -> Any:
         return self._request("GET", path, body=None)
 
-    def _request(self, method: str, path: str, *, body: Optional[dict]) -> Any:
+    def _request(self, method: str, path: str, *, body: dict | None) -> Any:
         url = self._base_url + path
-        data: Optional[bytes] = None
+        data: bytes | None = None
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Accept": "application/json",

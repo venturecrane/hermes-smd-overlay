@@ -23,7 +23,7 @@ actor, and skill_name are logged on failure.
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from shared.d1_client import D1Client
 from shared.secrets import require
@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 # D1Client. Stays ``None`` if the registration failed; the hook callbacks
 # log a warning and return when the writer is absent so the agent keeps
 # running through a misconfigured Machine.
-_WRITER: Optional[AuditLogWriter] = None
-_CUSTOMER_SLUG: Optional[str] = None
+_WRITER: AuditLogWriter | None = None
+_CUSTOMER_SLUG: str | None = None
 
 
-def _writer() -> Optional[AuditLogWriter]:
+def _writer() -> AuditLogWriter | None:
     """Read the module-level writer. Returns ``None`` if registration failed."""
     return _WRITER
 

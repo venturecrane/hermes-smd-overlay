@@ -37,14 +37,12 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 from shared.d1_client import D1Client
 from shared.secrets import require
 
 from .honcho_client import HonchoClient, HonchoUnreachable
-from .state import ObservationRecord
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +118,8 @@ _DELETE_ARCHIVE_SQL = (
 # ---------------------------------------------------------------------------
 
 
-def _iso_utc(now: Optional[datetime] = None) -> str:
-    dt = now if now is not None else datetime.now(timezone.utc)
+def _iso_utc(now: datetime | None = None) -> str:
+    dt = now if now is not None else datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -165,9 +163,9 @@ def archive_aged_conclusions(
     *,
     archive_after_days: int = DEFAULT_ARCHIVE_AFTER_DAYS,
     batch_size: int = 100,
-    honcho_client: Optional[HonchoClient] = None,
-    d1_client: Optional[D1Client] = None,
-    now: Optional[datetime] = None,
+    honcho_client: HonchoClient | None = None,
+    d1_client: D1Client | None = None,
+    now: datetime | None = None,
 ) -> ArchiveResult:
     """Move conclusions older than ``archive_after_days`` from live to archive.
 
@@ -190,7 +188,7 @@ def archive_aged_conclusions(
     if archive_after_days <= 0:
         raise ValueError("archive_after_days must be a positive int")
 
-    started = now or datetime.now(timezone.utc)
+    started = now or datetime.now(UTC)
     started_iso = _iso_utc(started)
     cutoff_iso = _iso_utc(started - timedelta(days=archive_after_days))
 
@@ -322,9 +320,9 @@ def archive_aged_conclusions(
 def restore_from_archive(
     observation_id: str,
     *,
-    honcho_client: Optional[HonchoClient] = None,
-    d1_client: Optional[D1Client] = None,
-    now: Optional[datetime] = None,
+    honcho_client: HonchoClient | None = None,
+    d1_client: D1Client | None = None,
+    now: datetime | None = None,
 ) -> RestoreResult:
     """Restore an archived observation back into the live Honcho store.
 

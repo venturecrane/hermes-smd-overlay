@@ -41,7 +41,6 @@ Audit table column shape (mirrors the per-customer D1 schema):
 
 import enum
 from dataclasses import dataclass, field
-from typing import Optional
 
 from shared.action_classes import (
     BANNED_REASON,
@@ -49,7 +48,6 @@ from shared.action_classes import (
     TOOL_ACTION_CLASS_MAP,
     ActionClass,
 )
-
 
 # ---------------------------------------------------------------------------
 # Accepted action_type vocabulary
@@ -172,14 +170,14 @@ class AuditEvent:
 
     action_type: str
     actor: str
-    actor_role: Optional[ActorRole] = None
-    skill_name: Optional[str] = None
-    matter_ref: Optional[str] = None
-    input_payload: Optional[bytes] = None
-    output_payload: Optional[bytes] = None
-    diff_payload: Optional[bytes] = None
-    trust_ceiling: Optional[str] = None
-    metadata: Optional[dict] = field(default=None)
+    actor_role: ActorRole | None = None
+    skill_name: str | None = None
+    matter_ref: str | None = None
+    input_payload: bytes | None = None
+    output_payload: bytes | None = None
+    diff_payload: bytes | None = None
+    trust_ceiling: str | None = None
+    metadata: dict | None = field(default=None)
 
 
 # Scope keys lifted into per-tool audit metadata.

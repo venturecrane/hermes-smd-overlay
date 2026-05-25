@@ -27,6 +27,7 @@ import importlib.util
 import json
 import sys
 import time
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -91,7 +92,7 @@ class FakeD1Client:
         ]
         out: list[dict] = []
         for _sql, params in self.calls:
-            out.append(dict(zip(cols, params)))
+            out.append(dict(zip(cols, params, strict=False)))
         return out
 
 
@@ -150,10 +151,10 @@ def test_ulid_unique_within_same_ms() -> None:
 
 
 def test_iso_utc_format() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     mod = load_plugin("hermes-smd-audit")
-    dt = datetime(2026, 5, 21, 12, 34, 56, 789_000, tzinfo=timezone.utc)
+    dt = datetime(2026, 5, 21, 12, 34, 56, 789_000, tzinfo=UTC)
     assert mod.emit._iso_utc(dt) == "2026-05-21T12:34:56.789Z"
 
 

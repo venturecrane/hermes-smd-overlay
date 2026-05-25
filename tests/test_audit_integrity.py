@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterator
 
 
 def load_plugin(plugin_name: str):
@@ -98,7 +98,7 @@ class _BrokenLoader:
 
 # Fixed reference timestamp used across tests (well outside the 5-min
 # mirror-lag grace window so "old" rows don't accidentally get the grace).
-_NOW = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 5, 21, 12, 0, 0, tzinfo=UTC)
 _NOW_TS = "2026-05-21T12:00:00.000Z"
 _OLD_TS = "2026-05-20T12:00:00.000Z"  # 24h before _NOW
 
@@ -307,7 +307,7 @@ def test_mirror_loader_failure_also_surfaces() -> None:
     mod = load_plugin("hermes-smd-audit")
     row = _row_factory(mod)
     d1 = _FakeLoader([row("01A", _OLD_TS)])
-    mirror = _BrokenLoader(IOError("r2 timeout"))
+    mirror = _BrokenLoader(OSError("r2 timeout"))
     report = mod.integrity.check_audit_integrity(
         d1, mirror, start_ts=_OLD_TS, end_ts=_NOW_TS, now=lambda: _NOW
     )

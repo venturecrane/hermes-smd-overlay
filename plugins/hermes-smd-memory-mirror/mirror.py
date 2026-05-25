@@ -43,8 +43,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from shared.d1_client import D1Client
 from shared.secrets import require
@@ -109,8 +108,8 @@ _SELECT_LAST_MIRRORED_SQL = (
 # ---------------------------------------------------------------------------
 
 
-def _iso_utc(now: Optional[datetime] = None) -> str:
-    dt = now if now is not None else datetime.now(timezone.utc)
+def _iso_utc(now: datetime | None = None) -> str:
+    dt = now if now is not None else datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -301,9 +300,9 @@ def conclusion_to_record(conclusion: dict, *, session_id: str, mirrored_at: str)
 def mirror_session(
     *,
     session_id: str,
-    honcho_client: Optional[HonchoClient] = None,
-    d1_client: Optional[D1Client] = None,
-    now: Optional[datetime] = None,
+    honcho_client: HonchoClient | None = None,
+    d1_client: D1Client | None = None,
+    now: datetime | None = None,
 ) -> MirrorResult:
     """Poll Honcho for new conclusions on this session and write them to D1.
 
@@ -406,7 +405,7 @@ def mirror_session(
 # ---------------------------------------------------------------------------
 
 
-def _read_last_mirrored_at(d1_client: D1Client, session_id: str) -> Optional[str]:
+def _read_last_mirrored_at(d1_client: D1Client, session_id: str) -> str | None:
     """Return the highest honcho_created_at already mirrored for this session.
 
     Used to bound the Honcho poll to only new rows. Returns ``None`` on

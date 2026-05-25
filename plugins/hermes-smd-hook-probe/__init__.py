@@ -23,8 +23,8 @@ user content and secrets pass through these seams.
 import json
 import logging
 import threading
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def _next_sequence() -> int:
         return _sequence_counter
 
 
-def _kwargs_digest(kwargs: Dict[str, Any]) -> Dict[str, str]:
+def _kwargs_digest(kwargs: dict[str, Any]) -> dict[str, str]:
     """Return a {key: type_name} mapping for safe logging.
 
     Never includes values - those may contain user content or secrets.
@@ -50,19 +50,19 @@ def _kwargs_digest(kwargs: Dict[str, Any]) -> Dict[str, str]:
     return {key: type(value).__name__ for key, value in kwargs.items()}
 
 
-def _kwargs_seen(kwargs: Dict[str, Any]) -> List[str]:
+def _kwargs_seen(kwargs: dict[str, Any]) -> list[str]:
     """Return the sorted list of kwarg names received."""
     return sorted(kwargs.keys())
 
 
-def _emit(hook_name: str, kwargs: Dict[str, Any]) -> None:
+def _emit(hook_name: str, kwargs: dict[str, Any]) -> None:
     """Emit one JSON log line for a single hook firing."""
     try:
         payload = {
             "event": _EVENT_NAME,
             "hook_name": hook_name,
             "sequence": _next_sequence(),
-            "timestamp_iso": datetime.now(timezone.utc).isoformat(),
+            "timestamp_iso": datetime.now(UTC).isoformat(),
             "kwargs_digest": _kwargs_digest(kwargs),
             "kwargs_seen": _kwargs_seen(kwargs),
         }

@@ -40,7 +40,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ def composio_connection_id_for_slug_prefix(slug: str) -> str:
 @dataclass(frozen=True)
 class _ConnectionIdDecision:
     ok: bool
-    found_slug: Optional[str]
+    found_slug: str | None
     reason: str
 
 
@@ -223,7 +223,7 @@ class ComposioConnectionGuard:
 _COMPOSIO_TOOL_PREFIX = "composio."
 
 
-def _extract_connection_id(result: Any) -> Optional[Any]:
+def _extract_connection_id(result: Any) -> Any | None:
     """Pull a ``connection_id`` out of a tool result.
 
     Tool results come back as JSON strings; some adapters may pass dicts
@@ -254,7 +254,7 @@ def verify_composio_response(
     tool_name: str,
     result: Any,
     expected_connection_id: str,
-) -> Optional[str]:
+) -> str | None:
     """Inspect a Composio tool response and refuse cross-tenant data.
 
     Args:

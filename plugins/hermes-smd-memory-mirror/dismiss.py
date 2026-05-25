@@ -37,8 +37,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from shared.d1_client import D1Client
 from shared.secrets import require
@@ -106,8 +105,8 @@ class DismissResult:
 # ---------------------------------------------------------------------------
 
 
-def _iso_utc(now: Optional[datetime] = None) -> str:
-    dt = now if now is not None else datetime.now(timezone.utc)
+def _iso_utc(now: datetime | None = None) -> str:
+    dt = now if now is not None else datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -121,9 +120,9 @@ def dismiss_conclusion(
     *,
     reason: str,
     dismissed_by: str,
-    honcho_client: Optional[HonchoClient] = None,
-    d1_client: Optional[D1Client] = None,
-    now: Optional[datetime] = None,
+    honcho_client: HonchoClient | None = None,
+    d1_client: D1Client | None = None,
+    now: datetime | None = None,
 ) -> DismissResult:
     """Physical-delete the conclusion in Honcho; stamp the D1 mirror row.
 

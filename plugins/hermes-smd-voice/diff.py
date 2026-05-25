@@ -51,8 +51,6 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Closed-set category labels
@@ -192,8 +190,8 @@ SCHEMA_VERSION = 1
 
 def extract_structural_diff(
     *,
-    body_text: Optional[str],
-    subject: Optional[str],
+    body_text: str | None,
+    subject: str | None,
     recipient_cohort: str,
 ) -> StructuralDiff:
     """Compute the structural-diff for one sent message.

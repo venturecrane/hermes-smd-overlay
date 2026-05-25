@@ -32,7 +32,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Module loaders for the voice plugin.
 #

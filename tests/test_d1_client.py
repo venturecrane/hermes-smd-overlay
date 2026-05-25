@@ -26,7 +26,6 @@ import pytest
 from shared.d1_client import D1Client, NamespaceAssertionError
 from shared.d1_env import d1_client_from_env
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

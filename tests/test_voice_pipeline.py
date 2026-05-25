@@ -28,7 +28,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -54,8 +54,8 @@ def load_plugin(plugin_name: str):
 load_plugin("hermes-smd-voice")
 import plugin_hermes_smd_voice.diff as _diff_mod  # noqa: E402
 import plugin_hermes_smd_voice.filter as _filter_mod  # noqa: E402
-import plugin_hermes_smd_voice.state as _state_mod  # noqa: E402
 import plugin_hermes_smd_voice.pipeline as _pipeline_mod  # noqa: E402
+import plugin_hermes_smd_voice.state as _state_mod  # noqa: E402
 
 GreetingStyle = _diff_mod.GreetingStyle
 SignoffStyle = _diff_mod.SignoffStyle
@@ -159,7 +159,7 @@ class SqliteQueryExecutor:
         cur = self._conn.cursor()
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description] if cur.description else []
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
 
 
 class FakeR2Client:
@@ -696,7 +696,7 @@ def test_retention_enforcer_deletes_expired_items():
             state_store=store,
             r2_client=r2,
             voice_retention_days=365,
-            now=datetime(2026, 5, 21, tzinfo=timezone.utc),
+            now=datetime(2026, 5, 21, tzinfo=UTC),
         )
     )
     assert summary["considered"] == 1

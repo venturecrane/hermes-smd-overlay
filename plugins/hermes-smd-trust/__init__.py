@@ -18,7 +18,7 @@ error result; this plugin does not cross-import the audit plugin.
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from shared.secrets import get_secret
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 _COMPOSIO_CONNECTION_ID_ENV = "SMD_COMPOSIO_CONNECTION_ID"
 
 
-def _resolve_expected_connection_id() -> Optional[str]:
+def _resolve_expected_connection_id() -> str | None:
     """Return the bound Composio connection ID or None if not provisioned."""
     try:
         return get_secret(_COMPOSIO_CONNECTION_ID_ENV)
@@ -43,7 +43,7 @@ def _resolve_expected_connection_id() -> Optional[str]:
         return None
 
 
-def on_pre_tool_call(**kwargs: Any) -> Optional[dict]:
+def on_pre_tool_call(**kwargs: Any) -> dict | None:
     """Block a tool call that exceeds the per-customer trust ceiling.
 
     Returns ``{"action": "block", "message": "<reason>"}`` to refuse, or
@@ -82,7 +82,7 @@ def on_pre_tool_call(**kwargs: Any) -> Optional[dict]:
         return None
 
 
-def on_transform_tool_result(**kwargs: Any) -> Optional[str]:
+def on_transform_tool_result(**kwargs: Any) -> str | None:
     """Refuse a Composio tool result whose connection_id is foreign.
 
     Returns a replacement result string when the guard refuses, or

@@ -21,8 +21,8 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional, Protocol
+from datetime import UTC, datetime
+from typing import Protocol
 
 log = logging.getLogger("aie.voice.state")
 
@@ -49,8 +49,8 @@ COHORT_UNASSIGNED = "unassigned"
 # ---------------------------------------------------------------------------
 
 
-def _iso_utc(now: Optional[datetime] = None) -> str:
-    dt = now if now is not None else datetime.now(timezone.utc)
+def _iso_utc(now: datetime | None = None) -> str:
+    dt = now if now is not None else datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -65,7 +65,7 @@ def _encode_crockford(value: int, length: int) -> str:
     return "".join(reversed(out))
 
 
-def _ulid(now_ms: Optional[int] = None) -> str:
+def _ulid(now_ms: int | None = None) -> str:
     ts = now_ms if now_ms is not None else int(time.time() * 1000)
     rand = secrets.randbits(80)
     return _encode_crockford(ts, 10) + _encode_crockford(rand, 16)
@@ -88,8 +88,8 @@ class VoiceSourceState:
     source_kind: str
     source_id: str
     last_ingestion_at: str
-    last_success_at: Optional[str]
-    last_error: Optional[str]
+    last_success_at: str | None
+    last_error: str | None
     ingest_status: str
     items_last_run: int
     samples_by_cohort: dict
@@ -118,14 +118,14 @@ class VoiceIngestionItem:
     source_message_digest: str
     recipient_cohort_id: str
     partner_authored: bool
-    filter_reason: Optional[str]
+    filter_reason: str | None
     ingested_at: str
     sent_at: str
-    r2_key: Optional[str]
-    structural_diff_digest: Optional[str]
-    word_count: Optional[int]
+    r2_key: str | None
+    structural_diff_digest: str | None
+    word_count: int | None
     schema_version: int
-    deleted_at: Optional[str]
+    deleted_at: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +245,7 @@ class IngestionStateUpdate:
     status: str
     items_last_run: int
     samples_by_cohort: dict
-    error: Optional[str] = None
+    error: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in VALID_STATUSES:
@@ -264,10 +264,10 @@ class IngestionItemRecord:
     recipient_cohort_id: str
     partner_authored: bool
     sent_at: str
-    filter_reason: Optional[str] = None
-    r2_key: Optional[str] = None
-    structural_diff_digest: Optional[str] = None
-    word_count: Optional[int] = None
+    filter_reason: str | None = None
+    r2_key: str | None = None
+    structural_diff_digest: str | None = None
+    word_count: int | None = None
     schema_version: int = 1
 
 
@@ -288,7 +288,7 @@ class VoiceSourceStateStore:
     def __init__(
         self,
         write_executor: WriteExecutor,
-        query_executor: Optional[QueryExecutor] = None,
+        query_executor: QueryExecutor | None = None,
     ) -> None:
         self._write = write_executor
         self._query = query_executor

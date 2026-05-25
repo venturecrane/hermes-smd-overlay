@@ -48,7 +48,14 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
-ignore = ["E501"]
+# E501 line-too-long: handled by formatter at 100 cols; long URL/citation strings exist.
+# UP042 enum.StrEnum: codebase uses `(str, enum.Enum)` mixin pattern intentionally;
+#   StrEnum changes __str__ semantics (returns value vs Name.MEMBER) which would
+#   silently break audit-row serialization and log-string assumptions. Migration
+#   would be a separate intentional refactor with explicit test coverage.
+# UP017 datetime.UTC: codebase uses `timezone.utc` consistently across audit
+#   timestamps and test fixtures; mass-rewrite to the 3.11+ alias is style churn.
+ignore = ["E501", "UP042", "UP017"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

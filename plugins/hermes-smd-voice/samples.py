@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 
 log = logging.getLogger("aie.voice.samples")
 
@@ -66,8 +66,8 @@ class _SampleHit:
 async def retrieve_relevant_samples_async(
     *,
     customer_slug: str,
-    r2_reader: Optional[R2SampleReader],
-    query_context: Optional[dict] = None,
+    r2_reader: R2SampleReader | None,
+    query_context: dict | None = None,
     limit: int = MAX_SAMPLES_PER_TURN,
 ) -> list[dict]:
     """Return up to ``limit`` ranked voice samples for the current turn.

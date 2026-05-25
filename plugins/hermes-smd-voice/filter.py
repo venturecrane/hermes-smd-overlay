@@ -39,7 +39,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 
 log = logging.getLogger("aie.voice.filter")
 
@@ -97,11 +97,11 @@ class CandidateMessage:
 
     body_text: str
     word_count: int
-    likely_agent_drafted: Optional[bool]   # None when the adapter cannot tell
+    likely_agent_drafted: bool | None   # None when the adapter cannot tell
     body_digest: str                       # SHA-256 hex of body_text
 
 
-def compute_body_digest(body_text: Optional[str]) -> str:
+def compute_body_digest(body_text: str | None) -> str:
     """SHA-256 hex of the body as UTF-8 bytes. Empty string hashes to
     the empty-input SHA-256 — that case is short-circuited by the
     filter's empty-body check before any audit lookup happens."""

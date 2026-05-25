@@ -39,9 +39,10 @@ Worker that drives the check is also synchronous in the Machine context.
 
 import enum
 import logging
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Callable, Iterator, Optional, Protocol
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class IntegrityFinding:
 
     kind: FindingKind
     row_id: str
-    detail: Optional[str] = None
+    detail: str | None = None
 
 
 @dataclass
@@ -91,7 +92,7 @@ class IntegrityReport:
     d1_rows_checked: int = 0
     mirror_rows_checked: int = 0
     findings: list[IntegrityFinding] = field(default_factory=list)
-    loader_error: Optional[str] = None
+    loader_error: str | None = None
 
     @property
     def clean(self) -> bool:
@@ -112,14 +113,14 @@ class AuditRow:
     ts: str
     action_type: str
     actor: str
-    actor_role: Optional[str]
-    skill_name: Optional[str]
-    matter_ref: Optional[str]
-    input_digest: Optional[str]
-    output_digest: Optional[str]
-    diff_digest: Optional[str]
-    trust_ceiling: Optional[str]
-    metadata: Optional[str]
+    actor_role: str | None
+    skill_name: str | None
+    matter_ref: str | None
+    input_digest: str | None
+    output_digest: str | None
+    diff_digest: str | None
+    trust_ceiling: str | None
+    metadata: str | None
 
     def compare_key(self) -> tuple:
         """Tuple of load-bearing columns — every column except ``metadata``."""
@@ -172,7 +173,7 @@ def _drain(stream: Iterator[AuditRow]) -> dict[str, AuditRow]:
     return out
 
 
-def _parse_iso(ts: str) -> Optional[datetime]:
+def _parse_iso(ts: str) -> datetime | None:
     """Parse an audit-log ``ts`` (ISO 8601 UTC, millisecond precision, Z suffix).
 
     Returns ``None`` on parse failure — the integrity check is best-effort
@@ -180,7 +181,7 @@ def _parse_iso(ts: str) -> Optional[datetime]:
     the comparison.
     """
     try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
     except (ValueError, TypeError):
         return None
 
@@ -200,7 +201,7 @@ def check_audit_integrity(
     *,
     start_ts: str,
     end_ts: str,
-    now: Optional[Callable[[], datetime]] = None,
+    now: Callable[[], datetime] | None = None,
 ) -> IntegrityReport:
     """Compare D1 audit_log against the Logpush mirror.
 
@@ -213,7 +214,7 @@ def check_audit_integrity(
     does not write.
     """
     report = IntegrityReport()
-    now_dt = (now or (lambda: datetime.now(timezone.utc)))()
+    now_dt = (now or (lambda: datetime.now(UTC)))()
 
     try:
         d1_rows = _drain(d1_loader.load(start_ts, end_ts))

@@ -98,17 +98,19 @@ import enum
 import logging
 import re
 import statistics
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from typing import Iterable, Optional, Sequence
 
 from .diff import (
-    SCHEMA_VERSION as DIFF_SCHEMA_VERSION,
-    GreetingStyle,
-    SignoffStyle,
-    StructuralDiff,
     _PARAGRAPH_SPLIT,
     _SENTENCE_SPLIT,
     _WORD_SPLIT,
+    GreetingStyle,
+    SignoffStyle,
+    StructuralDiff,
+)
+from .diff import (
+    SCHEMA_VERSION as DIFF_SCHEMA_VERSION,
 )
 
 log = logging.getLogger("aie.voice.transform")
@@ -338,7 +340,7 @@ class TransformResult:
     source_draft: str
     profile_sample_count: int
     changes_applied: list = field(default_factory=list)
-    notes: Optional[str] = None
+    notes: str | None = None
     selected_voice_user_id: str = GENERAL_VOICE_USER_ID
     """The voice profile actually applied to this draft. Equals the
     reviewer's `voice_profile_id` slug when their per-user profile was
@@ -380,7 +382,7 @@ class VoiceProfileBundle:
     :meth:`select_with_cohort` (3-tuple, the cohort-aware path).
     """
 
-    general: "VoiceProfile"
+    general: VoiceProfile
     per_user: dict
     """Mapping from `voice_profile_id` slug to VoiceProfile. Empty dict
     when no per-user profiles are configured. The dict is opaque to the
@@ -397,7 +399,7 @@ class VoiceProfileBundle:
     is rejected in favor of the cohort-agnostic per-user (or general)
     fallback."""
 
-    def select(self, reviewer_user_id: Optional[str]) -> tuple:
+    def select(self, reviewer_user_id: str | None) -> tuple:
         """Pick the right profile for this reviewer, cohort-agnostic.
 
         Legacy 2-tuple entry point preserved for cohort-unaware callers.
@@ -426,8 +428,8 @@ class VoiceProfileBundle:
 
     def select_with_cohort(
         self,
-        reviewer_user_id: Optional[str],
-        recipient_cohort: Optional[str],
+        reviewer_user_id: str | None,
+        recipient_cohort: str | None,
     ) -> tuple:
         """Pick the right profile for this (reviewer, cohort) pair.
 
@@ -636,9 +638,9 @@ class DraftTransformer:
         self,
         *,
         draft: str,
-        profile: "VoiceProfile | VoiceProfileBundle",
-        reviewer_user_id: Optional[str] = None,
-        recipient_cohort: Optional[str] = None,
+        profile: VoiceProfile | VoiceProfileBundle,
+        reviewer_user_id: str | None = None,
+        recipient_cohort: str | None = None,
     ) -> TransformResult:
         """Rewrite ``draft`` so its surface shape matches ``profile``.
 
@@ -841,14 +843,14 @@ def _apply_signoff_swap(draft: str, profile: VoiceProfile) -> tuple:
     return "\n".join(lines), "signoff_swap"
 
 
-def _classify_signoff_line(line: str) -> Optional[str]:
+def _classify_signoff_line(line: str) -> str | None:
     for style, pattern in _SIGNOFF_LINE_PATTERNS.items():
         if pattern.match(line):
             return style.value
     return None
 
 
-def _last_signoff_index(lines: list) -> Optional[int]:
+def _last_signoff_index(lines: list) -> int | None:
     """Find the index of the last recognized signoff phrase line.
 
     Scans from the bottom up, stopping at the first non-empty line that
@@ -974,7 +976,7 @@ _CLAUSE_BOUNDARY_RE = re.compile(
 )
 
 
-def _find_first_splittable(sentences: list) -> Optional[int]:
+def _find_first_splittable(sentences: list) -> int | None:
     """Return the index of the first long sentence with a clause boundary."""
     for idx, s in enumerate(sentences):
         if len(_WORD_SPLIT.findall(s)) >= 15 and _CLAUSE_BOUNDARY_RE.search(s):
@@ -1017,7 +1019,7 @@ def _split_sentence_at_clause(sentence: str) -> tuple:
     return head, tail
 
 
-def _find_first_joinable(sentences: list) -> Optional[int]:
+def _find_first_joinable(sentences: list) -> int | None:
     """Return the index of the first pair of adjacent short joinable sentences."""
     for idx in range(len(sentences) - 1):
         left_len = len(_WORD_SPLIT.findall(sentences[idx]))
@@ -1133,7 +1135,7 @@ def _split_off_greeting_signoff(draft: str) -> tuple:
     return "\n".join(body_lines).strip(), header_lines, footer_lines
 
 
-def _first_nonempty_index(lines: list) -> Optional[int]:
+def _first_nonempty_index(lines: list) -> int | None:
     for idx, line in enumerate(lines):
         if line.strip():
             return idx
@@ -1206,9 +1208,9 @@ def _fabrication_guard_passthrough(
 
 
 def _resolve_profile_selection(
-    profile: "VoiceProfile | VoiceProfileBundle",
-    reviewer_user_id: Optional[str],
-    recipient_cohort: Optional[str] = None,
+    profile: VoiceProfile | VoiceProfileBundle,
+    reviewer_user_id: str | None,
+    recipient_cohort: str | None = None,
 ) -> tuple:
     """Resolve the (profile, selected_user_id, selected_cohort) triple.
 
@@ -1230,9 +1232,9 @@ def _resolve_profile_selection(
 def transform_draft(
     *,
     draft: str,
-    profile: "VoiceProfile | VoiceProfileBundle",
-    reviewer_user_id: Optional[str] = None,
-    recipient_cohort: Optional[str] = None,
+    profile: VoiceProfile | VoiceProfileBundle,
+    reviewer_user_id: str | None = None,
+    recipient_cohort: str | None = None,
 ) -> TransformResult:
     """Top-level functional entry point.
 

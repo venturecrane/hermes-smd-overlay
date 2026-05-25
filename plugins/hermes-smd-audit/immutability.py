@@ -44,7 +44,7 @@ original.
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -175,14 +175,14 @@ class MirroredAuditRow:
     ts: str
     action_type: str
     actor: str
-    actor_role: Optional[str]
-    skill_name: Optional[str]
-    matter_ref: Optional[str]
-    input_digest: Optional[str]
-    output_digest: Optional[str]
-    diff_digest: Optional[str]
-    trust_ceiling: Optional[str]
-    metadata: Optional[str]
+    actor_role: str | None
+    skill_name: str | None
+    matter_ref: str | None
+    input_digest: str | None
+    output_digest: str | None
+    diff_digest: str | None
+    trust_ceiling: str | None
+    metadata: str | None
 
 
 class LogpushMirror(Protocol):
@@ -238,7 +238,7 @@ class D1Executor:
         self,
         sql: str,
         *params: Any,
-        legal_hold_ticket: Optional[str] = None,
+        legal_hold_ticket: str | None = None,
     ) -> Any:
         if is_mutation_against_audit_log(sql):
             if legal_hold_ticket:

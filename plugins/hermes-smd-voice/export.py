@@ -62,9 +62,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional, Protocol, Sequence
+from datetime import UTC, datetime
+from typing import Protocol
 
 log = logging.getLogger("aie.voice.export")
 
@@ -128,9 +129,9 @@ class VoiceExportManifestEntry:
     kind: str
     sha256: str
     item_count: int
-    cohort: Optional[str] = None
-    source_kind: Optional[str] = None
-    source_id: Optional[str] = None
+    cohort: str | None = None
+    source_kind: str | None = None
+    source_id: str | None = None
 
 
 @dataclass
@@ -141,8 +142,8 @@ class VoiceExportManifest:
     exported_at: str
     schema_version: int = VOICE_EXPORT_SCHEMA_VERSION
     entries: list[VoiceExportManifestEntry] = field(default_factory=list)
-    signature: Optional[str] = None
-    signature_kind: Optional[str] = None
+    signature: str | None = None
+    signature_kind: str | None = None
 
     def add(self, entry: VoiceExportManifestEntry) -> None:
         if entry.kind not in ALL_VOICE_KINDS:
@@ -229,8 +230,8 @@ class NoOpVoiceExportSigner:
 # ---------------------------------------------------------------------------
 
 
-def _iso_utc(now: Optional[datetime] = None) -> str:
-    dt = now if now is not None else datetime.now(timezone.utc)
+def _iso_utc(now: datetime | None = None) -> str:
+    dt = now if now is not None else datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
@@ -288,11 +289,11 @@ async def export_voice_library(
     *,
     customer_slug: str,
     reader: VoiceExportReader,
-    r2_reader: Optional[VoiceR2ObjectReader],
+    r2_reader: VoiceR2ObjectReader | None,
     writer: VoiceExportWriter,
-    voice_config: Optional[dict] = None,
-    signer: Optional[VoiceExportSigner] = None,
-    now: Optional[datetime] = None,
+    voice_config: dict | None = None,
+    signer: VoiceExportSigner | None = None,
+    now: datetime | None = None,
 ) -> VoiceExportManifest:
     """Produce the voice portion of the customer-owned export archive.
 

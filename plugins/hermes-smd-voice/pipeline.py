@@ -34,12 +34,15 @@ from __future__ import annotations
 import enum
 import logging
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional, Protocol, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Protocol
 
 from .diff import (
     SCHEMA_VERSION as DIFF_SCHEMA_VERSION,
+)
+from .diff import (
     extract_structural_diff,
     structural_diff_digest,
 )
@@ -87,10 +90,10 @@ class SentMessage:
 
     message_id: str
     sent_at: str
-    body_text: Optional[str]
-    subject: Optional[str]
+    body_text: str | None
+    subject: str | None
     recipients: Sequence[str]              # email addresses; used by the cohort resolver
-    likely_agent_drafted: Optional[bool]
+    likely_agent_drafted: bool | None
 
 
 @dataclass(frozen=True)
@@ -110,8 +113,8 @@ class IngestionResult:
     started_at: str
     finished_at: str
     duration_ms: int
-    next_cursor: Optional[str]
-    error: Optional[str] = None
+    next_cursor: str | None
+    error: str | None = None
 
 
 class StorageError(RuntimeError):
@@ -136,8 +139,8 @@ class EmailSource(Protocol):
     source_id: str
 
     async def list_sent_since(
-        self, cursor: Optional[str]
-    ) -> tuple[Sequence[SentMessage], Optional[str]]: ...
+        self, cursor: str | None
+    ) -> tuple[Sequence[SentMessage], str | None]: ...
 
 
 class NoEmailSource:
@@ -150,8 +153,8 @@ class NoEmailSource:
     source_id = "none"
 
     async def list_sent_since(
-        self, cursor: Optional[str]
-    ) -> tuple[Sequence[SentMessage], Optional[str]]:
+        self, cursor: str | None
+    ) -> tuple[Sequence[SentMessage], str | None]:
         return [], cursor
 
 
@@ -163,7 +166,7 @@ class CohortResolver(Protocol):
     matches by email domain or full address. Tests pass in-memory fakes.
     """
 
-    async def resolve(self, recipient_email: str) -> Optional[str]: ...
+    async def resolve(self, recipient_email: str) -> str | None: ...
 
 
 class StaticCohortResolver:
@@ -173,7 +176,7 @@ class StaticCohortResolver:
     ``unassigned`` per state.COHORT_UNASSIGNED.
     """
 
-    async def resolve(self, recipient_email: str) -> Optional[str]:  # noqa: ARG002
+    async def resolve(self, recipient_email: str) -> str | None:  # noqa: ARG002
         return None
 
 
@@ -195,8 +198,8 @@ class CursorStore(Protocol):
     the new one.
     """
 
-    async def get(self) -> Optional[str]: ...
-    async def set(self, cursor: Optional[str]) -> None: ...
+    async def get(self) -> str | None: ...
+    async def set(self, cursor: str | None) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +223,10 @@ class VoiceIngestionRunner:
     cursor_store: CursorStore
     audit_lookup: AuditDigestLookup
     source_kind: str = "email"
-    _clock: Optional[Callable[[], datetime]] = None
+    _clock: Callable[[], datetime] | None = None
 
     def _now(self) -> datetime:
-        return self._clock() if self._clock else datetime.now(timezone.utc)
+        return self._clock() if self._clock else datetime.now(UTC)
 
     async def run_ingestion(self, *, mode: IngestionMode) -> IngestionResult:
         """Run one ingestion pass.
@@ -245,7 +248,7 @@ class VoiceIngestionRunner:
         items_errored = 0
         cohort_histogram: dict = {}
         next_cursor = cursor
-        run_error: Optional[str] = None
+        run_error: str | None = None
 
         try:
             messages, next_cursor = await self.source.list_sent_since(cursor)
@@ -457,7 +460,7 @@ class VoiceIngestionRunner:
 
     @staticmethod
     def _compute_status(
-        *, items_ingested: int, items_errored: int, run_error: Optional[str]
+        *, items_ingested: int, items_errored: int, run_error: str | None
     ) -> str:
         if run_error and items_ingested == 0:
             return INGEST_STATUS_ERROR
@@ -476,7 +479,7 @@ async def enforce_retention(
     state_store: VoiceSourceStateStore,
     r2_client: R2Client,
     voice_retention_days: int,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> dict:
     """Delete voice samples older than ``voice_retention_days``.
 
@@ -487,7 +490,7 @@ async def enforce_retention(
 
     Returns a summary dict: ``{"considered": N, "deleted": M, "errors": E}``.
     """
-    now_dt = now or datetime.now(timezone.utc)
+    now_dt = now or datetime.now(UTC)
     cutoff = now_dt - timedelta(days=voice_retention_days)
     cutoff_iso = _iso_utc(cutoff)
 
@@ -574,7 +577,7 @@ async def decommission_source(
 # ---------------------------------------------------------------------------
 
 
-import re as _re  # local import to keep top-level imports tight
+import re as _re  # noqa: E402 — intentional local import, isolates regex use to this helper section
 
 _WORD_RE = _re.compile(r"\b\w+\b")
 

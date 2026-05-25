@@ -28,7 +28,7 @@ failure on one turn never breaks the agent loop.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from . import samples, transform  # noqa: F401 — surface module imports for tests
 
@@ -39,16 +39,16 @@ logger = logging.getLogger(__name__)
 # R2 client into this slot before the agent loop starts; tests can
 # patch it directly. ``None`` means "no binding available" — the hook
 # degrades to a no-op rather than raising.
-_R2_READER: Optional["samples.R2SampleReader"] = None
+_R2_READER: samples.R2SampleReader | None = None
 
 # Module-level customer slug. Resolved at register-time from
 # ``SMD_CUSTOMER_SLUG``. Missing slug means "single-tenant Machine boot
 # misconfigured" — the hook degrades to a no-op rather than raising so
 # the agent still responds.
-_CUSTOMER_SLUG: Optional[str] = None
+_CUSTOMER_SLUG: str | None = None
 
 
-def bind_runtime(*, customer_slug: str, r2_reader: "samples.R2SampleReader") -> None:
+def bind_runtime(*, customer_slug: str, r2_reader: samples.R2SampleReader) -> None:
     """Bind runtime collaborators after register() returns.
 
     The Machine boot sequence:
@@ -70,7 +70,7 @@ def bind_runtime(*, customer_slug: str, r2_reader: "samples.R2SampleReader") -> 
     )
 
 
-async def on_pre_llm_call(**kwargs: Any) -> Optional[dict]:
+async def on_pre_llm_call(**kwargs: Any) -> dict | None:
     """Inject relevant voice samples into the user message context.
 
     Expected kwargs per docs/hook-surface.md §3 (pre_llm_call):

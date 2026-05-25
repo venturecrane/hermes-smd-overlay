@@ -33,10 +33,8 @@ import json
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .schemas import VALID_EVIDENCE_STATUSES
-
 
 # ---------------------------------------------------------------------------
 # Observation type — closed vocabulary (matches honcho_interceptor.py)
@@ -90,7 +88,7 @@ def _encode_crockford(value: int, length: int) -> str:
     return "".join(reversed(out))
 
 
-def ulid(now_ms: Optional[int] = None) -> str:
+def ulid(now_ms: int | None = None) -> str:
     """Return a 26-char ULID. Sortable by creation time."""
     ts = now_ms if now_ms is not None else int(time.time() * 1000)
     rand = secrets.randbits(80)
@@ -135,8 +133,8 @@ class ObservationRecord:
     honcho_created_at: str
     mirrored_at: str
     evidence_status: str
-    persona_slug: Optional[str] = None
-    confidence: Optional[float] = None
+    persona_slug: str | None = None
+    confidence: float | None = None
     observation_id: str = field(default_factory=ulid)
     schema_version: int = 1
 

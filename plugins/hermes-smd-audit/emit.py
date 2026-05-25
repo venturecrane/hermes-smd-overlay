@@ -38,8 +38,8 @@ import json
 import logging
 import secrets
 import time
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from shared.action_classes import (
     BannedToolError,
@@ -93,20 +93,20 @@ def _encode_crockford(value: int, length: int) -> str:
     return "".join(reversed(out))
 
 
-def _ulid(now_ms: Optional[int] = None) -> str:
+def _ulid(now_ms: int | None = None) -> str:
     """Return a 26-char ULID. ``now_ms`` is injectable for deterministic tests."""
     ts = now_ms if now_ms is not None else int(time.time() * 1000)
     rand = secrets.randbits(80)
     return _encode_crockford(ts, 10) + _encode_crockford(rand, 16)
 
 
-def _iso_utc(now: Optional[datetime] = None) -> str:
+def _iso_utc(now: datetime | None = None) -> str:
     """ISO 8601 UTC with millisecond precision and explicit ``Z`` suffix."""
-    dt = now if now is not None else datetime.now(timezone.utc)
+    dt = now if now is not None else datetime.now(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
-def _sha256(payload: Optional[bytes]) -> Optional[str]:
+def _sha256(payload: bytes | None) -> str | None:
     if payload is None:
         return None
     return hashlib.sha256(payload).hexdigest()
@@ -173,7 +173,7 @@ class AuditLogWriter:
         ulid = _ulid(now_ms=now_ms)
         ts = _iso_utc(now_dt)
 
-        actor_role_value: Optional[str]
+        actor_role_value: str | None
         if isinstance(event.actor_role, ActorRole):
             actor_role_value = event.actor_role.value
         else:
@@ -233,8 +233,8 @@ class ToolCallTimer:
     __slots__ = ("_started_perf", "_duration_ms")
 
     def __init__(self) -> None:
-        self._started_perf: Optional[float] = None
-        self._duration_ms: Optional[float] = None
+        self._started_perf: float | None = None
+        self._duration_ms: float | None = None
 
     def start(self) -> "ToolCallTimer":
         """Begin timing. Returns self so callers can chain."""
@@ -254,12 +254,12 @@ class ToolCallTimer:
         return elapsed
 
     @property
-    def duration_ms(self) -> Optional[float]:
+    def duration_ms(self) -> float | None:
         """Read the last-measured duration. ``None`` if ``stop()`` has not run."""
         return self._duration_ms
 
 
-def extract_scope_metadata(arguments: Optional[dict]) -> dict[str, str]:
+def extract_scope_metadata(arguments: dict | None) -> dict[str, str]:
     """Lift scope-aware fields from a tool's arguments dict into metadata.
 
     Returns a dict with at most the keys in ``SCOPE_KEYS``. Missing or None
@@ -284,15 +284,15 @@ def build_per_tool_metadata(
     tool_name: str,
     action_class: HookActionClass,
     outcome: str,
-    skill_name: Optional[str] = None,
-    skill_version: Optional[str] = None,
-    ceiling_level: Optional[str] = None,
-    error_type: Optional[str] = None,
-    duration_ms: Optional[float] = None,
-    trace_id: Optional[str] = None,
-    arguments: Optional[dict] = None,
+    skill_name: str | None = None,
+    skill_version: str | None = None,
+    ceiling_level: str | None = None,
+    error_type: str | None = None,
+    duration_ms: float | None = None,
+    trace_id: str | None = None,
+    arguments: dict | None = None,
     unmapped: bool = False,
-    banned_reason: Optional[str] = None,
+    banned_reason: str | None = None,
 ) -> dict:
     """Build the canonical ``metadata`` dict for one per-tool audit row.
 
@@ -355,7 +355,7 @@ def build_per_tool_metadata(
 # ---------------------------------------------------------------------------
 
 
-def _outcome_from_result(result: Any) -> tuple[str, Optional[str]]:
+def _outcome_from_result(result: Any) -> tuple[str, str | None]:
     """Best-effort outcome + error_type inference from a Hermes tool result.
 
     Hermes' ``post_tool_call`` passes ``result`` as a str (usually a JSON
@@ -375,16 +375,16 @@ def emit_tool_event(
     *,
     customer: str,
     tool_name: str,
-    args: Optional[dict],
+    args: dict | None,
     result: Any,
     task_id: str,
     session_id: str,
     tool_call_id: str,
-    duration_ms: Optional[int],
+    duration_ms: int | None,
     actor: str = "agent",
     actor_role: ActorRole = ActorRole.AGENT,
-    skill_name: Optional[str] = None,
-) -> Optional[str]:
+    skill_name: str | None = None,
+) -> str | None:
     """Write one ``TOOL_CALL_COMPLETED`` audit row for a post_tool_call event.
 
     Handles three cases:
@@ -403,7 +403,7 @@ def emit_tool_event(
         classification = classify_tool(tool_name)
         action_class = classification.action_class
         unmapped = classification.unmapped
-        banned_reason: Optional[str] = None
+        banned_reason: str | None = None
         outcome, error_type = _outcome_from_result(result)
         action_type = "TOOL_CALL_COMPLETED"
     except BannedToolError as exc:
@@ -460,7 +460,7 @@ def emit_llm_event(
     platform: str,
     actor: str = "agent",
     actor_role: ActorRole = ActorRole.AGENT,
-) -> Optional[str]:
+) -> str | None:
     """Write one ``LLM_TURN_COMPLETED`` audit row for a post_llm_call event.
 
     The user message and assistant response are NEVER stored verbatim — the

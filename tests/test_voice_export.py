@@ -24,7 +24,7 @@ import hashlib
 import importlib.util
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -516,7 +516,7 @@ def test_re_export_is_deterministic_with_fixed_clock(voice_snapshot):
     reader = _FakeReader(states=states, items=items)
     writer_a = _RecordingWriter()
     writer_b = _RecordingWriter()
-    fixed = datetime(2026, 5, 21, 12, 0, 0, tzinfo=timezone.utc)
+    fixed = datetime(2026, 5, 21, 12, 0, 0, tzinfo=UTC)
 
     _run(
         export_voice_library(

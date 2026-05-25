@@ -26,8 +26,9 @@ re-import the real ``NamespacedR2Client`` here and drop the inline
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, Optional, Protocol
+from typing import Protocol
 
 from .filter import AuditDigestLookup
 from .pipeline import (
@@ -139,7 +140,7 @@ def build_namespaced_voice_runner(
     cursor_store: CursorStore,
     audit_lookup: AuditDigestLookup,
     source_kind: str = "email",
-    clock: Optional[Callable[[], datetime]] = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> VoiceIngestionRunner:
     """Return a `VoiceIngestionRunner` wired through namespace-asserting R2.
 

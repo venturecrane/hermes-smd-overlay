@@ -54,9 +54,9 @@ coupling, per AGENTS.md).
 import enum
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Optional
 
 from shared.action_classes import (
     BANNED_TOOLS,
@@ -315,7 +315,7 @@ _DEFAULT_CUSTOMER_CEILING = Ceiling.DRAFT_FOR_REVIEW
 _DEFAULT_SKILL_CEILING = Ceiling.AUTONOMOUS
 
 
-def _parse_ceiling(value: Optional[str], fallback: Ceiling) -> Ceiling:
+def _parse_ceiling(value: str | None, fallback: Ceiling) -> Ceiling:
     if not value:
         return fallback
     try:
@@ -366,7 +366,7 @@ def _resolve_customer_ceiling() -> Ceiling:
     return _parse_ceiling(env_value, _DEFAULT_CUSTOMER_CEILING)
 
 
-def _resolve_skill_ceiling(args: Optional[dict]) -> Ceiling:
+def _resolve_skill_ceiling(args: dict | None) -> Ceiling:
     """Resolve the SKILL.md-declared ceiling for the active skill.
 
     The runtime is expected to stamp ``_skill_trust_ceiling`` onto the tool
@@ -379,7 +379,7 @@ def _resolve_skill_ceiling(args: Optional[dict]) -> Ceiling:
     return _parse_ceiling(value, _DEFAULT_SKILL_CEILING)
 
 
-def _resolve_skill_name(args: Optional[dict]) -> str:
+def _resolve_skill_name(args: dict | None) -> str:
     """Best-effort skill-name resolution for the audit reason string."""
     if isinstance(args, dict):
         name = args.get("_skill_name")
@@ -388,7 +388,7 @@ def _resolve_skill_name(args: Optional[dict]) -> str:
     return "(unknown)"
 
 
-def _resolve_current_turn_approval(args: Optional[dict]) -> bool:
+def _resolve_current_turn_approval(args: dict | None) -> bool:
     """Whether the operator approved THIS action in THIS turn.
 
     The runtime stamps ``_current_turn_approval`` onto the tool args when
@@ -409,7 +409,7 @@ def evaluate_tool_call(
     tool_name: str,
     args: dict,
     customer_slug: str,
-) -> Optional[dict]:
+) -> dict | None:
     """Decide whether a tool call may proceed.
 
     Returns:

@@ -12,12 +12,10 @@ Covers:
     a raise inside the policy module never propagates to the caller.
 """
 
-import os
 
 import pytest
 
 from tests.conftest import load_plugin
-
 
 # ---------------------------------------------------------------------------
 # Module loaders — bypass package-import-by-hyphen issues
