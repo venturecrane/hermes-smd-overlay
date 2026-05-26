@@ -31,9 +31,15 @@ For each persona in `customer.yaml.personas[]` the command writes:
 ```
 $HERMES_HOME/profiles/<persona-slug>/config.yaml
 $HERMES_HOME/profiles/<persona-slug>/SOUL.md
+$HERMES_HOME/profiles/<persona-slug>/MEMORY.md   # tombstone (ADR 0016)
+$HERMES_HOME/profiles/<persona-slug>/USER.md     # tombstone (ADR 0016)
 ```
 
 The Hermes-native multi-persona pattern is documented in ADR 0011; per-persona SOUL.md is what Hermes loads as identity at profile boot.
+
+The `MEMORY.md` and `USER.md` files are tombstones — each contains only a single HTML comment block. Per ADR 0016, Honcho is the memory provider for SMD AI Employee profiles, and Hermes' local-file memory sources (`MEMORY.md`, `USER.md`) must NOT be loaded because they would double-process memory and create state divergence with Honcho. The tombstones pre-empt Hermes' default-template auto-creation at profile boot.
+
+The generated `config.yaml` also carries an explicit `local_memory_files` block declaring both files disabled, so operators inspecting a profile see the intent without needing to open the tombstone files.
 
 ### `hermes-smd customer-sync`
 
