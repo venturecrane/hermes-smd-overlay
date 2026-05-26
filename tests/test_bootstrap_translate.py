@@ -274,6 +274,167 @@ def test_translate_writes_tombstones_for_every_persona(tmp_path):
         assert config["local_memory_files"]["user_md_enabled"] is False
 
 
+# ---------------------------------------------------------------------------
+# ADR 0021 Stream D — skill bundles
+# ---------------------------------------------------------------------------
+
+
+# customer.yaml with one persona that ships two bundles. Each entry
+# mirrors the ai-employee/bundles/ catalog shape (slug, description,
+# skills, instruction).
+YAML_WITH_BUNDLES = VALID_YAML.replace(
+    "        enabled: true\n",
+    "        enabled: true\n"
+    "    bundles:\n"
+    "      - slug: pi-intake\n"
+    "        description: 'Intake triage + conflict screen'\n"
+    "        skills:\n"
+    "          - law-pi-intake-triage\n"
+    "          - law-conflict-check\n"
+    "        instruction: 'Shared context across both skills'\n"
+    "      - slug: pi-matter-prep\n"
+    "        description: 'Demand draft + settlement prep'\n"
+    "        skills:\n"
+    "          - law-pi-demand-letter-draft\n"
+    "          - law-pi-settlement-prep\n",
+)
+
+
+def test_translate_writes_per_profile_bundle_yaml(tmp_path):
+    """Each persona bundle gets one YAML file in skill-bundles/."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(
+        tmp_path, customer_yaml_body=YAML_WITH_BUNDLES
+    )
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    bundles_dir = hermes_home / "profiles" / "marcus" / "skill-bundles"
+    assert bundles_dir.exists()
+    assert (bundles_dir / "pi-intake.yaml").exists()
+    assert (bundles_dir / "pi-matter-prep.yaml").exists()
+
+
+def test_translate_bundle_yaml_carries_canonical_shape(tmp_path):
+    """The bundle file matches the Hermes-native bundle shape: slug,
+    description, skills, instruction (optional)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(
+        tmp_path, customer_yaml_body=YAML_WITH_BUNDLES
+    )
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+
+    intake_yaml = hermes_home / "profiles" / "marcus" / "skill-bundles" / "pi-intake.yaml"
+    body = yaml.safe_load(intake_yaml.read_text())
+    assert body["slug"] == "pi-intake"
+    assert body["description"] == "Intake triage + conflict screen"
+    assert body["skills"] == ["law-pi-intake-triage", "law-conflict-check"]
+    assert body["instruction"] == "Shared context across both skills"
+
+    prep_yaml = hermes_home / "profiles" / "marcus" / "skill-bundles" / "pi-matter-prep.yaml"
+    prep_body = yaml.safe_load(prep_yaml.read_text())
+    assert prep_body["slug"] == "pi-matter-prep"
+    # `instruction` was omitted in customer.yaml — must not appear on
+    # disk as `instruction: null`.
+    assert "instruction" not in prep_body
+
+
+def test_translate_bundles_are_idempotent(tmp_path):
+    """Re-running translate does not rewrite unchanged bundle files."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(
+        tmp_path, customer_yaml_body=YAML_WITH_BUNDLES
+    )
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    intake_yaml = hermes_home / "profiles" / "marcus" / "skill-bundles" / "pi-intake.yaml"
+    mtime_before = intake_yaml.stat().st_mtime_ns
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    assert intake_yaml.stat().st_mtime_ns == mtime_before
+
+
+def test_translate_removes_stale_bundles_on_update(tmp_path):
+    """A bundle removed from customer.yaml is deleted from disk."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(
+        tmp_path, customer_yaml_body=YAML_WITH_BUNDLES
+    )
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    bundles_dir = hermes_home / "profiles" / "marcus" / "skill-bundles"
+    assert (bundles_dir / "pi-intake.yaml").exists()
+    assert (bundles_dir / "pi-matter-prep.yaml").exists()
+
+    # Rewrite customer.yaml dropping pi-matter-prep.
+    yaml_with_only_intake = YAML_WITH_BUNDLES.replace(
+        "      - slug: pi-matter-prep\n"
+        "        description: 'Demand draft + settlement prep'\n"
+        "        skills:\n"
+        "          - law-pi-demand-letter-draft\n"
+        "          - law-pi-settlement-prep\n",
+        "",
+    )
+    customer_yaml.write_text(yaml_with_only_intake)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    assert (bundles_dir / "pi-intake.yaml").exists()
+    assert not (bundles_dir / "pi-matter-prep.yaml").exists()
+
+
+def test_translate_removes_all_bundles_when_block_dropped(tmp_path):
+    """If customer.yaml drops the `bundles` block entirely, all
+    per-profile bundle files for that persona are deleted."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(
+        tmp_path, customer_yaml_body=YAML_WITH_BUNDLES
+    )
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    bundles_dir = hermes_home / "profiles" / "marcus" / "skill-bundles"
+    assert (bundles_dir / "pi-intake.yaml").exists()
+
+    # Reset to the original VALID_YAML, which has no bundles block.
+    customer_yaml.write_text(VALID_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    assert not (bundles_dir / "pi-intake.yaml").exists()
+    assert not (bundles_dir / "pi-matter-prep.yaml").exists()
+
+
+def test_translate_persona_without_bundles_creates_no_skill_bundles_dir(tmp_path):
+    """A persona with no bundles[] declared does not get an empty
+    skill-bundles/ directory."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML, no bundles
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    bundles_dir = hermes_home / "profiles" / "marcus" / "skill-bundles"
+    assert not bundles_dir.exists()
+
+
 def test_translate_resolves_pending_skill_pin_to_actual_hash(tmp_path):
     """A `version: pending` skill entry is replaced with the resolved pin."""
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
