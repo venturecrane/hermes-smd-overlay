@@ -33,6 +33,7 @@ $HERMES_HOME/profiles/<persona-slug>/config.yaml
 $HERMES_HOME/profiles/<persona-slug>/SOUL.md
 $HERMES_HOME/profiles/<persona-slug>/MEMORY.md   # tombstone (ADR 0016)
 $HERMES_HOME/profiles/<persona-slug>/USER.md     # tombstone (ADR 0016)
+$HERMES_HOME/profiles/<persona-slug>/skill-bundles/<bundle-slug>.yaml   # one per bundle (ADR 0021 Stream D)
 ```
 
 The Hermes-native multi-persona pattern is documented in ADR 0011; per-persona SOUL.md is what Hermes loads as identity at profile boot.
@@ -40,6 +41,8 @@ The Hermes-native multi-persona pattern is documented in ADR 0011; per-persona S
 The `MEMORY.md` and `USER.md` files are tombstones — each contains only a single HTML comment block. Per ADR 0016, Honcho is the memory provider for SMD AI Employee profiles, and Hermes' local-file memory sources (`MEMORY.md`, `USER.md`) must NOT be loaded because they would double-process memory and create state divergence with Honcho. The tombstones pre-empt Hermes' default-template auto-creation at profile boot.
 
 The generated `config.yaml` also carries an explicit `local_memory_files` block declaring both files disabled, so operators inspecting a profile see the intent without needing to open the tombstone files.
+
+The `skill-bundles/` directory contains one YAML per entry in `customer.yaml.personas[<n>].bundles[]` (ADR 0021 Stream D). Each file matches the Hermes-native bundle shape (`slug`, `description`, `skills`, optional `instruction`); Hermes loads `~/.hermes/profiles/<slug>/skill-bundles/*.yaml` at profile boot and exposes each as a `/<bundle-slug>` slash command. Bundle files declared previously but removed from the current `customer.yaml` are deleted from disk so stale bundles do not accumulate. Personas with no `bundles[]` block do not get an empty `skill-bundles/` directory.
 
 ### `hermes-smd customer-sync`
 

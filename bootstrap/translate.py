@@ -156,6 +156,90 @@ bootstrap` to restore.
 
 
 # ---------------------------------------------------------------------------
+# Skill bundles (ADR 0021 Stream D)
+# ---------------------------------------------------------------------------
+
+
+def _bundle_body(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Build the Hermes-native bundle YAML body for one bundle.
+
+    Mirrors the per-customer ``personas[].bundles[]`` shape onto disk
+    in the form Hermes loads at profile boot (``~/.hermes/profiles/
+    <slug>/skill-bundles/<bundle-slug>.yaml``). The validator runs at
+    customer.yaml load time; this function is downstream of validation
+    and trusts the input is well-formed.
+
+    Optional fields (``instruction``) are written only when present in
+    customer.yaml so unset values don't show up as ``instruction: null``
+    on disk.
+    """
+    out: dict[str, Any] = {
+        "slug": bundle["slug"],
+        "description": bundle["description"],
+        "skills": list(bundle.get("skills") or []),
+    }
+    instruction = bundle.get("instruction")
+    if instruction:
+        out["instruction"] = instruction
+    return out
+
+
+def _write_persona_bundles(
+    *,
+    persona: dict[str, Any],
+    profile_dir: Path,
+) -> tuple[int, int]:
+    """Materialize per-profile skill-bundle YAMLs for one persona.
+
+    For each entry in ``persona['bundles']`` writes
+    ``profile_dir/skill-bundles/<bundle-slug>.yaml``. Bundle files
+    removed from customer.yaml between runs are deleted from disk so
+    stale bundles do not accumulate.
+
+    Returns a (wrote_count, removed_count) tuple for the logger.
+    """
+    bundles_dir = profile_dir / "skill-bundles"
+    declared_bundles = persona.get("bundles") or []
+
+    if not declared_bundles:
+        # No bundles declared. If the directory exists with stale files,
+        # tear it down to match. Tolerate already-absent.
+        if bundles_dir.exists():
+            removed = sum(1 for p in bundles_dir.glob("*.yaml"))
+            for stale in bundles_dir.glob("*.yaml"):
+                stale.unlink()
+            return (0, removed)
+        return (0, 0)
+
+    bundles_dir.mkdir(parents=True, exist_ok=True)
+
+    wrote = 0
+    declared_paths: set[Path] = set()
+    for bundle in declared_bundles:
+        bundle_slug = bundle.get("slug")
+        if not bundle_slug:
+            raise TranslateError(
+                f"persona {persona.get('slug', '?')!r}: bundle entry missing slug after validation"
+            )
+        bundle_path = bundles_dir / f"{bundle_slug}.yaml"
+        declared_paths.add(bundle_path)
+        body = _bundle_body(bundle)
+        if _write_if_changed(bundle_path, _yaml_bytes(body)):
+            wrote += 1
+
+    # Remove stale bundle files (declared previously, removed from this
+    # customer.yaml). Only touch files we own (`<slug>.yaml`), never
+    # other content somebody put in the directory.
+    removed = 0
+    for existing in bundles_dir.glob("*.yaml"):
+        if existing not in declared_paths:
+            existing.unlink()
+            removed += 1
+
+    return (wrote, removed)
+
+
+# ---------------------------------------------------------------------------
 # Skill pin resolution (ported from resolve_skill_pins.py)
 # ---------------------------------------------------------------------------
 
@@ -386,6 +470,11 @@ def translate_customer_yaml(
       loaded.
     * ``<hermes_home>/profiles/<slug>/USER.md`` — tombstone (empty)
       with the same rationale.
+    * ``<hermes_home>/profiles/<slug>/skill-bundles/<bundle-slug>.yaml``
+      — one file per entry in ``customer.yaml.personas[].bundles[]``
+      (ADR 0021 Stream D). Bundle files declared previously but
+      removed from this customer.yaml are deleted from disk so stale
+      bundles do not accumulate.
 
     The function is idempotent. Re-running with the same input
     produces the same on-disk bytes; unchanged files are not
@@ -453,14 +542,32 @@ def translate_customer_yaml(
         # default templates at profile boot.
         wrote_memory_md = _write_if_changed(memory_md_path, _MEMORY_MD_TOMBSTONE)
         wrote_user_md = _write_if_changed(user_md_path, _USER_MD_TOMBSTONE)
-        if wrote_config or wrote_soul or wrote_memory_md or wrote_user_md:
+        # ADR 0021 Stream D — per-profile Hermes skill-bundles. Each
+        # entry in customer.yaml.personas[].bundles[] maps to one
+        # `<bundle-slug>.yaml` under the profile dir. Bundles removed
+        # from customer.yaml between runs are deleted.
+        wrote_bundles, removed_bundles = _write_persona_bundles(
+            persona=persona,
+            profile_dir=profile_dir,
+        )
+        if (
+            wrote_config
+            or wrote_soul
+            or wrote_memory_md
+            or wrote_user_md
+            or wrote_bundles
+            or removed_bundles
+        ):
             logger.info(
-                "translate: wrote profile %s (config=%s, soul=%s, memory_md=%s, user_md=%s)",
+                "translate: wrote profile %s (config=%s, soul=%s, memory_md=%s, "
+                "user_md=%s, bundles_written=%s, bundles_removed=%s)",
                 slug,
                 wrote_config,
                 wrote_soul,
                 wrote_memory_md,
                 wrote_user_md,
+                wrote_bundles,
+                removed_bundles,
             )
         else:
             logger.debug("translate: profile %s already up to date", slug)
