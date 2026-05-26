@@ -95,6 +95,67 @@ def _honcho_block() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Local-memory-files disposition (ADR 0016)
+# ---------------------------------------------------------------------------
+
+
+def _local_memory_files_block() -> dict[str, Any]:
+    """Return the canonical local-memory-files declaration.
+
+    Per ADR 0016, Honcho is the memory provider; Hermes' local-file
+    memory sources (``MEMORY.md`` and ``USER.md``) must NOT be loaded
+    because they would double-process memory and create state divergence
+    between Honcho and the local files.
+
+    The block declares both files disabled and records the rationale so
+    operators inspecting a profile's ``config.yaml`` see the intent
+    explicitly. The actual on-disk enforcement is the tombstone files
+    written alongside (see :func:`_write_memory_tombstones`).
+    """
+    return {
+        "memory_md_enabled": False,
+        "user_md_enabled": False,
+        "provider": "honcho",
+        "rationale": (
+            "ADR 0016 — Honcho is the memory provider; "
+            "local files are tombstoned to prevent double-processing"
+        ),
+    }
+
+
+# Tombstone-file contents. Single comment block each, idempotent across
+# re-runs. Written into the profile directory alongside config.yaml and
+# SOUL.md by ``translate_customer_yaml``.
+_MEMORY_MD_TOMBSTONE = """<!--
+This file is intentionally a tombstone (empty).
+
+Honcho is the memory provider for this profile per ADR 0016.
+Hermes' local-file memory sources (MEMORY.md and USER.md) must NOT
+be loaded — they would double-process memory and create state
+divergence between Honcho and the local files.
+
+The presence of this empty file pre-empts Hermes' default template
+auto-creation at profile boot. Do not edit; rerun `hermes-smd
+bootstrap` to restore.
+-->
+""".encode()
+
+_USER_MD_TOMBSTONE = """<!--
+This file is intentionally a tombstone (empty).
+
+Honcho is the memory provider for this profile per ADR 0016.
+Hermes' local-file memory sources (MEMORY.md and USER.md) must NOT
+be loaded — they would double-process memory and create state
+divergence between Honcho and the local files.
+
+The presence of this empty file pre-empts Hermes' default template
+auto-creation at profile boot. Do not edit; rerun `hermes-smd
+bootstrap` to restore.
+-->
+""".encode()
+
+
+# ---------------------------------------------------------------------------
 # Skill pin resolution (ported from resolve_skill_pins.py)
 # ---------------------------------------------------------------------------
 
@@ -240,6 +301,7 @@ def _persona_config(
         "voice_library": customer.get("voice_library") or {},
         "memory": customer.get("memory") or {},
         "honcho": _honcho_block(),
+        "local_memory_files": _local_memory_files_block(),
     }
 
 
@@ -313,9 +375,17 @@ def translate_customer_yaml(
 
     * ``<hermes_home>/profiles/<slug>/config.yaml`` — Hermes-native
       config with the resolved skill catalog, connector wiring,
-      scope, and the tuned Honcho block (see ADR 0016).
+      scope, the tuned Honcho block (see ADR 0016), and the
+      ``local_memory_files`` block declaring MEMORY.md / USER.md
+      disabled.
     * ``<hermes_home>/profiles/<slug>/SOUL.md`` — per-persona identity
       consumed by Hermes at profile boot.
+    * ``<hermes_home>/profiles/<slug>/MEMORY.md`` — tombstone (empty)
+      pre-empting Hermes' default-template auto-creation. Honcho is
+      the memory provider per ADR 0016; this local file must NOT be
+      loaded.
+    * ``<hermes_home>/profiles/<slug>/USER.md`` — tombstone (empty)
+      with the same rationale.
 
     The function is idempotent. Re-running with the same input
     produces the same on-disk bytes; unchanged files are not
@@ -370,18 +440,27 @@ def translate_customer_yaml(
         profile_dir = profiles_root / slug
         config_path = profile_dir / "config.yaml"
         soul_path = profile_dir / "SOUL.md"
+        memory_md_path = profile_dir / "MEMORY.md"
+        user_md_path = profile_dir / "USER.md"
 
         config_body = _persona_config(persona, customer, resolved_pins)
         soul_body = _soul_body(persona, customer)
 
         wrote_config = _write_if_changed(config_path, _yaml_bytes(config_body))
         wrote_soul = _write_if_changed(soul_path, soul_body.encode())
-        if wrote_config or wrote_soul:
+        # ADR 0016 — Honcho is the memory provider; tombstone the local
+        # MEMORY.md / USER.md so Hermes does not auto-populate them with
+        # default templates at profile boot.
+        wrote_memory_md = _write_if_changed(memory_md_path, _MEMORY_MD_TOMBSTONE)
+        wrote_user_md = _write_if_changed(user_md_path, _USER_MD_TOMBSTONE)
+        if wrote_config or wrote_soul or wrote_memory_md or wrote_user_md:
             logger.info(
-                "translate: wrote profile %s (config=%s, soul=%s)",
+                "translate: wrote profile %s (config=%s, soul=%s, memory_md=%s, user_md=%s)",
                 slug,
                 wrote_config,
                 wrote_soul,
+                wrote_memory_md,
+                wrote_user_md,
             )
         else:
             logger.debug("translate: profile %s already up to date", slug)

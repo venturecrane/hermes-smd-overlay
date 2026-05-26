@@ -162,6 +162,118 @@ def test_translate_carries_customer_identity_into_config(tmp_path):
     assert config["persona"]["tone"] == ["plainspoken", "concise"]
 
 
+# ---------------------------------------------------------------------------
+# ADR 0016 — MEMORY.md / USER.md tombstones + local_memory_files block
+# ---------------------------------------------------------------------------
+
+
+def test_translate_writes_memory_md_tombstone(tmp_path):
+    """Each profile dir must contain a tombstoned MEMORY.md so Hermes
+    does not auto-populate from default template at profile boot."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    memory_md = hermes_home / "profiles" / "marcus" / "MEMORY.md"
+    assert memory_md.exists()
+    body = memory_md.read_text()
+    # Tombstone must contain the ADR 0016 rationale comment marker.
+    assert "ADR 0016" in body
+    assert "Honcho is the memory provider" in body
+    # No actual memory content — purely a comment.
+    assert body.strip().startswith("<!--")
+    assert body.strip().endswith("-->")
+
+
+def test_translate_writes_user_md_tombstone(tmp_path):
+    """Each profile dir must contain a tombstoned USER.md."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    user_md = hermes_home / "profiles" / "marcus" / "USER.md"
+    assert user_md.exists()
+    body = user_md.read_text()
+    assert "ADR 0016" in body
+    assert "Honcho is the memory provider" in body
+    assert body.strip().startswith("<!--")
+    assert body.strip().endswith("-->")
+
+
+def test_translate_embeds_local_memory_files_block(tmp_path):
+    """config.yaml MUST declare MEMORY.md and USER.md disabled with the
+    ADR 0016 rationale, so operators inspecting the profile see intent
+    even without opening the tombstone files."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    block = config.get("local_memory_files")
+    assert block is not None, "config.yaml missing local_memory_files block"
+    assert block["memory_md_enabled"] is False
+    assert block["user_md_enabled"] is False
+    assert block["provider"] == "honcho"
+    assert "ADR 0016" in block["rationale"]
+
+
+def test_translate_tombstones_are_idempotent(tmp_path):
+    """Re-running translate must NOT rewrite unchanged tombstone files
+    (matches the idempotency contract for config.yaml and SOUL.md)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    memory_md = hermes_home / "profiles" / "marcus" / "MEMORY.md"
+    user_md = hermes_home / "profiles" / "marcus" / "USER.md"
+    mtime_memory = memory_md.stat().st_mtime_ns
+    mtime_user = user_md.stat().st_mtime_ns
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    assert memory_md.stat().st_mtime_ns == mtime_memory
+    assert user_md.stat().st_mtime_ns == mtime_user
+
+
+def test_translate_writes_tombstones_for_every_persona(tmp_path):
+    """Multi-persona customers get tombstones in every profile dir."""
+    # Append a second persona, same pattern as test_translate_handles_multiple_personas.
+    body = VALID_YAML.replace(
+        "        enabled: true\n",
+        "        enabled: true\n"
+        "  - slug: junie\n"
+        "    status: active\n"
+        "    name: Junie\n"
+        "    title: AI Associate\n"
+        "    tone:\n"
+        "      - cheerful\n"
+        "    skills: []\n",
+    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    for slug in ("marcus", "junie"):
+        assert (hermes_home / "profiles" / slug / "MEMORY.md").exists()
+        assert (hermes_home / "profiles" / slug / "USER.md").exists()
+        config = yaml.safe_load((hermes_home / "profiles" / slug / "config.yaml").read_text())
+        assert config["local_memory_files"]["memory_md_enabled"] is False
+        assert config["local_memory_files"]["user_md_enabled"] is False
+
+
 def test_translate_resolves_pending_skill_pin_to_actual_hash(tmp_path):
     """A `version: pending` skill entry is replaced with the resolved pin."""
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
