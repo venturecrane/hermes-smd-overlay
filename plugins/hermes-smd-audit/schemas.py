@@ -120,6 +120,18 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         "LLM_TURN_COMPLETED",
         # Per-tool audit emitted by the post_tool_call hook.
         "TOOL_CALL_COMPLETED",
+        # Subagent lifecycle emitted by the subagent_stop hook
+        # (ADR 0021 Stream C — one row per delegated child).
+        "SUBAGENT_STOPPED",
+        # Parent-side refusal when a subagent return fails the assembly-time
+        # schema contract (ADR 0021 Stream C — emitted by the ss-console
+        # delegate_task skills; the overlay accepts the action type so the
+        # parent's row writes through the same per-customer D1 binding).
+        "SUBAGENT_INCOMPLETE",
+        # Agent-authored skill creation observation emitted by post_tool_call
+        # when the dispatched tool is `skill_manage` (ADR 0017 §40 — mirror-
+        # don't-gate observation of the Hermes-native Skill Curator surface).
+        "AGENT_SKILL_CREATED",
     }
 )
 
