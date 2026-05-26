@@ -29,7 +29,14 @@ from shared.d1_client import D1Client
 from shared.secrets import require
 
 from . import emit, immutability, integrity, schemas  # noqa: F401 — surface for tests
-from .emit import AuditLogWriter, emit_llm_event, emit_tool_event
+from .emit import (
+    AuditLogWriter,
+    detect_skill_manage_creation,
+    emit_agent_skill_created_event,
+    emit_llm_event,
+    emit_subagent_stop_event,
+    emit_tool_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,22 +72,89 @@ def on_post_tool_call(**kwargs: Any) -> None:
         logger.debug("hermes-smd-audit: post_tool_call skipped (writer unconfigured)")
         return
 
+    tool_name = kwargs.get("tool_name", "") or ""
+    args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else None
+    session_id = kwargs.get("session_id", "") or ""
+    tool_call_id = kwargs.get("tool_call_id", "") or ""
+
     try:
         emit_tool_event(
             writer,
             customer=_CUSTOMER_SLUG,
-            tool_name=kwargs.get("tool_name", ""),
-            args=kwargs.get("args") if isinstance(kwargs.get("args"), dict) else None,
+            tool_name=tool_name,
+            args=args,
             result=kwargs.get("result"),
             task_id=kwargs.get("task_id", "") or "",
-            session_id=kwargs.get("session_id", "") or "",
-            tool_call_id=kwargs.get("tool_call_id", "") or "",
+            session_id=session_id,
+            tool_call_id=tool_call_id,
             duration_ms=kwargs.get("duration_ms"),
         )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning(
             "hermes-smd-audit: post_tool_call emission failed (tool=%s session=%s err=%s)",
-            kwargs.get("tool_name"),
+            tool_name,
+            session_id,
+            exc,
+        )
+
+    # ADR 0017 §40 — when `skill_manage` is invoked to create a new skill,
+    # emit AGENT_SKILL_CREATED in addition to TOOL_CALL_COMPLETED. This is
+    # the mirror-don't-gate observation surface; the Curator's flow is not
+    # intercepted.
+    try:
+        created_slug = detect_skill_manage_creation(tool_name=tool_name, args=args)
+        if created_slug is not None:
+            emit_agent_skill_created_event(
+                writer,
+                customer=_CUSTOMER_SLUG,
+                session_id=session_id,
+                skill_name_created=created_slug,
+                skill_manage_args=args,
+                tool_call_id=tool_call_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — never raise out of a hook
+        logger.warning(
+            "hermes-smd-audit: AGENT_SKILL_CREATED emission failed (session=%s err=%s)",
+            session_id,
+            exc,
+        )
+
+
+def on_subagent_stop(**kwargs: Any) -> None:
+    """Write one SUBAGENT_STOPPED audit row per delegated child agent.
+
+    ADR 0021 Stream C: every ``delegate_task`` parent expects one audit row
+    per child so the assembly-time schema contract has a visible trail
+    (mirror-don't-gate per ADR 0016). The hook fires after each delegated
+    subagent's run terminates, regardless of return status.
+
+    Expected kwargs (per Hermes subagent_stop hook contract):
+        session_id, parent_session_id, child_role, child_status,
+        duration_ms, task_id (optional), skill_name (optional)
+
+    Exception-safe: any failure is logged and swallowed.
+    """
+    writer = _writer()
+    if writer is None or _CUSTOMER_SLUG is None:
+        logger.debug("hermes-smd-audit: subagent_stop skipped (writer unconfigured)")
+        return
+
+    try:
+        emit_subagent_stop_event(
+            writer,
+            customer=_CUSTOMER_SLUG,
+            session_id=kwargs.get("session_id", "") or "",
+            parent_session_id=kwargs.get("parent_session_id"),
+            child_role=kwargs.get("child_role", "") or "",
+            child_status=kwargs.get("child_status", "") or "",
+            duration_ms=kwargs.get("duration_ms"),
+            task_id=kwargs.get("task_id", "") or "",
+            skill_name=kwargs.get("skill_name"),
+        )
+    except Exception as exc:  # noqa: BLE001 — never raise out of a hook
+        logger.warning(
+            "hermes-smd-audit: subagent_stop emission failed (child_role=%s session=%s err=%s)",
+            kwargs.get("child_role"),
             kwargs.get("session_id"),
             exc,
         )
@@ -153,3 +227,4 @@ def register(ctx) -> None:
 
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("post_llm_call", on_post_llm_call)
+    ctx.register_hook("subagent_stop", on_subagent_stop)

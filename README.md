@@ -8,7 +8,7 @@ Five plugins that attach to Hermes' documented plugin hook surface:
 
 | Plugin | Hooks | Purpose |
 |---|---|---|
-| `hermes-smd-audit` | `post_tool_call`, `post_llm_call` | Per-tool and per-LLM-call audit emission to per-customer D1. |
+| `hermes-smd-audit` | `post_tool_call`, `post_llm_call`, `subagent_stop` | Per-tool, per-LLM-call, and per-subagent audit emission to per-customer D1. Also emits `AGENT_SKILL_CREATED` when the dispatched tool is `skill_manage` (ADR 0017 §40). |
 | `hermes-smd-trust` | `pre_tool_call`, `transform_tool_result` | Content-class trust ceilings + Composio per-connection isolation guard. |
 | `hermes-smd-voice` | `pre_llm_call`, `post_llm_call` | Sample-driven voice transformation for customer-facing drafts. |
 | `hermes-smd-memory-mirror` | `on_session_end` | Mirrors Honcho conclusions to per-customer D1 with provenance; supports Captain dismissal. |

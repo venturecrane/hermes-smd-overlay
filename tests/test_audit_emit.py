@@ -749,3 +749,329 @@ def test_on_post_tool_call_no_writer_is_noop(fake_ctx) -> None:
         tool_call_id="",
         duration_ms=1,
     )
+
+
+# ---------------------------------------------------------------------------
+# subagent_stop hook + emit_subagent_stop_event (ADR 0021 Stream C)
+# ---------------------------------------------------------------------------
+
+
+def test_emit_subagent_stop_event_writes_row() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    writer = mod.emit.AuditLogWriter(client)
+
+    ulid = mod.emit.emit_subagent_stop_event(
+        writer,
+        customer="acme",
+        session_id="sess-child-1",
+        parent_session_id="sess-parent-1",
+        child_role="medicals_summary",
+        child_status="ok",
+        duration_ms=4200,
+        task_id="task-1",
+        skill_name="law-pi-demand-letter-draft",
+    )
+    assert ulid
+    row = client.rows()[0]
+    assert row["action_type"] == "SUBAGENT_STOPPED"
+    assert row["skill_name"] == "law-pi-demand-letter-draft"
+    md = json.loads(row["metadata"])
+    assert md["per_subagent_audit"] is True
+    assert md["customer"] == "acme"
+    assert md["child_role"] == "medicals_summary"
+    assert md["child_status"] == "ok"
+    assert md["session_id"] == "sess-child-1"
+    assert md["parent_session_id"] == "sess-parent-1"
+    assert md["task_id"] == "task-1"
+    assert md["duration_ms"] == 4200.0
+
+
+def test_emit_subagent_stop_event_minimal_kwargs() -> None:
+    """parent_session_id, task_id, duration_ms, skill_name are all optional."""
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    writer = mod.emit.AuditLogWriter(client)
+
+    mod.emit.emit_subagent_stop_event(
+        writer,
+        customer="acme",
+        session_id="sess-child-1",
+        parent_session_id=None,
+        child_role="liability_summary",
+        child_status="failed",
+        duration_ms=None,
+    )
+    row = client.rows()[0]
+    md = json.loads(row["metadata"])
+    assert md["child_status"] == "failed"
+    assert "parent_session_id" not in md
+    assert "task_id" not in md
+    assert "duration_ms" not in md
+
+
+def test_emit_subagent_stop_event_rejects_reserved_metadata_keys() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    writer = mod.emit.AuditLogWriter(client)
+
+    with pytest.raises(ValueError):
+        mod.emit.emit_subagent_stop_event(
+            writer,
+            customer="acme",
+            session_id="s",
+            parent_session_id=None,
+            child_role="r",
+            child_status="ok",
+            duration_ms=1,
+            extra_metadata={"child_role": "evil"},  # reserved by wrapper
+        )
+
+
+def test_on_subagent_stop_writes_through_writer(fake_ctx, monkeypatch) -> None:
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    mod._WRITER = mod.emit.AuditLogWriter(client)
+    mod._CUSTOMER_SLUG = "acme"
+
+    mod.on_subagent_stop(
+        session_id="sess-child-1",
+        parent_session_id="sess-parent-1",
+        child_role="damages_summary",
+        child_status="ok",
+        duration_ms=2100,
+        task_id="task-x",
+        skill_name="law-pi-settlement-prep",
+    )
+    rows = client.rows()
+    assert len(rows) == 1
+    assert rows[0]["action_type"] == "SUBAGENT_STOPPED"
+    md = json.loads(rows[0]["metadata"])
+    assert md["child_role"] == "damages_summary"
+
+
+def test_on_subagent_stop_swallows_writer_exception(fake_ctx, monkeypatch) -> None:
+    """Per AGENTS.md hard rule #3, callbacks never raise."""
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-audit")
+    boom = FakeD1Client(raise_on_execute=RuntimeError("D1 unreachable"))
+    mod._WRITER = mod.emit.AuditLogWriter(boom)
+    mod._CUSTOMER_SLUG = "acme"
+
+    # Must not raise.
+    mod.on_subagent_stop(
+        session_id="s",
+        parent_session_id=None,
+        child_role="r",
+        child_status="ok",
+        duration_ms=1,
+    )
+
+
+def test_on_subagent_stop_no_writer_is_noop(fake_ctx) -> None:
+    mod = load_plugin("hermes-smd-audit")
+    mod._WRITER = None
+    mod._CUSTOMER_SLUG = None
+    # Must not raise.
+    mod.on_subagent_stop(
+        session_id="s",
+        parent_session_id=None,
+        child_role="r",
+        child_status="ok",
+        duration_ms=1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# skill_manage → AGENT_SKILL_CREATED detection + emission (ADR 0017 §40)
+# ---------------------------------------------------------------------------
+
+
+def test_detect_skill_manage_creation_basic_create_action() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    assert (
+        mod.emit.detect_skill_manage_creation(
+            tool_name="skill_manage",
+            args={"action": "create", "slug": "my-new-skill"},
+        )
+        == "my-new-skill"
+    )
+
+
+def test_detect_skill_manage_creation_accepts_name_field() -> None:
+    """The detector is permissive on the field name (`slug`, `name`, `skill_slug`)."""
+    mod = load_plugin("hermes-smd-audit")
+    assert (
+        mod.emit.detect_skill_manage_creation(
+            tool_name="skill_manage",
+            args={"mode": "create", "name": "another-skill"},
+        )
+        == "another-skill"
+    )
+
+
+def test_detect_skill_manage_creation_returns_none_for_non_create_action() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    assert (
+        mod.emit.detect_skill_manage_creation(
+            tool_name="skill_manage",
+            args={"action": "delete", "slug": "old-skill"},
+        )
+        is None
+    )
+
+
+def test_detect_skill_manage_creation_returns_none_for_other_tools() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    assert (
+        mod.emit.detect_skill_manage_creation(
+            tool_name="email_create_draft",
+            args={"action": "create", "slug": "foo"},
+        )
+        is None
+    )
+
+
+def test_detect_skill_manage_creation_returns_none_for_missing_slug() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    assert (
+        mod.emit.detect_skill_manage_creation(
+            tool_name="skill_manage",
+            args={"action": "create"},
+        )
+        is None
+    )
+
+
+def test_detect_skill_manage_creation_returns_none_for_non_dict_args() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    assert mod.emit.detect_skill_manage_creation(tool_name="skill_manage", args=None) is None
+    assert (
+        mod.emit.detect_skill_manage_creation(tool_name="skill_manage", args="not-a-dict") is None
+    )  # type: ignore[arg-type]
+
+
+def test_emit_agent_skill_created_event_writes_row() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    writer = mod.emit.AuditLogWriter(client)
+
+    ulid = mod.emit.emit_agent_skill_created_event(
+        writer,
+        customer="acme",
+        session_id="sess-1",
+        skill_name_created="newly-authored-skill",
+        skill_manage_args={"action": "create", "slug": "newly-authored-skill"},
+        tool_call_id="trace-xyz",
+    )
+    assert ulid
+    row = client.rows()[0]
+    assert row["action_type"] == "AGENT_SKILL_CREATED"
+    assert row["skill_name"] == "newly-authored-skill"
+    md = json.loads(row["metadata"])
+    assert md["per_agent_skill_creation"] is True
+    assert md["customer"] == "acme"
+    assert md["skill_name_created"] == "newly-authored-skill"
+    assert md["session_id"] == "sess-1"
+    assert md["tool_call_id"] == "trace-xyz"
+    assert md["skill_manage_args"]["action"] == "create"
+
+
+def test_on_post_tool_call_fires_both_rows_for_skill_manage_create(fake_ctx, monkeypatch) -> None:
+    """When skill_manage is invoked with a create action, TWO audit rows
+    must land: TOOL_CALL_COMPLETED (the usual) AND AGENT_SKILL_CREATED
+    (the ADR 0017 §40 observation surface)."""
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    mod._WRITER = mod.emit.AuditLogWriter(client)
+    mod._CUSTOMER_SLUG = "acme"
+
+    mod.on_post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "create", "slug": "fresh-skill"},
+        result="{}",
+        task_id="",
+        session_id="sess-1",
+        tool_call_id="trace-1",
+        duration_ms=10,
+    )
+    rows = client.rows()
+    action_types = [r["action_type"] for r in rows]
+    assert "TOOL_CALL_COMPLETED" in action_types
+    assert "AGENT_SKILL_CREATED" in action_types
+
+
+def test_on_post_tool_call_does_not_fire_agent_skill_created_for_other_tools(
+    fake_ctx, monkeypatch
+) -> None:
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    mod._WRITER = mod.emit.AuditLogWriter(client)
+    mod._CUSTOMER_SLUG = "acme"
+
+    mod.on_post_tool_call(
+        tool_name="email_create_draft",
+        args={"action": "create"},
+        result="{}",
+        task_id="",
+        session_id="sess-1",
+        tool_call_id="trace-1",
+        duration_ms=10,
+    )
+    rows = client.rows()
+    action_types = [r["action_type"] for r in rows]
+    assert "AGENT_SKILL_CREATED" not in action_types
+
+
+def test_on_post_tool_call_does_not_fire_agent_skill_created_for_skill_manage_delete(
+    fake_ctx, monkeypatch
+) -> None:
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    mod._WRITER = mod.emit.AuditLogWriter(client)
+    mod._CUSTOMER_SLUG = "acme"
+
+    mod.on_post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "delete", "slug": "old-skill"},
+        result="{}",
+        task_id="",
+        session_id="sess-1",
+        tool_call_id="trace-1",
+        duration_ms=10,
+    )
+    rows = client.rows()
+    action_types = [r["action_type"] for r in rows]
+    assert "AGENT_SKILL_CREATED" not in action_types
+
+
+# ---------------------------------------------------------------------------
+# ACCEPTED_ACTION_TYPES schema additions
+# ---------------------------------------------------------------------------
+
+
+def test_subagent_action_types_accepted() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    assert "SUBAGENT_STOPPED" in mod.schemas.ACCEPTED_ACTION_TYPES
+    assert "SUBAGENT_INCOMPLETE" in mod.schemas.ACCEPTED_ACTION_TYPES
+    assert "AGENT_SKILL_CREATED" in mod.schemas.ACCEPTED_ACTION_TYPES
+
+
+def test_register_wires_subagent_stop_hook(fake_ctx, monkeypatch) -> None:
+    """register(ctx) MUST register subagent_stop alongside the existing hooks."""
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-audit")
+    mod.register(fake_ctx)
+    assert "post_tool_call" in fake_ctx.registered
+    assert "post_llm_call" in fake_ctx.registered
+    assert "subagent_stop" in fake_ctx.registered

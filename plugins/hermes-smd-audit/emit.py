@@ -492,15 +492,185 @@ def emit_llm_event(
     return writer.write(event)
 
 
+def emit_subagent_stop_event(
+    writer: AuditLogWriter,
+    *,
+    customer: str,
+    session_id: str,
+    parent_session_id: str | None,
+    child_role: str,
+    child_status: str,
+    duration_ms: int | None,
+    task_id: str = "",
+    skill_name: str | None = None,
+    actor: str = "agent",
+    actor_role: ActorRole = ActorRole.AGENT,
+    extra_metadata: dict | None = None,
+) -> str | None:
+    """Write one ``SUBAGENT_STOPPED`` audit row for a subagent_stop hook event.
+
+    ADR 0021 Stream C requires one audit row per delegated child agent so
+    that the parent skill's assembly-time schema contract has a visible
+    trail (mirror-don't-gate per ADR 0016). The hook fires after each
+    delegated subagent's run terminates, regardless of return status.
+
+    Args:
+        customer: The customer slug for namespacing.
+        session_id: The subagent's own session id.
+        parent_session_id: The dispatching parent's session id, when
+            available. Carried in metadata so the dashboard can link a
+            parent's draft assembly back to its child rows.
+        child_role: The role label the parent passed when delegating
+            (e.g. ``"medicals_summary"``, ``"interrogatory_map"``,
+            ``"opposing_counsel_history"``).
+        child_status: One of ``"ok"``, ``"failed"``, ``"timeout"``,
+            or ``"interrupted"`` as reported by the Hermes dispatcher.
+        duration_ms: Wall-clock duration of the subagent run.
+        skill_name: The parent skill that delegated this child, if known.
+        extra_metadata: Optional per-skill metadata (e.g. token counts
+            the parent collected). Reserved keys ``child_role``,
+            ``child_status``, ``duration_ms``, ``session_id``,
+            ``parent_session_id``, ``task_id``, ``per_subagent_audit``,
+            and ``customer`` are populated by this function and must not
+            appear in ``extra_metadata``.
+
+    Returns the inserted ULID, or ``None`` on writer failure (hook
+    wrapper swallows ``AuditWriteError``).
+    """
+    metadata: dict = {
+        "per_subagent_audit": True,
+        "customer": customer,
+        "child_role": child_role,
+        "child_status": child_status,
+        "session_id": session_id,
+    }
+    if parent_session_id:
+        metadata["parent_session_id"] = parent_session_id
+    if task_id:
+        metadata["task_id"] = task_id
+    if duration_ms is not None:
+        metadata["duration_ms"] = float(duration_ms)
+    if extra_metadata:
+        reserved = set(metadata.keys())
+        for key, value in extra_metadata.items():
+            if key in reserved:
+                raise ValueError(f"extra_metadata key {key!r} reserved by emit_subagent_stop_event")
+            metadata[key] = value
+
+    event = AuditEvent(
+        action_type="SUBAGENT_STOPPED",
+        actor=actor,
+        actor_role=actor_role,
+        skill_name=skill_name,
+        metadata=metadata,
+    )
+    return writer.write(event)
+
+
+# ``skill_manage`` is the Hermes-native tool name for the Skill Curator's
+# create/edit/delete surface. Emitting AGENT_SKILL_CREATED on this tool
+# (in addition to the usual TOOL_CALL_COMPLETED row) is the observation
+# surface for ADR 0017 §40 — Hermes' agent-authored skill creation flow.
+SKILL_MANAGE_TOOL_NAME = "skill_manage"
+
+
+def emit_agent_skill_created_event(
+    writer: AuditLogWriter,
+    *,
+    customer: str,
+    session_id: str,
+    skill_name_created: str,
+    skill_manage_args: dict | None,
+    tool_call_id: str = "",
+    actor: str = "agent",
+    actor_role: ActorRole = ActorRole.AGENT,
+) -> str | None:
+    """Write one ``AGENT_SKILL_CREATED`` audit row when ``skill_manage``
+    is invoked to create a new skill.
+
+    Hermes' Skill Curator exposes skill creation through the
+    ``skill_manage`` tool. Per ADR 0017 §40 (mirror-don't-gate), we
+    observe these creations into the per-customer D1 audit log so the
+    dashboard can show what skills the agent authored without
+    intercepting or gating the Curator's native flow.
+
+    Args:
+        customer: The customer slug for namespacing.
+        session_id: Session id of the agent invocation that called
+            ``skill_manage``.
+        skill_name_created: The slug of the skill that was created
+            (extracted by the caller from ``skill_manage`` arguments).
+        skill_manage_args: The full args dict passed to ``skill_manage``,
+            for the metadata trail.
+
+    Returns the inserted ULID, or ``None`` on writer failure.
+    """
+    metadata: dict = {
+        "per_agent_skill_creation": True,
+        "customer": customer,
+        "session_id": session_id,
+        "skill_name_created": skill_name_created,
+    }
+    if tool_call_id:
+        metadata["tool_call_id"] = tool_call_id
+    if skill_manage_args is not None:
+        # Carry the args verbatim (no payload digest — the args are public
+        # skill-metadata, not user content); useful for "what did the agent
+        # author" inspection on the dashboard.
+        metadata["skill_manage_args"] = skill_manage_args
+
+    event = AuditEvent(
+        action_type="AGENT_SKILL_CREATED",
+        actor=actor,
+        actor_role=actor_role,
+        skill_name=skill_name_created,
+        metadata=metadata,
+    )
+    return writer.write(event)
+
+
+def detect_skill_manage_creation(
+    *,
+    tool_name: str,
+    args: dict | None,
+) -> str | None:
+    """Return the slug of the newly-created skill when ``skill_manage`` is
+    invoked with a creation action, else ``None``.
+
+    The detector accepts several plausible argument shapes the Curator may
+    use (``action: "create"`` with a ``slug`` or ``name`` field, plain
+    ``slug`` arg on a ``mode: "create"``-like contract). It is permissive
+    on the input side because the Curator's exact argument schema lives in
+    Hermes core; the overlay observes, it doesn't validate.
+    """
+    if tool_name != SKILL_MANAGE_TOOL_NAME:
+        return None
+    if not isinstance(args, dict):
+        return None
+    action = args.get("action") or args.get("mode") or args.get("op")
+    if action and isinstance(action, str) and action.lower() not in {"create", "add", "new"}:
+        return None
+    # Allow create-like flows without an explicit action field if the
+    # args carry a slug + a creation-shaped marker.
+    candidate = args.get("slug") or args.get("name") or args.get("skill_slug")
+    if not isinstance(candidate, str) or not candidate.strip():
+        return None
+    return candidate.strip()
+
+
 __all__ = [
     "AuditLogWriter",
     "AuditWriteError",
     "BannedToolError",
+    "SKILL_MANAGE_TOOL_NAME",
     "ToolCallTimer",
     "ToolClassification",
     "build_per_tool_metadata",
     "classify_tool",
+    "detect_skill_manage_creation",
+    "emit_agent_skill_created_event",
     "emit_llm_event",
+    "emit_subagent_stop_event",
     "emit_tool_event",
     "extract_scope_metadata",
 ]
