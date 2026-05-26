@@ -132,6 +132,11 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         # when the dispatched tool is `skill_manage` (ADR 0017 §40 — mirror-
         # don't-gate observation of the Hermes-native Skill Curator surface).
         "AGENT_SKILL_CREATED",
+        # Inbound webhook routed to a skill by hermes-smd-webhook-router
+        # (ADR 0021 Stream E). One row per successful route; the payload
+        # source + event_type land in metadata. Observation only; the
+        # router does not gate dispatch.
+        "WEBHOOK_ROUTED",
     }
 )
 
