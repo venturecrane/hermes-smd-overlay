@@ -152,6 +152,74 @@ class ActorRole(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
+# Agent-authored skill inventory — ADR 0022 Stream 2 (skill body persistence)
+#
+# Mirrors ss-console/ai-employee/migrations/0008 + 0009 combined. Lives in
+# the per-customer D1 audit binding (SMD_D1_AUDIT_BINDING). The audit
+# plugin owns the writes; skill_capture.py implements the write-ahead
+# pattern (D1 row first with r2_status='pending', R2 PUT follows, UPDATE
+# to persisted/failed). Boot-time reconciler retries pending/failed rows.
+#
+# Schema is the authoritative copy from
+# docs/specs/ai-employee/skill-body-persistence.md (ss-console).
+# Idempotent CREATE TABLE IF NOT EXISTS / ALTER on each Machine boot so
+# the schema converges without a separate migration tool.
+# ---------------------------------------------------------------------------
+
+
+AGENT_SKILLS_INVENTORY_DDL: str = """
+CREATE TABLE IF NOT EXISTS agent_skills_inventory (
+    customer_slug       TEXT NOT NULL,
+    persona_slug        TEXT NOT NULL,
+    skill_name          TEXT NOT NULL,
+    skill_content_hash  TEXT NOT NULL,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    source_turn_id      TEXT NOT NULL,
+    archived_at         TEXT,
+    archived_reason     TEXT,
+    removed_at          TEXT,
+    removed_by          TEXT,
+    r2_key              TEXT,
+    r2_status           TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (r2_status IN ('unknown', 'pending', 'persisted', 'failed')),
+    r2_write_error      TEXT,
+    PRIMARY KEY (customer_slug, persona_slug, skill_name, skill_content_hash)
+);
+"""
+
+AGENT_SKILLS_INVENTORY_ACTIVE_INDEX_DDL: str = """
+CREATE INDEX IF NOT EXISTS agent_skills_inventory_active
+    ON agent_skills_inventory (persona_slug, created_at)
+    WHERE archived_at IS NULL AND removed_at IS NULL;
+"""
+
+AGENT_SKILLS_INVENTORY_BY_PERSONA_INDEX_DDL: str = """
+CREATE INDEX IF NOT EXISTS agent_skills_inventory_by_persona
+    ON agent_skills_inventory (persona_slug, created_at);
+"""
+
+AGENT_SKILLS_INVENTORY_BY_HASH_INDEX_DDL: str = """
+CREATE INDEX IF NOT EXISTS agent_skills_inventory_by_hash
+    ON agent_skills_inventory (skill_content_hash);
+"""
+
+AGENT_SKILLS_INVENTORY_R2_PENDING_INDEX_DDL: str = """
+CREATE INDEX IF NOT EXISTS agent_skills_inventory_r2_pending
+    ON agent_skills_inventory (r2_status, created_at)
+    WHERE r2_status IN ('pending', 'failed');
+"""
+
+
+AUDIT_PLUGIN_DDLS: tuple[str, ...] = (
+    AGENT_SKILLS_INVENTORY_DDL,
+    AGENT_SKILLS_INVENTORY_ACTIVE_INDEX_DDL,
+    AGENT_SKILLS_INVENTORY_BY_PERSONA_INDEX_DDL,
+    AGENT_SKILLS_INVENTORY_BY_HASH_INDEX_DDL,
+    AGENT_SKILLS_INVENTORY_R2_PENDING_INDEX_DDL,
+)
+
+
+# ---------------------------------------------------------------------------
 # Deprecated alias for the action-class enum.
 #
 # The vocabulary moved to ``shared.action_classes.ActionClass`` (task #33
