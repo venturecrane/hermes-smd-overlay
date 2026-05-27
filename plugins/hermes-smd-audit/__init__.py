@@ -23,12 +23,19 @@ actor, and skill_name are logged on failure.
 """
 
 import logging
+import os
 from typing import Any
 
 from shared.d1_client import D1Client
 from shared.secrets import require
 
-from . import emit, immutability, integrity, schemas  # noqa: F401 — surface for tests
+from . import (  # noqa: F401 — surface for tests
+    emit,
+    immutability,
+    integrity,
+    schemas,
+    skill_capture,
+)
 from .emit import (
     AuditLogWriter,
     detect_skill_manage_creation,
@@ -36,6 +43,12 @@ from .emit import (
     emit_llm_event,
     emit_subagent_stop_event,
     emit_tool_event,
+)
+from .skill_capture import (
+    R2Config,
+    capture_skill_body,
+    load_r2_config_from_env,
+    reconcile_pending_bodies,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +60,11 @@ logger = logging.getLogger(__name__)
 # running through a misconfigured Machine.
 _WRITER: AuditLogWriter | None = None
 _CUSTOMER_SLUG: str | None = None
+# ADR 0022 Stream 2: per-customer D1 client for the agent_skills_inventory
+# writes, plus the R2 config for the skill-bodies bucket. Both populated by
+# register(); the hook no-ops cleanly when either is None.
+_SKILL_D1_CLIENT: D1Client | None = None
+_R2_CONFIG: R2Config | None = None
 
 
 def _writer() -> AuditLogWriter | None:
@@ -112,10 +130,78 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 skill_manage_args=args,
                 tool_call_id=tool_call_id,
             )
+            # ADR 0022 Stream 2 — write-ahead body capture. Reads SKILL.md
+            # from the per-profile skills directory and persists to per-
+            # customer R2 with the write-ahead pattern. No-op when the
+            # D1 client or R2 config isn't wired (logged once at register).
+            _maybe_capture_skill_body(
+                customer_slug=_CUSTOMER_SLUG,
+                session_id=session_id,
+                created_slug=created_slug,
+                args=args,
+            )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning(
             "hermes-smd-audit: AGENT_SKILL_CREATED emission failed (session=%s err=%s)",
             session_id,
+            exc,
+        )
+
+
+def _maybe_capture_skill_body(
+    *,
+    customer_slug: str,
+    session_id: str,
+    created_slug: str,
+    args: dict | None,
+) -> None:
+    """Invoke skill_capture.capture_skill_body when the inventory client
+    and R2 config are wired. Wrapped in its own try/except per the
+    AGENTS.md exception-safety rule."""
+    if _SKILL_D1_CLIENT is None:
+        # Logged once at register(); skip silently per-call.
+        return
+    # Persona slug: the agent runs under one profile per Machine (ADR 0011
+    # v1: length-1 personas[]). Hermes exposes the active profile via
+    # HERMES_ACTIVE_PROFILE; fall back to the SMD_ACTIVE_PERSONA secret
+    # if present, then to the env-set HERMES_HOME shape default.
+    persona_slug = os.getenv("HERMES_ACTIVE_PROFILE") or os.getenv("SMD_ACTIVE_PERSONA") or ""
+    if not persona_slug:
+        # The Curator's args may carry it explicitly for some flows.
+        if isinstance(args, dict):
+            candidate = args.get("persona_slug") or args.get("persona")
+            if isinstance(candidate, str) and candidate.strip():
+                persona_slug = candidate.strip()
+    if not persona_slug:
+        logger.debug(
+            "skill_capture: persona_slug unresolved (skill=%s); skipping body capture",
+            created_slug,
+        )
+        return
+
+    hermes_home = os.getenv("HERMES_HOME") or "/opt/data"
+    try:
+        result = capture_skill_body(
+            _SKILL_D1_CLIENT,
+            _R2_CONFIG,
+            customer_slug=customer_slug,
+            persona_slug=persona_slug,
+            skill_name=created_slug,
+            source_turn_id=session_id,
+            hermes_home=hermes_home,
+        )
+        logger.info(
+            "skill_capture: persona=%s skill=%s status=%s reason=%s",
+            persona_slug,
+            created_slug,
+            result.r2_status,
+            result.reason,
+        )
+    except Exception as exc:  # noqa: BLE001 — never raise out of a hook
+        logger.warning(
+            "skill_capture: unhandled exception (persona=%s skill=%s err=%s)",
+            persona_slug,
+            created_slug,
             exc,
         )
 
@@ -193,15 +279,20 @@ def on_post_llm_call(**kwargs: Any) -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point. Wires both hooks.
+    """Plugin entry point. Wires the three hooks plus ADR 0022 Stream 2.
 
     Resolves the D1 binding and customer slug from env at registration time
     (failing loud here is correct — the Machine cannot ship audit rows
     without these secrets). If registration fails, the plugin still
     registers the hook callbacks (so Hermes accepts the plugin) but they
     no-op at debug level.
+
+    ADR 0022 Stream 2 — separately resolves the R2 skill-bodies config
+    (R2_ENDPOINT_URL + R2_SKILL_BODIES_* env). When absent, the body
+    capture path no-ops cleanly and the boot reconciler is skipped.
+    Audit emission continues unchanged on that misconfiguration.
     """
-    global _WRITER, _CUSTOMER_SLUG
+    global _WRITER, _CUSTOMER_SLUG, _SKILL_D1_CLIENT, _R2_CONFIG
 
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
@@ -211,6 +302,10 @@ def register(ctx) -> None:
             customer_slug=_CUSTOMER_SLUG,
         )
         _WRITER = AuditLogWriter(client)
+        # ADR 0022 Stream 2 — skill inventory writes go to the same audit
+        # D1 binding (agent_skills_inventory table lives alongside
+        # audit_log per the ss-console migrations).
+        _SKILL_D1_CLIENT = client
         logger.info(
             "hermes-smd-audit registered (customer=%s binding=%s)",
             _CUSTOMER_SLUG,
@@ -223,7 +318,46 @@ def register(ctx) -> None:
         # dispatcher's contract holds.
         _WRITER = None
         _CUSTOMER_SLUG = None
+        _SKILL_D1_CLIENT = None
         logger.warning("hermes-smd-audit: env not configured, hooks will no-op: %s", exc)
+
+    # ADR 0022 Stream 2 — R2 skill-bodies config is optional from this
+    # plugin's perspective: when missing, the capture path INSERTs the
+    # D1 row in 'pending' and the boot reconciler retries when env later
+    # appears. We don't fail registration on missing R2 env so misconfig
+    # never blocks the audit pipeline.
+    _R2_CONFIG = load_r2_config_from_env()
+    if _R2_CONFIG is None:
+        logger.warning(
+            "hermes-smd-audit: R2 skill-bodies env not configured (R2_ENDPOINT_URL + "
+            "R2_SKILL_BODIES_{BUCKET,ACCESS_KEY_ID,SECRET_ACCESS_KEY}); body capture "
+            "writes pending D1 rows only, reconciler skipped on this boot."
+        )
+    else:
+        logger.info(
+            "hermes-smd-audit: R2 skill-bodies bucket configured (bucket=%s)",
+            _R2_CONFIG.bucket,
+        )
+        # Run the boot reconciler synchronously at registration. It is
+        # bounded (max_iterations=500 by default) and reads from the
+        # same D1 client; this is a one-pass best-effort retry.
+        if _SKILL_D1_CLIENT is not None and _CUSTOMER_SLUG is not None:
+            try:
+                summary = reconcile_pending_bodies(
+                    _SKILL_D1_CLIENT,
+                    _R2_CONFIG,
+                    hermes_home=os.getenv("HERMES_HOME") or "/opt/data",
+                    customer_slug=_CUSTOMER_SLUG,
+                )
+                logger.info(
+                    "hermes-smd-audit reconciler: scanned=%d persisted=%d failed=%d skipped_missing_body=%d",
+                    summary.scanned,
+                    summary.persisted,
+                    summary.failed,
+                    summary.skipped_missing_body,
+                )
+            except Exception as exc:  # noqa: BLE001 — reconciler is best-effort
+                logger.warning("hermes-smd-audit reconciler failed: %s", exc)
 
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("post_llm_call", on_post_llm_call)
