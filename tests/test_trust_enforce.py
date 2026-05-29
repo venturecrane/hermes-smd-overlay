@@ -352,11 +352,12 @@ def test_evaluate_tool_call_empty_name_is_passthrough(env_autonomous) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_on_pre_tool_call_swallows_internal_exceptions(monkeypatch) -> None:
-    """A raise inside enforce.evaluate_tool_call must not propagate.
+def test_on_pre_tool_call_fails_closed_on_internal_exceptions(monkeypatch) -> None:
+    """A raise inside enforce.evaluate_tool_call must FAIL CLOSED (issue #12).
 
     Replaces ``enforce.evaluate_tool_call`` with a raising stub and asserts
-    the hook returns None (allow) rather than letting the exception escape.
+    the hook returns a block directive rather than allowing the call —
+    safety must not degrade to "allow" on an indeterminate decision.
     """
     plugin = load_plugin("hermes-smd-trust")
 
@@ -371,6 +372,41 @@ def test_on_pre_tool_call_swallows_internal_exceptions(monkeypatch) -> None:
         session_id="s",
         tool_call_id="c",
     )
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert result["message"].startswith("Refused:")
+
+
+def test_evaluate_tool_call_fails_closed_for_sensitive_on_ceiling_error(
+    monkeypatch,
+) -> None:
+    """If ceiling resolution raises, a sensitive (non-READ) action refuses.
+
+    Issue #12: a customer.yaml parse error / garbled secret during ceiling
+    resolution must not let a COMMITMENT/EXTERNAL_SEND/DESTRUCTIVE call
+    through. ``calendar_propose_time`` is a (non-banned) COMMITMENT tool.
+    """
+    enforce = _load_trust_module("enforce")
+
+    def boom() -> None:
+        raise RuntimeError("customer.yaml parse failure")
+
+    monkeypatch.setattr(enforce, "_resolve_customer_ceiling", boom)
+    result = enforce.evaluate_tool_call("calendar_propose_time", {}, "acme")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "failing closed" in result["message"].lower()
+
+
+def test_evaluate_tool_call_allows_read_on_ceiling_error(monkeypatch) -> None:
+    """A ceiling-resolution failure must NOT brick low-risk READ tooling."""
+    enforce = _load_trust_module("enforce")
+
+    def boom() -> None:
+        raise RuntimeError("customer.yaml parse failure")
+
+    monkeypatch.setattr(enforce, "_resolve_customer_ceiling", boom)
+    result = enforce.evaluate_tool_call("email_list_messages", {}, "acme")
     assert result is None
 
 
