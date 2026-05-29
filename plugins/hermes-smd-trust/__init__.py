@@ -47,12 +47,17 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
     """Block a tool call that exceeds the per-customer trust ceiling.
 
     Returns ``{"action": "block", "message": "<reason>"}`` to refuse, or
-    ``None`` to allow the call. Exception-safe: any raise is logged and
-    swallowed, returning None (allow) so the agent loop continues. The
-    pre_tool_call helper's contract (hermes_cli/plugins.py:1428-1437)
-    only accepts the block-directive shape; other return values are
-    ignored by the dispatcher, which means an exception-on-allow path
-    is safe.
+    ``None`` to allow the call.
+
+    FAIL CLOSED (issue #12): if the policy path raises unexpectedly, this
+    hook returns a block directive rather than ``None``. Safety must not
+    degrade to "allow" on error — a transient or config-induced fault in
+    the trust path must never silently let a sensitive action through on
+    the live per-customer Machine. ``evaluate_tool_call`` already handles
+    its own resolution failures (allowing low-risk READs, refusing
+    sensitive actions); this handler is the backstop for anything it
+    cannot catch. The pre_tool_call helper's contract
+    (hermes_cli/plugins.py:1428-1437) honors the block-directive shape.
 
     Expected kwargs per docs/hook-surface.md:
         tool_name, args, task_id, session_id, tool_call_id
@@ -76,10 +81,17 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         return enforce.evaluate_tool_call(tool_name, args, customer_slug)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.exception(
-            "hermes-smd-trust: pre_tool_call raised; allowing call to proceed "
-            "(safety: trust-ceiling decision unavailable for this tool)"
+            "hermes-smd-trust: pre_tool_call raised; FAILING CLOSED — blocking "
+            "the tool call (safety: an indeterminate trust decision must not "
+            "allow a sensitive action; issue #12)"
         )
-        return None
+        return {
+            "action": "block",
+            "message": (
+                "Refused: trust-ceiling evaluation failed; failing closed "
+                "(indeterminate decision blocked for safety)"
+            ),
+        }
 
 
 def on_transform_tool_result(**kwargs: Any) -> str | None:

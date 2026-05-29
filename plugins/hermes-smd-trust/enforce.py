@@ -435,17 +435,48 @@ def evaluate_tool_call(
         }
 
     # 2. Resolve customer + skill ceilings; take the more restrictive.
-    customer_ceiling = _resolve_customer_ceiling()
-    skill_ceiling = _resolve_skill_ceiling(args)
-    effective_ceiling = _min_ceiling(customer_ceiling, skill_ceiling)
+    #
+    # FAIL CLOSED on resolution failure (issue #12). A raise here — a
+    # customer.yaml parse error, a garbled/missing secret, an unexpected
+    # None — must NOT silently allow a sensitive action. READ is the one
+    # exception: it is always permitted under any non-refused ceiling and
+    # carries no external blast radius, so a transient config error must
+    # not brick read-only tooling. Every other action class refuses when
+    # the ceiling is indeterminate.
+    try:
+        customer_ceiling = _resolve_customer_ceiling()
+        skill_ceiling = _resolve_skill_ceiling(args)
+        effective_ceiling = _min_ceiling(customer_ceiling, skill_ceiling)
 
-    decision = enforce(
-        ceiling=effective_ceiling,
-        action=classification.action_class,
-        skill_name=_resolve_skill_name(args),
-        tool_name=tool_name,
-        current_turn_approval=_resolve_current_turn_approval(args),
-    )
+        decision = enforce(
+            ceiling=effective_ceiling,
+            action=classification.action_class,
+            skill_name=_resolve_skill_name(args),
+            tool_name=tool_name,
+            current_turn_approval=_resolve_current_turn_approval(args),
+        )
+    except Exception:  # noqa: BLE001
+        if classification.action_class == ActionClass.READ:
+            logger.warning(
+                "trust: ceiling resolution failed for READ tool %r; allowing "
+                "(read is low-risk and always permitted under non-refused ceilings)",
+                tool_name,
+                exc_info=True,
+            )
+            return None
+        logger.exception(
+            "trust: ceiling resolution failed for sensitive tool %r (action=%s); "
+            "FAILING CLOSED — refusing the call",
+            tool_name,
+            classification.action_class,
+        )
+        return {
+            "action": "block",
+            "message": (
+                f"Refused: trust-ceiling decision unavailable for this "
+                f"{classification.action_class} action; failing closed"
+            ),
+        }
 
     if decision.allowed:
         return None

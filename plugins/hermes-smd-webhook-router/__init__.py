@@ -32,9 +32,9 @@ from pathlib import Path
 from typing import Any
 
 from shared.d1_client import D1Client
-from shared.secrets import require
+from shared.secrets import get_secret, require
 
-from . import router  # noqa: F401 - surface for tests
+from . import router, verify  # noqa: F401 - surface for tests
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,17 @@ logger = logging.getLogger(__name__)
 _TABLE: router.RoutingTable = router.RoutingTable.empty()
 _CUSTOMER_SLUG: str | None = None
 _D1_CLIENT: Any | None = None
+# Per-customer webhook signing secret (issue #13). None disables routing:
+# an unverifiable webhook must not drive skill actions.
+_SIGNING_SECRET: str | None = None
+# Per-process replay cache for event-ID de-duplication.
+_REPLAY = verify.ReplayCache()
+
+# Inbound header names carrying the provider signature material. Lower-cased
+# for case-insensitive lookup. Provider-specific; defaults are generic.
+_SIGNATURE_HEADER = "x-webhook-signature"
+_TIMESTAMP_HEADER = "x-webhook-timestamp"
+_EVENT_ID_HEADER = "x-webhook-id"
 
 
 _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
@@ -124,14 +135,98 @@ def _emit_webhook_routed(
     client.execute(_INSERT_SQL, *params)
 
 
+def _header(headers: Any, name: str) -> str | None:
+    """Case-insensitive header lookup. Returns None if absent/not a dict."""
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        if isinstance(key, str) and key.lower() == name:
+            return value if isinstance(value, str) else None
+    return None
+
+
+def _raw_body_for(kwargs: dict[str, Any], payload: Any) -> bytes:
+    """Resolve the exact bytes the signature was computed over.
+
+    The gateway SHOULD pass ``raw_body`` (the verbatim request body) so
+    the HMAC matches the provider's signature byte-for-byte. When it does
+    not, we fall back to a canonical JSON serialization of the parsed
+    payload — this only matches our own internal signer/tests, NOT a real
+    third-party provider, which is why an absent raw_body for a real
+    inbound webhook will fail verification and (correctly) not route.
+    """
+    raw = kwargs.get("raw_body")
+    if isinstance(raw, (bytes, str)):
+        return raw if isinstance(raw, bytes) else raw.encode("utf-8")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _event_id_from_payload(payload: Any) -> str | None:
+    """Best-effort event-ID extraction for replay dedupe."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("event_id", "id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("event_id", "id"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _verification_failure(kwargs: dict[str, Any], payload: Any) -> str | None:
+    """Return a human-readable reason the inbound webhook is unverified,
+    or ``None`` when it verifies. Routing proceeds only on ``None``.
+
+    Refusing to route on any failure is the safe default (issue #13): a
+    forged or replayed event must not drive skill actions. The dispatch
+    is not blocked — it simply passes through as an ordinary message that
+    the agent loop (and the trust ceiling) still governs.
+    """
+    if _SIGNING_SECRET is None:
+        return (
+            "SMD_WEBHOOK_SIGNING_SECRET not configured; webhook routing is "
+            "disabled until a per-customer signing secret is provisioned"
+        )
+    headers = kwargs.get("headers")
+    signature = _header(headers, _SIGNATURE_HEADER)
+    timestamp = _header(headers, _TIMESTAMP_HEADER)
+    raw_body = _raw_body_for(kwargs, payload)
+    try:
+        verify.verify_signature(
+            secret=_SIGNING_SECRET,
+            raw_body=raw_body,
+            signature=signature,
+            timestamp=timestamp,
+        )
+    except verify.WebhookVerificationError as exc:
+        return f"signature verification failed: {exc}"
+
+    event_id = _header(headers, _EVENT_ID_HEADER) or _event_id_from_payload(payload)
+    if not event_id:
+        return "missing event id required for replay protection"
+    if not _REPLAY.check_and_record(event_id):
+        return f"replayed event id {event_id!r}"
+    return None
+
+
 def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     """Inspect each inbound dispatch for webhook markers and rewrite if matched.
 
     Expected kwargs:
-        payload: dict | Any - the inbound message body.
+        payload: dict | Any - the inbound (parsed) message body.
+        raw_body: bytes | str - the verbatim request body the provider
+            signed. REQUIRED for real third-party webhooks; see
+            ``_raw_body_for``.
+        headers: dict - inbound request headers carrying the provider
+            signature, timestamp, and event id.
 
-    Returns a rewrite directive on match, or ``None`` to pass through
-    unchanged. The rewrite directive shape:
+    Returns a rewrite directive on a matched AND verified webhook, or
+    ``None`` to pass through unchanged. The rewrite directive shape:
 
         {"action": "route_to_skill",
          "persona": "<persona-slug>",
@@ -140,6 +235,11 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
 
     Hermes' gateway dispatcher consumes this contract to invoke the
     named skill on the named persona.
+
+    A matched route is verified (HMAC signature + timestamp freshness +
+    event-ID dedupe) before it fires (issue #13). Verification failure
+    does NOT block the dispatch — it declines to auto-invoke the skill,
+    so a forged or replayed event cannot drive skill actions.
 
     Exception-safe: any failure logs at warning level and returns
     ``None``. Per AGENTS.md hard rule #3, the callback never raises.
@@ -158,6 +258,25 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         return None
 
     if decision.trigger is None:
+        return None
+
+    # Verify the inbound webhook before routing (issue #13). An attacker
+    # who learns the dispatch URL must not be able to drive skill actions
+    # with forged or replayed events.
+    try:
+        failure = _verification_failure(kwargs, payload)
+    except Exception as exc:  # noqa: BLE001 - never let verification raise
+        logger.warning(
+            "hermes-smd-webhook-router: verification raised (%s); refusing to route",
+            exc,
+        )
+        return None
+    if failure is not None:
+        logger.warning(
+            "hermes-smd-webhook-router: refusing to route %s — %s",
+            decision.matched_key,
+            failure,
+        )
         return None
 
     # Emit audit row. Failure is logged but does NOT block the route -
@@ -193,7 +312,7 @@ def register(ctx) -> None:
     stays registered so Hermes' dispatcher contract holds, but
     dispatches pass through unchanged.
     """
-    global _TABLE, _CUSTOMER_SLUG, _D1_CLIENT
+    global _TABLE, _CUSTOMER_SLUG, _D1_CLIENT, _SIGNING_SECRET
 
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
@@ -209,6 +328,19 @@ def register(ctx) -> None:
             "hermes-smd-webhook-router: env not configured (%s); routing will work "
             "without audit emission",
             exc,
+        )
+
+    # Per-customer webhook signing secret (issue #13). Optional at register
+    # time: when absent, the router still registers but refuses to route any
+    # webhook (it cannot verify it). Provisioned alongside the webhook
+    # subscription that captures the provider's signing secret.
+    try:
+        _SIGNING_SECRET = get_secret("SMD_WEBHOOK_SIGNING_SECRET")
+    except KeyError:
+        _SIGNING_SECRET = None
+        logger.warning(
+            "hermes-smd-webhook-router: SMD_WEBHOOK_SIGNING_SECRET not set; inbound "
+            "webhooks cannot be verified and will NOT be routed until it is provisioned"
         )
 
     customer_yaml_path = Path(

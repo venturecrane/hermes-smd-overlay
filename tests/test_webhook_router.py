@@ -19,6 +19,8 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import importlib.util
 import json
 import sys
@@ -27,6 +29,35 @@ from textwrap import dedent
 from typing import Any
 
 import pytest
+
+_SIGNING_SECRET = "topsecret-test-key"
+
+
+def _sign(raw_body: bytes, secret: str = _SIGNING_SECRET, timestamp: str | None = None) -> str:
+    signing_input = (f"{timestamp}.".encode() + raw_body) if timestamp else raw_body
+    return hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).hexdigest()
+
+
+def signed_kwargs(
+    payload: dict,
+    *,
+    secret: str = _SIGNING_SECRET,
+    event_id: str = "evt-1",
+    timestamp: str | None = None,
+) -> dict:
+    """Build a fully-verifiable on_pre_gateway_dispatch kwargs set.
+
+    raw_body is the canonical JSON the router's fallback computes over,
+    so the HMAC matches without the gateway passing verbatim bytes.
+    """
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "X-Webhook-Signature": _sign(raw, secret, timestamp),
+        "X-Webhook-Id": event_id,
+    }
+    if timestamp is not None:
+        headers["X-Webhook-Timestamp"] = timestamp
+    return {"payload": payload, "raw_body": raw, "headers": headers}
 
 
 def load_plugin(plugin_name: str):
@@ -297,6 +328,7 @@ def test_on_pre_gateway_dispatch_returns_rewrite_on_match(
     with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
     monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
     monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    monkeypatch.setenv("SMD_WEBHOOK_SIGNING_SECRET", _SIGNING_SECRET)
     mod = load_plugin("hermes-smd-webhook-router")
     mod.register(fake_ctx)
 
@@ -309,7 +341,7 @@ def test_on_pre_gateway_dispatch_returns_rewrite_on_match(
         "event_type": "matter.created",
         "matter_id": "matter-42",
     }
-    result = mod.on_pre_gateway_dispatch(payload=payload)
+    result = mod.on_pre_gateway_dispatch(**signed_kwargs(payload))
     assert result is not None
     assert result["action"] == "route_to_skill"
     assert result["persona"] == "marcus"
@@ -365,16 +397,19 @@ def test_on_pre_gateway_dispatch_routes_on_metadata_wrapped_payload(
     with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
     monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
     monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    monkeypatch.setenv("SMD_WEBHOOK_SIGNING_SECRET", _SIGNING_SECRET)
     mod = load_plugin("hermes-smd-webhook-router")
     mod.register(fake_ctx)
     fake_client = FakeD1Client()
     mod._D1_CLIENT = fake_client
 
     result = mod.on_pre_gateway_dispatch(
-        payload={
-            "metadata": {"source": "filevine", "event_type": "document.added"},
-            "doc_id": "doc-7",
-        }
+        **signed_kwargs(
+            {
+                "metadata": {"source": "filevine", "event_type": "document.added"},
+                "doc_id": "doc-7",
+            }
+        )
     )
     assert result is not None
     assert result["skill"] == "law-pi-discovery-response"
@@ -387,13 +422,14 @@ def test_on_pre_gateway_dispatch_route_succeeds_when_audit_writer_fails(
     with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
     monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
     monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    monkeypatch.setenv("SMD_WEBHOOK_SIGNING_SECRET", _SIGNING_SECRET)
     mod = load_plugin("hermes-smd-webhook-router")
     mod.register(fake_ctx)
     boom = FakeD1Client(raise_on_execute=RuntimeError("D1 unreachable"))
     mod._D1_CLIENT = boom
 
     payload = {"source": "filevine", "event_type": "matter.created"}
-    result = mod.on_pre_gateway_dispatch(payload=payload)
+    result = mod.on_pre_gateway_dispatch(**signed_kwargs(payload))
     # Route still applied despite audit failure.
     assert result is not None
     assert result["skill"] == "law-pi-intake-triage"
@@ -432,6 +468,146 @@ def test_on_pre_gateway_dispatch_never_raises(fake_ctx, monkeypatch, with_custom
     # Must NOT raise.
     result = mod.on_pre_gateway_dispatch(payload={"any": "shape"})
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Inbound webhook verification (issue #13)
+# ---------------------------------------------------------------------------
+
+
+def _registered_router(fake_ctx, monkeypatch, with_customer_yaml, *, with_secret: bool):
+    with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    if with_secret:
+        monkeypatch.setenv("SMD_WEBHOOK_SIGNING_SECRET", _SIGNING_SECRET)
+    else:
+        monkeypatch.delenv("SMD_WEBHOOK_SIGNING_SECRET", raising=False)
+    mod = load_plugin("hermes-smd-webhook-router")
+    mod.register(fake_ctx)
+    mod._D1_CLIENT = FakeD1Client()
+    return mod
+
+
+_MATCH_PAYLOAD = {"source": "filevine", "event_type": "matter.created"}
+
+
+def test_refuses_to_route_when_no_signing_secret(fake_ctx, monkeypatch, with_customer_yaml):
+    """No signing secret = cannot verify = must not route (fail closed)."""
+    mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=False)
+    assert mod._SIGNING_SECRET is None
+    # Even a well-formed, matching payload does not route without a secret.
+    result = mod.on_pre_gateway_dispatch(payload=dict(_MATCH_PAYLOAD))
+    assert result is None
+    assert mod._D1_CLIENT.calls == []
+
+
+def test_refuses_to_route_on_missing_signature(fake_ctx, monkeypatch, with_customer_yaml):
+    mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=True)
+    # Matching payload but no signature header at all.
+    result = mod.on_pre_gateway_dispatch(payload=dict(_MATCH_PAYLOAD), headers={})
+    assert result is None
+    assert mod._D1_CLIENT.calls == []
+
+
+def test_refuses_to_route_on_bad_signature(fake_ctx, monkeypatch, with_customer_yaml):
+    mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=True)
+    payload = dict(_MATCH_PAYLOAD)
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    result = mod.on_pre_gateway_dispatch(
+        payload=payload,
+        raw_body=raw,
+        headers={"X-Webhook-Signature": "deadbeef", "X-Webhook-Id": "evt-1"},
+    )
+    assert result is None
+    assert mod._D1_CLIENT.calls == []
+
+
+def test_refuses_to_route_on_forged_payload_same_signature(
+    fake_ctx, monkeypatch, with_customer_yaml
+):
+    """A valid signature for one body must not validate a tampered body."""
+    mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=True)
+    # Sign the original, then tamper the routed payload's raw_body.
+    signed = signed_kwargs(dict(_MATCH_PAYLOAD), event_id="evt-1")
+    signed["raw_body"] = signed["raw_body"] + b'{"tamper":true}'
+    result = mod.on_pre_gateway_dispatch(**signed)
+    assert result is None
+
+
+def test_refuses_to_route_on_stale_timestamp(fake_ctx, monkeypatch, with_customer_yaml):
+    mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=True)
+    # Timestamp far in the past — signature valid but outside the window.
+    stale = signed_kwargs(dict(_MATCH_PAYLOAD), event_id="evt-1", timestamp="1000000000")
+    result = mod.on_pre_gateway_dispatch(**stale)
+    assert result is None
+
+
+def test_refuses_to_route_on_replayed_event_id(fake_ctx, monkeypatch, with_customer_yaml):
+    mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=True)
+    kwargs = signed_kwargs(dict(_MATCH_PAYLOAD), event_id="evt-replay")
+    # First delivery routes.
+    first = mod.on_pre_gateway_dispatch(**kwargs)
+    assert first is not None
+    assert first["skill"] == "law-pi-intake-triage"
+    # Identical replay is rejected.
+    second = mod.on_pre_gateway_dispatch(**kwargs)
+    assert second is None
+
+
+def test_routes_on_valid_signed_timestamped_webhook(fake_ctx, monkeypatch, with_customer_yaml):
+    import time
+
+    mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=True)
+    fresh_ts = str(int(time.time()))
+    kwargs = signed_kwargs(dict(_MATCH_PAYLOAD), event_id="evt-fresh", timestamp=fresh_ts)
+    result = mod.on_pre_gateway_dispatch(**kwargs)
+    assert result is not None
+    assert result["skill"] == "law-pi-intake-triage"
+    assert len(mod._D1_CLIENT.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# verify.py unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_verify_signature_roundtrip():
+    mod = load_plugin("hermes-smd-webhook-router")
+    verify = mod.verify
+    body = b'{"a":1}'
+    sig = verify.compute_signature(_SIGNING_SECRET, body)
+    # Valid signature passes (no raise).
+    verify.verify_signature(secret=_SIGNING_SECRET, raw_body=body, signature=sig)
+    # Wrong secret fails.
+    with pytest.raises(verify.WebhookVerificationError):
+        verify.verify_signature(secret="other", raw_body=body, signature=sig)
+
+
+def test_verify_signature_accepts_sha256_prefix():
+    mod = load_plugin("hermes-smd-webhook-router")
+    verify = mod.verify
+    body = b"payload"
+    sig = verify.compute_signature(_SIGNING_SECRET, body)
+    verify.verify_signature(secret=_SIGNING_SECRET, raw_body=body, signature=f"sha256={sig}")
+
+
+def test_verify_signature_rejects_missing_secret_and_signature():
+    mod = load_plugin("hermes-smd-webhook-router")
+    verify = mod.verify
+    with pytest.raises(verify.WebhookVerificationError, match="signing secret"):
+        verify.verify_signature(secret=None, raw_body=b"x", signature="abc")
+    with pytest.raises(verify.WebhookVerificationError, match="signature"):
+        verify.verify_signature(secret="s", raw_body=b"x", signature=None)
+
+
+def test_replay_cache_detects_duplicates():
+    mod = load_plugin("hermes-smd-webhook-router")
+    cache = mod.verify.ReplayCache(ttl_seconds=100)
+    assert cache.check_and_record("e1", now=0.0) is True
+    assert cache.check_and_record("e1", now=1.0) is False  # replay
+    # After TTL elapses the id is forgotten and accepted again.
+    assert cache.check_and_record("e1", now=200.0) is True
 
 
 # ---------------------------------------------------------------------------
