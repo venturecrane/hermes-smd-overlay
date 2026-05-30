@@ -1,6 +1,6 @@
 name: hermes-smd-trust
-version: "0.1.0"
-description: "Content-class trust ceilings + Composio per-connection isolation guard."
+version: "0.2.0"
+description: "Content-class trust ceilings + outbound fabrication gate (ADR 0028) + Composio per-connection isolation guard."
 author: VentureCrane
 requires_env:
   - SMD_CUSTOMER_SLUG

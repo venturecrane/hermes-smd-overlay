@@ -1,0 +1,90 @@
+{
+  "version": "2026-05-29.2",
+  "description": "Canonical high-risk fabrication / uncontracted-commitment markers for the outbound provenance gate (ADR 0028 Tier-1, universal across verticals). This file is the SINGLE source of truth: the hermes-smd-overlay vendors a copy and a CI hash-check asserts the bytes match this artifact at its pinned SHA, so the two repos cannot drift. Derived from the CLAUDE.md 'No fabricated client-facing content' Pattern A/B rule and the Tone & Positioning style markers. Match `literal_ci` and `regex` case-insensitively; `literal` exactly.",
+  "markers": [
+    {
+      "id": "em-dash",
+      "kind": "literal",
+      "value": "—",
+      "note": "Banned typographic marker on shipped user-facing copy (tone rules)."
+    },
+    {
+      "id": "coming-soon",
+      "kind": "literal_ci",
+      "value": "coming soon",
+      "note": "Placeholder copy banned on prospect/client surfaces."
+    },
+    {
+      "id": "well-reach-out",
+      "kind": "regex",
+      "value": "we(?:'ll| ?ll| will) reach out",
+      "note": "Pattern A: implies an uncontracted scheduling commitment (states.ts:138). Covers we'll / well / we will."
+    },
+    {
+      "id": "work-begins-within",
+      "kind": "literal_ci",
+      "value": "work begins within",
+      "note": "Pattern A: post-signing timeline promise (quotes/[id].astro:72)."
+    },
+    {
+      "id": "within-two-weeks-of-signing",
+      "kind": "literal_ci",
+      "value": "within two weeks of signing",
+      "note": "Pattern A: uncontracted start-date promise."
+    },
+    {
+      "id": "replies-within-n-business-day",
+      "kind": "regex",
+      "value": "repl(?:y|ies) within \\d+ business day",
+      "note": "Pattern A: SLA promise the engagement has not contracted (ConsultantBlock.astro:136)."
+    },
+    {
+      "id": "stabilization-period",
+      "kind": "literal_ci",
+      "value": "stabilization period",
+      "note": "Pattern A: post-handoff support promise (sow-template.tsx:529)."
+    },
+    {
+      "id": "guarantee",
+      "kind": "regex",
+      "value": "\\bguarantee(?:d|s)?\\b",
+      "note": "Outcome guarantee — an uncontracted promise."
+    },
+    {
+      "id": "specific-dollar-amount",
+      "kind": "regex",
+      "value": "\\$\\s?\\d",
+      "note": "A specific dollar figure in client-facing copy must come from authored engagement data, never an agent draft."
+    },
+    {
+      "id": "by-next-week",
+      "kind": "literal_ci",
+      "value": "by next week",
+      "note": "Future-date commitment phrase."
+    },
+    {
+      "id": "by-end-of",
+      "kind": "literal_ci",
+      "value": "by end of",
+      "note": "Future-date commitment phrase (by end of week/month/quarter)."
+    },
+    {
+      "id": "we-shadow-and-observe",
+      "kind": "literal_ci",
+      "value": "we shadow and observe",
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83, stripped by hotfix #378)."
+    },
+    {
+      "id": "we-redesign-together",
+      "kind": "literal_ci",
+      "value": "we redesign together",
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83)."
+    },
+    {
+      "id": "training-and-handoff",
+      "kind": "literal_ci",
+      "value": "training and handoff",
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83)."
+    }
+  ]
+}
