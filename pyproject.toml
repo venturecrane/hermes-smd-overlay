@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-smd-overlay"
-version = "0.1.0"
+version = "0.2.0"
 description = "Plugin overlay for the Nous Hermes Agent — adds audit, trust ceilings, voice transformation, and memory mirroring without modifying Hermes core."
 readme = "README.md"
 license = { text = "MIT" }
