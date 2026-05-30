@@ -154,8 +154,9 @@ def _emit_inbound_received(
 ) -> None:
     """Write one INBOUND_RECEIVED row directly via D1Client (ADR 0027).
 
-    Carries the provenance envelope (item_id, trust_class, source, surface,
-    verification, content_digest) — NEVER the inbound content itself, only its
+    Carries the provenance envelope via ``envelope.audit_metadata()`` (source,
+    surface, ingested_at, trust_class, verification, verification_detail,
+    content_digest, item_id) — NEVER the inbound content itself, only its
     digest. ``INBOUND_RECEIVED`` is added to ACCEPTED_ACTION_TYPES ss-console-
     side by PR-B; the direct-INSERT path does not validate action_type, so the
     row writes through regardless. If the audit writer ever rejects the type,
@@ -164,7 +165,7 @@ def _emit_inbound_received(
     metadata = {
         "per_inbound_received": True,
         "customer": customer,
-        **envelope.as_dict(),
+        **envelope.audit_metadata(),
     }
     params = [
         _ulid(),
