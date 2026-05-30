@@ -34,12 +34,18 @@ from tests.conftest import load_plugin
 # the vendored bytes + version match the canonical artifact so the two repos
 # cannot silently drift.
 #
-# Final canonical artifact confirmed by team-lead (ss-console PR #1151,
-# version 2026-05-29.2, 14 markers). team-lead folded all of Stream C's
-# additions into this artifact (the Pattern-B fabricated-schedule strings, the
-# future-date phrases) and strengthened kinds (several literal → literal_ci;
-# replies-within → regex). If ss-console bumps the artifact, update BOTH pins
-# below together with the re-vendored bytes.
+# Pinned to the MERGED-ON-MAIN artifact (ss-console PR #1151, merge commit
+# fede4ec1581dcac643d1cf42e654d7b30ae41839), version 2026-05-29.2, 14 markers.
+# The vendored bytes were verified byte-identical to the raw artifact at that
+# merge commit:
+#   curl -fsSL https://raw.githubusercontent.com/venturecrane/ss-console/\
+#     fede4ec1581dcac643d1cf42e654d7b30ae41839/\
+#     ai-employee/safety-substrate/fabrication_markers.json | shasum -a 256
+#   -> e666b2a2…b69142  (diff against the vendored copy was empty)
+# team-lead folded all of Stream C's additions into this artifact (the Pattern-B
+# fabricated-schedule strings, the future-date phrases) and strengthened kinds
+# (several literal → literal_ci; replies-within → regex). If ss-console bumps the
+# artifact, re-fetch at the new commit and update BOTH pins below together.
 _CANONICAL_MARKERS_SHA256 = "e666b2a24d2b4198db30ae8225ad252dbf6ace0acda8ce66f3a36ce8bad69142"
 _CANONICAL_MARKERS_VERSION = "2026-05-29.2"
 

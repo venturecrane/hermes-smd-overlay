@@ -19,10 +19,12 @@ The two must not drift:
 pins the vendored bytes (sha256) AND the version string to the canonical
 artifact, so any edit on either side fails CI until both are updated together.
 
-The vendored copy is the final canonical artifact (ss-console PR #1151,
-version ``2026-05-29.2``, 14 markers). Schema is ``{id, kind, value, note}``
-with ``kind`` ∈ literal (exact, case-sensitive) | literal_ci | regex (both
-case-insensitive); ``pattern``/``reason`` remain accepted as legacy aliases.
+The vendored copy is the final canonical artifact merged on ss-console main
+(PR #1151, merge commit ``fede4ec1581dcac643d1cf42e654d7b30ae41839``,
+version ``2026-05-29.2``, 14 markers), verified byte-identical to the raw
+artifact at that commit. Schema is ``{id, kind, value, note}`` with ``kind`` ∈
+literal (exact, case-sensitive) | literal_ci | regex (both case-insensitive);
+``pattern``/``reason`` remain accepted as legacy aliases.
 TODO(post-merge): replace the hand-copied file + sha pin with a build-time
 vendoring step (pinned raw-URL fetch from ss-console main) once the cadence of
 artifact changes warrants the automation.
