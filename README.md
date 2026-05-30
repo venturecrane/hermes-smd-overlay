@@ -9,7 +9,7 @@ Five plugins that attach to Hermes' documented plugin hook surface:
 | Plugin | Hooks | Purpose |
 |---|---|---|
 | `hermes-smd-audit` | `post_tool_call`, `post_llm_call`, `subagent_stop` | Per-tool, per-LLM-call, and per-subagent audit emission to per-customer D1. Also emits `AGENT_SKILL_CREATED` when the dispatched tool is `skill_manage` (ADR 0017 §40). |
-| `hermes-smd-trust` | `pre_tool_call`, `transform_tool_result` | Content-class trust ceilings + Composio per-connection isolation guard. |
+| `hermes-smd-trust` | `pre_tool_call`, `transform_tool_result` | Content-class trust ceilings + outbound fabrication gate (`pre_tool_call` runs a second evaluation blocking draft bodies that carry banned fabrication markers / fabricated citations, emitting `FABRICATION_FILTER_TRIGGERED`, ADR 0028) + Composio per-connection isolation guard. |
 | `hermes-smd-voice` | `pre_llm_call`, `post_llm_call` | Sample-driven voice transformation for customer-facing drafts. |
 | `hermes-smd-memory-mirror` | `on_session_end` | Mirrors Honcho conclusions to per-customer D1 with provenance; supports Captain dismissal. |
 | `hermes-smd-webhook-router` | `pre_gateway_dispatch` | Routes inbound webhook payloads to skills via `customer.yaml.webhook_triggers[]`. Emits `WEBHOOK_ROUTED` audit rows (ADR 0021 Stream E). |

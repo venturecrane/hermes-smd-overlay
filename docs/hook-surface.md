@@ -43,6 +43,8 @@ hooks:
 
 **Purpose (overlay):** trust-ceiling enforcement (`hermes-smd-trust`). Blocks a tool before execution by returning `{"action": "block", "message": "<reason>"}`.
 
+**Second evaluation in the same callback (ADR 0028 — outbound provenance gate).** `hermes-smd-trust.on_pre_tool_call` runs a SECOND check after the trust-ceiling check passes, only for body-bearing draft-creating tools (`email_create_draft`, `email_update_draft`, `sms_create_draft`, `practice_management_create_note`, and the body-optional calendar/task/matter drafts — see `plugins/hermes-smd-trust/outbound.py`). It scans the draft body for banned fabrication markers (Tier-1, universal) and fabricated legal citations (Tier-2, law/indeterminate vertical) and returns the same block-directive shape if a marker or citation is found. This is NOT a new hook — `pre_tool_call` is the only hook that can block via return value, and send tools are permanently banned by the ceiling layer, so "drafted OR sent" reduces to "drafted." On block it emits a `FABRICATION_FILTER_TRIGGERED` audit row (marker ids / citation labels only — never the body). Fail-closed: an unresolvable body on a body-required tool, an unloadable marker registry, or a raising citation filter all BLOCK.
+
 **Firing site:** `hermes_cli/plugins.py:1419-1426` (inside `get_pre_tool_call_block_message`, declared at line 1396). The helper is called once per tool execution from `model_tools.py:778`.
 
 **Single-fire contract:** The helper is the only production path. `model_tools.py:763-789` documents the contract: "pre_tool_call fires exactly once per tool execution"; callers that already fired it pass `skip_pre_tool_call_hook=True` to avoid double-firing.

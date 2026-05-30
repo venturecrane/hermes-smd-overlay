@@ -1,0 +1,97 @@
+{
+  "version": "1.0.0",
+  "source": "ss-console/ai-employee/safety-substrate/fabrication_markers.json",
+  "description": "Vendored copy of the canonical HIGH_RISK_MARKERS registry. Single source of truth lives in ss-console (authored by PR-B). The matcher in shared/fabrication_markers.py loads this file; a TODO + structural test guard a strict hash-check against the ss-console artifact once PR-B lands. These are the CLAUDE.md Pattern-A / Pattern-B + tone-rule banned strings, matched case-insensitively as phrases or regexes.",
+  "markers": [
+    {
+      "id": "em-dash",
+      "kind": "literal",
+      "pattern": "—",
+      "reason": "tone-rule: em dash is a banned style marker on user-facing copy"
+    },
+    {
+      "id": "coming-soon",
+      "kind": "literal",
+      "pattern": "coming soon",
+      "reason": "tone-rule: 'coming soon' banned on prospect/client surfaces"
+    },
+    {
+      "id": "well-reach-out",
+      "kind": "literal",
+      "pattern": "we'll reach out",
+      "reason": "Pattern A: implies an uncontracted future-contact commitment"
+    },
+    {
+      "id": "well-reach-out-ascii",
+      "kind": "literal",
+      "pattern": "well reach out",
+      "reason": "Pattern A: implies an uncontracted future-contact commitment (apostrophe-stripped)"
+    },
+    {
+      "id": "work-begins-within",
+      "kind": "literal",
+      "pattern": "work begins within",
+      "reason": "Pattern A: fabricated start-date commitment"
+    },
+    {
+      "id": "within-two-weeks-of-signing",
+      "kind": "literal",
+      "pattern": "within two weeks of signing",
+      "reason": "Pattern A: fabricated post-signing timeline"
+    },
+    {
+      "id": "replies-within-1-business-day",
+      "kind": "literal",
+      "pattern": "replies within 1 business day",
+      "reason": "Pattern A: fabricated response-time guarantee"
+    },
+    {
+      "id": "stabilization-period",
+      "kind": "literal",
+      "pattern": "stabilization period",
+      "reason": "Pattern A: fabricated post-handoff support commitment"
+    },
+    {
+      "id": "guarantee",
+      "kind": "regex",
+      "pattern": "\\bguarantee(?:d|s)?\\b",
+      "reason": "tone-rule: guarantees are uncontracted commitments"
+    },
+    {
+      "id": "specific-dollar-amount",
+      "kind": "regex",
+      "pattern": "\\$\\s?\\d",
+      "reason": "tone-rule: no published dollar amounts on client-facing surfaces"
+    },
+    {
+      "id": "by-next-week",
+      "kind": "literal",
+      "pattern": "by next week",
+      "reason": "future-date commitment phrase (fabricated timeline)"
+    },
+    {
+      "id": "by-end-of",
+      "kind": "literal",
+      "pattern": "by end of",
+      "reason": "future-date commitment phrase (fabricated timeline)"
+    },
+    {
+      "id": "we-shadow-and-observe",
+      "kind": "literal",
+      "pattern": "we shadow and observe",
+      "reason": "Pattern B: fabricated 3-week schedule constant (hotfix #378)"
+    },
+    {
+      "id": "we-redesign-together",
+      "kind": "literal",
+      "pattern": "we redesign together",
+      "reason": "Pattern B: fabricated 3-week schedule constant (hotfix #378)"
+    },
+    {
+      "id": "training-and-handoff",
+      "kind": "literal",
+      "pattern": "training and handoff",
+      "reason": "Pattern B: fabricated 3-week schedule constant (hotfix #378)"
+    }
+  ]
+}

@@ -22,7 +22,7 @@ from typing import Any
 
 from shared.secrets import get_secret
 
-from . import composio_guard, enforce
+from . import composio_guard, enforce, outbound
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,17 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
     cannot catch. The pre_tool_call helper's contract
     (hermes_cli/plugins.py:1428-1437) honors the block-directive shape.
 
+    TWO evaluations run in this one callback (ADR 0028). First the
+    trust-ceiling check (``evaluate_tool_call``). If — and ONLY if — that
+    allows the call AND the tool is a body-bearing draft-creating tool, a
+    SECOND evaluation runs: the outbound provenance gate
+    (``outbound.check_outbound_draft``) scans the draft body for banned
+    fabrication markers / fabricated citations and blocks before the draft
+    tool executes. ``pre_tool_call`` is the only hook that can block via
+    return value, and send tools are permanently banned by the ceiling
+    layer, so "drafted OR sent" reduces to "drafted" here. The gate is a
+    second check in the same callback, not a new plugin or hook.
+
     Expected kwargs per docs/hook-surface.md:
         tool_name, args, task_id, session_id, tool_call_id
     """
@@ -78,7 +89,21 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
             except KeyError:
                 customer_slug = ""
 
-        return enforce.evaluate_tool_call(tool_name, args, customer_slug)
+        ceiling_block = enforce.evaluate_tool_call(tool_name, args, customer_slug)
+        if ceiling_block is not None:
+            # The trust ceiling already refuses this call; no need to scan a
+            # draft body that will never be written.
+            return ceiling_block
+
+        # Ceiling allowed the call. Run the outbound provenance gate as a
+        # SECOND evaluation — it no-ops for non-draft tools and blocks a draft
+        # whose body carries a banned fabrication marker / fabricated citation.
+        return outbound.check_outbound_draft(
+            tool_name=tool_name,
+            args=args,
+            session_id=kwargs.get("session_id") or "",
+            tool_call_id=kwargs.get("tool_call_id") or "",
+        )
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.exception(
             "hermes-smd-trust: pre_tool_call raised; FAILING CLOSED — blocking "
