@@ -1,6 +1,6 @@
 name: hermes-smd-webhook-router
-version: "0.1.0"
-description: "Route inbound webhook payloads to skill invocations via customer.yaml.webhook_triggers. ADR 0021 Stream E."
+version: "0.2.0"
+description: "Route inbound webhook payloads to skill invocations via customer.yaml.webhook_triggers (ADR 0021 Stream E) + attach inbound provenance envelope and INBOUND_RECEIVED (ADR 0027)."
 author: VentureCrane
 requires_env:
   - SMD_CUSTOMER_SLUG

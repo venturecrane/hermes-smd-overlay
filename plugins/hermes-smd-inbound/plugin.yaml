@@ -1,0 +1,9 @@
+name: hermes-smd-inbound
+version: "0.1.0"
+description: "Nonce-fenced quarantine of untrusted inbound content at the pre_llm_call chokepoint (ADR 0027 inbound convergence, defense-in-depth)."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - pre_llm_call
+hooks:
+  - pre_llm_call

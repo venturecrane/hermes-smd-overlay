@@ -7,4 +7,6 @@ plugins:
   - plugins/hermes-smd-trust
   - plugins/hermes-smd-voice
   - plugins/hermes-smd-memory-mirror
+  - plugins/hermes-smd-webhook-router
+  - plugins/hermes-smd-inbound
   - plugins/hermes-smd-hook-probe

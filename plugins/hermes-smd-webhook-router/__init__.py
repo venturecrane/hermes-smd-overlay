@@ -19,6 +19,16 @@ Per ADR 0016 mirror-don't-gate: a successful route emits one
 router is observation + dispatch-rewrite only; it never blocks the
 dispatch on audit failure.
 
+ADR 0027 inbound convergence: on a verified route the router also attaches
+an :class:`shared.inbound.InboundEnvelope` (item_id, trust_class=
+unknown_external, source, surface, ingested_at, verification, content_digest)
+to the dispatch directive, emits an ``INBOUND_RECEIVED`` audit row, and
+records the item in :data:`shared.inbound.PENDING` so the ``hermes-smd-inbound``
+plugin's ``pre_llm_call`` chokepoint can wrap it in a nonce-fenced quarantine
+block before the engine reasons over it. Envelope/enqueue failures never break
+routing — the trust gate (``hermes-smd-trust`` refusing injected sends) remains
+the enforcing wall; the envelope + fence are defense-in-depth + provenance.
+
 Hook callbacks are exception-safe per AGENTS.md hard rule #3.
 """
 
@@ -31,6 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from shared import inbound
 from shared.d1_client import D1Client
 from shared.secrets import get_secret, require
 
@@ -133,6 +144,68 @@ def _emit_webhook_routed(
         json.dumps(metadata, sort_keys=True, separators=(",", ":")),
     ]
     client.execute(_INSERT_SQL, *params)
+
+
+def _emit_inbound_received(
+    *,
+    client: Any,
+    customer: str,
+    envelope: inbound.InboundEnvelope,
+) -> None:
+    """Write one INBOUND_RECEIVED row directly via D1Client (ADR 0027).
+
+    Carries the provenance envelope (item_id, trust_class, source, surface,
+    verification, content_digest) — NEVER the inbound content itself, only its
+    digest. ``INBOUND_RECEIVED`` is added to ACCEPTED_ACTION_TYPES ss-console-
+    side by PR-B; the direct-INSERT path does not validate action_type, so the
+    row writes through regardless. If the audit writer ever rejects the type,
+    coordinate with team-lead (the schema is the canonical source).
+    """
+    metadata = {
+        "per_inbound_received": True,
+        "customer": customer,
+        **envelope.as_dict(),
+    }
+    params = [
+        _ulid(),
+        _iso_utc(),
+        "INBOUND_RECEIVED",
+        "agent",
+        "agent",  # ActorRole.AGENT
+        None,  # skill_name
+        None,  # matter_ref
+        None,  # input_digest — content is never persisted, only its digest (in metadata)
+        None,  # output_digest
+        None,  # diff_digest
+        None,  # trust_ceiling
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+    ]
+    client.execute(_INSERT_SQL, *params)
+
+
+def _inbound_content_for(payload: Any) -> str:
+    """Best-effort extraction of the untrusted text body from an inbound payload.
+
+    Used for the envelope's content_digest and the quarantine fence. Tries the
+    common body keys (top-level then nested under ``data``/``body``); falls back
+    to a canonical JSON serialization of the whole payload so SOMETHING is
+    always quarantined (fail-closed: we never hand un-fenced inbound to the
+    engine just because we didn't recognize the body shape).
+    """
+    if isinstance(payload, dict):
+        for key in ("body", "body_plain", "text", "content", "message"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("body", "body_plain", "text", "content", "message"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+    if isinstance(payload, str):
+        return payload
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _header(headers: Any, name: str) -> str | None:
@@ -279,9 +352,44 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         )
         return None
 
-    # Emit audit row. Failure is logged but does NOT block the route -
-    # the dispatch rewrite is the load-bearing action; the audit row
-    # is observability.
+    # ADR 0027 — attach an inbound provenance envelope to the dispatched
+    # content and record it for the pre_llm_call quarantine chokepoint. The
+    # router only reaches here on a VERIFIED route (the verification gate
+    # above already declined forged/replayed events), so verification is
+    # "verified"; trust_class stays unknown_external (a verified webhook is
+    # still untrusted third-party data — positive evidence is required to
+    # raise the trust class). Building the envelope must never break the
+    # route, so it is wrapped in its own try/except.
+    envelope: inbound.InboundEnvelope | None = None
+    try:
+        content = _inbound_content_for(payload)
+        envelope = inbound.make_envelope(
+            content=content,
+            source=decision.trigger.source,
+            surface="webhook",
+            verification="verified",
+            trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
+        )
+        # Record the item for the inbound plugin's pre_llm_call chokepoint to
+        # fence. Keyed by the dispatch session so the fence applies to the
+        # right turn. session_id may be absent on some gateway shapes; an
+        # empty key still enqueues (the chokepoint drains by the same key).
+        session_id = kwargs.get("session_id")
+        if not isinstance(session_id, str):
+            session_id = ""
+        inbound.PENDING.enqueue(
+            inbound.InboundItem(session_id=session_id, content=content, envelope=envelope)
+        )
+    except Exception as exc:  # noqa: BLE001 — provenance must not break routing
+        logger.warning(
+            "hermes-smd-webhook-router: inbound envelope/enqueue failed (%s); "
+            "route still applied (the trust gate remains the enforcing wall)",
+            exc,
+        )
+
+    # Emit audit rows. Failure is logged but does NOT block the route -
+    # the dispatch rewrite is the load-bearing action; the audit rows
+    # are observability.
     if _D1_CLIENT is not None and _CUSTOMER_SLUG is not None:
         try:
             _emit_webhook_routed(
@@ -295,13 +403,31 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
                 "route still applied",
                 exc,
             )
+        if envelope is not None:
+            try:
+                _emit_inbound_received(
+                    client=_D1_CLIENT,
+                    customer=_CUSTOMER_SLUG,
+                    envelope=envelope,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "hermes-smd-webhook-router: INBOUND_RECEIVED emission failed (%s); "
+                    "route still applied",
+                    exc,
+                )
 
-    return {
+    directive: dict[str, Any] = {
         "action": "route_to_skill",
         "persona": decision.trigger.persona,
         "skill": decision.trigger.skill,
         "payload": payload,
     }
+    if envelope is not None:
+        # Attach provenance to the dispatch directive so downstream consumers
+        # (and the dashboard) can trace the action back to the inbound item.
+        directive["inbound_envelope"] = envelope.as_dict()
+    return directive
 
 
 def register(ctx) -> None:

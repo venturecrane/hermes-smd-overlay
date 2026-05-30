@@ -348,16 +348,21 @@ def test_on_pre_gateway_dispatch_returns_rewrite_on_match(
     assert result["skill"] == "law-pi-intake-triage"
     assert result["payload"] is payload
 
-    # Audit row emitted.
-    assert len(fake_client.calls) == 1
-    row = fake_client.rows()[0]
-    assert row["action_type"] == "WEBHOOK_ROUTED"
+    # Audit rows emitted: WEBHOOK_ROUTED (ADR 0021) + INBOUND_RECEIVED (ADR 0027).
+    rows = fake_client.rows()
+    assert len(rows) == 2
+    action_types = {r["action_type"] for r in rows}
+    assert action_types == {"WEBHOOK_ROUTED", "INBOUND_RECEIVED"}
+    row = next(r for r in rows if r["action_type"] == "WEBHOOK_ROUTED")
     assert row["skill_name"] == "law-pi-intake-triage"
     md = json.loads(row["metadata"])
     assert md["source"] == "filevine"
     assert md["event_type"] == "matter.created"
     assert md["persona"] == "marcus"
     assert md["skill"] == "law-pi-intake-triage"
+    # The ADR 0027 envelope is attached to the dispatch directive.
+    assert result["inbound_envelope"]["trust_class"] == "unknown_external"
+    assert result["inbound_envelope"]["verification"] == "verified"
 
 
 def test_on_pre_gateway_dispatch_passthrough_on_no_marker(
@@ -564,7 +569,8 @@ def test_routes_on_valid_signed_timestamped_webhook(fake_ctx, monkeypatch, with_
     result = mod.on_pre_gateway_dispatch(**kwargs)
     assert result is not None
     assert result["skill"] == "law-pi-intake-triage"
-    assert len(mod._D1_CLIENT.calls) == 1
+    # WEBHOOK_ROUTED (ADR 0021) + INBOUND_RECEIVED (ADR 0027).
+    assert len(mod._D1_CLIENT.calls) == 2
 
 
 # ---------------------------------------------------------------------------
