@@ -13,17 +13,17 @@ Single source of truth
 ----------------------
 The canonical marker registry lives in **ss-console** at
 ``ai-employee/safety-substrate/fabrication_markers.json`` (authored by PR-B).
-This overlay vendors a copy at ``shared/fabrication_markers.json``. The two
-must not drift.
+This overlay vendors a BYTE-EXACT copy at ``shared/fabrication_markers.json``.
+The two must not drift:
+``tests/test_outbound_gate.py::test_vendored_markers_match_canonical_sha256``
+pins the vendored bytes to the canonical artifact's sha256, so any edit on
+either side fails CI until both are updated together.
 
-TODO(PR-B-merge): once ss-console publishes the canonical JSON, add a strict
-hash-check that asserts the vendored copy byte-matches (or version-matches +
-content-hash-matches) the ss-console artifact. The structural test
-(``tests/test_outbound_gate.py::test_markers_registry_non_empty_and_versioned``)
-already asserts the loaded registry is non-empty and carries a ``version``;
-extend it to the hash comparison when the upstream artifact exists. Until then,
-the vendored file is the operative source and the loader fails closed if it is
-missing, empty, or malformed.
+TODO(PR-B-merge): when PR-B lands on main, re-pin the sha in that test to the
+merged artifact and switch this loader to fetch the pinned raw-URL on main (or
+a build-time vendoring step) instead of a hand-copied file. The schema is the
+canonical ``{id, kind, value, note}`` (``kind`` ∈ literal | literal_ci | regex);
+``pattern``/``reason`` remain accepted as legacy aliases during the transition.
 
 Fail-closed posture
 -------------------
@@ -121,27 +121,44 @@ class MarkerRegistry:
 
 
 def _compile_marker(entry: dict) -> _CompiledMarker | None:
-    """Compile one registry entry into a case-insensitive matcher.
+    """Compile one registry entry into a matcher.
 
-    Literal markers are escaped so ``$`` / ``.`` etc. match literally; regex
-    markers are compiled as-authored. A malformed entry returns ``None`` and
-    is logged; the registry-level loader decides whether the survivors are
-    sufficient (fail-closed if none remain).
+    Canonical ss-console schema (source of truth): ``{id, kind, value, note}``
+    where ``kind`` is one of:
+
+      * ``literal``    — exact, CASE-SENSITIVE substring match.
+      * ``literal_ci`` — case-INSENSITIVE substring match.
+      * ``regex``      — case-INSENSITIVE regex, compiled as-authored.
+
+    ``pattern``/``reason`` are accepted as legacy aliases for ``value``/``note``
+    so the loader is tolerant during the cross-repo transition. A malformed
+    entry returns ``None`` and is logged; the registry-level loader decides
+    whether the survivors are sufficient (fail-closed if none remain).
     """
     marker_id = entry.get("id")
-    pattern_text = entry.get("pattern")
-    kind = (entry.get("kind") or "literal").lower()
-    reason = entry.get("reason") or marker_id or "fabrication marker"
+    # Canonical key is ``value``; fall back to the legacy ``pattern`` alias.
+    pattern_text = entry.get("value")
+    if pattern_text is None:
+        pattern_text = entry.get("pattern")
+    kind = (entry.get("kind") or "literal_ci").lower()
+    # Canonical key is ``note``; fall back to legacy ``reason`` then id.
+    reason = entry.get("note") or entry.get("reason") or marker_id or "fabrication marker"
     if not isinstance(marker_id, str) or not marker_id:
         logger.warning("fabrication_markers: entry missing 'id'; dropping entry")
         return None
     if not isinstance(pattern_text, str) or not pattern_text:
-        logger.warning("fabrication_markers: marker %r missing 'pattern'; dropping", marker_id)
+        logger.warning("fabrication_markers: marker %r missing 'value'; dropping", marker_id)
         return None
     try:
         if kind == "regex":
             compiled = re.compile(pattern_text, re.IGNORECASE)
+        elif kind == "literal":
+            # Exact, case-SENSITIVE literal substring.
+            compiled = re.compile(re.escape(pattern_text))
         else:
+            # literal_ci (and any unknown kind, fail-closed to the broadest
+            # case-insensitive literal so an unrecognized kind never silently
+            # disables a marker).
             compiled = re.compile(re.escape(pattern_text), re.IGNORECASE)
     except re.error as exc:
         logger.warning(

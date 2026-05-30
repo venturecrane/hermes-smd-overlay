@@ -1,97 +1,90 @@
 {
-  "version": "1.0.0",
-  "source": "ss-console/ai-employee/safety-substrate/fabrication_markers.json",
-  "description": "Vendored copy of the canonical HIGH_RISK_MARKERS registry. Single source of truth lives in ss-console (authored by PR-B). The matcher in shared/fabrication_markers.py loads this file; a TODO + structural test guard a strict hash-check against the ss-console artifact once PR-B lands. These are the CLAUDE.md Pattern-A / Pattern-B + tone-rule banned strings, matched case-insensitively as phrases or regexes.",
+  "version": "2026-05-29.2",
+  "description": "Canonical high-risk fabrication / uncontracted-commitment markers for the outbound provenance gate (ADR 0028 Tier-1, universal across verticals). This file is the SINGLE source of truth: the hermes-smd-overlay vendors a copy and a CI hash-check asserts the bytes match this artifact at its pinned SHA, so the two repos cannot drift. Derived from the CLAUDE.md 'No fabricated client-facing content' Pattern A/B rule and the Tone & Positioning style markers. Match `literal_ci` and `regex` case-insensitively; `literal` exactly.",
   "markers": [
     {
       "id": "em-dash",
       "kind": "literal",
-      "pattern": "—",
-      "reason": "tone-rule: em dash is a banned style marker on user-facing copy"
+      "value": "—",
+      "note": "Banned typographic marker on shipped user-facing copy (tone rules)."
     },
     {
       "id": "coming-soon",
-      "kind": "literal",
-      "pattern": "coming soon",
-      "reason": "tone-rule: 'coming soon' banned on prospect/client surfaces"
+      "kind": "literal_ci",
+      "value": "coming soon",
+      "note": "Placeholder copy banned on prospect/client surfaces."
     },
     {
       "id": "well-reach-out",
-      "kind": "literal",
-      "pattern": "we'll reach out",
-      "reason": "Pattern A: implies an uncontracted future-contact commitment"
-    },
-    {
-      "id": "well-reach-out-ascii",
-      "kind": "literal",
-      "pattern": "well reach out",
-      "reason": "Pattern A: implies an uncontracted future-contact commitment (apostrophe-stripped)"
+      "kind": "regex",
+      "value": "we(?:'ll| ?ll| will) reach out",
+      "note": "Pattern A: implies an uncontracted scheduling commitment (states.ts:138). Covers we'll / well / we will."
     },
     {
       "id": "work-begins-within",
-      "kind": "literal",
-      "pattern": "work begins within",
-      "reason": "Pattern A: fabricated start-date commitment"
+      "kind": "literal_ci",
+      "value": "work begins within",
+      "note": "Pattern A: post-signing timeline promise (quotes/[id].astro:72)."
     },
     {
       "id": "within-two-weeks-of-signing",
-      "kind": "literal",
-      "pattern": "within two weeks of signing",
-      "reason": "Pattern A: fabricated post-signing timeline"
+      "kind": "literal_ci",
+      "value": "within two weeks of signing",
+      "note": "Pattern A: uncontracted start-date promise."
     },
     {
-      "id": "replies-within-1-business-day",
-      "kind": "literal",
-      "pattern": "replies within 1 business day",
-      "reason": "Pattern A: fabricated response-time guarantee"
+      "id": "replies-within-n-business-day",
+      "kind": "regex",
+      "value": "repl(?:y|ies) within \\d+ business day",
+      "note": "Pattern A: SLA promise the engagement has not contracted (ConsultantBlock.astro:136)."
     },
     {
       "id": "stabilization-period",
-      "kind": "literal",
-      "pattern": "stabilization period",
-      "reason": "Pattern A: fabricated post-handoff support commitment"
+      "kind": "literal_ci",
+      "value": "stabilization period",
+      "note": "Pattern A: post-handoff support promise (sow-template.tsx:529)."
     },
     {
       "id": "guarantee",
       "kind": "regex",
-      "pattern": "\\bguarantee(?:d|s)?\\b",
-      "reason": "tone-rule: guarantees are uncontracted commitments"
+      "value": "\\bguarantee(?:d|s)?\\b",
+      "note": "Outcome guarantee — an uncontracted promise."
     },
     {
       "id": "specific-dollar-amount",
       "kind": "regex",
-      "pattern": "\\$\\s?\\d",
-      "reason": "tone-rule: no published dollar amounts on client-facing surfaces"
+      "value": "\\$\\s?\\d",
+      "note": "A specific dollar figure in client-facing copy must come from authored engagement data, never an agent draft."
     },
     {
       "id": "by-next-week",
-      "kind": "literal",
-      "pattern": "by next week",
-      "reason": "future-date commitment phrase (fabricated timeline)"
+      "kind": "literal_ci",
+      "value": "by next week",
+      "note": "Future-date commitment phrase."
     },
     {
       "id": "by-end-of",
-      "kind": "literal",
-      "pattern": "by end of",
-      "reason": "future-date commitment phrase (fabricated timeline)"
+      "kind": "literal_ci",
+      "value": "by end of",
+      "note": "Future-date commitment phrase (by end of week/month/quarter)."
     },
     {
       "id": "we-shadow-and-observe",
-      "kind": "literal",
-      "pattern": "we shadow and observe",
-      "reason": "Pattern B: fabricated 3-week schedule constant (hotfix #378)"
+      "kind": "literal_ci",
+      "value": "we shadow and observe",
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83, stripped by hotfix #378)."
     },
     {
       "id": "we-redesign-together",
-      "kind": "literal",
-      "pattern": "we redesign together",
-      "reason": "Pattern B: fabricated 3-week schedule constant (hotfix #378)"
+      "kind": "literal_ci",
+      "value": "we redesign together",
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83)."
     },
     {
       "id": "training-and-handoff",
-      "kind": "literal",
-      "pattern": "training and handoff",
-      "reason": "Pattern B: fabricated 3-week schedule constant (hotfix #378)"
+      "kind": "literal_ci",
+      "value": "training and handoff",
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83)."
     }
   ]
 }

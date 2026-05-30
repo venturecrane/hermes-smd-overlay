@@ -13,7 +13,9 @@ Three layers under test:
      written on block when the audit env is configured.
 """
 
+import hashlib
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -26,16 +28,47 @@ from tests.conftest import load_plugin
 # ---------------------------------------------------------------------------
 
 
+# Canonical artifact provenance. The vendored shared/fabrication_markers.json is
+# a byte-exact copy of the ss-console source of truth
+# (ai-employee/safety-substrate/fabrication_markers.json). This sha256 pins the
+# vendored bytes so the two repos cannot silently drift.
+#
+# Pinned to the PR-B artifact at branch feat/aie-inbound-spine-0027
+# (version 2026-05-29.2). TODO(PR-B-merge): when PR-B lands on main, re-pin this
+# to the merged artifact's sha256 (it should not change if the file is
+# unmodified at merge) and switch the loader's vendoring note to the pinned
+# raw-URL on main.
+_CANONICAL_MARKERS_SHA256 = "e666b2a24d2b4198db30ae8225ad252dbf6ace0acda8ce66f3a36ce8bad69142"
+
+_VENDORED_MARKERS_PATH = (
+    Path(__file__).resolve().parent.parent / "shared" / "fabrication_markers.json"
+)
+
+
 def test_markers_registry_non_empty_and_versioned() -> None:
     """The vendored registry must load, be non-empty, and carry a version.
 
-    TODO(PR-B-merge): extend this to a strict hash/version check against the
-    canonical ss-console artifact once it is published. Until then this pins
-    the structural invariant (non-empty + versioned) the loader fails closed on.
+    The loader fails closed on a missing/empty/all-malformed registry; this
+    pins the structural invariant the gate depends on.
     """
     reg = load_markers()
     assert isinstance(reg.version, str) and reg.version
     assert len(reg.markers) > 0
+
+
+def test_vendored_markers_match_canonical_sha256() -> None:
+    """The vendored JSON must be byte-identical to the ss-console artifact.
+
+    Strict cross-repo drift guard: if either repo edits the marker set, this
+    fails until the vendored copy + this pin are updated together.
+    """
+    raw = _VENDORED_MARKERS_PATH.read_bytes()
+    actual = hashlib.sha256(raw).hexdigest()
+    assert actual == _CANONICAL_MARKERS_SHA256, (
+        "vendored shared/fabrication_markers.json drifted from the canonical "
+        "ss-console artifact; re-vendor the exact bytes and update "
+        f"_CANONICAL_MARKERS_SHA256 (expected {_CANONICAL_MARKERS_SHA256}, got {actual})"
+    )
 
 
 def test_markers_match_pattern_a_strings() -> None:
