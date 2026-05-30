@@ -85,7 +85,7 @@ hooks:
 
 ### 3. `pre_llm_call`
 
-**Purpose (overlay):** voice-sample injection (`hermes-smd-voice` — adds per-customer voice samples to the user message before the model sees it).
+**Purpose (overlay):** voice-sample injection (`hermes-smd-voice` — adds per-customer voice samples to the user message before the model sees it) AND untrusted-inbound quarantine (`hermes-smd-inbound`, ADR 0027 — drains the per-session pending inbound register and injects each item wrapped in a nonce-fenced quarantine block). Both are observers that contribute injected context; returns are merged (no "first wins"), so the two plugins coexist on this hook. This is the SINGLE chokepoint for inbound quarantine — it also fires for skill-triggered LLM calls, so no per-skill duplication is needed.
 
 **Firing site:** `run_agent.py:12447-12457`.
 
@@ -206,7 +206,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `transform_terminal_output` | no | terminal-output canonicalization (not relevant) |
 | `transform_tool_result` | yes | Composio guard |
 | `transform_llm_output` | no | vocabulary/personality transformation (potential future use) |
-| `pre_llm_call` | yes | voice sample injection |
+| `pre_llm_call` | yes | voice sample injection + inbound quarantine (ADR 0027) |
 | `post_llm_call` | yes | LLM audit |
 | `pre_api_request` | no | gateway-level API request (not relevant) |
 | `post_api_request` | no | gateway-level API response (not relevant) |
@@ -215,7 +215,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `on_session_finalize` | no | session-end finalization |
 | `on_session_reset` | no | session reset |
 | `subagent_stop` | no | subagent lifecycle |
-| `pre_gateway_dispatch` | no | gateway-only; can drop/rewrite messages |
+| `pre_gateway_dispatch` | yes | webhook routing + inbound envelope attach (ADR 0021 Stream E / ADR 0027) |
 | `pre_approval_request` | no | approval lifecycle observer |
 | `post_approval_response` | no | approval lifecycle observer |
 

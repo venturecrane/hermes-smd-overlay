@@ -4,7 +4,7 @@ Development notes for AI coding agents working in this repo.
 
 ## What this repo is
 
-Plugin overlay for `NousResearch/hermes-agent`. Five plugins (four production + one probe) plus a bootstrap CLI. See [README.md](README.md) for the catalog.
+Plugin overlay for `NousResearch/hermes-agent`. Six plugins (five production + one probe) plus a bootstrap CLI. See [README.md](README.md) for the catalog.
 
 ## Hard rules
 

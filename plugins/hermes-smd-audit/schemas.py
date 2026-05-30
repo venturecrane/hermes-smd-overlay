@@ -137,6 +137,13 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         # source + event_type land in metadata. Observation only; the
         # router does not gate dispatch.
         "WEBHOOK_ROUTED",
+        # Untrusted inbound content received + attributed by
+        # hermes-smd-webhook-router (ADR 0027 inbound convergence). One row per
+        # dispatched inbound item; the provenance envelope (item_id,
+        # trust_class, source, surface, verification, content_digest) lands in
+        # metadata — never the content itself. Canonical type added ss-console-
+        # side by PR-B; mirrored here so the overlay's AuditLogWriter accepts it.
+        "INBOUND_RECEIVED",
     }
 )
 
