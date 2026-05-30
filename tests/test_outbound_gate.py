@@ -29,16 +29,19 @@ from tests.conftest import load_plugin
 
 
 # Canonical artifact provenance. The vendored shared/fabrication_markers.json is
-# a byte-exact copy of the ss-console source of truth
-# (ai-employee/safety-substrate/fabrication_markers.json). This sha256 pins the
-# vendored bytes so the two repos cannot silently drift.
+# a BYTE-EXACT copy of the ss-console source of truth
+# (ai-employee/safety-substrate/fabrication_markers.json). These pins assert
+# the vendored bytes + version match the canonical artifact so the two repos
+# cannot silently drift.
 #
-# Pinned to the PR-B artifact at branch feat/aie-inbound-spine-0027
-# (version 2026-05-29.2). TODO(PR-B-merge): when PR-B lands on main, re-pin this
-# to the merged artifact's sha256 (it should not change if the file is
-# unmodified at merge) and switch the loader's vendoring note to the pinned
-# raw-URL on main.
+# Final canonical artifact confirmed by team-lead (ss-console PR #1151,
+# version 2026-05-29.2, 14 markers). team-lead folded all of Stream C's
+# additions into this artifact (the Pattern-B fabricated-schedule strings, the
+# future-date phrases) and strengthened kinds (several literal → literal_ci;
+# replies-within → regex). If ss-console bumps the artifact, update BOTH pins
+# below together with the re-vendored bytes.
 _CANONICAL_MARKERS_SHA256 = "e666b2a24d2b4198db30ae8225ad252dbf6ace0acda8ce66f3a36ce8bad69142"
+_CANONICAL_MARKERS_VERSION = "2026-05-29.2"
 
 _VENDORED_MARKERS_PATH = (
     Path(__file__).resolve().parent.parent / "shared" / "fabrication_markers.json"
@@ -56,18 +59,27 @@ def test_markers_registry_non_empty_and_versioned() -> None:
     assert len(reg.markers) > 0
 
 
-def test_vendored_markers_match_canonical_sha256() -> None:
+def test_vendored_markers_match_canonical_sha256_and_version() -> None:
     """The vendored JSON must be byte-identical to the ss-console artifact.
 
-    Strict cross-repo drift guard: if either repo edits the marker set, this
-    fails until the vendored copy + this pin are updated together.
+    Strict cross-repo drift guard (team-lead's directive): asserts BOTH the
+    sha256 of the exact bytes AND the version string. If either repo edits the
+    marker set, this fails until the vendored copy + both pins are updated
+    together.
     """
     raw = _VENDORED_MARKERS_PATH.read_bytes()
-    actual = hashlib.sha256(raw).hexdigest()
-    assert actual == _CANONICAL_MARKERS_SHA256, (
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    assert actual_sha == _CANONICAL_MARKERS_SHA256, (
         "vendored shared/fabrication_markers.json drifted from the canonical "
         "ss-console artifact; re-vendor the exact bytes and update "
-        f"_CANONICAL_MARKERS_SHA256 (expected {_CANONICAL_MARKERS_SHA256}, got {actual})"
+        f"_CANONICAL_MARKERS_SHA256 (expected {_CANONICAL_MARKERS_SHA256}, got {actual_sha})"
+    )
+    # Version pin — defends against a same-byte-count edit that somehow collides
+    # on a different sha, and documents which canonical revision is in force.
+    reg = load_markers()
+    assert reg.version == _CANONICAL_MARKERS_VERSION, (
+        f"vendored markers version {reg.version!r} != canonical "
+        f"{_CANONICAL_MARKERS_VERSION!r}; re-vendor + re-pin together"
     )
 
 

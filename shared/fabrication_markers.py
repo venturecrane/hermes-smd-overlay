@@ -15,15 +15,17 @@ The canonical marker registry lives in **ss-console** at
 ``ai-employee/safety-substrate/fabrication_markers.json`` (authored by PR-B).
 This overlay vendors a BYTE-EXACT copy at ``shared/fabrication_markers.json``.
 The two must not drift:
-``tests/test_outbound_gate.py::test_vendored_markers_match_canonical_sha256``
-pins the vendored bytes to the canonical artifact's sha256, so any edit on
-either side fails CI until both are updated together.
+``tests/test_outbound_gate.py::test_vendored_markers_match_canonical_sha256_and_version``
+pins the vendored bytes (sha256) AND the version string to the canonical
+artifact, so any edit on either side fails CI until both are updated together.
 
-TODO(PR-B-merge): when PR-B lands on main, re-pin the sha in that test to the
-merged artifact and switch this loader to fetch the pinned raw-URL on main (or
-a build-time vendoring step) instead of a hand-copied file. The schema is the
-canonical ``{id, kind, value, note}`` (``kind`` ∈ literal | literal_ci | regex);
-``pattern``/``reason`` remain accepted as legacy aliases during the transition.
+The vendored copy is the final canonical artifact (ss-console PR #1151,
+version ``2026-05-29.2``, 14 markers). Schema is ``{id, kind, value, note}``
+with ``kind`` ∈ literal (exact, case-sensitive) | literal_ci | regex (both
+case-insensitive); ``pattern``/``reason`` remain accepted as legacy aliases.
+TODO(post-merge): replace the hand-copied file + sha pin with a build-time
+vendoring step (pinned raw-URL fetch from ss-console main) once the cadence of
+artifact changes warrants the automation.
 
 Fail-closed posture
 -------------------
