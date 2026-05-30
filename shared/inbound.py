@@ -1,11 +1,18 @@
 """Inbound provenance + quarantine primitives — ADR 0027.
 
-VENDORED contract from ``ss-console/ai-employee/adapter/inbound_envelope.py``,
-which is the source-of-truth primitive (authored in PR-B). This is a
-pure-python copy carried in the overlay so the webhook router and the
+SOURCE OF TRUTH: ``ss-console/ai-employee/adapter/inbound_envelope.py``.
+This is a VENDORED copy carried in the overlay so the webhook router and the
 ``hermes-smd-inbound`` plugin can attribute + quarantine untrusted inbound
-content without a cross-repo runtime dependency. Keep this aligned with
-ss-console; the shape (enums, wrap format, audit_metadata) changes there first.
+content without a cross-repo runtime dependency (overlay cannot runtime-import
+ss-console). Keep this aligned with ss-console; the shape (enums, wrap format,
+audit_metadata) changes there first.
+
+Alignment is asserted by a CONTRACT test, not a byte hash. Unlike the markers
+DATA (``fabrication_markers.json``, pinned by sha256), this is CODE — formatting
+and lint deltas between the two repos would break a byte hash. The contract is
+pinned instead in ``tests/test_inbound.py``: the wrap output matches the
+canonical fence format line-for-line; ``trust_class`` defaults to
+``unknown_external``; an unrecognized class falls closed.
 
 Untrusted inbound content (a webhook payload, an inbound email body, anything
 that originated outside the trusted operator/agent boundary) must be
