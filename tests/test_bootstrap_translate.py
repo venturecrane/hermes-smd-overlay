@@ -557,9 +557,7 @@ AGENTMAIL_YAML = VALID_YAML.replace("adapter: gmail", "adapter: agentmail").repl
 def test_translate_materializes_agentmail_mcp_server(tmp_path, monkeypatch):
     """An enabled ``mcp:agentmail`` connector becomes a Hermes mcp_servers entry."""
     monkeypatch.setenv("AGENTMAIL_API_KEY", "am_us_test_key")
-    customer_yaml, skills_dir, hermes_home = _seed_repo(
-        tmp_path, customer_yaml_body=AGENTMAIL_YAML
-    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
@@ -577,9 +575,7 @@ def test_translate_materializes_agentmail_mcp_server(tmp_path, monkeypatch):
 def test_translate_excludes_agentmail_send_tools(tmp_path, monkeypatch):
     """The autonomous-send tools are excluded from the agentmail toolset (ADR 0005)."""
     monkeypatch.setenv("AGENTMAIL_API_KEY", "am_us_test_key")
-    customer_yaml, skills_dir, hermes_home = _seed_repo(
-        tmp_path, customer_yaml_body=AGENTMAIL_YAML
-    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
@@ -596,9 +592,7 @@ def test_translate_excludes_agentmail_send_tools(tmp_path, monkeypatch):
 def test_translate_skips_agentmail_when_key_unset(tmp_path, monkeypatch):
     """No key in the env => the agentmail MCP server is not wired (boot continues)."""
     monkeypatch.delenv("AGENTMAIL_API_KEY", raising=False)
-    customer_yaml, skills_dir, hermes_home = _seed_repo(
-        tmp_path, customer_yaml_body=AGENTMAIL_YAML
-    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
