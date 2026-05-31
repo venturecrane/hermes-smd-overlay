@@ -348,13 +348,63 @@ def test_payments_initiate_transfer_is_banned() -> None:
     assert "payments_initiate_transfer" not in mod.schemas.TOOL_ACTION_CLASS_MAP
 
 
-def test_no_send_tool_appears_in_registry() -> None:
-    """Defense-in-depth: no autonomous-send tool may appear in the registry."""
+def test_principal_send_tools_stay_banned_and_absent_from_registry() -> None:
+    """Principal-identity sends are NEVER in the registry — they stay banned.
+
+    Pre-ADR-0025 doctrine was "no send tool anywhere." ADR 0025 makes the
+    PERSONA's own-identity sends (``agentmail:send_*``) a configurable
+    EXTERNAL_SEND, so they legitimately appear in the registry and are governed
+    by the trust ceiling. What stays absolute: the agent must never send from
+    the PRINCIPAL's identity (``email_send`` / ``email_reply`` / ``sms_send``,
+    "never send as Scott"). Those remain in BANNED_TOOLS and out of the map.
+    """
     mod = load_plugin("hermes-smd-audit")
-    forbidden_substrings = ("_send", "_send_", "send_message")
-    for name in mod.schemas.TOOL_ACTION_CLASS_MAP.keys():
-        for substr in forbidden_substrings:
-            assert substr not in name, f"tool name {name!r} contains forbidden substring {substr!r}"
+    principal_sends = (
+        "email_send",
+        "email_send_message",
+        "email_reply",
+        "email_reply_all",
+        "email_forward",
+        "sms_send",
+        "sms_send_message",
+    )
+    for name in principal_sends:
+        assert name in mod.schemas.BANNED_TOOLS, f"{name} must stay banned"
+        assert name not in mod.schemas.TOOL_ACTION_CLASS_MAP, f"{name} must not be in the registry"
+
+
+def test_send_tools_in_registry_are_classified_external_send() -> None:
+    """Any send-capable tool that IS in the registry must be EXTERNAL_SEND.
+
+    A send tool classified READ / INTERNAL_WRITE would slip past the exposure
+    ceiling. The only sends allowed in the registry are the persona's own
+    (``agentmail:send_*``); each must carry the EXTERNAL_SEND class so the
+    ceiling governs it (ADR 0025). ``send_draft`` is a send (it dispatches a
+    pre-composed draft), so it counts too; ``create_draft`` / ``update_draft``
+    are authoring, not sending, and are excluded from this check.
+    """
+    mod = load_plugin("hermes-smd-audit")
+    for name, action in mod.schemas.TOOL_ACTION_CLASS_MAP.items():
+        looks_like_send = (
+            ("send" in name)
+            or name.endswith(("_reply", "_forward"))
+            or ":reply_to_message" in name
+            or ":forward_message" in name
+        )
+        is_draft_authoring = name.endswith(
+            (
+                "create_draft",
+                "update_draft",
+                "_create_draft",
+                "_event_draft",
+                "_task_draft",
+                "invitation_draft",
+            )
+        )
+        if looks_like_send and not is_draft_authoring:
+            assert action is mod.schemas.HookActionClass.EXTERNAL_SEND, (
+                f"send-capable tool {name!r} is classified {action}, expected EXTERNAL_SEND"
+            )
 
 
 # ---------------------------------------------------------------------------
