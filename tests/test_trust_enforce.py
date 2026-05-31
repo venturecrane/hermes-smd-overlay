@@ -100,6 +100,11 @@ def test_classify_tool_empty_name_raises() -> None:
         "calendar_delete_event",
         "practice_management_delete_matter",
         "connector_revoke_oauth",
+        # AgentMail MCP sends — prefixed `<server>:<tool>` runtime names.
+        "agentmail:send_message",
+        "agentmail:send_draft",
+        "agentmail:reply_to_message",
+        "agentmail:forward_message",
     ],
 )
 def test_classify_tool_banned_raises_banned_tool_error(banned_tool) -> None:

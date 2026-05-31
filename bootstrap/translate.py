@@ -63,6 +63,7 @@ Ported from
 import hashlib
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +74,9 @@ except ImportError as exc:  # pragma: no cover - import-time guard
         "PyYAML is required by bootstrap.translate; install with `pip install pyyaml`"
     ) from exc
 
+from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
 from bootstrap.validate import validate_customer_yaml
+from shared.secrets import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +270,73 @@ class TranslateError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+def _materialize_mcp_servers(connectors: dict[str, Any]) -> dict[str, Any]:
+    """Build the Hermes-native ``mcp_servers`` block from ``connectors``.
+
+    For each ENABLED connector whose ``backend`` is ``mcp:<name>`` and whose
+    ``<name>`` has a :data:`MCP_CONNECTOR_REGISTRY` entry, emit one
+    ``mcp_servers`` record in the shape Hermes loads (``url`` + ``headers`` +
+    ``enabled`` + ``tools.exclude``). The API key is read from the registered
+    env var via :func:`shared.secrets.get_secret` and written into the
+    ``headers`` map — the key lands in the per-profile ``config.yaml`` on the
+    per-customer Fly volume, consistent with the OAuth-token-on-volume posture
+    of ADR 0010.
+
+    Connectors are SKIPPED (logged, never fatal) when:
+
+    * the backend is not ``mcp:`` (``build:`` / ``synthetic:`` are other paths);
+    * the ``<name>`` is not in the registry (e.g. the OAuth-based Google
+      connectors, wired by a different path) — leaves them unwired, exactly as
+      before this materializer existed;
+    * the registered ``secret_env`` is unset in the process (the connector is
+      simply not wired this boot; the agent boots without it rather than
+      crashlooping on a missing key).
+
+    The send tools in ``spec.blocked_tools`` are excluded from the server's
+    toolset here; they are ALSO banned at the trust layer
+    (``shared.action_classes.BANNED_TOOLS``) as the durable safety guarantee.
+    """
+    servers: dict[str, Any] = {}
+    for capability, record in (connectors or {}).items():
+        if not isinstance(record, dict) or not record.get("enabled"):
+            continue
+        backend = str(record.get("backend", ""))
+        if not backend.startswith("mcp:"):
+            continue
+        name = backend[len("mcp:") :]
+        spec = MCP_CONNECTOR_REGISTRY.get(name)
+        if spec is None:
+            logger.info(
+                "translate: connector %s backend %r has no MCP registry entry; "
+                "not materialized (wired by another path or unsupported)",
+                capability,
+                backend,
+            )
+            continue
+
+        entry: dict[str, Any] = {"url": spec.url, "enabled": True}
+        if spec.auth_header and spec.secret_env:
+            try:
+                key = get_secret(spec.secret_env)
+            except KeyError:
+                logger.warning(
+                    "translate: connector %s (mcp:%s) requires %s but it is "
+                    "unset; MCP server NOT wired this boot",
+                    capability,
+                    name,
+                    spec.secret_env,
+                )
+                continue
+            entry["headers"] = {spec.auth_header: key}
+        if spec.blocked_tools:
+            # Keep autonomous-send tools off the agent's menu (ADR 0005). The
+            # trust layer bans them too; this is the in-config belt.
+            entry["tools"] = {"exclude": list(spec.blocked_tools)}
+        servers[name] = entry
+
+    return servers
+
+
 def _persona_config(
     persona: dict[str, Any],
     customer: dict[str, Any],
@@ -288,7 +358,7 @@ def _persona_config(
             }
         )
 
-    return {
+    config: dict[str, Any] = {
         "schema_version": 1,
         "profile_slug": persona_slug,
         "customer_id": customer.get("customer_id"),
@@ -311,6 +381,17 @@ def _persona_config(
         # flat-file core (MEMORY.md / USER.md). Honcho (inferred memory)
         # is deferred to Phase 2 — see the module docstring and ADR 0016.
     }
+
+    # Materialize `mcp:` connector backends into the Hermes-native
+    # `mcp_servers` block Hermes actually reads. The `connectors` map above is
+    # our own metadata; without this block Hermes wires no MCP server. Only
+    # emit the key when there's at least one server so configs for customers
+    # with no MCP connector stay byte-identical to before.
+    mcp_servers = _materialize_mcp_servers(customer.get("connectors") or {})
+    if mcp_servers:
+        config["mcp_servers"] = mcp_servers
+
+    return config
 
 
 def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
@@ -346,13 +427,41 @@ def _write_if_changed(target: Path, content: bytes) -> bool:
     it already held the desired bytes. Idempotency primitive: the
     bootstrap subcommand reports the number of profiles written, but
     repeated runs against unchanged input do not churn the volume.
+
+    The write is ATOMIC — content goes to a temp file in the same
+    directory and is moved into place with :func:`os.replace`. Two
+    reasons:
+
+    * ``os.replace`` swaps the directory entry using the *parent
+      directory's* permissions, so it overwrites an existing target
+      even when that target is owned by another user / not writable by
+      us. This recovers a profile whose ``config.yaml`` was left
+      root-owned by a manual in-container edit (a plain ``write_bytes``
+      O_TRUNC would raise ``PermissionError`` and crashloop the boot).
+    * A reader (the Hermes gateway) never sees a half-written config.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        existing = target.read_bytes()
-        if existing == content:
-            return False
-    target.write_bytes(content)
+        try:
+            if target.read_bytes() == content:
+                return False
+        except OSError:
+            # Unreadable existing file — fall through and replace it.
+            pass
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return True
 
 
