@@ -4,8 +4,11 @@ Covers:
 
 * Translation materializes one ``config.yaml`` + ``SOUL.md`` per persona
   under ``$HERMES_HOME/profiles/<slug>/``.
-* The generated ``config.yaml`` embeds the canonical Honcho block from
-  ADR 0016.
+* The generated ``config.yaml`` carries NO memory-provider block and NO
+  ``local_memory_files`` block, and translation writes NO MEMORY.md /
+  USER.md tombstones — Phase 1 runs on Hermes' always-on flat-file core
+  (ADR 0016, revised 2026-05-30; the prior Honcho-as-sole-provider
+  disposition is reversed).
 * Translation is idempotent — re-running with the same inputs leaves
   file bytes unchanged (same content, no churn).
 * Skill pin resolution refuses when an enabled skill's pin disagrees
@@ -125,8 +128,12 @@ def test_translate_writes_persona_identity_into_soul_md(tmp_path):
     assert "- concise" in soul
 
 
-def test_translate_embeds_tuned_honcho_block(tmp_path):
-    """The generated config.yaml MUST embed the ADR 0016 Honcho config."""
+def test_translate_emits_no_memory_provider_block(tmp_path):
+    """Phase 1: config.yaml carries NO honcho / memory-provider block.
+
+    The flat-file core is the substrate; Honcho is deferred to Phase 2.
+    A stray provider block would re-introduce the fictional, never-booted
+    Honcho wiring (ADR 0016, revised 2026-05-30)."""
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
@@ -134,16 +141,10 @@ def test_translate_embeds_tuned_honcho_block(tmp_path):
         skills_dir=str(skills_dir),
     )
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
-    honcho = config.get("honcho")
-    assert honcho is not None
-    assert honcho["recallMode"] == "hybrid"
-    assert honcho["dialecticCadence"] == "3-5"
-    assert honcho["dialecticDepth"] == 1
-    assert honcho["user_observe_me"] is True
-    assert honcho["user_observe_others"] is False
-    assert honcho["ai_observe_me"] is False
-    assert honcho["ai_observe_others"] is False
-    assert honcho["writeFrequency"] == "session"
+    assert "honcho" not in config
+    assert "local_memory_files" not in config
+    # The customer-owned memory isolation block is still carried through.
+    assert config["memory"]["d1_namespace"] == "acme"
 
 
 def test_translate_carries_customer_identity_into_config(tmp_path):
@@ -163,92 +164,38 @@ def test_translate_carries_customer_identity_into_config(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# ADR 0016 — MEMORY.md / USER.md tombstones + local_memory_files block
+# ADR 0016 (revised 2026-05-30) — flat-file core stays on; NO tombstones
 # ---------------------------------------------------------------------------
 
 
-def test_translate_writes_memory_md_tombstone(tmp_path):
-    """Each profile dir must contain a tombstoned MEMORY.md so Hermes
-    does not auto-populate from default template at profile boot."""
+def test_translate_does_not_tombstone_memory_md(tmp_path):
+    """Phase 1: translate must NOT write a MEMORY.md tombstone.
+
+    Hermes' flat-file core is the substrate; it auto-creates MEMORY.md at
+    profile boot. A tombstone here would suppress that and leave the agent
+    with no working memory (the reversed prior Honcho-only disposition)."""
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
     )
-    memory_md = hermes_home / "profiles" / "marcus" / "MEMORY.md"
-    assert memory_md.exists()
-    body = memory_md.read_text()
-    # Tombstone must contain the ADR 0016 rationale comment marker.
-    assert "ADR 0016" in body
-    assert "Honcho is the memory provider" in body
-    # No actual memory content — purely a comment.
-    assert body.strip().startswith("<!--")
-    assert body.strip().endswith("-->")
+    assert not (hermes_home / "profiles" / "marcus" / "MEMORY.md").exists()
 
 
-def test_translate_writes_user_md_tombstone(tmp_path):
-    """Each profile dir must contain a tombstoned USER.md."""
+def test_translate_does_not_tombstone_user_md(tmp_path):
+    """Phase 1: translate must NOT write a USER.md tombstone."""
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
     )
-    user_md = hermes_home / "profiles" / "marcus" / "USER.md"
-    assert user_md.exists()
-    body = user_md.read_text()
-    assert "ADR 0016" in body
-    assert "Honcho is the memory provider" in body
-    assert body.strip().startswith("<!--")
-    assert body.strip().endswith("-->")
+    assert not (hermes_home / "profiles" / "marcus" / "USER.md").exists()
 
 
-def test_translate_embeds_local_memory_files_block(tmp_path):
-    """config.yaml MUST declare MEMORY.md and USER.md disabled with the
-    ADR 0016 rationale, so operators inspecting the profile see intent
-    even without opening the tombstone files."""
-    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
-    translate_customer_yaml(
-        customer_yaml_path=str(customer_yaml),
-        hermes_home=str(hermes_home),
-        skills_dir=str(skills_dir),
-    )
-    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
-    block = config.get("local_memory_files")
-    assert block is not None, "config.yaml missing local_memory_files block"
-    assert block["memory_md_enabled"] is False
-    assert block["user_md_enabled"] is False
-    assert block["provider"] == "honcho"
-    assert "ADR 0016" in block["rationale"]
-
-
-def test_translate_tombstones_are_idempotent(tmp_path):
-    """Re-running translate must NOT rewrite unchanged tombstone files
-    (matches the idempotency contract for config.yaml and SOUL.md)."""
-    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
-    translate_customer_yaml(
-        customer_yaml_path=str(customer_yaml),
-        hermes_home=str(hermes_home),
-        skills_dir=str(skills_dir),
-    )
-    memory_md = hermes_home / "profiles" / "marcus" / "MEMORY.md"
-    user_md = hermes_home / "profiles" / "marcus" / "USER.md"
-    mtime_memory = memory_md.stat().st_mtime_ns
-    mtime_user = user_md.stat().st_mtime_ns
-
-    translate_customer_yaml(
-        customer_yaml_path=str(customer_yaml),
-        hermes_home=str(hermes_home),
-        skills_dir=str(skills_dir),
-    )
-    assert memory_md.stat().st_mtime_ns == mtime_memory
-    assert user_md.stat().st_mtime_ns == mtime_user
-
-
-def test_translate_writes_tombstones_for_every_persona(tmp_path):
-    """Multi-persona customers get tombstones in every profile dir."""
-    # Append a second persona, same pattern as test_translate_handles_multiple_personas.
+def test_translate_writes_no_tombstones_for_any_persona(tmp_path):
+    """Multi-persona customers get NO tombstones in any profile dir."""
     body = VALID_YAML.replace(
         "        enabled: true\n",
         "        enabled: true\n"
@@ -267,11 +214,11 @@ def test_translate_writes_tombstones_for_every_persona(tmp_path):
         skills_dir=str(skills_dir),
     )
     for slug in ("marcus", "junie"):
-        assert (hermes_home / "profiles" / slug / "MEMORY.md").exists()
-        assert (hermes_home / "profiles" / slug / "USER.md").exists()
+        assert not (hermes_home / "profiles" / slug / "MEMORY.md").exists()
+        assert not (hermes_home / "profiles" / slug / "USER.md").exists()
         config = yaml.safe_load((hermes_home / "profiles" / slug / "config.yaml").read_text())
-        assert config["local_memory_files"]["memory_md_enabled"] is False
-        assert config["local_memory_files"]["user_md_enabled"] is False
+        assert "honcho" not in config
+        assert "local_memory_files" not in config
 
 
 # ---------------------------------------------------------------------------

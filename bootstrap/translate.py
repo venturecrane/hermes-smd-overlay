@@ -7,11 +7,21 @@ For each persona in ``customer.yaml.personas[]`` the bootstrap CLI writes:
 
 The Hermes-native config consumes the multi-persona pattern documented
 in ADR 0011; per-persona ``SOUL.md`` is what Hermes loads as identity
-at profile boot. The tuned Honcho block embedded in each ``config.yaml``
-matches the disposition decided in ADR 0016 (mirror, don't gate;
-``recallMode: hybrid``, ``dialecticCadence: 3-5``, ``dialecticDepth: 1``,
-``user_observe_me: true``, all other observation flags off,
-``writeFrequency: session``).
+at profile boot.
+
+Memory disposition (ADR 0016, revised 2026-05-30)
+-------------------------------------------------
+Hermes' always-on flat-file core (``MEMORY.md`` / ``USER.md``) is the
+Phase-1 memory substrate; the translator leaves it alone so Hermes
+auto-creates and maintains it at profile boot. Honcho — the *inferred*
+memory engine — is a swappable provider that, per ADR 0016, sits behind
+the customer-owned D1/R2 file and feeds it; it is deferred to Phase 2
+and is NOT wired here. Earlier revisions of this module emitted a tuned
+Honcho config block and tombstoned the flat-file core; both were removed
+when the never-booted Honcho integration was found to be fictional (the
+in-container ``honcho-ai`` server does not exist). Do not re-introduce a
+memory-provider config block until the real Honcho v3.0.7 source vendor
+lands (Phase 2).
 
 Structural-vs-non-structural change rule (ADR 0019)
 ---------------------------------------------------
@@ -66,93 +76,6 @@ except ImportError as exc:  # pragma: no cover - import-time guard
 from bootstrap.validate import validate_customer_yaml
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Tuned Honcho config block (ADR 0016)
-# ---------------------------------------------------------------------------
-
-
-def _honcho_block() -> dict[str, Any]:
-    """Return the canonical Honcho config block.
-
-    Embedded verbatim into every per-profile ``config.yaml``. Values
-    are not pulled from ``customer.yaml`` — they are the SMD overlay's
-    Honcho-disposition decision, not a customer-tunable knob. If a
-    customer needs a different cadence, the answer is a follow-on ADR,
-    not a per-customer override here.
-    """
-    return {
-        "recallMode": "hybrid",
-        "dialecticCadence": "3-5",
-        "dialecticDepth": 1,
-        "user_observe_me": True,
-        "user_observe_others": False,
-        "ai_observe_me": False,
-        "ai_observe_others": False,
-        "writeFrequency": "session",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Local-memory-files disposition (ADR 0016)
-# ---------------------------------------------------------------------------
-
-
-def _local_memory_files_block() -> dict[str, Any]:
-    """Return the canonical local-memory-files declaration.
-
-    Per ADR 0016, Honcho is the memory provider; Hermes' local-file
-    memory sources (``MEMORY.md`` and ``USER.md``) must NOT be loaded
-    because they would double-process memory and create state divergence
-    between Honcho and the local files.
-
-    The block declares both files disabled and records the rationale so
-    operators inspecting a profile's ``config.yaml`` see the intent
-    explicitly. The actual on-disk enforcement is the tombstone files
-    written alongside (see :func:`_write_memory_tombstones`).
-    """
-    return {
-        "memory_md_enabled": False,
-        "user_md_enabled": False,
-        "provider": "honcho",
-        "rationale": (
-            "ADR 0016 — Honcho is the memory provider; "
-            "local files are tombstoned to prevent double-processing"
-        ),
-    }
-
-
-# Tombstone-file contents. Single comment block each, idempotent across
-# re-runs. Written into the profile directory alongside config.yaml and
-# SOUL.md by ``translate_customer_yaml``.
-_MEMORY_MD_TOMBSTONE = """<!--
-This file is intentionally a tombstone (empty).
-
-Honcho is the memory provider for this profile per ADR 0016.
-Hermes' local-file memory sources (MEMORY.md and USER.md) must NOT
-be loaded — they would double-process memory and create state
-divergence between Honcho and the local files.
-
-The presence of this empty file pre-empts Hermes' default template
-auto-creation at profile boot. Do not edit; rerun `hermes-smd
-bootstrap` to restore.
--->
-""".encode()
-
-_USER_MD_TOMBSTONE = """<!--
-This file is intentionally a tombstone (empty).
-
-Honcho is the memory provider for this profile per ADR 0016.
-Hermes' local-file memory sources (MEMORY.md and USER.md) must NOT
-be loaded — they would double-process memory and create state
-divergence between Honcho and the local files.
-
-The presence of this empty file pre-empts Hermes' default template
-auto-creation at profile boot. Do not edit; rerun `hermes-smd
-bootstrap` to restore.
--->
-""".encode()
 
 
 # ---------------------------------------------------------------------------
@@ -384,8 +307,9 @@ def _persona_config(
         "escalation": customer.get("escalation") or {},
         "voice_library": customer.get("voice_library") or {},
         "memory": customer.get("memory") or {},
-        "honcho": _honcho_block(),
-        "local_memory_files": _local_memory_files_block(),
+        # No memory-provider block: Phase 1 runs on Hermes' always-on
+        # flat-file core (MEMORY.md / USER.md). Honcho (inferred memory)
+        # is deferred to Phase 2 — see the module docstring and ADR 0016.
     }
 
 
@@ -458,18 +382,12 @@ def translate_customer_yaml(
     For each persona in ``customer.yaml.personas[]`` writes:
 
     * ``<hermes_home>/profiles/<slug>/config.yaml`` — Hermes-native
-      config with the resolved skill catalog, connector wiring,
-      scope, the tuned Honcho block (see ADR 0016), and the
-      ``local_memory_files`` block declaring MEMORY.md / USER.md
-      disabled.
+      config with the resolved skill catalog, connector wiring, and
+      scope. No memory-provider block is emitted: Phase 1 runs on
+      Hermes' always-on flat-file core (MEMORY.md / USER.md); Honcho
+      is deferred to Phase 2 (see module docstring / ADR 0016).
     * ``<hermes_home>/profiles/<slug>/SOUL.md`` — per-persona identity
       consumed by Hermes at profile boot.
-    * ``<hermes_home>/profiles/<slug>/MEMORY.md`` — tombstone (empty)
-      pre-empting Hermes' default-template auto-creation. Honcho is
-      the memory provider per ADR 0016; this local file must NOT be
-      loaded.
-    * ``<hermes_home>/profiles/<slug>/USER.md`` — tombstone (empty)
-      with the same rationale.
     * ``<hermes_home>/profiles/<slug>/skill-bundles/<bundle-slug>.yaml``
       — one file per entry in ``customer.yaml.personas[].bundles[]``
       (ADR 0021 Stream D). Bundle files declared previously but
@@ -529,19 +447,17 @@ def translate_customer_yaml(
         profile_dir = profiles_root / slug
         config_path = profile_dir / "config.yaml"
         soul_path = profile_dir / "SOUL.md"
-        memory_md_path = profile_dir / "MEMORY.md"
-        user_md_path = profile_dir / "USER.md"
 
         config_body = _persona_config(persona, customer, resolved_pins)
         soul_body = _soul_body(persona, customer)
 
         wrote_config = _write_if_changed(config_path, _yaml_bytes(config_body))
         wrote_soul = _write_if_changed(soul_path, soul_body.encode())
-        # ADR 0016 — Honcho is the memory provider; tombstone the local
-        # MEMORY.md / USER.md so Hermes does not auto-populate them with
-        # default templates at profile boot.
-        wrote_memory_md = _write_if_changed(memory_md_path, _MEMORY_MD_TOMBSTONE)
-        wrote_user_md = _write_if_changed(user_md_path, _USER_MD_TOMBSTONE)
+        # NOTE: MEMORY.md / USER.md are intentionally NOT written here.
+        # Hermes' flat-file memory core is the Phase-1 substrate; Hermes
+        # auto-creates and maintains those files at profile boot. Earlier
+        # revisions tombstoned them to force Honcho as sole provider — that
+        # is reversed (ADR 0016, revised 2026-05-30).
         # ADR 0021 Stream D — per-profile Hermes skill-bundles. Each
         # entry in customer.yaml.personas[].bundles[] maps to one
         # `<bundle-slug>.yaml` under the profile dir. Bundles removed
@@ -550,22 +466,13 @@ def translate_customer_yaml(
             persona=persona,
             profile_dir=profile_dir,
         )
-        if (
-            wrote_config
-            or wrote_soul
-            or wrote_memory_md
-            or wrote_user_md
-            or wrote_bundles
-            or removed_bundles
-        ):
+        if wrote_config or wrote_soul or wrote_bundles or removed_bundles:
             logger.info(
-                "translate: wrote profile %s (config=%s, soul=%s, memory_md=%s, "
-                "user_md=%s, bundles_written=%s, bundles_removed=%s)",
+                "translate: wrote profile %s (config=%s, soul=%s, "
+                "bundles_written=%s, bundles_removed=%s)",
                 slug,
                 wrote_config,
                 wrote_soul,
-                wrote_memory_md,
-                wrote_user_md,
                 wrote_bundles,
                 removed_bundles,
             )
