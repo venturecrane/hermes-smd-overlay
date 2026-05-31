@@ -126,19 +126,7 @@ hooks:
 
 **Return-value semantics:** Observer only. Returns collected but not interpreted.
 
-### 5. `transform_tool_result`
-
-**Purpose (overlay):** Composio per-connection isolation guard (`hermes-smd-trust` — refuses a Composio tool result that doesn't match the customer's expected `connection_id`).
-
-**Firing site:** `model_tools.py:847-857`.
-
-**Ordering invariant:** Fires **after** `post_tool_call` on the same execution path (`model_tools.py:840-846` documents the seam). Fires before the result is appended back into conversation context — a returned string replaces the result for the agent.
-
-**Kwargs:** identical to `post_tool_call` (tool_name, args, result, task_id, session_id, tool_call_id, duration_ms).
-
-**Return-value semantics:** Fail-open. The first callback returning a `str` wins and replaces the tool result. Non-string returns are ignored (`model_tools.py:858-859` — only `isinstance(hook_result, str)` is accepted).
-
-### 6. `on_session_end`
+### 5. `on_session_end`
 
 **Purpose (overlay):** Honcho conclusion mirror trigger (`hermes-smd-memory-mirror` — poll Honcho for new conclusions and write them to per-customer D1 with provenance).
 
@@ -169,7 +157,7 @@ hooks:
 All six hooks the overlay design depends on exist in upstream Hermes at the pinned ref. No hook is missing; no hook is misordered relative to the overlay's needs.
 
 - The single-fire contract on `pre_tool_call` is documented (`model_tools.py:763-789`) — the overlay's trust-ceiling enforcement runs once per tool execution.
-- The post-tool seam (`post_tool_call` → `transform_tool_result`) is the correct location for audit + Composio guard.
+- The post-tool seam (`post_tool_call`) is the correct location for audit emission.
 - `pre_llm_call` writes into the user message (not the system prompt) — preserves prompt-cache stability.
 - `post_llm_call` only fires on completed, non-interrupted turns. Interrupted turns will need to be captured by an alternative signal (e.g., `on_session_end` with `completed=False, interrupted=True`); the audit plugin can compensate.
 - `on_session_end` fires per-turn, not per-conversation. The memory-mirror plugin's mirror cadence aligns naturally (Honcho's `writeFrequency: session` produces new conclusions at the same per-turn boundary).
@@ -204,7 +192,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `pre_tool_call` | yes | trust ceiling |
 | `post_tool_call` | yes | audit |
 | `transform_terminal_output` | no | terminal-output canonicalization (not relevant) |
-| `transform_tool_result` | yes | Composio guard |
+| `transform_tool_result` | no | tool-result transformation (not relevant) |
 | `transform_llm_output` | no | vocabulary/personality transformation (potential future use) |
 | `pre_llm_call` | yes | voice sample injection + inbound quarantine (ADR 0027) |
 | `post_llm_call` | yes | LLM audit |

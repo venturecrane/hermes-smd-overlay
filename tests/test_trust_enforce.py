@@ -40,14 +40,14 @@ def _load_trust_module(submodule: str = ""):
 
 
 def test_trust_registers_expected_hooks(fake_ctx) -> None:
-    """hermes-smd-trust must attach to pre_tool_call and transform_tool_result."""
+    """hermes-smd-trust must attach to pre_tool_call."""
     mod = load_plugin("hermes-smd-trust")
     assert callable(mod.register)
 
     mod.register(fake_ctx)
 
     assert "pre_tool_call" in fake_ctx.registered
-    assert "transform_tool_result" in fake_ctx.registered
+    assert "transform_tool_result" not in fake_ctx.registered
 
 
 # ---------------------------------------------------------------------------

@@ -62,7 +62,7 @@ VALID_YAML = dedent(
     connectors:
       Email:
         adapter: gmail
-        backend: composio:gmail
+        backend: mcp:gmail
         enabled: true
 
     scope:

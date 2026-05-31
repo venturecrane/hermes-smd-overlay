@@ -54,7 +54,7 @@ VALID_YAML = dedent(
     connectors:
       Email:
         adapter: gmail
-        backend: composio:gmail
+        backend: mcp:gmail
         enabled: true
 
     scope:
@@ -116,7 +116,7 @@ def test_customer_config_connectors(tmp_path):
     cfg = CustomerConfig.from_volume(str(path))
     connectors = cfg.connectors
     assert "Email" in connectors
-    assert connectors["Email"]["backend"] == "composio:gmail"
+    assert connectors["Email"]["backend"] == "mcp:gmail"
 
 
 def test_customer_config_voice_library(tmp_path):
@@ -269,7 +269,7 @@ def test_validate_rejects_invalid_trust_ceiling(tmp_path):
 
 
 def test_validate_rejects_invalid_connector_backend(tmp_path):
-    bad = VALID_YAML.replace("backend: composio:gmail", "backend: http://example.com")
+    bad = VALID_YAML.replace("backend: mcp:gmail", "backend: http://example.com")
     path = _write(tmp_path, bad)
     errors = validate_customer_yaml(path)
     assert any("backend" in e and "must start with" in e for e in errors)
