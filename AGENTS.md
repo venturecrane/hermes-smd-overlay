@@ -75,6 +75,6 @@ Conventional Commits with venture scope omitted (this repo is single-venture):
 
 ```
 feat(audit): emit per-tool D1 rows
-fix(trust): handle missing composio connection_id
+fix(trust): handle missing customer slug
 docs: cite on_session_end firing sites
 ```

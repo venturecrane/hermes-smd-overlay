@@ -48,7 +48,7 @@ ACCEPTED_VERTICALS = {
 
 ACCEPTED_CEILINGS = {"autonomous", "draft_for_review", "refused"}
 
-ACCEPTED_BACKEND_PREFIXES = ("composio:", "mcp:", "build:", "synthetic:")
+ACCEPTED_BACKEND_PREFIXES = ("mcp:", "build:", "synthetic:")
 
 REQUIRED_TOP_LEVEL_FIELDS = (
     "customer_id",

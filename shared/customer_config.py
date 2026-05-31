@@ -185,9 +185,8 @@ class CustomerConfig:
 
         Each value is the raw connector record from ``customer.yaml``
         (``adapter``, ``backend``, ``enabled``, optional configuration).
-        The ``backend`` prefix (``mcp:``, ``build:``, ``composio:``,
-        ``synthetic:``) dictates how the runtime wires the connector;
-        see ADR 0020.
+        The ``backend`` prefix (``mcp:``, ``build:``, ``synthetic:``)
+        dictates how the runtime wires the connector; see ADR 0020.
         """
         raw = self._data.get("connectors") or {}
         if not isinstance(raw, dict):

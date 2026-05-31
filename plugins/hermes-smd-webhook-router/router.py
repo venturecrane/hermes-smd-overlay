@@ -162,14 +162,14 @@ def detect_webhook_markers(payload: Any) -> tuple[str, str] | None:
     webhook markers, else ``None``.
 
     The router accepts two payload shapes (the gateway can wrap the
-    inbound webhook either way depending on the AgentMail/Composio
-    fan-in pattern):
+    inbound webhook either way depending on the AgentMail fan-in
+    pattern):
 
     1. Top-level keys: ``{"source": "...", "event_type": "..."}``
        - bare webhook payload.
     2. Nested under ``metadata``:
        ``{"metadata": {"source": "...", "event_type": "..."}}`` -
-       payload wrapped by the AgentMail/Composio webhook ingress.
+       payload wrapped by the AgentMail webhook ingress.
 
     Any other shape returns ``None`` - the router does not route on
     inferred markers.
