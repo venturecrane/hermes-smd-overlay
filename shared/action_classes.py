@@ -91,6 +91,19 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # Connector-level destructive operations.
         "connector_revoke_oauth",
         "connector_unbind_permanent",
+        # AgentMail MCP — autonomous outbound from the persona's own mailbox
+        # (ADR 0005 reviewer-as-sender). MCP tools reach this classifier under
+        # `<server>:<tool>` notation, so the runtime names are prefixed. These
+        # MUST be listed explicitly: an UNMAPPED tool falls back to READ =
+        # allowed (classify_tool below), so the agentmail sends would otherwise
+        # be fail-OPEN. The draft path (`agentmail:create_draft`,
+        # `agentmail:update_draft`) is intentionally NOT banned — drafting is
+        # the agent's job; a human reviewer sends. Keep in sync with the
+        # blocked_tools list in bootstrap/mcp_registry.py (asserted by test).
+        "agentmail:send_message",
+        "agentmail:send_draft",
+        "agentmail:reply_to_message",
+        "agentmail:forward_message",
     }
 )
 
@@ -118,6 +131,10 @@ BANNED_REASON: Mapping[str, str] = MappingProxyType(
         "practice_management_close_matter_permanent": "banned_tool_destructive",
         "connector_revoke_oauth": "banned_tool_destructive",
         "connector_unbind_permanent": "banned_tool_destructive",
+        "agentmail:send_message": "banned_tool_pattern_a",
+        "agentmail:send_draft": "banned_tool_pattern_a",
+        "agentmail:reply_to_message": "banned_tool_pattern_a",
+        "agentmail:forward_message": "banned_tool_pattern_a",
     }
 )
 

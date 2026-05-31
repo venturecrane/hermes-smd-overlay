@@ -545,6 +545,92 @@ def test_translate_skips_disabled_skills(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# MCP connector materialization (mcp:agentmail -> mcp_servers block)
+# ---------------------------------------------------------------------------
+
+
+AGENTMAIL_YAML = VALID_YAML.replace("adapter: gmail", "adapter: agentmail").replace(
+    "backend: mcp:gmail", "backend: mcp:agentmail"
+)
+
+
+def test_translate_materializes_agentmail_mcp_server(tmp_path, monkeypatch):
+    """An enabled ``mcp:agentmail`` connector becomes a Hermes mcp_servers entry."""
+    monkeypatch.setenv("AGENTMAIL_API_KEY", "am_us_test_key")
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    servers = config["mcp_servers"]
+    assert "agentmail" in servers
+    am = servers["agentmail"]
+    assert am["url"] == "https://mcp.agentmail.to/mcp"
+    assert am["enabled"] is True
+    assert am["headers"] == {"x-api-key": "am_us_test_key"}
+
+
+def test_translate_excludes_agentmail_send_tools(tmp_path, monkeypatch):
+    """The autonomous-send tools are excluded from the agentmail toolset (ADR 0005)."""
+    monkeypatch.setenv("AGENTMAIL_API_KEY", "am_us_test_key")
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    excluded = config["mcp_servers"]["agentmail"]["tools"]["exclude"]
+    for tool in ("send_message", "send_draft", "reply_to_message", "forward_message"):
+        assert tool in excluded
+    # The draft path is NOT excluded — drafting is the agent's job.
+    assert "create_draft" not in excluded
+
+
+def test_translate_skips_agentmail_when_key_unset(tmp_path, monkeypatch):
+    """No key in the env => the agentmail MCP server is not wired (boot continues)."""
+    monkeypatch.delenv("AGENTMAIL_API_KEY", raising=False)
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert "agentmail" not in config.get("mcp_servers", {})
+
+
+def test_translate_unregistered_mcp_backend_not_materialized(tmp_path):
+    """A ``mcp:`` backend with no registry entry (e.g. gmail) yields no mcp_servers."""
+    # VALID_YAML uses backend: mcp:gmail, which is not in the registry.
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert "mcp_servers" not in config
+
+
+def test_agentmail_blocked_tools_are_banned_at_trust_layer():
+    """Every agentmail blocked_tool has a prefixed entry in BANNED_TOOLS.
+
+    The mcp_servers ``tools.exclude`` (config belt) and the trust-layer ban
+    (durable guarantee) must not drift: a send tool excluded from the menu
+    must also be refused if it ever reaches the classifier."""
+    from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
+    from shared.action_classes import BANNED_TOOLS
+
+    spec = MCP_CONNECTOR_REGISTRY["agentmail"]
+    assert spec.blocked_tools  # guard against an empty list silently passing
+    for tool in spec.blocked_tools:
+        assert f"agentmail:{tool}" in BANNED_TOOLS
+
+
+# ---------------------------------------------------------------------------
 # Module surface
 # ---------------------------------------------------------------------------
 
