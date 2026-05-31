@@ -59,21 +59,21 @@ class McpConnectorSpec:
 
 
 # AgentMail (https://agentmail.to) — API-first email built for AI agents. The
-# persona gets its OWN inbox (not the principal's Gmail); the native
-# create_draft / send separation maps onto reviewer-as-sender exactly. Hosted
-# MCP authenticates with an `x-api-key` header.
+# persona gets its OWN inbox (not the principal's Gmail). The send tools are
+# NOT excluded: ADR 0025 makes autonomous send a CONFIGURABLE per-action
+# ceiling, so the sends stay on the menu and are governed by the trust layer
+# (default draft_for_review = reviewer-as-sender; raised to autonomous only by
+# authored action_ceilings; the content-sensitivity floor forces money /
+# contract / scope / legal to draft regardless). Excluding them here would
+# hide the capability from the very layer meant to govern it. Hosted MCP
+# authenticates with an `x-api-key` header.
 MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
     "agentmail": McpConnectorSpec(
         name="agentmail",
         url="https://mcp.agentmail.to/mcp",
         auth_header="x-api-key",
         secret_env="AGENTMAIL_API_KEY",
-        blocked_tools=(
-            "send_message",
-            "send_draft",
-            "reply_to_message",
-            "forward_message",
-        ),
+        blocked_tools=(),
     ),
 }
 

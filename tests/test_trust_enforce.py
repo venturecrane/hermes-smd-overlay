@@ -100,11 +100,6 @@ def test_classify_tool_empty_name_raises() -> None:
         "calendar_delete_event",
         "practice_management_delete_matter",
         "connector_revoke_oauth",
-        # AgentMail MCP sends — prefixed `<server>:<tool>` runtime names.
-        "agentmail:send_message",
-        "agentmail:send_draft",
-        "agentmail:reply_to_message",
-        "agentmail:forward_message",
     ],
 )
 def test_classify_tool_banned_raises_banned_tool_error(banned_tool) -> None:
@@ -170,27 +165,44 @@ def test_enforce_internal_write_draft_for_review_routes_to_draft() -> None:
     assert decision.audit_action == "draft"
 
 
-def test_enforce_external_send_autonomous_requires_approval() -> None:
+def test_enforce_external_send_configured_ceiling() -> None:
+    """ADR 0025: external_send is governed by the configured per-action ceiling,
+    not a hardcoded approval. Default drafts; explicit autonomous sends;
+    explicit refused blocks; a vertical floor only narrows."""
     enforce = _load_trust_module("enforce")
-    # Without approval — refused.
-    refused = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
-        action=enforce.ActionClass.EXTERNAL_SEND,
-        skill_name="test",
+    A = enforce.ActionClass
+    C = enforce.Ceiling
+    # Default (no override): an autonomous scalar still DRAFTS external_send.
+    d = enforce.enforce(ceiling=C.AUTONOMOUS, action=A.EXTERNAL_SEND, skill_name="t", tool_name="x")
+    assert d.allowed is False and d.audit_action == "draft"
+    # Explicit action_ceilings autonomous -> send.
+    d = enforce.enforce(
+        ceiling=C.DRAFT_FOR_REVIEW,
+        action=A.EXTERNAL_SEND,
+        skill_name="t",
         tool_name="x",
-        current_turn_approval=False,
+        action_ceilings={A.EXTERNAL_SEND: C.AUTONOMOUS},
     )
-    assert refused.allowed is False
-    assert refused.audit_action == "refuse"
-    # With approval — allowed.
-    allowed = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
-        action=enforce.ActionClass.EXTERNAL_SEND,
-        skill_name="test",
+    assert d.allowed is True and d.audit_action == "allow"
+    # Explicit refused -> refuse.
+    d = enforce.enforce(
+        ceiling=C.AUTONOMOUS,
+        action=A.EXTERNAL_SEND,
+        skill_name="t",
         tool_name="x",
-        current_turn_approval=True,
+        action_ceilings={A.EXTERNAL_SEND: C.REFUSED},
     )
-    assert allowed.allowed is True
+    assert d.allowed is False and d.audit_action == "refuse"
+    # Vertical floor narrows an autonomous override back to draft.
+    d = enforce.enforce(
+        ceiling=C.AUTONOMOUS,
+        action=A.EXTERNAL_SEND,
+        skill_name="t",
+        tool_name="x",
+        action_ceilings={A.EXTERNAL_SEND: C.AUTONOMOUS},
+        vertical_floors={A.EXTERNAL_SEND: C.DRAFT_FOR_REVIEW},
+    )
+    assert d.allowed is False and d.audit_action == "draft"
 
 
 def test_enforce_external_send_draft_for_review_drafts() -> None:
@@ -441,3 +453,105 @@ def test_on_pre_tool_call_allow_returns_none(env_autonomous) -> None:
         tool_call_id="c",
     )
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# ADR 0025 — per-action ceilings + agentmail send reclassification
+# ---------------------------------------------------------------------------
+
+
+def test_agentmail_sends_classify_external_send() -> None:
+    enforce = _load_trust_module("enforce")
+    for t in (
+        "agentmail:send_message",
+        "agentmail:send_draft",
+        "agentmail:reply_to_message",
+        "agentmail:forward_message",
+    ):
+        c = enforce.classify_tool(t)
+        assert c.action_class == enforce.ActionClass.EXTERNAL_SEND
+        assert c.unmapped is False
+
+
+def test_resolve_ceiling_external_send_defaults_to_draft() -> None:
+    enforce = _load_trust_module("enforce")
+    eff = enforce.resolve_ceiling(enforce.ActionClass.EXTERNAL_SEND, enforce.Ceiling.AUTONOMOUS)
+    assert eff == enforce.Ceiling.DRAFT_FOR_REVIEW
+
+
+def test_resolve_ceiling_explicit_autonomous_send() -> None:
+    enforce = _load_trust_module("enforce")
+    eff = enforce.resolve_ceiling(
+        enforce.ActionClass.EXTERNAL_SEND,
+        enforce.Ceiling.DRAFT_FOR_REVIEW,
+        {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS},
+    )
+    assert eff == enforce.Ceiling.AUTONOMOUS
+
+
+def test_resolve_ceiling_vertical_floor_narrows() -> None:
+    enforce = _load_trust_module("enforce")
+    eff = enforce.resolve_ceiling(
+        enforce.ActionClass.EXTERNAL_SEND,
+        enforce.Ceiling.AUTONOMOUS,
+        {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS},
+        {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.DRAFT_FOR_REVIEW},
+    )
+    assert eff == enforce.Ceiling.DRAFT_FOR_REVIEW
+
+
+# ---------------------------------------------------------------------------
+# Content-sensitivity floor (ADR 0031) via evaluate_tool_call
+# ---------------------------------------------------------------------------
+
+
+def test_send_defaults_to_draft_without_override(env_autonomous) -> None:
+    """No action_ceilings -> external_send drafts even under an autonomous scalar."""
+    enforce = _load_trust_module("enforce")
+    result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "smd")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+
+
+def test_autonomous_clean_send_is_allowed(env_autonomous) -> None:
+    enforce = _load_trust_module("enforce")
+    args = {
+        "_action_ceilings": {"external_send": "autonomous"},
+        "subject": "Saw your note",
+        "text": "Got it, that works on my end. Talk soon.",
+    }
+    result = enforce.evaluate_tool_call("agentmail:send_message", args, "smd")
+    assert result is None
+
+
+def test_content_floor_downgrades_money_send(env_autonomous) -> None:
+    enforce = _load_trust_module("enforce")
+    args = {
+        "_action_ceilings": {"external_send": "autonomous"},
+        "subject": "Invoice attached",
+        "text": "Please remit payment of $500 by Friday.",
+    }
+    result = enforce.evaluate_tool_call("agentmail:send_message", args, "smd")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "draft" in result["message"].lower()
+
+
+def test_content_floor_downgrades_contract_send(env_autonomous) -> None:
+    enforce = _load_trust_module("enforce")
+    args = {
+        "_action_ceilings": {"external_send": "autonomous"},
+        "text": "Attached is the contract, please sign and return.",
+    }
+    result = enforce.evaluate_tool_call("agentmail:send_message", args, "smd")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+
+
+def test_send_draft_with_no_body_fails_toward_draft(env_autonomous) -> None:
+    """send_draft carries no inspectable body; the floor fails toward draft."""
+    enforce = _load_trust_module("enforce")
+    args = {"_action_ceilings": {"external_send": "autonomous"}, "draft_id": "d_1"}
+    result = enforce.evaluate_tool_call("agentmail:send_draft", args, "smd")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"

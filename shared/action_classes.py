@@ -91,19 +91,21 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # Connector-level destructive operations.
         "connector_revoke_oauth",
         "connector_unbind_permanent",
-        # AgentMail MCP — autonomous outbound from the persona's own mailbox
-        # (ADR 0005 reviewer-as-sender). MCP tools reach this classifier under
-        # `<server>:<tool>` notation, so the runtime names are prefixed. These
-        # MUST be listed explicitly: an UNMAPPED tool falls back to READ =
-        # allowed (classify_tool below), so the agentmail sends would otherwise
-        # be fail-OPEN. The draft path (`agentmail:create_draft`,
-        # `agentmail:update_draft`) is intentionally NOT banned — drafting is
-        # the agent's job; a human reviewer sends. Keep in sync with the
-        # blocked_tools list in bootstrap/mcp_registry.py (asserted by test).
-        "agentmail:send_message",
-        "agentmail:send_draft",
-        "agentmail:reply_to_message",
-        "agentmail:forward_message",
+        #
+        # NOTE on AgentMail sends (`agentmail:send_message`, `send_draft`,
+        # `reply_to_message`, `forward_message`): these are NO LONGER banned.
+        # ADR 0025 (Captain decision 2026-05-29) overturned the hardcoded
+        # autonomous-send refusal — exposure is now a CONFIGURABLE per-action
+        # ceiling, not a permanent ban. The agentmail sends are classified
+        # ``EXTERNAL_SEND`` in TOOL_ACTION_CLASS_MAP below and governed by the
+        # resolved ceiling (default ``draft_for_review`` = reviewer-as-sender;
+        # raised to ``autonomous`` only by authored ``action_ceilings``; a
+        # vertical floor can only narrow). The content-sensitivity floor
+        # (``shared.content_floor``) additionally forces money / contract /
+        # scope / legal content to draft even under an autonomous ceiling.
+        # The PRINCIPAL-identity sends (`email_send`, `email_reply`, ...) stay
+        # banned above — "never send as Scott" is a hard floor; the agent owns
+        # its OWN AgentMail identity, not the principal's mailbox.
     }
 )
 
@@ -131,10 +133,8 @@ BANNED_REASON: Mapping[str, str] = MappingProxyType(
         "practice_management_close_matter_permanent": "banned_tool_destructive",
         "connector_revoke_oauth": "banned_tool_destructive",
         "connector_unbind_permanent": "banned_tool_destructive",
-        "agentmail:send_message": "banned_tool_pattern_a",
-        "agentmail:send_draft": "banned_tool_pattern_a",
-        "agentmail:reply_to_message": "banned_tool_pattern_a",
-        "agentmail:forward_message": "banned_tool_pattern_a",
+        # agentmail sends are NOT banned (ADR 0025) — see the note in
+        # BANNED_TOOLS above. They are EXTERNAL_SEND, ceiling-governed.
     }
 )
 
@@ -150,7 +150,21 @@ BANNED_REASON: Mapping[str, str] = MappingProxyType(
 
 
 _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
-    # Email — read-only + draft-creation only. SEND is BANNED.
+    # AgentMail MCP — the persona's OWN mailbox (not the principal's Gmail).
+    # MCP tools reach the classifier under `<server>:<tool>` notation, so the
+    # runtime names are prefixed. Sends are EXTERNAL_SEND, governed by the
+    # resolved per-action ceiling (ADR 0025): default draft_for_review;
+    # autonomous only when authored in action_ceilings; vertical floor narrows;
+    # content-sensitivity floor (shared.content_floor) forces sensitive content
+    # to draft even under autonomous. Drafting (`agentmail:create_draft`,
+    # `agentmail:update_draft`) is INTERNAL_WRITE — the agent's own job.
+    "agentmail:send_message": ActionClass.EXTERNAL_SEND,
+    "agentmail:send_draft": ActionClass.EXTERNAL_SEND,
+    "agentmail:reply_to_message": ActionClass.EXTERNAL_SEND,
+    "agentmail:forward_message": ActionClass.EXTERNAL_SEND,
+    "agentmail:create_draft": ActionClass.INTERNAL_WRITE,
+    "agentmail:update_draft": ActionClass.INTERNAL_WRITE,
+    # Email — read-only + draft-creation only. PRINCIPAL-identity SEND is BANNED.
     "email_list_messages": ActionClass.READ,
     "email_get_message": ActionClass.READ,
     "email_search": ActionClass.READ,

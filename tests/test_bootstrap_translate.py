@@ -572,8 +572,13 @@ def test_translate_materializes_agentmail_mcp_server(tmp_path, monkeypatch):
     assert am["headers"] == {"x-api-key": "am_us_test_key"}
 
 
-def test_translate_excludes_agentmail_send_tools(tmp_path, monkeypatch):
-    """The autonomous-send tools are excluded from the agentmail toolset (ADR 0005)."""
+def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
+    """ADR 0025: agentmail send tools are NOT excluded from the MCP toolset.
+
+    Exposure is a configurable per-action trust ceiling, not an MCP-level
+    exclusion — the sends stay on the menu so the trust layer can govern them.
+    The materialized agentmail server carries no ``tools.exclude``.
+    """
     monkeypatch.setenv("AGENTMAIL_API_KEY", "am_us_test_key")
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
     translate_customer_yaml(
@@ -582,11 +587,7 @@ def test_translate_excludes_agentmail_send_tools(tmp_path, monkeypatch):
         skills_dir=str(skills_dir),
     )
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
-    excluded = config["mcp_servers"]["agentmail"]["tools"]["exclude"]
-    for tool in ("send_message", "send_draft", "reply_to_message", "forward_message"):
-        assert tool in excluded
-    # The draft path is NOT excluded — drafting is the agent's job.
-    assert "create_draft" not in excluded
+    assert "tools" not in config["mcp_servers"]["agentmail"]
 
 
 def test_translate_skips_agentmail_when_key_unset(tmp_path, monkeypatch):
@@ -615,19 +616,25 @@ def test_translate_unregistered_mcp_backend_not_materialized(tmp_path):
     assert "mcp_servers" not in config
 
 
-def test_agentmail_blocked_tools_are_banned_at_trust_layer():
-    """Every agentmail blocked_tool has a prefixed entry in BANNED_TOOLS.
+def test_agentmail_sends_are_external_send_not_banned():
+    """ADR 0025: agentmail sends are reclassified, not banned.
 
-    The mcp_servers ``tools.exclude`` (config belt) and the trust-layer ban
-    (durable guarantee) must not drift: a send tool excluded from the menu
-    must also be refused if it ever reaches the classifier."""
+    The send tools are NO LONGER in BANNED_TOOLS — they are EXTERNAL_SEND in
+    the action-class map, governed by the resolved trust ceiling. The registry
+    no longer excludes them (blocked_tools is empty)."""
     from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
-    from shared.action_classes import BANNED_TOOLS
+    from shared.action_classes import (
+        BANNED_TOOLS,
+        TOOL_ACTION_CLASS_MAP,
+        ActionClass,
+    )
 
     spec = MCP_CONNECTOR_REGISTRY["agentmail"]
-    assert spec.blocked_tools  # guard against an empty list silently passing
-    for tool in spec.blocked_tools:
-        assert f"agentmail:{tool}" in BANNED_TOOLS
+    assert spec.blocked_tools == ()
+    for tool in ("send_message", "send_draft", "reply_to_message", "forward_message"):
+        prefixed = f"agentmail:{tool}"
+        assert prefixed not in BANNED_TOOLS
+        assert TOOL_ACTION_CLASS_MAP[prefixed] == ActionClass.EXTERNAL_SEND
 
 
 # ---------------------------------------------------------------------------
