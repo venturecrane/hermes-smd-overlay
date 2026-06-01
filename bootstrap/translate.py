@@ -445,6 +445,41 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
     return {"webhook": {"enabled": True, "extra": {"port": 8644, "routes": routes}}}
 
 
+def _materialize_telegram_platform(customer: dict[str, Any]) -> dict[str, Any]:
+    """Build the Hermes-native top-level ``telegram:`` config block from customer.yaml.
+
+    Reads ``customer["telegram"]`` (``enabled``, ``allow_from``, ``require_mention``,
+    ``reactions``) and emits the keys Hermes' config loader maps to env
+    (``telegram.allow_from`` -> ``TELEGRAM_ALLOWED_USERS``). The bot TOKEN is NOT
+    here — it is the Fly secret ``TELEGRAM_BOT_TOKEN``, which auto-enables the
+    native polling platform. This block authors the ALLOWLIST as reviewable
+    config (the source of truth) rather than a loose Fly secret. See ADR 0033.
+
+    **FAIL-CLOSED:** if ``telegram.enabled`` is true but ``allow_from`` is empty we
+    ``raise`` — the pinned Hermes ref's authorizer returns ``True`` (allow ALL) when
+    ``TELEGRAM_ALLOWED_USERS`` is unset (``telegram.py``: ``if not allowed_csv: return True``),
+    so an enabled-but-unrestricted Telegram bot must never be materialized. Returns
+    ``{}`` when there is no enabled telegram block, keeping configs byte-identical.
+    """
+    tg = customer.get("telegram")
+    if not isinstance(tg, dict) or not tg.get("enabled"):
+        return {}
+    allow_from = [str(uid).strip() for uid in (tg.get("allow_from") or []) if str(uid).strip()]
+    if not allow_from:
+        raise ValueError(
+            "customer.yaml telegram.enabled is true but allow_from is empty. The pinned "
+            "Hermes ref allows ALL Telegram users when the allowlist is unset (fail-open); "
+            "refusing to materialize an unrestricted bot. Author allow_from with the "
+            "permitted Telegram user id(s)."
+        )
+    block: dict[str, Any] = {"allow_from": allow_from}
+    if "require_mention" in tg:
+        block["require_mention"] = bool(tg["require_mention"])
+    if "reactions" in tg:
+        block["reactions"] = bool(tg["reactions"])
+    return block
+
+
 def _persona_config(
     persona: dict[str, Any],
     customer: dict[str, Any],
@@ -506,6 +541,14 @@ def _persona_config(
     webhook_platform = _materialize_webhook_platform(customer)
     if webhook_platform:
         config["platforms"] = webhook_platform
+
+    # Telegram: author the allowlist (and tuning) as reviewable config. The bot
+    # token is a Fly secret that auto-enables the native polling platform; this
+    # block makes customer.yaml the source of truth for WHO may talk to the bot.
+    # Fail-closed: raises if enabled with an empty allowlist (ADR 0033).
+    telegram_block = _materialize_telegram_platform(customer)
+    if telegram_block:
+        config["telegram"] = telegram_block
 
     return config
 
