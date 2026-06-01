@@ -1,20 +1,20 @@
 """hermes-smd-webhook-gate — the deterministic front-door for inbound webhooks.
 
 Why this exists (read first): Hermes' native webhook adapter verifies only
-GitHub / GitLab / Generic(``X-Webhook-Signature``) signatures. AgentMail signs
-with ``X-AgentMail-Signature`` using the SAME algorithm (hex HMAC-SHA256 of the
-raw body) — only the header NAME differs. The overlay must not modify Hermes
-core, so this thin front-door reconciles the header and is the single
-HTTP-edge verifier:
+GitHub / GitLab / Generic(``X-Webhook-Signature`` = hex HMAC-SHA256 of the body)
+signatures. AgentMail delivers via **Svix** (``svix-id`` / ``svix-timestamp`` /
+``svix-signature`` headers, ``whsec_`` secret, base64 v1 scheme) — a different
+verification entirely. The overlay must not modify Hermes core, so this thin
+front-door is the single HTTP-edge verifier and scheme bridge:
 
-  public POST (AgentMail)  ->  this gate (verify X-AgentMail-Signature)
-                           ->  localhost:8644 (Hermes adapter, Generic verify)
+  public POST (AgentMail/Svix)  ->  this gate (verify Svix signature)
+                                ->  localhost:8644 (Hermes adapter, Generic verify)
 
-On the forward hop the gate sets ``X-Webhook-Signature`` (recomputed over the
-exact forwarded bytes, same secret) so the adapter re-verifies, and sets
-``X-Request-ID`` to the inbound message-id so the adapter's idempotency cache
-dedupes vendor retries. Only the gate is exposed publicly (Fly ``http_service``
-points at ``GATE_PORT``); the gateway's 8644 stays loopback-reachable.
+On the forward hop the gate sets ``X-Webhook-Signature`` (hex HMAC-SHA256 over the
+exact forwarded bytes, same secret string) so the adapter re-verifies, and sets
+``X-Request-ID`` to the Svix delivery id so the adapter's idempotency cache dedupes
+vendor retries. Only the gate is exposed publicly (Fly ``http_service`` points at
+``GATE_PORT``); the gateway's 8644 stays loopback-reachable.
 
 Security posture: the gate is the deterministic auth boundary. A forged POST
 (bad/missing signature) is rejected 401 before any agent work. Sender-trust
@@ -29,6 +29,7 @@ is installed. Launched by bootstrap.sh as a tini-supervised child.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import http.client
@@ -57,15 +58,33 @@ def _hex_hmac_sha256(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def verify_agentmail_signature(body: bytes, header_value: str, secret: str) -> bool:
-    """True iff ``X-AgentMail-Signature`` == hex HMAC-SHA256(body, secret).
+def verify_svix_signature(
+    body: bytes, svix_id: str, svix_ts: str, svix_sig_header: str, secret: str
+) -> bool:
+    """Svix webhook verification — AgentMail delivers via Svix.
 
-    Constant-time compare. A falsy header or secret is a reject (fail-closed).
+    (Verified against AgentMail's webhook-verification docs: headers
+    ``svix-id`` / ``svix-timestamp`` / ``svix-signature``, secret prefixed
+    ``whsec_``.) Scheme: signed content = ``f"{id}.{timestamp}.{body}"``; the
+    HMAC key is the base64-decoded secret (after the ``whsec_`` prefix); the
+    expected value is base64(HMAC-SHA256(key, signed)); the ``svix-signature``
+    header is a space-delimited list of ``v1,<base64>`` — match any in
+    constant time. Any missing field is a reject (fail-closed).
     """
-    if not header_value or not secret:
+    if not (svix_id and svix_ts and svix_sig_header and secret):
         return False
-    expected = _hex_hmac_sha256(body, secret)
-    return hmac.compare_digest(str(header_value), expected)
+    try:
+        key_b64 = secret.split("_", 1)[1] if secret.startswith("whsec_") else secret
+        key = base64.b64decode(key_b64)
+    except Exception:
+        return False
+    signed = svix_id.encode() + b"." + svix_ts.encode() + b"." + body
+    expected = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+    for part in svix_sig_header.split():
+        version, _, sig = part.partition(",")
+        if version == "v1" and sig and hmac.compare_digest(sig, expected):
+            return True
+    return False
 
 
 def _route_secret(route: str) -> str | None:
@@ -128,19 +147,28 @@ class _Handler(BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length) if length else b""
 
-        sig = self.headers.get("X-AgentMail-Signature", "")
-        if not verify_agentmail_signature(body, sig, secret):
-            logger.warning("gate: invalid signature for route %r", route)
+        svix_id = self.headers.get("svix-id", "")
+        svix_ts = self.headers.get("svix-timestamp", "")
+        svix_sig = self.headers.get("svix-signature", "")
+        if not verify_svix_signature(body, svix_id, svix_ts, svix_sig, secret):
+            # Diagnostic: header NAMES only (never values/secrets) so a future
+            # provider scheme change is debuggable without a leak.
+            logger.warning(
+                "gate: invalid signature for route %r (headers present: %s)",
+                route,
+                sorted(self.headers.keys()),
+            )
             self._json(401, {"error": "invalid signature"})
             return
 
-        # Forward verbatim to the Hermes adapter with the Generic header it
-        # understands (recomputed over the exact bytes) + an idempotency id.
+        # Forward to the Hermes adapter with the Generic header it understands
+        # (hex HMAC over the exact bytes, same secret) + the Svix delivery id as
+        # the idempotency key so adapter dedupes vendor retries.
         fwd_sig = _hex_hmac_sha256(body, secret)
         headers = {
             "Content-Type": self.headers.get("Content-Type", "application/json"),
             "X-Webhook-Signature": fwd_sig,
-            "X-Request-ID": _message_id(body) or sig[:64],
+            "X-Request-ID": svix_id or (_message_id(body) or "")[:64],
         }
         # Forward over a fixed loopback host:port (http.client, not a dynamic
         # URL) — route is charset-validated above and only forms the path.
@@ -168,12 +196,14 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     port = int(os.environ.get("WEBHOOK_GATE_PORT", DEFAULT_GATE_PORT))
-    # Boot self-check (Devil's-Advocate #1): prove the HMAC path is sane so a
-    # byte-mangling bug surfaces here, not as phantom 401s on live traffic.
-    probe = verify_agentmail_signature(
-        b"probe", _hex_hmac_sha256(b"probe", "k"), "k"
-    )
-    assert probe, "webhook-gate HMAC self-check failed"
+    # Boot self-check: round-trip a Svix-signed probe so a crypto/encoding bug
+    # surfaces here, not as phantom 401s on live traffic.
+    _whsec = "whsec_" + base64.b64encode(b"selfcheckkey").decode()
+    _key = base64.b64decode(_whsec.split("_", 1)[1])
+    _signed = b"id1.1700000000." + b"probe"
+    _sig = base64.b64encode(hmac.new(_key, _signed, hashlib.sha256).digest()).decode()
+    probe = verify_svix_signature(b"probe", "id1", "1700000000", f"v1,{_sig}", _whsec)
+    assert probe, "webhook-gate Svix self-check failed"
     httpd = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
     logger.info(
         "webhook-gate listening on 0.0.0.0:%d -> %s:%d (HMAC self-check ok)",
