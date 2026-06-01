@@ -46,6 +46,10 @@ Issues = "https://github.com/venturecrane/hermes-smd-overlay/issues"
 
 [project.scripts]
 hermes-smd = "bootstrap.cli:main"
+hermes-smd-webhook-gate = "webhook_gate:main"
+
+[tool.setuptools]
+py-modules = ["webhook_gate"]
 
 [tool.setuptools.packages.find]
 where = ["."]

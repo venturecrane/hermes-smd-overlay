@@ -674,3 +674,55 @@ def test_agentmail_sends_are_external_send_not_banned():
 def test_translate_customer_yaml_is_callable():
     """The ``translate_customer_yaml`` function must exist and be callable."""
     assert callable(translate_customer_yaml)
+
+
+# --- inbound webhook platform materialization (ADR 0021 Stream E) ---------
+
+from bootstrap import translate as _wh  # noqa: E402
+
+_WH_CUSTOMER = {
+    "connectors": {
+        "Email": {
+            "adapter": "agentmail",
+            "backend": "mcp:agentmail",
+            "enabled": True,
+            "webhook_url": "https://hermes-smd.fly.dev/webhooks/agentmail",
+        }
+    },
+    "webhook_triggers": [
+        {
+            "source": "agentmail",
+            "event_type": "message.received",
+            "skill": "inbox-triage",
+            "persona": "crane",
+        }
+    ],
+}
+
+
+def test_webhook_platform_materialized_when_secret_present(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET_AGENTMAIL", "shh")
+    out = _wh._materialize_webhook_platform(_WH_CUSTOMER)
+    assert out["webhook"]["enabled"] is True
+    route = out["webhook"]["extra"]["routes"]["agentmail"]
+    assert route["secret"] == "shh"
+    assert route["events"] == ["message.received"]
+    assert route["skills"] == ["inbox-triage"]
+    assert "untrusted" in route["prompt"].lower()
+
+
+def test_webhook_platform_fail_closed_without_secret(monkeypatch):
+    monkeypatch.delenv("WEBHOOK_SECRET_AGENTMAIL", raising=False)
+    assert _wh._materialize_webhook_platform(_WH_CUSTOMER) == {}
+
+
+def test_webhook_platform_empty_when_no_webhook_url():
+    cust = {"connectors": {"Email": {"adapter": "agentmail", "enabled": True}}}
+    assert _wh._materialize_webhook_platform(cust) == {}
+
+
+def test_route_name_parsed_from_webhook_url():
+    assert _wh._route_name_from_webhook_url("https://h.fly.dev/webhooks/agentmail") == "agentmail"
+    assert _wh._route_name_from_webhook_url("https://h/webhooks/x/") == "x"
+    assert _wh._route_name_from_webhook_url("") is None
+    assert _wh._route_name_from_webhook_url("https://h/no-segment") is None
