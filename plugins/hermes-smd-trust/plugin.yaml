@@ -4,6 +4,9 @@ description: "Content-class trust ceilings + outbound fabrication gate (ADR 0028
 author: VentureCrane
 requires_env:
   - SMD_CUSTOMER_SLUG
+  # outbound.py require()s this to emit FABRICATION_FILTER_TRIGGERED audit
+  # rows for the ADR 0028 gate; declared so it's caught at preflight.
+  - SMD_D1_AUDIT_BINDING
 provides_hooks:
   - pre_tool_call
 hooks:
