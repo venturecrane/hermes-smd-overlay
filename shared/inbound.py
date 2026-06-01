@@ -1,6 +1,6 @@
 """Inbound provenance + quarantine primitives — ADR 0027.
 
-SOURCE OF TRUTH: ``ss-console/ai-employee/adapter/inbound_envelope.py``.
+SOURCE OF TRUTH: ``ss-console/operator/adapter/inbound_envelope.py``.
 This is a VENDORED copy carried in the overlay so the webhook router and the
 ``hermes-smd-inbound`` plugin can attribute + quarantine untrusted inbound
 content without a cross-repo runtime dependency (overlay cannot runtime-import

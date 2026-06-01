@@ -1,6 +1,6 @@
 """Honcho conclusion poller + D1 writer.
 
-Ported from ss-console/ai-employee/adapter/memory/. The original
+Ported from ss-console/operator/adapter/memory/. The original
 "customer-owned memory artifact" model (ADR 0008, superseded) is
 replaced by the Honcho mirror pattern (ADR 0016).
 

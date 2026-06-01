@@ -1,7 +1,7 @@
 """Tests for the ``hermes-smd-voice`` plugin's transform layer.
 
 Ported from
-ss-console/ai-employee/adapter/voice/tests/test_transform.py with the
+ss-console/operator/adapter/voice/tests/test_transform.py with the
 register-hooks coverage from the placeholder retained.
 
 Covers:

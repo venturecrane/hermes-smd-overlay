@@ -12,7 +12,7 @@ is case-insensitive; markers are either literal phrases or regexes.
 Single source of truth
 ----------------------
 The canonical marker registry lives in **ss-console** at
-``ai-employee/safety-substrate/fabrication_markers.json`` (authored by PR-B).
+``operator/safety-substrate/fabrication_markers.json`` (authored by PR-B).
 This overlay vendors a BYTE-EXACT copy at ``shared/fabrication_markers.json``.
 The two must not drift:
 ``tests/test_outbound_gate.py::test_vendored_markers_match_canonical_sha256``

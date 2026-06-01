@@ -30,7 +30,7 @@ from tests.conftest import load_plugin
 
 # Canonical artifact provenance. The vendored shared/fabrication_markers.json is
 # a byte-exact copy of the ss-console source of truth
-# (ai-employee/safety-substrate/fabrication_markers.json). This sha256 pins the
+# (operator/safety-substrate/fabrication_markers.json). This sha256 pins the
 # vendored bytes so the two repos cannot silently drift.
 #
 # Pinned to the PR-B artifact at branch feat/aie-inbound-spine-0027

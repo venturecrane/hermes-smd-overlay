@@ -256,7 +256,7 @@ def test_translate_writes_no_tombstones_for_any_persona(tmp_path):
 
 
 # customer.yaml with one persona that ships two bundles. Each entry
-# mirrors the ai-employee/bundles/ catalog shape (slug, description,
+# mirrors the operator/bundles/ catalog shape (slug, description,
 # skills, instruction).
 YAML_WITH_BUNDLES = VALID_YAML.replace(
     "        enabled: true\n",

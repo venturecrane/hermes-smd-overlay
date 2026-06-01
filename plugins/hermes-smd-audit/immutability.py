@@ -1,6 +1,6 @@
 """Audit-log immutability enforcement at the Worker layer.
 
-Ported from ss-console/ai-employee/adapter/audit_log_immutability.py.
+Ported from ss-console/operator/adapter/audit_log_immutability.py.
 
 Cloudflare D1 does not ship per-role table permissions, so the substrate
 cannot grant the agent-runtime binding INSERT-only on ``audit_log`` the way

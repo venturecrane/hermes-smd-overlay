@@ -115,7 +115,7 @@ def test_wrap_inbound_contains_content_fence_and_attribution() -> None:
 
 
 # The exact canonical wrap output for a fully-pinned envelope + nonce, copied
-# from ss-console ai-employee/adapter/inbound_envelope.py::wrap_inbound at the
+# from ss-console operator/adapter/inbound_envelope.py::wrap_inbound at the
 # PR #1151 merge commit (fede4ec1…). Verified byte-identical: this overlay's
 # wrap_inbound, given the same field values + nonce, produces this exact string.
 _CANONICAL_WRAP_EXPECTED = (
@@ -135,7 +135,7 @@ def test_wrap_inbound_canonical_format_contract() -> None:
     match the canonical ss-console fence format BYTE-FOR-BYTE.
 
     shared/inbound.py is a vendored copy of ss-console
-    ai-employee/adapter/inbound_envelope.py. Because it is CODE (not data), the
+    operator/adapter/inbound_envelope.py. Because it is CODE (not data), the
     overlay/ss-console alignment is asserted by this contract test, NOT a byte
     hash of the file (cross-repo formatting/lint deltas would break a file
     hash). Instead we pin the OBSERVABLE OUTPUT: given identical field values +

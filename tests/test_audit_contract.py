@@ -21,7 +21,7 @@ from shared.audit_contract import (
 )
 
 # Canonical column order — this list IS the contract. If you change it you must
-# change it in lockstep with ss-console docs/specs/ai-employee/d1-schema.md and
+# change it in lockstep with ss-console docs/specs/operator/d1-schema.md and
 # the ss-console schema-snapshot guard. This test deliberately hard-codes the
 # expected order so a silent reorder fails.
 _EXPECTED_COLUMNS = (

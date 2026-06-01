@@ -11,7 +11,7 @@ Per-tool and per-LLM-call audit emission for SMD AI Employee customer Machines.
 
 ## Status
 
-Stub. Real implementation ports from `ss-console/ai-employee/adapter/audit_log.py` in §7 of the build plan.
+Stub. Real implementation ports from `ss-console/operator/adapter/audit_log.py` in §7 of the build plan.
 
 ## Env requirements
 

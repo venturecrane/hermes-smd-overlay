@@ -1,6 +1,6 @@
 """Tests for the voice sample ingestion pipeline.
 
-Ported from ss-console/ai-employee/adapter/tests/test_voice_pipeline.py.
+Ported from ss-console/operator/adapter/tests/test_voice_pipeline.py.
 
 Covers:
 

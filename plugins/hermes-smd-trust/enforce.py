@@ -1,6 +1,6 @@
 """Trust-ceiling enforcement — the safety floor under every tool call.
 
-Ported from ``ss-console/ai-employee/adapter/trust_ceiling.py`` (the policy
+Ported from ``ss-console/operator/adapter/trust_ceiling.py`` (the policy
 core). The per-tool classification vocabulary (``ActionClass``,
 ``BANNED_TOOLS``, ``TOOL_ACTION_CLASS_MAP``, ``BannedToolError``,
 ``ToolClassification``, ``classify_tool``) lives in
@@ -106,7 +106,7 @@ def _min_ceiling(a: Ceiling, b: Ceiling) -> Ceiling:
 # Per-action-class ceiling resolution (ADR 0025)
 #
 # Mirrors the canonical policy core in
-# ``ss-console/ai-employee/adapter/trust_ceiling.py`` (the boot-invariant
+# ``ss-console/operator/adapter/trust_ceiling.py`` (the boot-invariant
 # imports that one; this overlay copy runs live in the gateway pre_tool_call
 # hook — the two must agree). Autonomy is configured per ActionClass, not by
 # one skill scalar: ``external_send`` defaults to ``draft_for_review``

@@ -1,6 +1,6 @@
 """hermes-smd-memory-mirror — mirror Honcho conclusions to per-customer D1.
 
-Ported from ss-console/ai-employee/adapter/memory/. The original
+Ported from ss-console/operator/adapter/memory/. The original
 "customer-owned memory artifact" model (ADR 0008, superseded) is
 replaced by the Honcho mirror pattern (ADR 0016): Honcho is the live
 store; D1 holds a parallel record with provenance

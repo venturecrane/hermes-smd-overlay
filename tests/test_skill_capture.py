@@ -142,11 +142,11 @@ def test_load_r2_config_full_env(monkeypatch, skill_capture):
     monkeypatch.setenv("R2_ENDPOINT_URL", "https://example.r2.cloudflarestorage.com")
     monkeypatch.setenv("R2_SKILL_BODIES_ACCESS_KEY_ID", "AKxxxxx")
     monkeypatch.setenv("R2_SKILL_BODIES_SECRET_ACCESS_KEY", "secretvalue")
-    monkeypatch.setenv("R2_SKILL_BODIES_BUCKET", "ss-ai-employee-smith-pi-firm-skills")
+    monkeypatch.setenv("R2_SKILL_BODIES_BUCKET", "ss-operator-smith-pi-firm-skills")
 
     config = skill_capture.load_r2_config_from_env()
     assert config is not None
-    assert config.bucket == "ss-ai-employee-smith-pi-firm-skills"
+    assert config.bucket == "ss-operator-smith-pi-firm-skills"
     assert config.endpoint_url == "https://example.r2.cloudflarestorage.com"
 
 
@@ -205,7 +205,7 @@ def test_capture_happy_path_persists(tmp_path, skill_capture, monkeypatch):
         endpoint_url="https://example.r2.cloudflarestorage.com",
         access_key_id="AK",
         secret_access_key="S",
-        bucket="ss-ai-employee-smith-pi-firm-skills",
+        bucket="ss-operator-smith-pi-firm-skills",
     )
 
     result = skill_capture.capture_skill_body(
@@ -227,7 +227,7 @@ def test_capture_happy_path_persists(tmp_path, skill_capture, monkeypatch):
     assert "r2_status = 'persisted'" in d1.executes[1][0]
     # One R2 PUT with the right key, bucket, and body.
     assert len(put_calls) == 1
-    assert put_calls[0]["Bucket"] == "ss-ai-employee-smith-pi-firm-skills"
+    assert put_calls[0]["Bucket"] == "ss-operator-smith-pi-firm-skills"
     assert put_calls[0]["Key"] == result.r2_key
     assert put_calls[0]["Body"] == body
 

@@ -10,7 +10,7 @@ Content-class trust ceiling enforcement.
 
 ## Status
 
-Stub. Real implementation ports from `ss-console/ai-employee/adapter/trust_ceiling.py` in §7 of the build plan.
+Stub. Real implementation ports from `ss-console/operator/adapter/trust_ceiling.py` in §7 of the build plan.
 
 ## Trust ceilings (planned, not yet implemented)
 

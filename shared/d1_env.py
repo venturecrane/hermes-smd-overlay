@@ -5,7 +5,7 @@ call :func:`d1_client_from_env`; it reads ``CUSTOMER_SLUG`` and the
 binding env var, validates both, and returns a :class:`D1Client`
 already wired to the correct namespace.
 
-Ported from ``ss-console/ai-employee/adapter/d1_env.py``. The source
+Ported from ``ss-console/operator/adapter/d1_env.py``. The source
 returned a ``NamespacedD1Executor`` wrapping a raw HTTP executor with
 the audit writer injected. The overlay's :class:`D1Client` folds the
 namespace assertion directly into the client (no wrapper), so this

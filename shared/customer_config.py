@@ -24,7 +24,7 @@ This loader does not differentiate at read time — it surfaces the full
 authored shape. The sidecar's diff logic compares two ``CustomerConfig``
 instances field-by-field to decide whether a change is structural.
 
-Ported from ``ss-console/ai-employee/adapter/validate_customer_yaml.py``;
+Ported from ``ss-console/operator/adapter/validate_customer_yaml.py``;
 the validation logic itself lives in ``bootstrap/validate.py`` so the
 bootstrap CLI can validate before translation. The runtime loader here
 parses the YAML and exposes accessors; structural validation is the

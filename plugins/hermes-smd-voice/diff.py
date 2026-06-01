@@ -1,6 +1,6 @@
 """Structural-diff extractor for voice samples.
 
-Ported from ss-console/ai-employee/adapter/voice/diff.py.
+Ported from ss-console/operator/adapter/voice/diff.py.
 
 The privacy floor for Voice Layer 2: a raw sent email is NEVER persisted.
 The pipeline computes a structural representation of the message — what

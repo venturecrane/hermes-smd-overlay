@@ -1,6 +1,6 @@
 """Tests for the hermes-smd-audit plugin.
 
-Ported from ss-console/ai-employee/adapter/tests/test_audit_log.py +
+Ported from ss-console/operator/adapter/tests/test_audit_log.py +
 test_audit_emit_points.py. Covers:
 
   * Registration: ``register(ctx)`` is callable and wires both hooks.

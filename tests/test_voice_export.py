@@ -1,6 +1,6 @@
 """Tests for the ``hermes-smd-voice`` plugin's export module.
 
-Ported from ss-console/ai-employee/adapter/voice/tests/test_export.py.
+Ported from ss-console/operator/adapter/voice/tests/test_export.py.
 
 Covers:
 

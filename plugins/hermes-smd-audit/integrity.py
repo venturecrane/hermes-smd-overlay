@@ -1,6 +1,6 @@
 """Periodic integrity check: Logpush mirror == D1 audit_log contents.
 
-Ported from ss-console/ai-employee/adapter/audit_log_integrity.py.
+Ported from ss-console/operator/adapter/audit_log_integrity.py.
 
 This module compares the audit_log rows present in D1 against the rows
 mirrored to the immutable Logpush archive (R2 with Object Lock). Any

@@ -8,7 +8,7 @@ definition; all writers build their row through ``build_audit_params`` so the
 positional tuple can never drift from ``INSERT_SQL``.
 
 The canonical audit_log schema lives ss-console-side in
-``docs/specs/ai-employee/d1-schema.md``; ``COLUMNS`` here mirrors it and is
+``docs/specs/operator/d1-schema.md``; ``COLUMNS`` here mirrors it and is
 pinned by the schema-snapshot CI guard.
 """
 

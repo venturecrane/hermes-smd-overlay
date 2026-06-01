@@ -1,6 +1,6 @@
 """Per-source ingestion state for voice samples — D1 reads and writes.
 
-Ported from ss-console/ai-employee/adapter/voice/state.py.
+Ported from ss-console/operator/adapter/voice/state.py.
 
 The dashboard reads ``voice_source_state`` to render the
 ``last-ingestion-at`` health indicator and the per-cohort sample count.
