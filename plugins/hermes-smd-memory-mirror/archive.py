@@ -1,6 +1,6 @@
 """TTL archival of aged Honcho conclusions.
 
-Ported from ss-console/ai-employee/adapter/memory/retention.py. The
+Ported from ss-console/operator/adapter/memory/retention.py. The
 original retention.py walked the customer-owned ``memory_ingested_items``
 table; under ADR 0016 (Honcho mirror, not artifact) the analogous shape
 is the ``persona_observations`` mirror — and the destructive operation
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Defaults — match ss-console/ai-employee/adapter/memory/retention.py
+# Defaults — match ss-console/operator/adapter/memory/retention.py
 # (180 days is a working-set window for an active customer; longer than
 # the per-document retention window and shorter than the audit-log
 # retention norm).

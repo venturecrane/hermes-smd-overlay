@@ -1,6 +1,6 @@
 """Tests for plugins/hermes-smd-audit/integrity.py.
 
-Ported from ss-console/ai-employee/adapter/tests/test_audit_log_integrity.py.
+Ported from ss-console/operator/adapter/tests/test_audit_log_integrity.py.
 
 Exercises the D1 vs Logpush mirror integrity comparison against fake
 in-memory loaders.

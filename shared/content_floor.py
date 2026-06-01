@@ -10,7 +10,7 @@ even when ``external_send`` is configured ``autonomous``, a message that touches
 Provenance
 ----------
 Customer-zero onboarding interview, 2026-05-31 (Captain decision), recorded in
-``ai-employee/customers/smd/onboarding-interview-2026-05-31.md`` and
+``operator/customers/smd/onboarding-interview-2026-05-31.md`` and
 ``docs/adr/0031-content-sensitivity-send-floor.md``:
 
     "Crane send from AgentMail | Autonomous — *except* the content floor below.

@@ -11,13 +11,13 @@ Sample-driven voice transformation for SMD AI Employee customer drafts.
 
 ## Status
 
-Stub. Real implementation ports from `ss-console/ai-employee/adapter/voice/` in §7 of the build plan.
+Stub. Real implementation ports from `ss-console/operator/adapter/voice/` in §7 of the build plan.
 
 ## Approach
 
 Sample-driven, not rule-based. The agent is shown examples of the customer's own writing (from `vaults/<slug>/voice/samples/` in R2) and matches the style. Rule-based "always use 'we' not 'I'" prescriptions tend to over-correct and read inauthentic; samples capture register, vocabulary, and rhythm holistically.
 
-The companion `ai-employee/voice-gate/` harness in `ss-console` blind-tests draft fidelity before launch (target: 80% reviewer-panel indistinguishability). This plugin is the runtime transformer; voice-gate is the pre-deployment evaluator. They share the *concept* of voice-fidelity-as-measurable but do not import each other.
+The companion `operator/voice-gate/` harness in `ss-console` blind-tests draft fidelity before launch (target: 80% reviewer-panel indistinguishability). This plugin is the runtime transformer; voice-gate is the pre-deployment evaluator. They share the *concept* of voice-fidelity-as-measurable but do not import each other.
 
 ## Env requirements
 

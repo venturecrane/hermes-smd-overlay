@@ -1,6 +1,6 @@
 """Tests for plugins/hermes-smd-audit/immutability.py.
 
-Ported from ss-console/ai-employee/adapter/tests/test_audit_log_immutability.py.
+Ported from ss-console/operator/adapter/tests/test_audit_log_immutability.py.
 
 Covers the Worker-layer enforcement wrapper, the SQL inspection helper,
 the Logpush mirror protocol stub, and the LegalHoldException bypass path.

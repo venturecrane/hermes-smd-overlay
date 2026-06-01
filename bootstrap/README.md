@@ -83,7 +83,7 @@ The sidecar applies the diff in place and signals the Hermes process; no restart
 
 ## Status
 
-The CLI plumbing (argument parsing, validation, logging, exit codes) is real today. The underlying translation and sync actions raise `NotImplementedError` until §7 of the build plan ports the logic from `ss-console/ai-employee/adapter/validate_customer_yaml.py` and `resolve_skill_pins.py`.
+The CLI plumbing (argument parsing, validation, logging, exit codes) is real today. The underlying translation and sync actions raise `NotImplementedError` until §7 of the build plan ports the logic from `ss-console/operator/adapter/validate_customer_yaml.py` and `resolve_skill_pins.py`.
 
 Exit codes:
 

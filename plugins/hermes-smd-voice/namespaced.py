@@ -1,6 +1,6 @@
 """Factory helper that wires `VoiceIngestionRunner` against namespaced R2.
 
-Ported from ss-console/ai-employee/adapter/voice/namespaced.py with the
+Ported from ss-console/operator/adapter/voice/namespaced.py with the
 audit-log and cross-module namespace-assertion dependencies stripped
 out — those live elsewhere in the overlay and aren't required by the
 runtime voice path.
@@ -69,7 +69,7 @@ class RawR2Client(Protocol):
 class _AssertingR2Wrapper:
     """Wraps a raw R2 client with a per-customer slug assertion.
 
-    Inline mirror of ``ss-console/ai-employee/adapter/namespace_assertion.NamespacedR2Client``;
+    Inline mirror of ``ss-console/operator/adapter/namespace_assertion.NamespacedR2Client``;
     kept narrow so the voice plugin can run without dragging the entire
     namespace-assertion module into the overlay. When the shared module
     lands here, this class is deleted in favor of the import.

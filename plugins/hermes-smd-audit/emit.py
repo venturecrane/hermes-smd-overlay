@@ -1,8 +1,8 @@
 """Audit row construction and D1 emission.
 
-Ported from ss-console/ai-employee/adapter/audit_log.py (AuditLogWriter,
+Ported from ss-console/operator/adapter/audit_log.py (AuditLogWriter,
 SHA-256 digesting, ULID generation, ISO-8601 timestamps, action_type
-validation) and from ss-console/ai-employee/adapter/audit_emit_points.py
+validation) and from ss-console/operator/adapter/audit_emit_points.py
 (ToolCallTimer, build_per_tool_metadata, scope-aware metadata extraction).
 
 The tool-classification helpers (``BannedToolError``, ``ToolClassification``,

@@ -56,8 +56,8 @@ actual content hash of the on-disk skill directory and:
   Phase C — the pin is set after the skill is hashed.
 
 Ported from
-``ss-console/ai-employee/adapter/validate_customer_yaml.py`` +
-``ss-console/ai-employee/adapter/resolve_skill_pins.py``.
+``ss-console/operator/adapter/validate_customer_yaml.py`` +
+``ss-console/operator/adapter/resolve_skill_pins.py``.
 """
 
 import hashlib

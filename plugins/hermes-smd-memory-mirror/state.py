@@ -5,7 +5,7 @@ closed enums it carries, and the helper that converts a Honcho
 conclusion payload into an :class:`ObservationRecord` ready for D1
 insertion.
 
-Ported from ss-console/ai-employee/adapter/memory/state.py. The original
+Ported from ss-console/operator/adapter/memory/state.py. The original
 ``IngestedItemRecord`` (centered on R2 keys and vector chunk IDs) is
 replaced with :class:`ObservationRecord` (centered on Honcho conclusion
 ids and source-message provenance) because the architectural posture
@@ -71,7 +71,7 @@ class ObservationState(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
-# ULID helper — vendored, identical to ss-console/ai-employee/adapter/memory
+# ULID helper — vendored, identical to ss-console/operator/adapter/memory
 # /state.py and honcho_interceptor.py. The three sites use the same Crockford
 # alphabet and produce sortable strings of identical length.
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://smd.services/contracts/skill_capture/v1",
   "title": "Skill Capture Contract v1 — ADR 0022 Stream 2",
-  "description": "Contract between the SS-side schema (per-customer D1 agent_skills_inventory + R2 bucket) and the overlay-side writer (venturecrane/hermes-smd-overlay hermes-smd-audit plugin). Both repos consume this file as the source of truth for the write-ahead pattern that persists agent-authored skill bodies. See docs/specs/ai-employee/skill-body-persistence.md for the prose contract.",
+  "description": "Contract between the SS-side schema (per-customer D1 agent_skills_inventory + R2 bucket) and the overlay-side writer (venturecrane/hermes-smd-overlay hermes-smd-audit plugin). Both repos consume this file as the source of truth for the write-ahead pattern that persists agent-authored skill bodies. See docs/specs/operator/skill-body-persistence.md for the prose contract.",
   "version": "1.0.0",
 
   "definitions": {
@@ -136,7 +136,7 @@
 
   "read": {
     "description": "Admin portal endpoint. SS-side; consumed by ss-console only.",
-    "endpoint": "GET /admin/ai-employee/{customer_slug}/skills/{skill_content_hash}/body",
+    "endpoint": "GET /admin/operator/{customer_slug}/skills/{skill_content_hash}/body",
     "auth": "admin session (host-scoped cookie on admin.smd.services)",
     "behavior": [
       "Look up row by (customer_slug, skill_content_hash) in per-customer D1.",

@@ -1,6 +1,6 @@
 """Voice sample ingestion pipeline.
 
-Ported from ss-console/ai-employee/adapter/voice/pipeline.py.
+Ported from ss-console/operator/adapter/voice/pipeline.py.
 
 The pipeline runs in two modes — scheduled (daily cron) and on-demand
 (synchronous call) — through a single entrypoint,

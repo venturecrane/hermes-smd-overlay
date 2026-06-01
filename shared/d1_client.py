@@ -8,7 +8,7 @@ mismatch is a fatal isolation breach and is raised loudly rather than
 silently writing to the wrong tenant's database.
 
 Ported from
-``ss-console/ai-employee/adapter/namespace_assertion.py`` with two
+``ss-console/operator/adapter/namespace_assertion.py`` with two
 adaptations for this overlay:
 
 * The source target was an async ``Executor`` protocol; ``D1Client`` here

@@ -1,6 +1,6 @@
 """Voice Layer 2 — sample-driven draft transformation.
 
-Ported from ss-console/ai-employee/adapter/voice/transform.py.
+Ported from ss-console/operator/adapter/voice/transform.py.
 
 Layer 1 (rules) lives in skill ``SKILL.md`` frontmatter — banned patterns,
 required patterns, tone register. Layer 2 (this module) is the

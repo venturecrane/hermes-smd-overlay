@@ -1,6 +1,6 @@
 """Captain dismissal entry point for active Honcho conclusions.
 
-Ported from ss-console/ai-employee/adapter/honcho_interceptor.py
+Ported from ss-console/operator/adapter/honcho_interceptor.py
 ``HonchoInterceptor.dismiss``. The original interceptor required Captain
 to provide a customer.yaml-style PR-anchored promotion path; under
 ADR 0016 (mirror, don't gate) we no longer require that ceremony for

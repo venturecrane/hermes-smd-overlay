@@ -1,6 +1,6 @@
 """Voice library export pipeline.
 
-Ported from ss-console/ai-employee/adapter/voice/export.py.
+Ported from ss-console/operator/adapter/voice/export.py.
 
 Per the customer-owned memory artifact policy, the customer can request
 a portable archive of their voice library on offboarding. This module

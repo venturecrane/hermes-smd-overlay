@@ -1,6 +1,6 @@
 """Partner-authored filter for voice samples.
 
-Ported from ss-console/ai-employee/adapter/voice/filter.py.
+Ported from ss-console/operator/adapter/voice/filter.py.
 
 The voice library is the partner's voice, not the agent's. Samples that
 the AI Employee drafted (and the partner sent unedited or lightly

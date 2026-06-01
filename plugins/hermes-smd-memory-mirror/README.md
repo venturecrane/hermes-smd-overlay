@@ -11,7 +11,7 @@ Mirror Honcho conclusions to per-customer D1 with provenance, plus Captain dismi
 
 ## Status
 
-Stub. Real implementation ports from `ss-console/ai-employee/adapter/memory/` in §7 of the build plan.
+Stub. Real implementation ports from `ss-console/operator/adapter/memory/` in §7 of the build plan.
 
 ## Approach
 

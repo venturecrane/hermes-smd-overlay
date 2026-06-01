@@ -1,7 +1,7 @@
 """Tests for ``shared.d1_client``.
 
 Ported from
-``ss-console/ai-employee/adapter/tests/test_namespace_assertion.py`` and
+``ss-console/operator/adapter/tests/test_namespace_assertion.py`` and
 ``test_namespace_adoption.py``. Adapted to the overlay's synchronous
 ``D1Client`` API and trimmed to the SQL-namespace surface that lives
 in this client (the R2 + Vectorize wrappers in the source moved to the

@@ -1,6 +1,6 @@
 """Citation detector — PI-vertical safety invariant #6.
 
-VENDORED from ``ss-console/ai-employee/safety-substrate/citation_filter.py``,
+VENDORED from ``ss-console/operator/safety-substrate/citation_filter.py``,
 which is the source-of-truth primitive. This is a pure-python copy carried in
 the overlay so the outbound gate (ADR 0028) can run the law-vertical Tier-2
 citation scan inside the trust plugin without a cross-repo runtime dependency.

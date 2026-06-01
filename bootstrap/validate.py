@@ -1,12 +1,12 @@
 """customer.yaml schema validation.
 
 Validates an authored ``customer.yaml`` against the schema documented
-in ``ai-employee/customer.yaml.schema.md`` (ss-console). Returns a
+in ``operator/customer.yaml.schema.md`` (ss-console). Returns a
 list of human-readable error strings; an empty list means the file
 is valid.
 
 Ported from
-``ss-console/ai-employee/adapter/validate_customer_yaml.py`` with
+``ss-console/operator/adapter/validate_customer_yaml.py`` with
 two adaptations:
 
 * The source script was a CLI returning exit codes; this module is
@@ -16,7 +16,7 @@ two adaptations:
 * The source validated the existence of on-disk skill directories and
   connector wrappers relative to the ss-console layout. The overlay
   doesn't ship those trees in this repo — skills live in
-  ``ss-console/ai-employee/skills/`` and connector adapters live in
+  ``ss-console/operator/skills/`` and connector adapters live in
   separate plugin directories. Schema validation here is the
   structural shape check; existence checks are deferred to the
   translation step, which knows where the per-customer skill catalog

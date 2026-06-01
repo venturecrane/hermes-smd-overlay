@@ -1,6 +1,6 @@
 """Audit row shape and accepted action_type vocabulary.
 
-Ported from ss-console/ai-employee/adapter/audit_log.py (the ACCEPTED_ACTION_TYPES
+Ported from ss-console/operator/adapter/audit_log.py (the ACCEPTED_ACTION_TYPES
 frozenset + ActorRole enum + AuditEvent dataclass).
 
 The tool-action-class vocabulary (``ActionClass``, ``BANNED_TOOLS``,
@@ -161,14 +161,14 @@ class ActorRole(str, enum.Enum):
 # ---------------------------------------------------------------------------
 # Agent-authored skill inventory — ADR 0022 Stream 2 (skill body persistence)
 #
-# Mirrors ss-console/ai-employee/migrations/0008 + 0009 combined. Lives in
+# Mirrors ss-console/operator/migrations/0008 + 0009 combined. Lives in
 # the per-customer D1 audit binding (SMD_D1_AUDIT_BINDING). The audit
 # plugin owns the writes; skill_capture.py implements the write-ahead
 # pattern (D1 row first with r2_status='pending', R2 PUT follows, UPDATE
 # to persisted/failed). Boot-time reconciler retries pending/failed rows.
 #
 # Schema is the authoritative copy from
-# docs/specs/ai-employee/skill-body-persistence.md (ss-console).
+# docs/specs/operator/skill-body-persistence.md (ss-console).
 # Idempotent CREATE TABLE IF NOT EXISTS / ALTER on each Machine boot so
 # the schema converges without a separate migration tool.
 # ---------------------------------------------------------------------------

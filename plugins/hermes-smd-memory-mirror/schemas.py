@@ -19,7 +19,7 @@ schema versioning follows the SS migrations convention (a top-level
 ``schema_version`` integer column on the live table; archive rows
 carry their schema_version snapshot at archive time).
 
-Ported from ss-console/ai-employee/adapter/memory/state.py
+Ported from ss-console/operator/adapter/memory/state.py
 ``memory_source_state`` + ``memory_ingested_items`` shape. The original
 "customer-owned memory artifact" model (ADR 0008, superseded) is
 replaced by the Honcho mirror pattern (ADR 0016); the provenance
