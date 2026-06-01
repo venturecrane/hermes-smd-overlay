@@ -4,7 +4,7 @@ Plugin overlay for the [Nous Hermes Agent](https://github.com/NousResearch/herme
 
 ## What this is
 
-Six plugins that attach to Hermes' documented plugin hook surface:
+Seven plugins (six production + one rebase probe) that attach to Hermes' documented plugin hook surface:
 
 | Plugin | Hooks | Purpose |
 |---|---|---|
@@ -30,7 +30,7 @@ Plus a `bootstrap/` CLI (`hermes-smd bootstrap`) that translates `customer.yaml.
 hermes plugins install venturecrane/hermes-smd-overlay --enable
 ```
 
-Hermes' plugin manager clones the repo, copies the five plugins under `~/.hermes/plugins/`, and runs each plugin's `register()` on next start.
+Hermes' plugin manager clones the repo, copies the seven plugins under `~/.hermes/plugins/`, and runs each plugin's `register()` on next start.
 
 ## Hermes version pin
 

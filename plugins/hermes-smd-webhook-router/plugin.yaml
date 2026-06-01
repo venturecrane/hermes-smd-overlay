@@ -6,6 +6,11 @@ requires_env:
   - SMD_CUSTOMER_SLUG
   - SMD_D1_AUDIT_BINDING
   - SMD_CUSTOMER_YAML_PATH
+  # Load-bearing: without it _verification_failure refuses to route every
+  # inbound webhook (an unverifiable event must not drive skill actions,
+  # issue #13). Declared required so a Machine missing it is caught at
+  # preflight, not silently non-routing.
+  - SMD_WEBHOOK_SIGNING_SECRET
 provides_hooks:
   - pre_gateway_dispatch
 hooks:
