@@ -49,16 +49,13 @@ _CUSTOMER_SLUG: str | None = None
 
 
 def bind_runtime(*, customer_slug: str, r2_reader: samples.R2SampleReader) -> None:
-    """Bind runtime collaborators after register() returns.
+    """Bind runtime collaborators that make the hooks active.
 
-    The Machine boot sequence:
-
-      1. Loads plugin entry points (calls ``register(ctx)``).
-      2. Constructs the customer-scoped R2 client.
-      3. Calls ``bind_runtime`` with the resolved slug + R2 binding.
-
-    Step 3 is what makes the hooks active. Without it, both hooks
-    return ``None`` and the plugin behaves like a no-op.
+    Called by :func:`register` itself (which constructs the reader from the
+    Machine's R2 env via ``samples.reader_from_env``), and directly by tests
+    that inject a fake reader. Until this runs, ``_R2_READER`` is ``None`` and
+    both hooks no-op; register() emits a WARNING in that case so an unbound
+    plugin is never mistaken for a healthy one.
     """
     global _R2_READER, _CUSTOMER_SLUG
     _R2_READER = r2_reader
@@ -157,23 +154,48 @@ async def on_post_llm_call(**kwargs: Any) -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point. Wires both hooks.
+    """Plugin entry point. Wires both hooks AND binds the runtime.
 
-    The Machine boot path resolves ``SMD_CUSTOMER_SLUG`` from env and
-    calls :func:`bind_runtime` after register returns. If the slug is
-    missing here, register still succeeds — the hook callbacks fall
-    back to no-ops.
+    Self-sufficient binding: register resolves ``SMD_CUSTOMER_SLUG`` and
+    constructs the R2 voice-sample reader from the Machine's R2 env
+    (``samples.reader_from_env``), then calls :func:`bind_runtime`. There is no
+    separate out-of-band boot step — the previous design *defined*
+    ``bind_runtime`` but nothing ever called it, so both hooks silently
+    no-op'd forever (the plugin reported a healthy register while doing
+    nothing — the exact fail-silent anti-pattern this overlay guards against).
+
+    If the customer slug or the R2 credentials are absent, the plugin does NOT
+    pretend to be active: it logs a WARNING naming what is missing and leaves
+    the runtime unbound (hooks no-op, but loudly and explained, not silently).
+    Tests may call :func:`bind_runtime` directly to inject a fake reader.
     """
     import os
 
     global _CUSTOMER_SLUG
-    _CUSTOMER_SLUG = os.environ.get("SMD_CUSTOMER_SLUG") or None
+    slug = os.environ.get("SMD_CUSTOMER_SLUG") or None
 
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("post_llm_call", on_post_llm_call)
-    logger.info(
-        "hermes-smd-voice registered (customer=%s, awaiting bind_runtime)",
-        _CUSTOMER_SLUG or "<unset>",
+
+    reader = samples.reader_from_env()
+    if slug and reader is not None:
+        bind_runtime(customer_slug=slug, r2_reader=reader)
+        logger.info("hermes-smd-voice registered and ACTIVE (customer=%s)", slug)
+        return
+
+    # Not active — be explicit about WHY. Never a silent healthy-looking no-op.
+    _CUSTOMER_SLUG = slug
+    missing = []
+    if not slug:
+        missing.append("SMD_CUSTOMER_SLUG")
+    if reader is None:
+        missing.append(
+            "R2 voice vault env (R2_ENDPOINT_URL/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET_CONFIG)"
+        )
+    logger.warning(
+        "hermes-smd-voice registered but INACTIVE — voice transformation will NOT run. "
+        "Missing: %s. Hooks will no-op until the runtime is bound.",
+        "; ".join(missing),
     )
 
 
