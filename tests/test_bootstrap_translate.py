@@ -726,3 +726,45 @@ def test_route_name_parsed_from_webhook_url():
     assert _wh._route_name_from_webhook_url("https://h/webhooks/x/") == "x"
     assert _wh._route_name_from_webhook_url("") is None
     assert _wh._route_name_from_webhook_url("https://h/no-segment") is None
+
+
+def test_telegram_platform_materialized_with_allowlist():
+    cust = {
+        "telegram": {
+            "enabled": True,
+            "allow_from": ["7367659986", " 123 "],
+            "require_mention": False,
+            "reactions": True,
+        }
+    }
+    block = _wh._materialize_telegram_platform(cust)
+    assert block["allow_from"] == ["7367659986", "123"]  # stringified + trimmed
+    assert block["require_mention"] is False
+    assert block["reactions"] is True
+
+
+def test_telegram_platform_fail_closed_on_empty_allowlist():
+    # enabled + empty allow_from must raise — pinned ref fails OPEN on empty allowlist
+    for bad in ([], ["", "  "], None):
+        with pytest.raises(ValueError, match="allow_from is empty"):
+            _wh._materialize_telegram_platform({"telegram": {"enabled": True, "allow_from": bad}})
+
+
+def test_telegram_platform_empty_when_absent_or_disabled():
+    assert _wh._materialize_telegram_platform({}) == {}
+    assert (
+        _wh._materialize_telegram_platform({"telegram": {"enabled": False, "allow_from": ["1"]}})
+        == {}
+    )
+
+
+def test_telegram_block_lands_in_persona_config():
+    # End-to-end through _persona_config: the telegram block appears in the config dict.
+    persona = {"slug": "crane", "name": "Crane", "status": "active", "skills": []}
+    cust = {
+        "customer_id": "smd",
+        "telegram": {"enabled": True, "allow_from": ["7367659986"], "require_mention": False},
+    }
+    config = _wh._persona_config(persona, cust, {})
+    assert config["telegram"]["allow_from"] == ["7367659986"]
+    assert config["telegram"]["require_mention"] is False
