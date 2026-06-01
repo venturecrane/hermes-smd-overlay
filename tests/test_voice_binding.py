@@ -108,7 +108,7 @@ def test_pre_llm_call_injects_samples_when_bound(voice):
     result = asyncio.run(voice.on_pre_llm_call(session_id="s", user_message="hi"))
     assert result is not None
     assert "context" in result
-    assert "voice samples" in result["context"]
+    assert "author voice profile" in result["context"]
 
 
 def test_pre_llm_call_noop_when_unbound(voice):
