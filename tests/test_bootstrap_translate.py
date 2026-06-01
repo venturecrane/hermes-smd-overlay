@@ -112,6 +112,35 @@ def test_translate_materializes_profile_directory(tmp_path):
     assert (profile_dir / "SOUL.md").exists()
 
 
+def test_translate_installs_enabled_skill_body_into_profile(tmp_path):
+    # Regression: the profile config.yaml referenced the skill but the body
+    # was never placed in the profile's own skills dir, so the persona booted
+    # skill-less (Hermes discovers skills per-profile by directory presence).
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    installed = hermes_home / "profiles" / "marcus" / "skills" / "inbox-triage" / "SKILL.md"
+    assert installed.exists(), "enabled persona skill body must be installed into the profile"
+    assert installed.read_text() == "# inbox-triage skill\n"
+
+
+def test_translate_does_not_install_disabled_skills(tmp_path):
+    body = VALID_YAML.replace("enabled: true", "enabled: false")
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    profile_skills = hermes_home / "profiles" / "marcus" / "skills"
+    assert not (profile_skills / "inbox-triage").exists(), (
+        "a disabled skill must not be installed into the profile"
+    )
+
+
 def test_translate_writes_persona_identity_into_soul_md(tmp_path):
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
     translate_customer_yaml(
