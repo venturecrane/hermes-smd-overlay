@@ -63,6 +63,7 @@ Ported from
 import hashlib
 import logging
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -475,6 +476,59 @@ def _yaml_bytes(data: dict[str, Any]) -> bytes:
     ).encode()
 
 
+def _install_persona_skills(
+    persona: dict[str, Any],
+    profile_dir: Path,
+    skills_dir: Path,
+) -> int:
+    """Copy each enabled persona skill body into the profile's own skills dir.
+
+    Hermes discovers skills **per profile** by directory presence under that
+    profile's ``HERMES_HOME/skills/`` (each profile carries its own skills dir
+    and ``.bundled_manifest``). :func:`_persona_config` writes the profile's
+    ``config.yaml`` skill *reference*, but without the skill body present in the
+    profile's skills dir the persona's agent cannot discover or load it — the
+    skill resolves only in the base catalog, never for the running persona.
+    This installs the body so the persona can actually use its skills.
+
+    Only the persona's *enabled* skills are copied (per-persona scoping per
+    ADR 0007); the rest of the base catalog stays invisible to this profile.
+    Existing builtin category dirs in the profile are left untouched.
+
+    Args:
+        persona: One persona block from ``customer.yaml``.
+        profile_dir: The profile's home (``<hermes_home>/profiles/<slug>``).
+        skills_dir: Root of the base skill catalog (``<hermes_home>/skills``).
+
+    Returns:
+        Count of skills installed (for logging).
+
+    Raises:
+        TranslateError: If an enabled skill's body is missing from the catalog
+            (defensive; :func:`_resolve_skill_pins` validates this earlier).
+    """
+    dest_root = profile_dir / "skills"
+    dest_root.mkdir(parents=True, exist_ok=True)
+    installed = 0
+    for skill in persona.get("skills", []) or []:
+        if not skill.get("enabled"):
+            continue
+        name = skill.get("name")
+        if not name:
+            continue
+        src = skills_dir / name
+        if not src.is_dir():
+            raise TranslateError(
+                f"persona {persona.get('slug')!r}: skill {name!r} body not found "
+                f"at {src} (cannot install into profile)"
+            )
+        # dirs_exist_ok=True refreshes the body in place on every boot so a
+        # catalog update is reflected without churning unrelated builtin dirs.
+        shutil.copytree(src, dest_root / name, dirs_exist_ok=True)
+        installed += 1
+    return installed
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -575,15 +629,25 @@ def translate_customer_yaml(
             persona=persona,
             profile_dir=profile_dir,
         )
+        # Install the persona's enabled skill bodies into the profile's own
+        # skills dir. Without this the config.yaml skill reference points at a
+        # body the persona can never discover (per-profile skills dir), so the
+        # agent boots skill-less. See _install_persona_skills.
+        installed_skills = _install_persona_skills(
+            persona=persona,
+            profile_dir=profile_dir,
+            skills_dir=skills_path,
+        )
         if wrote_config or wrote_soul or wrote_bundles or removed_bundles:
             logger.info(
                 "translate: wrote profile %s (config=%s, soul=%s, "
-                "bundles_written=%s, bundles_removed=%s)",
+                "bundles_written=%s, bundles_removed=%s, skills_installed=%s)",
                 slug,
                 wrote_config,
                 wrote_soul,
                 wrote_bundles,
                 removed_bundles,
+                installed_skills,
             )
         else:
             logger.debug("translate: profile %s already up to date", slug)
