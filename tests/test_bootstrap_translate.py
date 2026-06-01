@@ -752,7 +752,10 @@ def test_telegram_platform_fail_closed_on_empty_allowlist():
 
 def test_telegram_platform_empty_when_absent_or_disabled():
     assert _wh._materialize_telegram_platform({}) == {}
-    assert _wh._materialize_telegram_platform({"telegram": {"enabled": False, "allow_from": ["1"]}}) == {}
+    assert (
+        _wh._materialize_telegram_platform({"telegram": {"enabled": False, "allow_from": ["1"]}})
+        == {}
+    )
 
 
 def test_telegram_block_lands_in_persona_config():
