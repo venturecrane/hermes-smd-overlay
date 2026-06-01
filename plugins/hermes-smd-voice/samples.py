@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+from collections import Counter
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -264,12 +265,20 @@ def retrieve_relevant_samples(customer_slug: str, query_context: dict) -> list[d
 
 
 def render_sample_block(samples: list[dict]) -> str:
-    """Render a sample list into a compact text block for prompt injection.
+    """Render samples into a model-actionable author-voice profile block.
 
-    The block is intended to ride on the user message via pre_llm_call's
-    ``{"context": "<text>"}`` return shape. Hermes joins each plugin's
-    context contribution with ``\\n\\n`` (per docs/hook-surface.md §3),
-    so the block produced here is self-contained.
+    Injected via pre_llm_call's ``{"context": "<text>"}`` so the model
+    drafts in the author's register. Aggregates across the supplied
+    structural-diff fingerprints (style only — never raw content) into a
+    compact directive surfacing the signal that actually distinguishes a
+    writer: sentence brevity + length distribution, punctuation rhythm,
+    and greeting/signoff habits.
+
+    Surfaces the rhythm signal — ``sentence_length_distribution`` and
+    ``punctuation_rhythm`` — that the differ computes and stores. The
+    prior version dropped both, injecting only greeting/signoff/avg, a
+    near-empty label that could not shape a draft (the differ's signal
+    was computed, stored, and then silently discarded at render time).
 
     Empty samples produce an empty string; the hook returns ``None`` in
     that case to keep the user message unchanged.
@@ -277,19 +286,131 @@ def render_sample_block(samples: list[dict]) -> str:
     if not samples:
         return ""
 
+    n = len(samples)
+    greeting = _dominant(samples, "greeting_style")
+    signoff = _dominant(samples, "signoff_style")
+    avg_len = _mean_float(samples, "avg_sentence_length")
+    length_mix = _aggregate_distribution(samples)
+    punctuation = _mean_punctuation(samples)
+
     lines: list[str] = [
-        "[voice samples: <greeting>, <signoff>, avg sentence length]",
+        "[author voice profile — draft in this writer's style; match the rhythm and brevity below]",
+        f"derived from {n} of the author's own message{'s' if n != 1 else ''} "
+        "(style only, no content)",
+        f"- greeting: {greeting}; sign-off: {signoff} "
+        "(do not add salutations or closers the author omits)",
+        f"- typical sentence length: ~{avg_len:.1f} words",
     ]
-    for i, diff in enumerate(samples, start=1):
-        greeting = diff.get("greeting_style", "unknown")
-        signoff = diff.get("signoff_style", "unknown")
-        avg_len = diff.get("avg_sentence_length", 0.0)
-        cohort = diff.get("recipient_cohort", "unassigned")
-        lines.append(
-            f"  {i}. cohort={cohort} greeting={greeting} signoff={signoff} "
-            f"avg_sentence_len={avg_len}"
-        )
+    if length_mix:
+        lines.append(f"- sentence-length mix: {length_mix}")
+    if punctuation:
+        lines.append(f"- punctuation per 100 words: {punctuation}")
     return "\n".join(lines)
+
+
+# Bucket keys emitted by diff._distribute_sentence_lengths, in ascending order,
+# with human-readable word-count ranges for the prompt.
+_LENGTH_BUCKET_LABELS = [
+    ("lt_5", "<5w"),
+    ("lt_10", "5-9w"),
+    ("lt_20", "10-19w"),
+    ("lt_35", "20-34w"),
+    ("gte_35", "35w+"),
+]
+
+# Keys emitted by diff._punctuation_rhythm (normalized per 100 words).
+_PUNCT_LABELS = [
+    ("period_per_100", "period"),
+    ("comma_per_100", "comma"),
+    ("semicolon_per_100", "semicolon"),
+    ("dash_per_100", "dash"),
+    ("question_per_100", "question"),
+    ("exclamation_per_100", "exclamation"),
+]
+
+
+def _dominant(samples: list[dict], field: str) -> str:
+    """Most common non-empty value of ``field`` across samples."""
+    vals = [s.get(field) for s in samples if isinstance(s, dict) and s.get(field)]
+    if not vals:
+        return "unknown"
+    return Counter(vals).most_common(1)[0][0]
+
+
+def _mean_float(samples: list[dict], field: str) -> float:
+    """Mean of a numeric ``field`` across samples; 0.0 when none present."""
+    vals: list[float] = []
+    for s in samples:
+        if not isinstance(s, dict):
+            continue
+        try:
+            vals.append(float(s.get(field, 0.0) or 0.0))
+        except (TypeError, ValueError):
+            continue
+    return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+
+def _aggregate_distribution(samples: list[dict]) -> str:
+    """Sum the per-sample sentence-length histograms into percentages.
+
+    Defensive: the diffs come from R2 JSON, so any bucket may be absent
+    or non-numeric. Returns "" when there's no usable distribution.
+    """
+    totals: dict[str, int] = {}
+    grand = 0
+    for s in samples:
+        if not isinstance(s, dict):
+            continue
+        dist = s.get("sentence_length_distribution")
+        if not isinstance(dist, dict):
+            continue
+        for key, val in dist.items():
+            try:
+                count = int(val)
+            except (TypeError, ValueError):
+                continue
+            totals[key] = totals.get(key, 0) + count
+            grand += count
+    if grand == 0:
+        return ""
+    parts: list[str] = []
+    for key, label in _LENGTH_BUCKET_LABELS:
+        count = totals.get(key, 0)
+        if count:
+            parts.append(f"{label} {round(100 * count / grand)}%")
+    return " / ".join(parts)
+
+
+def _mean_punctuation(samples: list[dict]) -> str:
+    """Mean per-100-word punctuation rates across samples.
+
+    Skips marks averaging below 0.5/100w to keep the directive tight.
+    Returns "" when no rhythm data is present.
+    """
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for s in samples:
+        if not isinstance(s, dict):
+            continue
+        rhythm = s.get("punctuation_rhythm")
+        if not isinstance(rhythm, dict):
+            continue
+        for key, val in rhythm.items():
+            try:
+                rate = float(val)
+            except (TypeError, ValueError):
+                continue
+            sums[key] = sums.get(key, 0.0) + rate
+            counts[key] = counts.get(key, 0) + 1
+    if not sums:
+        return ""
+    parts: list[str] = []
+    for key, label in _PUNCT_LABELS:
+        if counts.get(key):
+            mean = sums[key] / counts[key]
+            if mean >= 0.5:
+                parts.append(f"{label} {round(mean)}")
+    return ", ".join(parts)
 
 
 def _cohort_from_key(key: str) -> str:
