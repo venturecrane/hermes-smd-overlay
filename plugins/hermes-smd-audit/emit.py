@@ -33,12 +33,8 @@ Substrate invariants preserved across the port:
     dispatcher is never destabilized by an unloggable action.
 """
 
-import hashlib
-import json
 import logging
-import secrets
 import time
-from datetime import UTC, datetime
 from typing import Any
 
 from shared.action_classes import (
@@ -46,6 +42,11 @@ from shared.action_classes import (
     ToolClassification,
     classify_tool,
 )
+from shared.audit_contract import INSERT_SQL as _INSERT_SQL
+from shared.audit_contract import build_audit_params
+from shared.ids import iso_utc as _iso_utc
+from shared.ids import sha256 as _sha256
+from shared.ids import ulid as _ulid
 
 from .schemas import (
     ACCEPTED_ACTION_TYPES,
@@ -74,55 +75,16 @@ class AuditWriteError(RuntimeError):
     """
 
 
-# ---------------------------------------------------------------------------
-# ULID generation
-#
-# A ULID is a 26-char Crockford-base32 string: 10 chars timestamp (ms since
-# epoch) + 16 chars randomness. Sortable. No dashes. No external deps.
-# ---------------------------------------------------------------------------
-
-
-_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-
-def _encode_crockford(value: int, length: int) -> str:
-    out: list[str] = []
-    for _ in range(length):
-        value, rem = divmod(value, 32)
-        out.append(_CROCKFORD[rem])
-    return "".join(reversed(out))
-
-
-def _ulid(now_ms: int | None = None) -> str:
-    """Return a 26-char ULID. ``now_ms`` is injectable for deterministic tests."""
-    ts = now_ms if now_ms is not None else int(time.time() * 1000)
-    rand = secrets.randbits(80)
-    return _encode_crockford(ts, 10) + _encode_crockford(rand, 16)
-
-
-def _iso_utc(now: datetime | None = None) -> str:
-    """ISO 8601 UTC with millisecond precision and explicit ``Z`` suffix."""
-    dt = now if now is not None else datetime.now(UTC)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-def _sha256(payload: bytes | None) -> str | None:
-    if payload is None:
-        return None
-    return hashlib.sha256(payload).hexdigest()
+# ULID generation, ISO-8601 timestamps, and SHA-256 digesting are single-
+# sourced in ``shared.ids`` (imported above as _ulid / _iso_utc / _sha256);
+# the audit_log INSERT statement + column order in ``shared.audit_contract``
+# (imported as _INSERT_SQL). All three audit writers share that one contract so
+# a column reorder cannot desync them.
 
 
 # ---------------------------------------------------------------------------
 # Writer — talks to per-customer D1 through the shared D1Client
 # ---------------------------------------------------------------------------
-
-
-_INSERT_SQL = (
-    "INSERT INTO audit_log "
-    "(id, ts, action_type, actor, actor_role, skill_name, matter_ref, "
-    "input_digest, output_digest, diff_digest, trust_ceiling, metadata) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-)
 
 
 class AuditLogWriter:
@@ -177,22 +139,20 @@ class AuditLogWriter:
         else:
             actor_role_value = event.actor_role
 
-        params = [
-            ulid,
-            ts,
-            event.action_type,
-            event.actor,
-            actor_role_value,
-            event.skill_name,
-            event.matter_ref,
-            _sha256(event.input_payload),
-            _sha256(event.output_payload),
-            _sha256(event.diff_payload),
-            event.trust_ceiling,
-            json.dumps(event.metadata, sort_keys=True, separators=(",", ":"))
-            if event.metadata
-            else None,
-        ]
+        params = build_audit_params(
+            row_id=ulid,
+            ts=ts,
+            action_type=event.action_type,
+            actor=event.actor,
+            actor_role=actor_role_value,
+            skill_name=event.skill_name,
+            matter_ref=event.matter_ref,
+            input_digest=_sha256(event.input_payload),
+            output_digest=_sha256(event.output_payload),
+            diff_digest=_sha256(event.diff_payload),
+            trust_ceiling=event.trust_ceiling,
+            metadata=event.metadata,
+        )
 
         try:
             self._client.execute(_INSERT_SQL, *params)

@@ -28,15 +28,13 @@ write fails we still block (and log), because the safety decision is the block,
 not the row.
 """
 
-import json
 import logging
 import os
-import secrets as _secrets
-import time
-from datetime import UTC, datetime
 from typing import Any
 
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
+from shared.audit_contract import INSERT_SQL as _INSERT_SQL
+from shared.audit_contract import agent_event_params
 from shared.outbound_gate import GateDecision, evaluate
 
 logger = logging.getLogger(__name__)
@@ -226,38 +224,10 @@ def _resolve_cohort() -> str | None:
 # ---------------------------------------------------------------------------
 
 
-# Crockford-base32 ULID (10 chars ms-timestamp + 16 chars randomness). Duplicate
-# of hermes-smd-audit/emit.py and hermes-smd-webhook-router/__init__.py; a
-# shared/ulid module is a tracked follow-on cleanup.
-_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-
-def _encode_crockford(value: int, length: int) -> str:
-    out: list[str] = []
-    for _ in range(length):
-        value, rem = divmod(value, 32)
-        out.append(_CROCKFORD[rem])
-    return "".join(reversed(out))
-
-
-def _ulid() -> str:
-    ts = int(time.time() * 1000)
-    rand = _secrets.randbits(80)
-    return _encode_crockford(ts, 10) + _encode_crockford(rand, 16)
-
-
-def _iso_utc() -> str:
-    dt = datetime.now(UTC)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-# Must match hermes-smd-audit/emit.py `_INSERT_SQL` column order exactly.
-_INSERT_SQL = (
-    "INSERT INTO audit_log "
-    "(id, ts, action_type, actor, actor_role, skill_name, matter_ref, "
-    "input_digest, output_digest, diff_digest, trust_ceiling, metadata) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-)
+# ULID, ISO-Z timestamps, and the audit_log INSERT contract are single-sourced
+# in shared.ids / shared.audit_contract (imported above). Row params are built
+# via agent_event_params so this writer's column order can never drift from
+# hermes-smd-audit/emit.py.
 
 
 _AUDIT_CLIENT: Any = None
@@ -332,20 +302,11 @@ def _emit_fabrication_audit(
         if tool_call_id:
             metadata["tool_call_id"] = tool_call_id
 
-        params = [
-            _ulid(),
-            _iso_utc(),
-            "FABRICATION_FILTER_TRIGGERED",
-            "agent",
-            "agent",  # ActorRole.AGENT
-            None,  # skill_name
-            None,  # matter_ref
-            None,  # input_digest  — body is never persisted
-            None,  # output_digest
-            None,  # diff_digest
-            None,  # trust_ceiling
-            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-        ]
+        # body is never persisted — only marker ids / citation labels in metadata
+        params = agent_event_params(
+            action_type="FABRICATION_FILTER_TRIGGERED",
+            metadata=metadata,
+        )
         client.execute(_INSERT_SQL, *params)
     except Exception as exc:  # noqa: BLE001 — audit row is best-effort vs block
         logger.warning(
