@@ -740,6 +740,79 @@ def test_emit_llm_event_writes_llm_turn_completed_row() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Outcome inference (_outcome_from_result) — error-detecting, conservative.
+# ---------------------------------------------------------------------------
+
+
+def test_outcome_ok_for_empty_or_nonjson() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    f = mod.emit._outcome_from_result
+    assert f("") == ("ok", None)
+    assert f(None) == ("ok", None)
+    assert f("plain text, not json") == ("ok", None)
+    assert f("{ not valid json") == ("ok", None)  # unparseable → never fabricate
+    assert f("{}") == ("ok", None)
+    assert f('{"result": "done", "rows": 3}') == ("ok", None)
+
+
+def test_outcome_detects_structured_errors() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    f = mod.emit._outcome_from_result
+    assert f('{"error": "boom"}') == ("error", "boom")
+    assert f('{"error": true, "code": "E_TIMEOUT"}') == ("error", "E_TIMEOUT")
+    assert f('{"is_error": true}') == ("error", None)
+    assert f('{"isError": true}') == ("error", None)
+    assert f('{"status": "error"}') == ("error", "error")
+    assert f('{"status": "FAILED", "type": "AuthError"}') == ("error", "AuthError")
+    assert f('{"ok": false}') == ("error", None)
+    assert f('{"success": false, "error_type": "Conflict"}') == ("error", "Conflict")
+    # truthy non-error fields must NOT be read as errors
+    assert f('{"ok": true, "status": "success"}') == ("ok", None)
+
+
+def test_emit_tool_event_records_error_outcome_and_version() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    writer = mod.emit.AuditLogWriter(client)
+    mod.emit.emit_tool_event(
+        writer,
+        customer="acme",
+        tool_name="email_create_draft",
+        args=None,
+        result='{"error": "rate_limited", "code": "E_RATE"}',
+        task_id="t",
+        session_id="s",
+        tool_call_id="c",
+        duration_ms=5,
+    )
+    md = json.loads(client.rows()[0]["metadata"])
+    assert md["outcome"] == "error"
+    assert md["error_type"] == "E_RATE"
+    # forward-only changepoint marker (v2 = error-detecting)
+    assert md["outcome_semantics_version"] == 2
+
+
+def test_emit_tool_event_ok_outcome_carries_version() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    writer = mod.emit.AuditLogWriter(client)
+    mod.emit.emit_tool_event(
+        writer,
+        customer="acme",
+        tool_name="email_create_draft",
+        args=None,
+        result="{}",
+        task_id="t",
+        session_id="s",
+        tool_call_id="c",
+        duration_ms=5,
+    )
+    md = json.loads(client.rows()[0]["metadata"])
+    assert md["outcome"] == "ok"
+    assert md["outcome_semantics_version"] == 2
+
+
+# ---------------------------------------------------------------------------
 # Hook callbacks are exception-safe
 # ---------------------------------------------------------------------------
 

@@ -35,13 +35,12 @@ Hook callbacks are exception-safe per AGENTS.md hard rule #3.
 import json
 import logging
 import os
-import secrets
-import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from shared import inbound
+from shared.audit_contract import INSERT_SQL as _INSERT_SQL
+from shared.audit_contract import agent_event_params
 from shared.d1_client import D1Client
 from shared.secrets import get_secret, require
 
@@ -71,41 +70,10 @@ _EVENT_ID_HEADER = "x-webhook-id"
 _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
 
 
-# Minimal ULID generator. Duplicate of hermes-smd-audit/emit.py - the
-# overlay does not yet have a shared/ulid module; consolidation is a
-# follow-on cleanup. The contract matches: 10 chars timestamp + 16
-# chars randomness, Crockford-base32.
-_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
-
-def _encode_crockford(value: int, length: int) -> str:
-    out: list[str] = []
-    for _ in range(length):
-        value, rem = divmod(value, 32)
-        out.append(_CROCKFORD[rem])
-    return "".join(reversed(out))
-
-
-def _ulid() -> str:
-    ts = int(time.time() * 1000)
-    rand = secrets.randbits(80)
-    return _encode_crockford(ts, 10) + _encode_crockford(rand, 16)
-
-
-def _iso_utc() -> str:
-    dt = datetime.now(UTC)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-
-
-# The audit_log INSERT statement matches hermes-smd-audit/emit.py
-# `_INSERT_SQL`. Schema lives in ss-console
-# `docs/specs/ai-employee/d1-schema.md`; both plugins must agree.
-_INSERT_SQL = (
-    "INSERT INTO audit_log "
-    "(id, ts, action_type, actor, actor_role, skill_name, matter_ref, "
-    "input_digest, output_digest, diff_digest, trust_ceiling, metadata) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-)
+# ULID, ISO-Z timestamps, and the audit_log INSERT contract are single-sourced
+# in shared.ids / shared.audit_contract (imported above). The row params are
+# built via agent_event_params so this writer's column order can never drift
+# from hermes-smd-audit/emit.py.
 
 
 def _emit_webhook_routed(
@@ -117,9 +85,8 @@ def _emit_webhook_routed(
     """Write one WEBHOOK_ROUTED row directly via D1Client.
 
     Sidesteps the dynamic-import dance of pulling AuditLogWriter from
-    the sibling audit plugin. The INSERT SQL and the schema must agree
-    with ``hermes-smd-audit/emit.py``; both reference the canonical
-    audit_log schema in ss-console.
+    the sibling audit plugin, but shares its row contract
+    (``shared.audit_contract``) so the two can never desync.
     """
     metadata = {
         "per_webhook_route": True,
@@ -129,20 +96,11 @@ def _emit_webhook_routed(
         "persona": trigger.persona,
         "skill": trigger.skill,
     }
-    params = [
-        _ulid(),
-        _iso_utc(),
-        "WEBHOOK_ROUTED",
-        "agent",
-        "agent",  # ActorRole.AGENT
-        trigger.skill,
-        None,  # matter_ref
-        None,  # input_digest
-        None,  # output_digest
-        None,  # diff_digest
-        None,  # trust_ceiling
-        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-    ]
+    params = agent_event_params(
+        action_type="WEBHOOK_ROUTED",
+        skill_name=trigger.skill,
+        metadata=metadata,
+    )
     client.execute(_INSERT_SQL, *params)
 
 
@@ -167,20 +125,12 @@ def _emit_inbound_received(
         "customer": customer,
         **envelope.audit_metadata(),
     }
-    params = [
-        _ulid(),
-        _iso_utc(),
-        "INBOUND_RECEIVED",
-        "agent",
-        "agent",  # ActorRole.AGENT
-        None,  # skill_name
-        None,  # matter_ref
-        None,  # input_digest — content is never persisted, only its digest (in metadata)
-        None,  # output_digest
-        None,  # diff_digest
-        None,  # trust_ceiling
-        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-    ]
+    # input_digest stays NULL — inbound content is never persisted, only its
+    # digest (carried inside metadata via envelope.audit_metadata()).
+    params = agent_event_params(
+        action_type="INBOUND_RECEIVED",
+        metadata=metadata,
+    )
     client.execute(_INSERT_SQL, *params)
 
 
