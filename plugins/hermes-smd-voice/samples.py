@@ -26,8 +26,10 @@ here. For §7 the implementation is in-overlay.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -41,12 +43,12 @@ MAX_SAMPLES_PER_TURN = 8
 
 
 class R2SampleReader(Protocol):
-    """Per-customer R2 binding for sample retrieval.
+    """Per-customer R2 reader for sample retrieval.
 
-    The Fly Machine env binds an R2 client tagged with
-    ``SMD_R2_VOICE_BINDING`` to the customer's namespace; in the
-    overlay process this binding is exposed via a small adapter that
-    implements the two methods below.
+    The concrete implementation is :class:`R2VaultSampleReader` (built from the
+    Machine's R2 env by :func:`reader_from_env`), an S3-compatible boto3 client
+    over the per-customer config bucket. Tests supply a fake implementing the
+    two async methods below.
     """
 
     async def list_keys(self, prefix: str) -> list[str]: ...
@@ -61,6 +63,114 @@ class _SampleHit:
     key: str
     cohort: str
     diff: dict
+
+
+# ---------------------------------------------------------------------------
+# Concrete R2 reader — S3-compatible client over the per-customer R2 config
+# bucket, which holds the voice vault at vaults/<slug>/voice/.
+#
+# This mirrors the proven boto3/R2 pattern in hermes-smd-audit/skill_capture.py
+# (lazy boto3 import; env-resolved credentials; graceful None on misconfigured
+# Machine). The Machine env sets R2_ENDPOINT_URL / R2_ACCESS_KEY_ID /
+# R2_SECRET_ACCESS_KEY / R2_BUCKET_CONFIG (bootstrap.sh §"R2 secrets"); the
+# voice vault lives in the config bucket, not a separate one. boto3 is sync, so
+# list/get run in a worker thread to satisfy the async hook contract.
+# ---------------------------------------------------------------------------
+
+
+class R2VaultSampleReader:
+    """An :class:`R2SampleReader` backed by the customer's R2 config bucket.
+
+    Constructed from env via :func:`reader_from_env`. Keys are relative to the
+    bucket root; the caller passes ``<slug>/voice/cohort/`` prefixes, and this
+    reader scopes them under the vault root ``vaults/`` automatically so the
+    on-disk layout (``vaults/<slug>/voice/...``) matches customer.yaml's
+    ``memory.r2_vault_path``.
+    """
+
+    _VAULT_ROOT = "vaults/"
+
+    def __init__(
+        self, *, endpoint_url: str, access_key_id: str, secret_access_key: str, bucket: str
+    ):
+        self._endpoint_url = endpoint_url
+        self._access_key_id = access_key_id
+        self._secret_access_key = secret_access_key
+        self._bucket = bucket
+
+    def _client(self):
+        import boto3  # type: ignore[import-not-found]  # lazy: see skill_capture.py
+
+        return boto3.client(
+            "s3",
+            endpoint_url=self._endpoint_url,
+            aws_access_key_id=self._access_key_id,
+            aws_secret_access_key=self._secret_access_key,
+        )
+
+    def _full_prefix(self, prefix: str) -> str:
+        return f"{self._VAULT_ROOT}{prefix}"
+
+    def _list_keys_sync(self, prefix: str) -> list[str]:
+        s3 = self._client()
+        full = self._full_prefix(prefix)
+        keys: list[str] = []
+        token: str | None = None
+        while True:
+            kwargs = {"Bucket": self._bucket, "Prefix": full}
+            if token:
+                kwargs["ContinuationToken"] = token
+            resp = s3.list_objects_v2(**kwargs)
+            for obj in resp.get("Contents", []) or []:
+                key = obj.get("Key")
+                if key:
+                    # Strip the vault root so callers (and _cohort_from_key) see
+                    # the slug-relative key shape they expect.
+                    keys.append(
+                        key[len(self._VAULT_ROOT) :] if key.startswith(self._VAULT_ROOT) else key
+                    )
+            if not resp.get("IsTruncated"):
+                break
+            token = resp.get("NextContinuationToken")
+            if not token:
+                break
+        return keys
+
+    def _get_sync(self, key: str) -> bytes:
+        s3 = self._client()
+        full = self._full_prefix(key)
+        resp = s3.get_object(Bucket=self._bucket, Key=full)
+        return resp["Body"].read()
+
+    async def list_keys(self, prefix: str) -> list[str]:
+        return await asyncio.to_thread(self._list_keys_sync, prefix)
+
+    async def get(self, key: str) -> bytes:
+        return await asyncio.to_thread(self._get_sync, key)
+
+
+def reader_from_env() -> R2VaultSampleReader | None:
+    """Build an R2 voice-sample reader from the Machine env.
+
+    Returns ``None`` when any required R2 var is missing — the binder logs a
+    warning and the plugin stays inactive (it must never *silently* register as
+    a no-op; see register() in __init__.py). Mirrors skill_capture's
+    no-reader-on-missing-env posture, using the config-bucket credentials the
+    bootstrap sets (R2_ENDPOINT_URL / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
+    R2_BUCKET_CONFIG).
+    """
+    endpoint = os.getenv("R2_ENDPOINT_URL")
+    access_key = os.getenv("R2_ACCESS_KEY_ID")
+    secret_key = os.getenv("R2_SECRET_ACCESS_KEY")
+    bucket = os.getenv("R2_BUCKET_CONFIG")
+    if not (endpoint and access_key and secret_key and bucket):
+        return None
+    return R2VaultSampleReader(
+        endpoint_url=endpoint,
+        access_key_id=access_key,
+        secret_access_key=secret_key,
+        bucket=bucket,
+    )
 
 
 async def retrieve_relevant_samples_async(
@@ -200,6 +310,8 @@ def _cohort_from_key(key: str) -> str:
 __all__ = [
     "MAX_SAMPLES_PER_TURN",
     "R2SampleReader",
+    "R2VaultSampleReader",
+    "reader_from_env",
     "render_sample_block",
     "retrieve_relevant_samples",
     "retrieve_relevant_samples_async",

@@ -3,8 +3,16 @@ version: "0.1.0"
 description: "Sample-driven voice transformation for customer-facing drafts."
 author: VentureCrane
 requires_env:
+  # The plugin reads the customer slug + the per-customer R2 config-bucket
+  # credentials (the voice vault lives at vaults/<slug>/voice/ in that bucket).
+  # The old SMD_R2_VOICE_BINDING was a Cloudflare-Worker binding name that no
+  # provisioning ever set; the Machine accesses R2 via the S3-compatible boto3
+  # client using these vars (set by bootstrap.sh / fly secrets).
   - SMD_CUSTOMER_SLUG
-  - SMD_R2_VOICE_BINDING
+  - R2_ENDPOINT_URL
+  - R2_ACCESS_KEY_ID
+  - R2_SECRET_ACCESS_KEY
+  - R2_BUCKET_CONFIG
 provides_hooks:
   - pre_llm_call
   - post_llm_call
