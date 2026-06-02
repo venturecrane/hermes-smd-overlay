@@ -98,9 +98,11 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # autonomous-send refusal — exposure is now a CONFIGURABLE per-action
         # ceiling, not a permanent ban. The agentmail sends are classified
         # ``EXTERNAL_SEND`` in TOOL_ACTION_CLASS_MAP below and governed by the
-        # resolved ceiling (default ``draft_for_review`` = reviewer-as-sender;
-        # raised to ``autonomous`` only by authored ``action_ceilings``; a
-        # vertical floor can only narrow). The content-sensitivity floor
+        # resolved ceiling. Per ADR 0035 there is no default posture: unauthored
+        # ``external_send`` is fail-closed (``refused`` — no send, no draft);
+        # ``draft_for_review`` = reviewer-as-sender and ``autonomous`` are both
+        # values authored in ``action_ceilings``; a vertical floor can only
+        # narrow. The content-sensitivity floor
         # (``shared.content_floor``) additionally forces money / contract /
         # scope / legal content to draft even under an autonomous ceiling.
         # The PRINCIPAL-identity sends (`email_send`, `email_reply`, ...) stay
@@ -153,10 +155,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # AgentMail MCP — the persona's OWN mailbox (not the principal's Gmail).
     # MCP tools reach the classifier under `<server>:<tool>` notation, so the
     # runtime names are prefixed. Sends are EXTERNAL_SEND, governed by the
-    # resolved per-action ceiling (ADR 0025): default draft_for_review;
-    # autonomous only when authored in action_ceilings; vertical floor narrows;
-    # content-sensitivity floor (shared.content_floor) forces sensitive content
-    # to draft even under autonomous. Drafting (`agentmail:create_draft`,
+    # resolved per-action ceiling (ADR 0025/0035): unauthored is fail-closed
+    # (refused — no send, no draft); draft_for_review and autonomous are both
+    # authored in action_ceilings; vertical floor narrows; content-sensitivity
+    # floor (shared.content_floor) forces sensitive content to draft even under
+    # autonomous. Drafting (`agentmail:create_draft`,
     # `agentmail:update_draft`) is INTERNAL_WRITE — the agent's own job.
     "agentmail:send_message": ActionClass.EXTERNAL_SEND,
     "agentmail:send_draft": ActionClass.EXTERNAL_SEND,

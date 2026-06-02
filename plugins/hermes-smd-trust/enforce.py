@@ -109,9 +109,11 @@ def _min_ceiling(a: Ceiling, b: Ceiling) -> Ceiling:
 # ``ss-console/operator/adapter/trust_ceiling.py`` (the boot-invariant
 # imports that one; this overlay copy runs live in the gateway pre_tool_call
 # hook — the two must agree). Autonomy is configured per ActionClass, not by
-# one skill scalar: ``external_send`` defaults to ``draft_for_review``
-# (reviewer-as-sender) and must be raised EXPLICITLY via ``action_ceilings``;
-# a vertical-pack floor can only narrow, never widen.
+# one skill scalar. Per ADR 0035 there is NO imposed default: ``external_send``
+# (and any unrecognized entitled class) is fail-closed (``refused`` — no send,
+# no draft) when no ``action_ceilings`` entry is authored. ``draft_for_review``
+# (reviewer-as-sender) is a value an engagement authors explicitly, never a
+# fallback; a vertical-pack floor can only narrow, never widen.
 # ---------------------------------------------------------------------------
 
 
@@ -128,20 +130,25 @@ def _most_restrictive(a: Ceiling, b: Ceiling) -> Ceiling:
     return a if _RESTRICTIVENESS[a] >= _RESTRICTIVENESS[b] else b
 
 
-def _class_default(action: ActionClass, skill_ceiling: Ceiling) -> Ceiling:
-    """The safe default ceiling for an action class when no explicit override
-    is authored. ``external_send`` defaults to draft_for_review regardless of
-    the skill's scalar, so an autonomous skill does not silently gain the
-    ability to send externally — it must be granted explicitly (ADR 0025)."""
+def _unauthored_resolution(action: ActionClass, skill_ceiling: Ceiling) -> Ceiling:
+    """How an action class resolves when the engagement authored NO ceiling for
+    it. There is no imposed posture (ADR 0035): an unauthored entitled action is
+    fail-closed (``refused``) — it does not execute, and no draft is produced.
+    ``draft_for_review`` / reviewer-as-sender is a value an engagement authors
+    explicitly, never a fallback.
+
+    ``READ`` resolves to ``autonomous`` at this layer because read *breadth* is
+    governed by the authored scope envelope one layer over. ``INTERNAL_WRITE``
+    follows the skill's authored scalar ceiling. Every other entitled class with
+    no authored ceiling is ``refused``."""
     if action == ActionClass.READ:
         return Ceiling.AUTONOMOUS
     if action == ActionClass.INTERNAL_WRITE:
         return skill_ceiling
-    if action == ActionClass.EXTERNAL_SEND:
-        return Ceiling.DRAFT_FOR_REVIEW
-    # COMMITMENT / DESTRUCTIVE keep their own reversibility floors in enforce();
-    # this default only matters if those branches ever consult it.
-    return Ceiling.DRAFT_FOR_REVIEW
+    # EXTERNAL_SEND and any unrecognized entitled class: no authored grant means
+    # no action (ADR 0035 fail-closed). COMMITMENT / DESTRUCTIVE additionally
+    # carry their own current-turn-approval reversibility floors in enforce().
+    return Ceiling.REFUSED
 
 
 def resolve_ceiling(
@@ -154,14 +161,14 @@ def resolve_ceiling(
 
     Effective = most restrictive of:
       - the customer's explicit per-action override (if present), else the
-        safe class default; and
+        unauthored resolution (fail-closed for entitled classes, ADR 0035); and
       - the vertical-pack floor for that class (if present).
 
     A vertical floor can only make the result *more* restrictive — customer
     config can never raise above it (ADR 0025 / ADR 0022 compliance floors).
     """
     explicit = action_ceilings.get(action) if action_ceilings else None
-    base = explicit if explicit is not None else _class_default(action, skill_ceiling)
+    base = explicit if explicit is not None else _unauthored_resolution(action, skill_ceiling)
     floor = vertical_floors.get(action) if vertical_floors else None
     return _most_restrictive(base, floor) if floor is not None else base
 
@@ -237,10 +244,11 @@ def enforce(
     ``ceiling`` is the skill-level scalar (governs ``internal_write`` and acts
     as the REFUSED cap). ``action_ceilings`` are the customer's explicit
     per-action-class overrides; ``vertical_floors`` are non-raisable per-class
-    floors from the vertical pack. Both optional — when omitted, the safe class
-    defaults apply (notably ``external_send`` → draft_for_review), preserving
-    reviewer-as-sender as the default until a customer explicitly raises the
-    exposure ceiling (ADR 0025).
+    floors from the vertical pack. Both optional — when omitted, the unauthored
+    resolution applies (ADR 0035): entitled classes such as ``external_send``
+    are fail-closed (``refused`` — no send, no draft) until the engagement
+    authors a ceiling. ``draft_for_review`` (reviewer-as-sender) is an authored
+    value, not a fallback posture.
 
     ``current_turn_approval`` is True iff the operator explicitly approved
     THIS specific action in the CURRENT invocation. Approvals from prior
@@ -255,7 +263,8 @@ def enforce(
       - COMMITMENT requires AUTONOMOUS + current-turn approval (invariant #3).
       - DESTRUCTIVE requires AUTONOMOUS + current-turn approval (invariant #1).
       - EXTERNAL_SEND: resolved per-action ceiling — autonomous → send;
-        draft_for_review (the default) → draft; refused → block.
+        authored draft_for_review → draft; refused (incl. unauthored,
+        fail-closed per ADR 0035) → block.
       - INTERNAL_WRITE: resolved per-action ceiling — autonomous → write;
         draft_for_review → route to draft folder; refused → block.
 
@@ -319,11 +328,12 @@ def enforce(
             audit_action="allow",
         )
 
-    # EXTERNAL_SEND — governed by the resolved per-action ceiling (ADR 0025).
-    # autonomous → send; draft_for_review (the default) → draft; refused → block.
-    # No in-turn-approval escape: exposure autonomy is configured, not approved
-    # per message. The content-sensitivity floor (evaluate_tool_call) can still
-    # narrow an autonomous send to a draft based on the message body.
+    # EXTERNAL_SEND — governed by the resolved per-action ceiling (ADR 0025/0035).
+    # autonomous → send; authored draft_for_review → draft; refused → block.
+    # Unauthored external_send is fail-closed (refused), not draft (ADR 0035 —
+    # no imposed default). No in-turn-approval escape: exposure autonomy is
+    # configured, not approved per message. The content-sensitivity floor
+    # (evaluate_tool_call) can still narrow an autonomous send to a draft.
     if action == ActionClass.EXTERNAL_SEND:
         eff = resolve_ceiling(action, ceiling, action_ceilings, vertical_floors)
         if eff == Ceiling.AUTONOMOUS:
@@ -338,10 +348,10 @@ def enforce(
                 reason="external_send refused: configured ceiling (or vertical floor) is refused",
                 audit_action="refuse",
             )
-        # draft_for_review — the safe default and the reviewer-as-sender path.
+        # draft_for_review — an AUTHORED reviewer-as-sender ceiling (not a default).
         return EnforcementDecision(
             allowed=False,
-            reason="external_send below autonomous ceiling; routing to draft (reviewer-as-sender)",
+            reason="external_send at authored draft_for_review ceiling; routing to draft (reviewer-as-sender)",
             audit_action="draft",
         )
 
