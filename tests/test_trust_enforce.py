@@ -167,14 +167,15 @@ def test_enforce_internal_write_draft_for_review_routes_to_draft() -> None:
 
 def test_enforce_external_send_configured_ceiling() -> None:
     """ADR 0025: external_send is governed by the configured per-action ceiling,
-    not a hardcoded approval. Default drafts; explicit autonomous sends;
-    explicit refused blocks; a vertical floor only narrows."""
+    not a hardcoded approval. Unauthored is fail-closed; explicit autonomous
+    sends; explicit refused blocks; a vertical floor only narrows."""
     enforce = _load_trust_module("enforce")
     A = enforce.ActionClass
     C = enforce.Ceiling
-    # Default (no override): an autonomous scalar still DRAFTS external_send.
+    # No override: unauthored external_send is fail-closed (refused — no draft),
+    # even under an autonomous scalar (ADR 0035).
     d = enforce.enforce(ceiling=C.AUTONOMOUS, action=A.EXTERNAL_SEND, skill_name="t", tool_name="x")
-    assert d.allowed is False and d.audit_action == "draft"
+    assert d.allowed is False and d.audit_action == "refuse"
     # Explicit action_ceilings autonomous -> send.
     d = enforce.enforce(
         ceiling=C.DRAFT_FOR_REVIEW,
@@ -205,13 +206,30 @@ def test_enforce_external_send_configured_ceiling() -> None:
     assert d.allowed is False and d.audit_action == "draft"
 
 
-def test_enforce_external_send_draft_for_review_drafts() -> None:
+def test_enforce_external_send_unauthored_is_fail_closed() -> None:
+    # No action_ceilings entry → external_send is unauthored → refused, no draft
+    # (ADR 0035: no imposed default posture).
     enforce = _load_trust_module("enforce")
     decision = enforce.enforce(
         ceiling=enforce.Ceiling.DRAFT_FOR_REVIEW,
         action=enforce.ActionClass.EXTERNAL_SEND,
         skill_name="test",
         tool_name="x",
+    )
+    assert decision.allowed is False
+    assert decision.audit_action == "refuse"
+
+
+def test_enforce_external_send_authored_draft_for_review_drafts() -> None:
+    # An AUTHORED external_send=draft_for_review routes to draft — reviewer-as-sender
+    # is a value you author, distinct from unauthored=refused.
+    enforce = _load_trust_module("enforce")
+    decision = enforce.enforce(
+        ceiling=enforce.Ceiling.AUTONOMOUS,
+        action=enforce.ActionClass.EXTERNAL_SEND,
+        skill_name="test",
+        tool_name="x",
+        action_ceilings={enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.DRAFT_FOR_REVIEW},
     )
     assert decision.allowed is False
     assert decision.audit_action == "draft"
@@ -473,10 +491,12 @@ def test_agentmail_sends_classify_external_send() -> None:
         assert c.unmapped is False
 
 
-def test_resolve_ceiling_external_send_defaults_to_draft() -> None:
+def test_resolve_ceiling_external_send_unauthored_is_refused() -> None:
+    # No action_ceilings → unauthored external_send is fail-closed (ADR 0035),
+    # not draft_for_review.
     enforce = _load_trust_module("enforce")
     eff = enforce.resolve_ceiling(enforce.ActionClass.EXTERNAL_SEND, enforce.Ceiling.AUTONOMOUS)
-    assert eff == enforce.Ceiling.DRAFT_FOR_REVIEW
+    assert eff == enforce.Ceiling.REFUSED
 
 
 def test_resolve_ceiling_explicit_autonomous_send() -> None:
@@ -505,8 +525,9 @@ def test_resolve_ceiling_vertical_floor_narrows() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_send_defaults_to_draft_without_override(env_autonomous) -> None:
-    """No action_ceilings -> external_send drafts even under an autonomous scalar."""
+def test_send_unauthored_is_blocked_fail_closed(env_autonomous) -> None:
+    """No action_ceilings -> external_send is fail-closed (refused, ADR 0035) and
+    blocked, even under an autonomous skill scalar."""
     enforce = _load_trust_module("enforce")
     result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "smd")
     assert isinstance(result, dict)
