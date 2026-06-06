@@ -20,8 +20,11 @@ NOT in this registry is left unwired (logged, not fatal) — that covers the
 OAuth-based Google connectors, which are wired by a different (token-on-volume)
 path, not by a static header key.
 
-Adding a header-key MCP vendor = one :data:`MCP_CONNECTOR_REGISTRY` entry. No
-code change in the translator.
+Two transports are supported: a hosted-HTTP server (a ``url`` + optional
+API-key header, e.g. AgentMail) and a local stdio server (a launched
+``command`` + ``args`` + per-subprocess ``env``, e.g. Clio). Adding a vendor of
+either kind = one :data:`MCP_CONNECTOR_REGISTRY` entry; the translator branches
+on :attr:`McpConnectorSpec.transport`.
 """
 
 from dataclasses import dataclass, field
@@ -41,6 +44,16 @@ class McpConnectorSpec:
             way (OAuth) — those are not materialized here.
         secret_env: Process env var holding the key value (populated from a
             Fly secret at boot). ``None`` when ``auth_header`` is ``None``.
+        command: For a LOCAL stdio MCP server (e.g. Clio), the launch command
+            (a binary on PATH, e.g. ``clio-mcp``). ``None`` for hosted-URL
+            servers. Setting it switches the spec to the stdio transport.
+        args: Argument vector passed to ``command``.
+        env_secrets: ``(subprocess_env_var, source_secret_env)`` pairs for a
+            stdio server. Each value is read from the process env via
+            ``get_secret`` at materialize time and written into the server's
+            ``env`` block, supporting a remap (subprocess wants ``ENCRYPTION_KEY``
+            while the Fly secret is ``CLIO_ENCRYPTION_KEY``). All pairs are
+            required; a missing source leaves the server unwired this boot.
         blocked_tools: Native (un-prefixed) tool names that must be excluded
             from the agent's toolset — the autonomous-send capabilities
             (ADR 0005 reviewer-as-sender). These are emitted into the server's
@@ -52,10 +65,22 @@ class McpConnectorSpec:
     """
 
     name: str
-    url: str
+    # hosted-HTTP transport (e.g. AgentMail): a URL + optional API-key header
+    url: str | None = None
     auth_header: str | None = None
     secret_env: str | None = None
+    # local stdio transport (e.g. Clio): a launched command + per-subprocess env.
+    # Hermes' mcp_config supports both {url} and {command, args, env} server shapes
+    # (NousResearch/hermes-agent hermes_cli/mcp_config.py).
+    command: str | None = None
+    args: tuple[str, ...] = field(default=())
+    env_secrets: tuple[tuple[str, str], ...] = field(default=())
     blocked_tools: tuple[str, ...] = field(default=())
+
+    @property
+    def transport(self) -> str:
+        """``"stdio"`` when a launch ``command`` is set, otherwise ``"http"``."""
+        return "stdio" if self.command else "http"
 
 
 # AgentMail (https://agentmail.to) — API-first email built for AI agents. The
@@ -73,6 +98,27 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         url="https://mcp.agentmail.to/mcp",
         auth_header="x-api-key",
         secret_env="AGENTMAIL_API_KEY",
+        blocked_tools=(),
+    ),
+    # Clio (oktopeak/clio-mcp v2.0.0, MIT) — practice-management system of record
+    # for the law vertical. Unlike AgentMail this is a LOCAL stdio server: the
+    # `clio-mcp` binary (installed into the image from @oktopeak/clio-mcp) is
+    # launched per profile and reads its OAuth token from ~/.clio-mcp/tokens.enc
+    # (seeded by bootstrap.sh from the CLIO_TOKENS_ENC_B64 Fly secret) decrypted
+    # with ENCRYPTION_KEY. The client_id/secret + encryption key flow in via the
+    # env block below. Writes (create_matter/task/note) are NOT excluded here —
+    # the wedge skills are authored draft-and-surface, and tool-level gating is
+    # governed at the trust layer (follow-on hardening); excluding them would hide
+    # the capability from the layer meant to govern it (same rationale as AgentMail).
+    "clio-oktopeak": McpConnectorSpec(
+        name="clio-oktopeak",
+        command="clio-mcp",
+        args=(),
+        env_secrets=(
+            ("CLIO_CLIENT_ID", "CLIO_CLIENT_ID"),
+            ("CLIO_CLIENT_SECRET", "CLIO_CLIENT_SECRET"),
+            ("ENCRYPTION_KEY", "CLIO_ENCRYPTION_KEY"),  # remap: subprocess reads ENCRYPTION_KEY
+        ),
         blocked_tools=(),
     ),
 }
