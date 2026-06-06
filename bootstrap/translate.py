@@ -315,20 +315,49 @@ def _materialize_mcp_servers(connectors: dict[str, Any]) -> dict[str, Any]:
             )
             continue
 
-        entry: dict[str, Any] = {"url": spec.url, "enabled": True}
-        if spec.auth_header and spec.secret_env:
-            try:
-                key = get_secret(spec.secret_env)
-            except KeyError:
-                logger.warning(
-                    "translate: connector %s (mcp:%s) requires %s but it is "
-                    "unset; MCP server NOT wired this boot",
-                    capability,
-                    name,
-                    spec.secret_env,
-                )
+        if spec.transport == "stdio":
+            # Local stdio server (e.g. Clio): a launched command + env. Each
+            # required secret is read and written literally into the env block on
+            # the per-customer volume (ADR 0010). A missing source secret leaves
+            # the server unwired this boot (fail-closed, no crashloop), mirroring
+            # the HTTP key-missing path below.
+            entry: dict[str, Any] = {"command": spec.command, "enabled": True}
+            if spec.args:
+                entry["args"] = list(spec.args)
+            env_map: dict[str, str] = {}
+            missing_secret = False
+            for target_var, source_secret in spec.env_secrets:
+                try:
+                    env_map[target_var] = get_secret(source_secret)
+                except KeyError:
+                    logger.warning(
+                        "translate: connector %s (mcp:%s) requires %s but it is "
+                        "unset; MCP server NOT wired this boot",
+                        capability,
+                        name,
+                        source_secret,
+                    )
+                    missing_secret = True
+                    break
+            if missing_secret:
                 continue
-            entry["headers"] = {spec.auth_header: key}
+            if env_map:
+                entry["env"] = env_map
+        else:
+            entry = {"url": spec.url, "enabled": True}
+            if spec.auth_header and spec.secret_env:
+                try:
+                    key = get_secret(spec.secret_env)
+                except KeyError:
+                    logger.warning(
+                        "translate: connector %s (mcp:%s) requires %s but it is "
+                        "unset; MCP server NOT wired this boot",
+                        capability,
+                        name,
+                        spec.secret_env,
+                    )
+                    continue
+                entry["headers"] = {spec.auth_header: key}
         if spec.blocked_tools:
             # Keep autonomous-send tools off the agent's menu (ADR 0005). The
             # trust layer bans them too; this is the in-config belt.

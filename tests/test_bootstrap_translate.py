@@ -645,6 +645,54 @@ def test_translate_unregistered_mcp_backend_not_materialized(tmp_path):
     assert "mcp_servers" not in config
 
 
+# ---------------------------------------------------------------------------
+# Clio — a LOCAL stdio MCP server (command + args + env), not a hosted URL.
+# ---------------------------------------------------------------------------
+
+CLIO_YAML = VALID_YAML.replace("backend: mcp:gmail", "backend: mcp:clio-oktopeak")
+
+
+def test_translate_materializes_clio_stdio_mcp_server(tmp_path, monkeypatch):
+    """An enabled ``mcp:clio-oktopeak`` connector becomes a stdio mcp_servers entry."""
+    monkeypatch.setenv("CLIO_CLIENT_ID", "clio_id_test")
+    monkeypatch.setenv("CLIO_CLIENT_SECRET", "clio_secret_test")
+    monkeypatch.setenv("CLIO_ENCRYPTION_KEY", "f" * 64)
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=CLIO_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    servers = config["mcp_servers"]
+    assert "clio-oktopeak" in servers
+    clio = servers["clio-oktopeak"]
+    # stdio shape: a command + env, NOT a url/headers.
+    assert clio["command"] == "clio-mcp"
+    assert clio["enabled"] is True
+    assert "url" not in clio
+    assert "headers" not in clio
+    # env carries the client creds + the REMAPPED encryption key.
+    assert clio["env"]["CLIO_CLIENT_ID"] == "clio_id_test"
+    assert clio["env"]["CLIO_CLIENT_SECRET"] == "clio_secret_test"
+    assert clio["env"]["ENCRYPTION_KEY"] == "f" * 64  # remapped from CLIO_ENCRYPTION_KEY
+
+
+def test_translate_skips_clio_when_required_secret_unset(tmp_path, monkeypatch):
+    """A missing required secret leaves the Clio server unwired (boot continues)."""
+    monkeypatch.setenv("CLIO_CLIENT_ID", "clio_id_test")
+    monkeypatch.setenv("CLIO_CLIENT_SECRET", "clio_secret_test")
+    monkeypatch.delenv("CLIO_ENCRYPTION_KEY", raising=False)  # required, absent
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=CLIO_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert "clio-oktopeak" not in config.get("mcp_servers", {})
+
+
 def test_agentmail_sends_are_external_send_not_banned():
     """ADR 0025: agentmail sends are reclassified, not banned.
 
