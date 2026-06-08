@@ -635,9 +635,7 @@ def test_law_floor_narrows_authored_autonomous_send_to_draft(
     assert "draft" in result["message"].lower()
 
 
-def test_non_law_authored_autonomous_clean_send_is_not_floored(
-    env_autonomous, monkeypatch
-) -> None:
+def test_non_law_authored_autonomous_clean_send_is_not_floored(env_autonomous, monkeypatch) -> None:
     """Control: the same authored-autonomous clean send on a non-law vertical is
     NOT floored — it goes out. Proves the floor is law-specific, not a blanket
     downgrade of every vertical."""
@@ -656,8 +654,6 @@ def test_law_floor_does_not_widen_unauthored_send(env_autonomous, env_vertical_l
     """A law customer with NO authored external_send ceiling is still fail-closed
     (refused) — the floor narrows, it never grants. Unauthored stays refused."""
     enforce = _load_trust_module("enforce")
-    result = enforce.evaluate_tool_call(
-        "agentmail:send_message", {"text": "hi there"}, "pilot-law"
-    )
+    result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "pilot-law")
     assert isinstance(result, dict)
     assert result["action"] == "block"
