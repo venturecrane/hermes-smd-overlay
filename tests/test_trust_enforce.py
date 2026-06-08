@@ -576,3 +576,84 @@ def test_send_draft_with_no_body_fails_toward_draft(env_autonomous) -> None:
     result = enforce.evaluate_tool_call("agentmail:send_draft", args, "smd")
     assert isinstance(result, dict)
     assert result["action"] == "block"
+
+
+# ---------------------------------------------------------------------------
+# ADR 0022 — vertical-pack floors (_resolve_vertical_floors) for law-firm
+#
+# The law-firm pack's reviewer-as-sender-floor pins external_send to
+# draft_for_review. This closes the prior HONEST GAP where _resolve_vertical_floors
+# returned {} and a law customer's floor depended on remembering to author the
+# ceiling. See operator/verticals/law-firm/compliance-floor.md.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def env_vertical_law(monkeypatch):
+    """Set the customer vertical to law-firm via env override."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    yield
+
+
+def test_resolve_vertical_floors_law_firm_floors_external_send(env_vertical_law) -> None:
+    enforce = _load_trust_module("enforce")
+    floors = enforce._resolve_vertical_floors()
+    assert floors == {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.DRAFT_FOR_REVIEW}
+
+
+def test_resolve_vertical_floors_mixed_vertical_is_empty(monkeypatch) -> None:
+    enforce = _load_trust_module("enforce")
+    monkeypatch.setenv("SMD_VERTICAL", "mixed")
+    assert enforce._resolve_vertical_floors() == {}
+
+
+def test_resolve_vertical_failure_falls_through_to_env(monkeypatch) -> None:
+    """A customer_config read failure must not raise out of _resolve_vertical —
+    it falls through to the env override (here unset → '')."""
+    enforce = _load_trust_module("enforce")
+    monkeypatch.delenv("SMD_VERTICAL", raising=False)
+    assert enforce._resolve_vertical() == ""
+    assert enforce._resolve_vertical_floors() == {}
+
+
+def test_law_floor_narrows_authored_autonomous_send_to_draft(
+    env_autonomous, env_vertical_law
+) -> None:
+    """The reviewer-as-sender floor: a law customer who AUTHORED
+    external_send=autonomous is still narrowed to draft (blocked) by the pack
+    floor — even on a clean, non-content-sensitive body. This is the HONEST GAP
+    closure: the floor no longer depends on the customer authoring the ceiling."""
+    enforce = _load_trust_module("enforce")
+    args = {
+        "_action_ceilings": {"external_send": "autonomous"},
+        "subject": "Saw your note",
+        "text": "Got it, that works on my end. Talk soon.",
+    }
+    result = enforce.evaluate_tool_call("agentmail:send_message", args, "pilot-law")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "draft" in result["message"].lower()
+
+
+def test_non_law_authored_autonomous_clean_send_is_not_floored(env_autonomous, monkeypatch) -> None:
+    """Control: the same authored-autonomous clean send on a non-law vertical is
+    NOT floored — it goes out. Proves the floor is law-specific, not a blanket
+    downgrade of every vertical."""
+    enforce = _load_trust_module("enforce")
+    monkeypatch.setenv("SMD_VERTICAL", "mixed")
+    args = {
+        "_action_ceilings": {"external_send": "autonomous"},
+        "subject": "Saw your note",
+        "text": "Got it, that works on my end. Talk soon.",
+    }
+    result = enforce.evaluate_tool_call("agentmail:send_message", args, "smd")
+    assert result is None
+
+
+def test_law_floor_does_not_widen_unauthored_send(env_autonomous, env_vertical_law) -> None:
+    """A law customer with NO authored external_send ceiling is still fail-closed
+    (refused) — the floor narrows, it never grants. Unauthored stays refused."""
+    enforce = _load_trust_module("enforce")
+    result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "pilot-law")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
