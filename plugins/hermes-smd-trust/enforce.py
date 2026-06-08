@@ -557,23 +557,73 @@ def _resolve_action_ceilings(args: dict | None) -> dict[ActionClass, Ceiling]:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# Vertical-pack safety floors (ADR 0022 / ADR 0037 Tenet 3)
+#
+# A vertical pack declares non-raisable safety floors in its manifest
+# (``operator/verticals/<vertical>/vertical.yaml`` -> ``compliance:``). A floor
+# can only *narrow* a customer's authored ceiling, never raise it
+# (``resolve_ceiling``). The floor SEMANTICS are encoded here keyed by vertical
+# slug: each pack-declared compliance slug maps to the action-class ceiling it
+# pins. The pack's slug list is the source of truth; this registry is its
+# runtime realization — the Machine reads the customer's ``vertical`` field
+# (cheap, always present), not the full pack manifest.
+#
+#   law-firm / ``reviewer-as-sender-floor`` -> EXTERNAL_SEND pinned to
+#     draft_for_review: client- and tribunal-bound mail ships under a human
+#     reviewer's identity (ADR 0005), non-raisable. See
+#     ``operator/verticals/law-firm/{vertical.yaml,compliance-floor.md}``.
+# ---------------------------------------------------------------------------
+
+
+_VERTICAL_FLOORS: Mapping[str, Mapping[ActionClass, Ceiling]] = MappingProxyType(
+    {
+        "law-firm": MappingProxyType({ActionClass.EXTERNAL_SEND: Ceiling.DRAFT_FOR_REVIEW}),
+    }
+)
+
+
+def _resolve_vertical() -> str:
+    """Resolve the customer's vertical slug.
+
+    Source order: ``customer.yaml`` (via ``shared.customer_config``) ->
+    ``SMD_VERTICAL`` env override (dev / test) -> ``""`` (no vertical). The read
+    is best-effort: any failure falls through to the env / empty path so a
+    transient config error never raises here. Losing the floor on an unreadable
+    config does not *widen* anything — an unauthored ``external_send`` is
+    fail-closed regardless (ADR 0035), and the outer ``evaluate_tool_call``
+    handler already fails closed for sensitive actions on a raise.
+    """
+    try:
+        from shared.customer_config import CustomerConfig  # local import
+
+        vertical = CustomerConfig.from_volume().vertical
+        if vertical:
+            return vertical
+    except NotImplementedError:
+        pass
+    except Exception:
+        logger.debug(
+            "vertical resolution: customer_config unavailable; falling back to env",
+            exc_info=True,
+        )
+    return os.environ.get("SMD_VERTICAL", "")
+
+
 def _resolve_vertical_floors() -> dict[ActionClass, Ceiling]:
     """Resolve non-raisable per-action-class floors from the vertical pack.
 
-    ADR 0022 vertical packs are a Phase-2 deliverable; no pack ships yet, so
-    this returns ``{}``. The seam exists so the overlay runtime stays
-    signature-compatible with the canonical adapter (which the boot invariant
-    exercises with explicit floors) and so wiring a law-pack floor later is a
-    one-function change here.
+    The law-firm pack's ``reviewer-as-sender-floor`` pins ``external_send`` to
+    ``draft_for_review`` — a floor a customer's authored ceiling can only narrow,
+    never raise (ADR 0025 / ADR 0022). Returns ``{}`` for verticals with no
+    declared floor (e.g. customer-zero ``mixed``).
 
-    HONEST GAP: until packs land, a regulated-vertical customer does NOT get an
-    automatic runtime ``external_send`` floor from this path. For such a
-    customer the floor must be authored directly as the customer-wide
-    ``action_ceilings`` (which a vertical floor can only narrow, never raise).
-    Customer-zero (``smd``) is vertical ``mixed`` with no floor, so this is
-    correct for the live Machine today.
+    Closes the prior HONEST GAP: a law customer who forgets to author the
+    ``external_send`` ceiling now still gets the floor from the pack, so a
+    client/tribunal-bound send can never go out autonomously on a law Machine.
     """
-    return {}
+    floors = _VERTICAL_FLOORS.get(_resolve_vertical())
+    return dict(floors) if floors else {}
 
 
 # Body-bearing arg keys on AgentMail / generic send tools. ``subject`` is
