@@ -302,6 +302,14 @@ def register(ctx) -> None:
             customer_slug=_CUSTOMER_SLUG,
         )
         _WRITER = AuditLogWriter(client)
+        # The Machine's bootstrap does not apply the per-customer migrations, so
+        # ensure the audit_log table exists before the first write (ss-console
+        # #1285). Idempotent. A failure must not crash plugin load — log loudly
+        # and let the hooks no-op, same posture as a missing binding.
+        try:
+            _WRITER.ensure_schema()
+        except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
+            logger.error("hermes-smd-audit: ensure_schema failed; audit writes will fail: %s", exc)
         # ADR 0022 Stream 2 — skill inventory writes go to the same audit
         # D1 binding (agent_skills_inventory table lives alongside
         # audit_log per the ss-console migrations).

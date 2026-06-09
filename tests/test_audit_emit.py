@@ -213,6 +213,31 @@ def test_writer_inserts_row_with_all_fields() -> None:
     assert "T" in row["ts"]
 
 
+def test_ensure_schema_creates_table_then_write_reads_back(tmp_path) -> None:
+    """End-to-end against a REAL D1Client: on a fresh DB with no audit_log,
+    ensure_schema() creates the table and a real write lands a readable row.
+    Closes the table-creation gap in ss-console#1285 (the Machine's bootstrap
+    never applied the per-customer migrations, so the table was missing)."""
+    from shared.d1_client import D1Client
+
+    mod = load_plugin("hermes-smd-audit")
+    db = str(tmp_path / "audit.db")
+    client = D1Client(binding_name=db, customer_slug="acme")  # direct-path binding (#41)
+    writer = mod.emit.AuditLogWriter(client)
+    writer.ensure_schema()  # the table did not exist before this call
+
+    event = mod.schemas.AuditEvent(
+        action_type="DRAFT_CREATED",
+        actor="agent",
+        actor_role=mod.schemas.ActorRole.AGENT,
+        skill_name="inbox-triage",
+    )
+    ulid = writer.write(event)
+
+    rows = client.query("SELECT id, action_type, actor FROM audit_log")
+    assert rows == [{"id": ulid, "action_type": "DRAFT_CREATED", "actor": "agent"}]
+
+
 def test_writer_with_minimal_event() -> None:
     mod = load_plugin("hermes-smd-audit")
     client = FakeD1Client()

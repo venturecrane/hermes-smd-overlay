@@ -15,6 +15,8 @@ from pathlib import Path
 from shared.audit_contract import (
     ACTOR_AGENT,
     COLUMNS,
+    CREATE_INDEX_SQL,
+    CREATE_TABLE_SQL,
     INSERT_SQL,
     agent_event_params,
     build_audit_params,
@@ -49,6 +51,17 @@ def test_insert_sql_matches_columns():
     assert INSERT_SQL.startswith("INSERT INTO audit_log (")
     assert ", ".join(_EXPECTED_COLUMNS) in INSERT_SQL
     assert INSERT_SQL.count("?") == len(_EXPECTED_COLUMNS)
+
+
+def test_create_table_sql_covers_every_column():
+    # The CREATE DDL must name every contract column (drift guard: a new COLUMNS
+    # entry without a matching DDL column would write to a missing column).
+    assert CREATE_TABLE_SQL.startswith("CREATE TABLE IF NOT EXISTS audit_log (")
+    for col in _EXPECTED_COLUMNS:
+        assert col in CREATE_TABLE_SQL, f"CREATE_TABLE_SQL missing column {col!r}"
+    assert "id TEXT PRIMARY KEY" in CREATE_TABLE_SQL
+    # Indexes are idempotent (safe to re-run at every boot).
+    assert all(ix.startswith("CREATE INDEX IF NOT EXISTS") for ix in CREATE_INDEX_SQL)
 
 
 def test_build_audit_params_length_matches_columns():
