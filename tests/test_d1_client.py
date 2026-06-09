@@ -88,6 +88,23 @@ def test_construction_rejects_invalid_slug(bad_slug):
         D1Client(binding_name="CUSTOMER_DB", customer_slug=bad_slug, db_path=":memory:")
 
 
+def test_binding_name_as_direct_path(db_path, monkeypatch):
+    """A binding_name that is itself a filesystem path (how the live Machine
+    sets SMD_D1_AUDIT_BINDING=/opt/data/audit.db) is used directly — NOT looked
+    up as an env var. Regression for #1285 (audit emission never wrote)."""
+    monkeypatch.delenv(db_path, raising=False)  # no env var of this name exists
+    c = D1Client(binding_name=db_path, customer_slug="acme")  # db_path starts with /
+    assert c.query("SELECT COUNT(*) AS n FROM audit_log") == [{"n": 0}]
+
+
+def test_binding_name_as_env_var_indirection(db_path, monkeypatch):
+    """The original indirection still works: a non-path binding_name is looked
+    up in the environment to find the path."""
+    monkeypatch.setenv("CUSTOMER_DB", db_path)
+    c = D1Client(binding_name="CUSTOMER_DB", customer_slug="acme")
+    assert c.query("SELECT COUNT(*) AS n FROM audit_log") == [{"n": 0}]
+
+
 @pytest.mark.parametrize(
     "good_slug",
     ["ab", "smd", "acme", "client-1", "client-1-prod", "a0", "0a", "a-b-c"],
