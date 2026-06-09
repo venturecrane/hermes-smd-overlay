@@ -38,6 +38,9 @@ import logging
 import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
+
+from shared import runtime_read
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
 # to build the forward URL, so the only dynamic part of the urllib call is a
@@ -94,6 +97,18 @@ def _route_secret(route: str) -> str | None:
     return val or None
 
 
+_RUNTIME_PREFIX = "/runtime/"
+_RUNTIME_KIND_RE = re.compile(r"^[a-z_]{1,32}$")
+
+
+def _audit_db_path() -> str | None:
+    """Resolve the per-customer audit D1 file path the same way D1Client does:
+    ``SMD_D1_AUDIT_BINDING`` names the env var that holds the SQLite path
+    (defaulting to ``CUSTOMER_DB``). Returns None when unset (→ honest empty)."""
+    binding = os.environ.get("SMD_D1_AUDIT_BINDING") or "CUSTOMER_DB"
+    return os.environ.get(binding) or None
+
+
 def _message_id(body: bytes) -> str | None:
     try:
         payload = json.loads(body)
@@ -121,11 +136,60 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _json_nostore(self, status: int, obj: dict) -> None:
+        """Like ``_json`` but with ``Cache-Control: no-store`` — runtime reads
+        return tenant audit data that must never be cached by any proxy."""
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:  # noqa: N802 (stdlib signature)
-        if self.path.rstrip("/") == "/health":
+        split = urlsplit(self.path)
+        path = split.path
+        if path.rstrip("/") == "/health":
             self._json(200, {"status": "ok", "platform": "webhook-gate"})
+        elif path.startswith(_RUNTIME_PREFIX):
+            self._handle_runtime(path, split.query)
         else:
             self._json(404, {"error": "not found"})
+
+    def _handle_runtime(self, path: str, query: str) -> None:
+        """Console→Machine runtime read (ADR 0043 A). Authenticated, read-only,
+        single-customer. Auth failures return an opaque 401 — never a hint about
+        which check failed, and never the bearer or any row in a log."""
+        ok = runtime_read.verify_runtime_auth(
+            self.headers.get("Authorization"),
+            self.headers.get("X-Tenant-Slug"),
+            key=os.environ.get("OPERATOR_RUNTIME_READ_KEY"),
+            own_slug=os.environ.get("SMD_CUSTOMER_SLUG"),
+        )
+        if not ok:
+            logger.warning("runtime read: unauthorized from %s", self.address_string())
+            self._json_nostore(401, {"error": "unauthorized"})
+            return
+
+        kind = path[len(_RUNTIME_PREFIX) :].strip("/").split("/")[0]
+        if not _RUNTIME_KIND_RE.match(kind) or kind not in runtime_read.SUPPORTED_KINDS:
+            self._json_nostore(404, {"error": "unknown kind"})
+            return
+
+        params = parse_qs(query)
+        try:
+            result = runtime_read.read_runtime(
+                kind,
+                db_path=_audit_db_path(),
+                cursor=(params.get("cursor") or [None])[0],
+                limit=(params.get("limit") or [None])[0],
+            )
+        except Exception as exc:  # never leak detail; fail closed
+            logger.error("runtime read: error serving kind %r: %s", kind, exc)
+            self._json_nostore(500, {"error": "read failed"})
+            return
+        self._json_nostore(200, result)
 
     def do_POST(self) -> None:  # noqa: N802
         if not self.path.startswith("/webhooks/"):
