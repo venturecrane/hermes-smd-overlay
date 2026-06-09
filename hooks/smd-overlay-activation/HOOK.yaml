@@ -1,0 +1,10 @@
+name: smd-overlay-activation
+description: >
+  Gateway-startup activation gate for the SMD overlay (ss-console#1285). Force-loads
+  the overlay into the live gateway PluginManager singleton, then drives a real
+  pre_tool_call dispatch self-check (the trust ceiling MUST block a banned send tool).
+  Fail-closed: os._exit(1) if the overlay is not governing the live turn-path. This is
+  the authoritative live boot gate — it runs in the gateway process, which the
+  pre-gateway safety-substrate invariant structurally cannot.
+events:
+  - gateway:startup
