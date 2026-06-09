@@ -375,7 +375,9 @@ def _identifier_rows(fake: "_FakeD1Client") -> list:
     return [c for c in fake.calls if "IDENTIFIER_UNVERIFIED" in c[1]]
 
 
-def test_unverified_identifier_allows_and_reports(trust_plugin, env_autonomous, monkeypatch) -> None:
+def test_unverified_identifier_allows_and_reports(
+    trust_plugin, env_autonomous, monkeypatch
+) -> None:
     """A clean draft carrying an identifier the agent never read is ALLOWED
     (report-only never blocks) and emits one IDENTIFIER_UNVERIFIED row."""
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")

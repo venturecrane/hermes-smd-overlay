@@ -55,7 +55,7 @@ def test_iso_and_slash_dates_canonicalize_equal() -> None:
 
 
 def test_a_number_punctuation_variants_verify() -> None:
-    """"A 123 456 789" read, "A123456789" written — punctuation-insensitive."""
+    """ "A 123 456 789" read, "A123456789" written — punctuation-insensitive."""
     reg = _reg("Alien number A 123 456 789 on file.")
     assert not check("Your case references A123456789.", reg).has_unverified
 
@@ -136,7 +136,7 @@ def test_check_is_total_on_empty_and_garbage() -> None:
 
 
 def test_nickname_is_not_silently_verified_documented_limitation() -> None:
-    """"Bob" is not normalized to "Robert" (v1 limitation). In REPORT mode this
+    """ "Bob" is not normalized to "Robert" (v1 limitation). In REPORT mode this
     is a surfaced signal, not a block — which is the correct, honest behavior:
     we cannot verify "Bob" against "Robert Smith", so we say so."""
     reg = _reg("Client Robert Smith.")
