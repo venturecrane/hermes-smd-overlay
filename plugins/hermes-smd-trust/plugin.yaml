@@ -1,13 +1,16 @@
 name: hermes-smd-trust
-version: "0.2.0"
-description: "Content-class trust ceilings + outbound fabrication gate (ADR 0028)."
+version: "0.3.0"
+description: "Content-class trust ceilings + outbound fabrication gate (ADR 0028) + A1 identifier-integrity gate (report-only)."
 author: VentureCrane
 requires_env:
   - SMD_CUSTOMER_SLUG
-  # outbound.py require()s this to emit FABRICATION_FILTER_TRIGGERED audit
-  # rows for the ADR 0028 gate; declared so it's caught at preflight.
+  # outbound.py require()s this to emit FABRICATION_FILTER_TRIGGERED and
+  # IDENTIFIER_UNVERIFIED audit rows for the ADR 0028 / A1 gates; declared so
+  # it's caught at preflight.
   - SMD_D1_AUDIT_BINDING
 provides_hooks:
   - pre_tool_call
+  - post_tool_call # A1: records read-tool results into the provenance register
 hooks:
   - pre_tool_call
+  - post_tool_call

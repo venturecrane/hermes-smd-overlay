@@ -47,6 +47,7 @@ def test_trust_registers_expected_hooks(fake_ctx) -> None:
     mod.register(fake_ctx)
 
     assert "pre_tool_call" in fake_ctx.registered
+    assert "post_tool_call" in fake_ctx.registered  # A1 provenance recording
     assert "transform_tool_result" not in fake_ctx.registered
 
 
