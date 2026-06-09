@@ -102,11 +102,20 @@ _RUNTIME_KIND_RE = re.compile(r"^[a-z_]{1,32}$")
 
 
 def _audit_db_path() -> str | None:
-    """Resolve the per-customer audit D1 file path the same way D1Client does:
-    ``SMD_D1_AUDIT_BINDING`` names the env var that holds the SQLite path
-    (defaulting to ``CUSTOMER_DB``). Returns None when unset (→ honest empty)."""
-    binding = os.environ.get("SMD_D1_AUDIT_BINDING") or "CUSTOMER_DB"
-    return os.environ.get(binding) or None
+    """Resolve the per-customer audit D1 file path.
+
+    ``SMD_D1_AUDIT_BINDING`` may carry EITHER a direct filesystem path
+    (e.g. ``/opt/data/audit.db`` — how the live Machine sets it) OR the NAME of
+    another env var that holds the path (the documented indirection). Handle both:
+    a value starting with ``/`` is the path itself; otherwise it is a var name to
+    look up. Falls back to ``CUSTOMER_DB``. Returns None when nothing resolves
+    (→ honest empty page, never a guess)."""
+    binding = os.environ.get("SMD_D1_AUDIT_BINDING")
+    if binding and binding.startswith("/"):
+        return binding
+    if binding:
+        return os.environ.get(binding) or None
+    return os.environ.get("CUSTOMER_DB") or None
 
 
 def _message_id(body: bytes) -> str | None:
@@ -161,11 +170,17 @@ class _Handler(BaseHTTPRequestHandler):
         """Console→Machine runtime read (ADR 0043 A). Authenticated, read-only,
         single-customer. Auth failures return an opaque 401 — never a hint about
         which check failed, and never the bearer or any row in a log."""
+        # The gate is a SEPARATE process from the Hermes agent. SMD_CUSTOMER_SLUG
+        # is injected only into the agent's process (for the plugins); the
+        # Machine-wide slug the gate process actually has is CUSTOMER_SLUG (the
+        # Dockerfile ARG→ENV). Prefer SMD_CUSTOMER_SLUG when present, fall back to
+        # CUSTOMER_SLUG — without the fallback, own_slug is None and every read
+        # 401s regardless of key.
         ok = runtime_read.verify_runtime_auth(
             self.headers.get("Authorization"),
             self.headers.get("X-Tenant-Slug"),
             key=os.environ.get("OPERATOR_RUNTIME_READ_KEY"),
-            own_slug=os.environ.get("SMD_CUSTOMER_SLUG"),
+            own_slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG"),
         )
         if not ok:
             logger.warning("runtime read: unauthorized from %s", self.address_string())
