@@ -676,6 +676,10 @@ def test_translate_materializes_clio_stdio_mcp_server(tmp_path, monkeypatch):
     assert clio["env"]["CLIO_CLIENT_ID"] == "clio_id_test"
     assert clio["env"]["CLIO_CLIENT_SECRET"] == "clio_secret_test"
     assert clio["env"]["ENCRYPTION_KEY"] == "f" * 64  # remapped from CLIO_ENCRYPTION_KEY
+    # static env: TRANSPORT=stdio — without it clio-mcp defaults to HTTP mode and
+    # fatals ("MCP_BASE_URL is required in HTTP mode"), closing the stdio
+    # connection on launch (the pilot-law first-boot failure).
+    assert clio["env"]["TRANSPORT"] == "stdio"
 
 
 def test_translate_skips_clio_when_required_secret_unset(tmp_path, monkeypatch):

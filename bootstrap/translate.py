@@ -324,7 +324,9 @@ def _materialize_mcp_servers(connectors: dict[str, Any]) -> dict[str, Any]:
             entry: dict[str, Any] = {"command": spec.command, "enabled": True}
             if spec.args:
                 entry["args"] = list(spec.args)
-            env_map: dict[str, str] = {}
+            # Static (non-secret) env first — CLI-mode switches the binary needs
+            # (e.g. clio-mcp's TRANSPORT=stdio), then the secret values.
+            env_map: dict[str, str] = dict(spec.env_static)
             missing_secret = False
             for target_var, source_secret in spec.env_secrets:
                 try:
