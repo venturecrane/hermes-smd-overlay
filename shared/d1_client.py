@@ -289,9 +289,20 @@ class D1Client:
         return self._conn
 
     def _resolve_db_path(self) -> str:
-        """Resolve the D1 file path from explicit override or env var."""
+        """Resolve the D1 file path from explicit override, direct path, or env var.
+
+        ``binding_name`` may be EITHER a direct filesystem path (how the live
+        Machine's fly.toml sets ``SMD_D1_AUDIT_BINDING`` = ``/opt/data/audit.db``)
+        OR the NAME of an env var holding the path (the indirection this method
+        originally assumed). Accept both: a value starting with ``/`` is the path
+        itself; otherwise look it up in the environment. Without this, a
+        path-valued binding resolved to ``os.environ.get("/opt/data/audit.db")``
+        → None → every write raised → audit emission silently never wrote
+        (ss-console #1285)."""
         if self._db_path is not None:
             return self._db_path
+        if self._binding_name.startswith("/"):
+            return self._binding_name
         value = os.environ.get(self._binding_name)
         if not value:
             raise RuntimeError(
