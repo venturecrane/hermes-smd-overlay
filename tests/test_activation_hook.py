@@ -199,3 +199,55 @@ def test_fails_closed_when_hermes_plugins_unimportable(monkeypatch, no_real_exit
     with pytest.raises(_Exit) as ei:
         asyncio.run(handler.handle("gateway:startup", {}))
     assert ei.value.code == 1
+
+
+def _audit_env(monkeypatch, handler, *, writes: bool):
+    """Wire the handler's audit-DB helpers to an in-memory counter and make the
+    fake post_llm_call dispatch increment it iff ``writes`` (simulating the real
+    audit hook writing a row). Returns the counter list."""
+    count = [0]
+    monkeypatch.setattr(handler, "_audit_db_path", lambda: "/fake/audit.db")
+    monkeypatch.setattr(handler, "_audit_row_count", lambda _p: count[0])
+    return count
+
+
+def test_passes_when_governed_and_auditing(monkeypatch, no_real_exit):
+    calls = _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK)
+    handler = _load_handler()
+    count = _audit_env(monkeypatch, handler, writes=True)
+    # Make the post_llm_call dispatch "write" a row, like the real audit hook.
+    import sys as _sys
+
+    plugins_mod = _sys.modules["hermes_cli.plugins"]
+    _orig = plugins_mod.invoke_hook
+
+    def _counting_invoke(hook_name, **kwargs):
+        if hook_name == "post_llm_call":
+            count[0] += 1
+        return _orig(hook_name, **kwargs)
+
+    plugins_mod.invoke_hook = _counting_invoke
+    asyncio.run(handler.handle("gateway:startup", {}))  # no _Exit => passed
+    # Both self-checks ran: trust (pre_tool_call) then audit (post_llm_call).
+    names = [c[0] for c in calls["invoke"]]
+    assert "pre_tool_call" in names and "post_llm_call" in names
+
+
+def test_fails_closed_when_audit_not_writing(monkeypatch, no_real_exit):
+    # Hooks present, trust fires (blocks email_send), BUT the post_llm_call dispatch
+    # writes no audit row — the exact ss-console#1285 Q2 failure, now fail-closed.
+    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK)
+    handler = _load_handler()
+    _audit_env(monkeypatch, handler, writes=False)  # counter never increments
+    with pytest.raises(_Exit) as ei:
+        asyncio.run(handler.handle("gateway:startup", {}))
+    assert ei.value.code == 1
+
+
+def test_audit_check_skipped_when_no_binding(monkeypatch, no_real_exit):
+    # No resolvable audit DB (binding unset) -> audit self-check degrades to skipped,
+    # the handler still passes on trust governance alone (no false fail-closed).
+    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK)
+    handler = _load_handler()
+    monkeypatch.setattr(handler, "_audit_db_path", lambda: None)
+    asyncio.run(handler.handle("gateway:startup", {}))  # no _Exit => passed
