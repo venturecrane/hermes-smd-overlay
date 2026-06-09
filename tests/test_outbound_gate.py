@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from shared import outbound_gate
+from shared import outbound_gate, provenance
 from shared.fabrication_markers import FabricationMarkersError, load_markers
 from tests.conftest import load_plugin
 
@@ -356,6 +356,119 @@ def test_block_emits_fabrication_audit_row(trust_plugin, env_autonomous, monkeyp
     assert "Roe v. Wade" not in metadata_json
     assert "410 U.S. 113" not in metadata_json
     assert "fabrication_filter" in metadata_json
+
+
+# ---------------------------------------------------------------------------
+# Layer 3b — A1 identifier-integrity gate (REPORT-ONLY, never blocks)
+# ---------------------------------------------------------------------------
+
+
+def _wire_fake_audit(ob) -> "_FakeD1Client":
+    fake = _FakeD1Client()
+    ob._AUDIT_CLIENT = fake
+    ob._AUDIT_CUSTOMER_SLUG = "acme"
+    ob._AUDIT_WIRED = True
+    return fake
+
+
+def _identifier_rows(fake: "_FakeD1Client") -> list:
+    return [c for c in fake.calls if "IDENTIFIER_UNVERIFIED" in c[1]]
+
+
+def test_unverified_identifier_allows_and_reports(
+    trust_plugin, env_autonomous, monkeypatch
+) -> None:
+    """A clean draft carrying an identifier the agent never read is ALLOWED
+    (report-only never blocks) and emits one IDENTIFIER_UNVERIFIED row."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "Your alien number on file is A123456789."},
+        task_id="t",
+        session_id="sess-rep",
+        tool_call_id="c",
+    )
+    assert result is None  # report-only NEVER blocks
+    rows = _identifier_rows(fake)
+    assert len(rows) == 1
+    metadata_json = rows[0][1][-1]
+    assert "tier3_identifier" in metadata_json
+    # redaction: the raw A-number must NOT be in the row
+    assert "A123456789" not in metadata_json
+    assert "a_number" in metadata_json
+
+
+def test_verified_identifier_does_not_report(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """An identifier the agent READ this session (recorded via post_tool_call)
+    verifies — no IDENTIFIER_UNVERIFIED row."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+
+    # The agent reads a matter record carrying the A-number.
+    trust_plugin.on_post_tool_call(
+        tool_name="email_list_messages",
+        result="Matter for client; alien number A123456789 on file.",
+        session_id="sess-ver",
+        tool_call_id="r",
+    )
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "Confirming your alien number A123456789."},
+        task_id="t",
+        session_id="sess-ver",
+        tool_call_id="c",
+    )
+    assert result is None
+    assert _identifier_rows(fake) == []  # verified → nothing reported
+
+
+def test_report_never_blocks_with_empty_register(trust_plugin, env_autonomous, monkeypatch) -> None:
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="practice_management_create_note",
+        args={"note": "Hearing set for June 8, 2026; ref A999999999."},
+        task_id="t",
+        session_id="sess-empty",
+        tool_call_id="c",
+    )
+    assert result is None  # never blocks even with everything unverified
+
+
+def test_names_alone_do_not_report(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """A greeting recipient name is excluded from the runtime report (the
+    register holds no names in v1) — a draft with only an unverified name and no
+    structured identifier emits no IDENTIFIER_UNVERIFIED row."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "Dear Robert Smith,\n\nThank you for your patience."},
+        task_id="t",
+        session_id="sess-name",
+        tool_call_id="c",
+    )
+    assert result is None
+    assert _identifier_rows(fake) == []
+
+
+def test_post_tool_call_ignores_non_read_tools(trust_plugin, monkeypatch) -> None:
+    """Only READ tools establish provenance — a write tool's result is not
+    recorded into the register."""
+    provenance._reset_for_tests()
+    trust_plugin.on_post_tool_call(
+        tool_name="email_create_draft",  # INTERNAL_WRITE, not a read
+        result="A123456789 should not be recorded from a write.",
+        session_id="sess-nr",
+        tool_call_id="r",
+    )
+    assert not bool(provenance.register_for("sess-nr"))
 
 
 def test_audit_write_failure_still_blocks(trust_plugin, env_autonomous, monkeypatch) -> None:

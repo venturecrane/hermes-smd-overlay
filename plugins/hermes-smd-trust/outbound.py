@@ -32,6 +32,7 @@ import logging
 import os
 from typing import Any
 
+from shared import identifier_filter, provenance
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -319,6 +320,78 @@ def _emit_fabrication_audit(
 
 
 # ---------------------------------------------------------------------------
+# A1 identifier-integrity gate — REPORT-ONLY (never blocks)
+#
+# Distinct from the blocking Tier-1/Tier-2 fabrication gate above. After a draft
+# body clears that gate, scan it for identifier-shaped tokens (dates, A-numbers,
+# receipts, SSNs, case numbers) NOT in this session's provenance register — i.e.
+# an identifier the agent composed without READING it from a source. That is the
+# runtime signature of a fabricated/garbled identifier, and the never-computes
+# backstop for a computed legal date (a computed SOL won't be in the register).
+#
+# REPORT-ONLY: emits an IDENTIFIER_UNVERIFIED audit signal and ALLOWS the draft.
+# It never blocks — a mismatched identifier is what a human reviewer should SEE
+# (these are draft_for_review tools; the draft already reaches a human). Names
+# are excluded (the runtime register holds none — structured-name seeding is a
+# follow-on). Enforcement (report -> flag) flips only after the false-positive
+# rate is measured on real traffic (the plan's tune-on-traffic discipline).
+# ---------------------------------------------------------------------------
+
+
+def _report_identifiers(
+    *,
+    body: str,
+    session_id: str,
+    tool_name: str,
+    tool_call_id: str,
+    vertical: str | None,
+    cohort: str | None,
+) -> None:
+    """Report (never block) outbound identifiers not traceable to a session read.
+
+    Best-effort: any failure is swallowed — the report must never perturb the
+    allowed draft path or raise out of the hook.
+    """
+    try:
+        register = provenance.register_for(session_id)
+        result = identifier_filter.check(body, register)  # mode=REPORT default
+        unverified = [h for h in result.unverified if h.kind is not identifier_filter.IdKind.NAME]
+        if not unverified:
+            return
+        client, slug = _audit_client()
+        if client is None or slug is None:
+            return
+        by_kind: dict[str, int] = {}
+        for h in unverified:
+            by_kind[h.kind.value] = by_kind.get(h.kind.value, 0) + 1
+        metadata: dict = {
+            "gate_tier": "tier3_identifier",
+            "mode": "report",
+            "customer": slug,
+            "tool": tool_name,
+            "vertical": vertical or "(unknown)",
+            "register_was_empty": result.register_was_empty,
+            "unverified_counts": by_kind,
+            # redacted shapes only — never the raw identifier value
+            "shapes": sorted({identifier_filter._redact(h) for h in unverified}),
+        }
+        if cohort:
+            metadata["cohort"] = cohort
+        if session_id:
+            metadata["session_id"] = session_id
+        if tool_call_id:
+            metadata["tool_call_id"] = tool_call_id
+        params = agent_event_params(action_type="IDENTIFIER_UNVERIFIED", metadata=metadata)
+        client.execute(_INSERT_SQL, *params)
+    except Exception as exc:  # noqa: BLE001 — report is best-effort; never block the allow
+        logger.debug(
+            "outbound gate: identifier report failed (tool=%s err=%s); draft still allowed",
+            tool_name,
+            exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # The gate entry point — called from on_pre_tool_call after ceiling passes
 # ---------------------------------------------------------------------------
 
@@ -381,6 +454,16 @@ def check_outbound_draft(
     cohort = _resolve_cohort()
     decision = evaluate(body, cohort, vertical)
     if decision.allowed:
+        # A1 report-only identifier gate: signal (never block) any identifier in
+        # the body not traceable to a source read this session.
+        _report_identifiers(
+            body=body,
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            vertical=vertical,
+            cohort=cohort,
+        )
         return None
 
     _emit_fabrication_audit(

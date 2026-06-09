@@ -16,6 +16,7 @@ this plugin does not cross-import the audit plugin.
 import logging
 from typing import Any
 
+from shared import provenance
 from shared.secrets import get_secret
 
 from . import enforce, outbound
@@ -99,7 +100,43 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         }
 
 
+def on_post_tool_call(**kwargs: Any) -> None:
+    """Populate the per-session identifier provenance register from READ-tool
+    results (A1).
+
+    For a read-class tool, the identifiers in its result are things the agent
+    actually READ — the outbound gate later checks a draft's identifiers against
+    this register (report-only) to surface any the agent composed without
+    reading. Exception-safe + best-effort: provenance recording must never raise
+    out of a hook or perturb the tool path.
+
+    Expected kwargs per docs/hook-surface.md:
+        tool_name, args, result, task_id, session_id, tool_call_id
+    """
+    try:
+        tool_name = kwargs.get("tool_name") or ""
+        if not tool_name:
+            return
+        try:
+            classification = enforce.classify_tool(tool_name)
+        except enforce.BannedToolError:
+            return  # a banned tool never executes; never record from one
+        if classification.action_class is not enforce.ActionClass.READ:
+            return  # only reads establish provenance
+        result = kwargs.get("result")
+        if result is None:
+            return
+        provenance.record_read(
+            kwargs.get("session_id") or "",
+            result if isinstance(result, str) else str(result),
+        )
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.debug("hermes-smd-trust: post_tool_call provenance record failed", exc_info=True)
+
+
 def register(ctx) -> None:
-    """Plugin entry point. Wires the pre_tool_call hook."""
+    """Plugin entry point. Wires pre_tool_call (ceiling + outbound gate) and
+    post_tool_call (provenance recording for the A1 identifier gate)."""
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
-    logger.info("hermes-smd-trust registered: pre_tool_call")
+    ctx.register_hook("post_tool_call", on_post_tool_call)
+    logger.info("hermes-smd-trust registered: pre_tool_call + post_tool_call")
