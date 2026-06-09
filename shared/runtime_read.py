@@ -36,6 +36,7 @@ honest empty page (never fabricated rows); they light up when those tables land.
 from __future__ import annotations
 
 import hmac
+import os
 import sqlite3
 from typing import Any
 
@@ -122,8 +123,10 @@ def read_runtime(
     """
     if kind not in SUPPORTED_KINDS or kind not in _REAL_KINDS:
         return {"entries": [], "cursor": None}
-    if not db_path:
-        # Misconfigured binding — fail closed to empty rather than 500.
+    # No binding, or the DB file doesn't exist yet (a fresh Machine before the
+    # audit subsystem's first write legitimately has no audit.db) → honest empty,
+    # never a 500.
+    if not db_path or not os.path.exists(db_path):
         return {"entries": [], "cursor": None}
     return _read_audit_log(db_path, _valid_cursor(cursor), clamp_limit(limit))
 
@@ -155,6 +158,10 @@ def _read_audit_log(db_path: str, cursor: str | None, limit: int) -> dict[str, A
         else:
             sql = f"{_AUDIT_SELECT} ORDER BY id DESC LIMIT ?"
             rows = conn.execute(sql, (limit,)).fetchall()
+    except sqlite3.OperationalError:
+        # DB exists but has no audit_log table yet (the audit subsystem hasn't
+        # created it). Honest empty, not a 500.
+        return {"entries": [], "cursor": None}
     finally:
         conn.close()
 

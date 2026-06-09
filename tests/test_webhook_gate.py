@@ -59,5 +59,20 @@ def test_route_secret_reads_per_vendor_env(monkeypatch):
 def test_message_id_extracted_from_agentmail_payload():
     body = b'{"event_type":"message.received","message":{"message_id":"<x@y>"}}'
     assert gate._message_id(body) == "<x@y>"
+
+
+def test_audit_db_path_handles_direct_path_varname_and_fallback(monkeypatch):
+    # Direct filesystem path (how the live Machine sets it).
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "/opt/data/audit.db")
+    assert gate._audit_db_path() == "/opt/data/audit.db"
+    # Var-name indirection (the documented form): binding names the path var.
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    monkeypatch.setenv("CUSTOMER_DB", "/data/c.db")
+    assert gate._audit_db_path() == "/data/c.db"
+    # No binding → fall back to CUSTOMER_DB directly.
+    monkeypatch.delenv("SMD_D1_AUDIT_BINDING", raising=False)
+    assert gate._audit_db_path() == "/data/c.db"
+    monkeypatch.delenv("CUSTOMER_DB", raising=False)
+    assert gate._audit_db_path() is None
     assert gate._message_id(b"not json") is None
     assert gate._message_id(b'{"message":{}}') is None

@@ -128,6 +128,22 @@ def test_unknown_kind_and_missing_db_return_empty(tmp_path):
     assert rr.read_runtime("audit_log", db_path=None) == {"entries": [], "cursor": None}
 
 
+def test_nonexistent_db_file_returns_empty_not_error(tmp_path):
+    # A fresh Machine before the audit subsystem's first write has no audit.db.
+    missing = str(tmp_path / "never-created.db")
+    assert rr.read_runtime("audit_log", db_path=missing) == {"entries": [], "cursor": None}
+
+
+def test_db_without_audit_log_table_returns_empty(tmp_path):
+    # DB exists (other tables) but no audit_log yet → honest empty, not a crash.
+    path = tmp_path / "other.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE kanban (id TEXT)")
+    conn.commit()
+    conn.close()
+    assert rr.read_runtime("audit_log", db_path=str(path)) == {"entries": [], "cursor": None}
+
+
 def test_read_connection_is_readonly(tmp_path):
     """The read path opens mode=ro; a write on that connection is refused by the
     engine — read-only is enforced by SQLite, not just by convention."""
