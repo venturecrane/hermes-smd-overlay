@@ -43,6 +43,8 @@ from shared.action_classes import (
     ToolClassification,
     classify_tool,
 )
+from shared.audit_contract import CREATE_INDEX_SQL as _CREATE_INDEX_SQL
+from shared.audit_contract import CREATE_TABLE_SQL as _CREATE_TABLE_SQL
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import build_audit_params
 from shared.ids import iso_utc as _iso_utc
@@ -117,6 +119,21 @@ class AuditLogWriter:
         self._client = client
         self._clock = clock
         self._ulid_now_ms = ulid_now_ms
+
+    def ensure_schema(self) -> None:
+        """Idempotently create the audit_log table + indexes if absent.
+
+        The Machine's bootstrap does not apply the ss-console per-customer
+        migrations, so the table this writer targets may not exist — without
+        this, the first write hits "no such table" and audit_log is never
+        created (ss-console#1285). ``CREATE ... IF NOT EXISTS`` is safe whether
+        or not a future bootstrap migration step lands. Runs against the raw
+        D1Client (the immutability D1Executor blocks UPDATE/DELETE/DROP, not
+        CREATE). Called once at plugin register.
+        """
+        self._client.execute(_CREATE_TABLE_SQL)
+        for index_sql in _CREATE_INDEX_SQL:
+            self._client.execute(index_sql)
 
     def write(self, event: AuditEvent) -> str:
         """Insert one audit_log row. Returns the inserted ULID.

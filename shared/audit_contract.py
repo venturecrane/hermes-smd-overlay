@@ -41,6 +41,38 @@ INSERT_SQL = (
     "VALUES (" + ", ".join("?" for _ in COLUMNS) + ")"
 )
 
+# Canonical CREATE for the per-customer audit_log, beside INSERT_SQL/COLUMNS as
+# the single schema source. The Machine's bootstrap does NOT apply the
+# ss-console operator/migrations, so the audit writer ensures the table exists on
+# its own (ss-console#1285 — without this, writes hit "no such table" and
+# audit_log is never created). IF NOT EXISTS keeps it idempotent and safe if a
+# future bootstrap migration step lands. Column names are asserted equal to
+# COLUMNS by the contract test so the two cannot drift. Mirrors
+# ss-console operator/migrations/0001 (immutability is enforced at the Worker
+# layer via D1Executor, not DB triggers — there are none to replicate).
+CREATE_TABLE_SQL = (
+    "CREATE TABLE IF NOT EXISTS audit_log ("
+    "id TEXT PRIMARY KEY, "
+    "ts TEXT NOT NULL, "
+    "action_type TEXT NOT NULL, "
+    "actor TEXT NOT NULL, "
+    "actor_role TEXT, "
+    "skill_name TEXT, "
+    "matter_ref TEXT, "
+    "input_digest TEXT, "
+    "output_digest TEXT, "
+    "diff_digest TEXT, "
+    "trust_ceiling TEXT, "
+    "metadata TEXT"
+    ")"
+)
+
+CREATE_INDEX_SQL: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_action_type ON audit_log(action_type, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor, ts)",
+)
+
 
 def _dumps(metadata: dict | None) -> str | None:
     """Deterministic metadata serialization (sorted keys, no whitespace).
@@ -123,6 +155,8 @@ def agent_event_params(
 __all__ = [
     "COLUMNS",
     "INSERT_SQL",
+    "CREATE_TABLE_SQL",
+    "CREATE_INDEX_SQL",
     "ACTOR_AGENT",
     "build_audit_params",
     "agent_event_params",
