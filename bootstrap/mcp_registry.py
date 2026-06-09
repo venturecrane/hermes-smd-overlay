@@ -75,6 +75,12 @@ class McpConnectorSpec:
     command: str | None = None
     args: tuple[str, ...] = field(default=())
     env_secrets: tuple[tuple[str, str], ...] = field(default=())
+    # Static (non-secret) env for a stdio subprocess: ``(var, literal_value)``
+    # pairs written verbatim into the server's ``env`` block. For CLI-mode
+    # switches the binary needs but that aren't secrets — e.g. clio-mcp's
+    # ``TRANSPORT=stdio`` (without it the binary defaults to HTTP mode and
+    # fatals on a missing MCP_BASE_URL). Applied before ``env_secrets``.
+    env_static: tuple[tuple[str, str], ...] = field(default=())
     blocked_tools: tuple[str, ...] = field(default=())
 
     @property
@@ -114,6 +120,10 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         name="clio-oktopeak",
         command="clio-mcp",
         args=(),
+        # clio-mcp defaults to HTTP mode and fatals ("MCP_BASE_URL is required
+        # in HTTP mode") unless told to run as a local stdio server. Hermes
+        # launches it over stdio, so pin TRANSPORT=stdio.
+        env_static=(("TRANSPORT", "stdio"),),
         env_secrets=(
             ("CLIO_CLIENT_ID", "CLIO_CLIENT_ID"),
             ("CLIO_CLIENT_SECRET", "CLIO_CLIENT_SECRET"),
