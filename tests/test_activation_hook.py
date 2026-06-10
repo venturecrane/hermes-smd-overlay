@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import os
 import sys
 import types
@@ -63,9 +64,21 @@ def _load_handler() -> types.ModuleType:
 
 
 class _FakeManager:
-    def __init__(self, hook_names: set[str]) -> None:
+    def __init__(
+        self,
+        hook_names: set[str],
+        *,
+        async_hook: str | None = None,
+    ) -> None:
         # Mirror PluginManager._hooks: name -> [callbacks].
         self._hooks = {h: [lambda **k: None] for h in hook_names}
+        if async_hook is not None:
+
+            async def async_callback(**kwargs):
+                return None
+
+            assert inspect.iscoroutinefunction(async_callback)
+            self._hooks[async_hook] = [async_callback]
 
 
 def _install_fake_plugins(
@@ -73,15 +86,17 @@ def _install_fake_plugins(
     *,
     hooks: set[str],
     invoke_results: list,
+    block_message: str | None = _BLOCK[0]["message"],
+    async_hook: str | None = None,
     discover_raises: Exception | None = None,
     invoke_raises: Exception | None = None,
 ) -> dict:
     """Inject a fake ``hermes_cli.plugins`` exposing the three fns the handler
     imports. Returns a dict recording the ``force`` flag and invoke calls."""
-    calls: dict = {"force": None, "invoke": []}
+    calls: dict = {"force": None, "invoke": [], "block": []}
     parent = types.ModuleType("hermes_cli")
     mod = types.ModuleType("hermes_cli.plugins")
-    mgr = _FakeManager(hooks)
+    mgr = _FakeManager(hooks, async_hook=async_hook)
 
     def discover_plugins(force: bool = False) -> None:
         calls["force"] = force
@@ -91,6 +106,12 @@ def _install_fake_plugins(
     def get_plugin_manager():
         return mgr
 
+    def get_pre_tool_call_block_message(tool_name: str, args: dict, **kwargs):
+        calls["block"].append((tool_name, args, kwargs))
+        if invoke_raises is not None:
+            raise invoke_raises
+        return block_message
+
     def invoke_hook(hook_name: str, **kwargs):
         calls["invoke"].append((hook_name, kwargs))
         if invoke_raises is not None:
@@ -98,6 +119,7 @@ def _install_fake_plugins(
         return invoke_results
 
     mod.discover_plugins = discover_plugins  # type: ignore[attr-defined]
+    mod.get_pre_tool_call_block_message = get_pre_tool_call_block_message  # type: ignore[attr-defined]
     mod.get_plugin_manager = get_plugin_manager  # type: ignore[attr-defined]
     mod.invoke_hook = invoke_hook  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_cli", parent)
@@ -120,11 +142,12 @@ def test_passes_when_governed(monkeypatch, no_real_exit):
     asyncio.run(handler.handle("gateway:startup", {}))
     # It force-discovered (not a no-op discover) ...
     assert calls["force"] is True
-    # ... and drove the REAL pre_tool_call dispatch with the banned probe tool.
-    assert calls["invoke"], "self-check did not drive a dispatch"
-    name, kwargs = calls["invoke"][0]
-    assert name == "pre_tool_call"
-    assert kwargs["tool_name"] == "email_send"
+    # ... and drove the production block-message interpreter with the banned probe.
+    assert calls["block"], "self-check did not drive the pre-execution trust path"
+    tool_name, args, kwargs = calls["block"][0]
+    assert tool_name == "email_send"
+    assert args == {}
+    assert kwargs["session_id"] == "smd-activation-selfcheck"
 
 
 def test_fails_closed_when_no_hooks_registered(monkeypatch, no_real_exit):
@@ -150,7 +173,12 @@ def test_fails_closed_when_hooks_incomplete(monkeypatch, no_real_exit):
 def test_fails_closed_when_trust_not_enforcing(monkeypatch, no_real_exit):
     # All hooks present, but the trust gate did NOT block the banned tool — a
     # registered-but-inert pre_tool_call is exactly the silent failure to catch.
-    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=[None])
+    _install_fake_plugins(
+        monkeypatch,
+        hooks=_ALL_HOOKS,
+        invoke_results=[],
+        block_message=None,
+    )
     handler = _load_handler()
     with pytest.raises(_Exit) as ei:
         asyncio.run(handler.handle("gateway:startup", {}))
@@ -179,6 +207,26 @@ def test_fails_closed_when_dispatch_raises(monkeypatch, no_real_exit):
     handler = _load_handler()
     with pytest.raises(_Exit):
         asyncio.run(handler.handle("gateway:startup", {}))
+
+
+@pytest.mark.parametrize("async_hook", ["pre_tool_call", "pre_gateway_dispatch"])
+def test_fails_closed_when_any_registered_callback_is_async(
+    monkeypatch,
+    no_real_exit,
+    async_hook,
+):
+    calls = _install_fake_plugins(
+        monkeypatch,
+        hooks=_ALL_HOOKS,
+        invoke_results=_BLOCK,
+        async_hook=async_hook,
+    )
+    handler = _load_handler()
+    with pytest.raises(_Exit) as ei:
+        asyncio.run(handler.handle("gateway:startup", {}))
+    assert ei.value.code == 1
+    assert calls["block"] == []
+    assert calls["invoke"] == []
 
 
 def test_fails_closed_when_hermes_plugins_unimportable(monkeypatch, no_real_exit):
@@ -228,9 +276,10 @@ def test_passes_when_governed_and_auditing(monkeypatch, no_real_exit):
 
     plugins_mod.invoke_hook = _counting_invoke
     asyncio.run(handler.handle("gateway:startup", {}))  # no _Exit => passed
-    # Both self-checks ran: trust (pre_tool_call) then audit (post_llm_call).
+    # Both self-checks ran: trust interpreter then audit dispatch.
     names = [c[0] for c in calls["invoke"]]
-    assert "pre_tool_call" in names and "post_llm_call" in names
+    assert calls["block"]
+    assert "post_llm_call" in names
 
 
 def test_fails_closed_when_audit_not_writing(monkeypatch, no_real_exit):
