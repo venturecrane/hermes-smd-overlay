@@ -14,10 +14,10 @@ Stub. Real implementation ports from `ss-console/operator/adapter/trust_ceiling.
 
 ## Trust ceilings (planned, not yet implemented)
 
-Three content classes per ADR 0005 (reviewer-as-sender):
+Three content classes per ADR 0035:
 
 - `autonomous` — agent sends/posts/files directly.
-- `draft-for-review` — agent prepares the artifact in a customer-visible queue; reviewer-as-sender pattern handles final dispatch.
+- `draft-for-review` — agent prepares the artifact in a customer-visible queue; the approver handles final dispatch.
 - `refused` — agent does not produce the artifact.
 
 The ceiling for each tool is derived from `customer.yaml.scope` at provisioning and stored alongside the per-profile config.

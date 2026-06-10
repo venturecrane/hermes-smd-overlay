@@ -67,7 +67,7 @@ class ActionClass(str, enum.Enum):
 BANNED_TOOLS: frozenset[str] = frozenset(
     {
         # Pattern A — autonomous outbound from the agent identity. ADR 0005
-        # locks reviewer-as-sender; the agent NEVER sends from its own
+        # locks external_send to draft; the agent NEVER sends from its own
         # identity. The draft-creation path is allowed (DRAFT_CREATE);
         # the send path is permanently banned at this layer.
         "email_send",
@@ -100,7 +100,7 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # ``EXTERNAL_SEND`` in TOOL_ACTION_CLASS_MAP below and governed by the
         # resolved ceiling. Per ADR 0035 there is no default posture: unauthored
         # ``external_send`` is fail-closed (``refused`` — no send, no draft);
-        # ``draft_for_review`` = reviewer-as-sender and ``autonomous`` are both
+        # ``draft_for_review`` and ``autonomous`` are both
         # values authored in ``action_ceilings``; a vertical floor can only
         # narrow. The content-sensitivity floor
         # (``shared.content_floor``) additionally forces money / contract /

@@ -222,7 +222,7 @@ def test_enforce_external_send_unauthored_is_fail_closed() -> None:
 
 
 def test_enforce_external_send_authored_draft_for_review_drafts() -> None:
-    # An AUTHORED external_send=draft_for_review routes to draft — reviewer-as-sender
+    # An AUTHORED external_send=draft_for_review routes to draft
     # is a value you author, distinct from unauthored=refused.
     enforce = _load_trust_module("enforce")
     decision = enforce.enforce(
@@ -582,7 +582,7 @@ def test_send_draft_with_no_body_fails_toward_draft(env_autonomous) -> None:
 # ---------------------------------------------------------------------------
 # ADR 0022 — vertical-pack floors (_resolve_vertical_floors) for law-firm
 #
-# The law-firm pack's reviewer-as-sender-floor pins external_send to
+# The law-firm pack's external-send-draft-floor pins external_send to
 # draft_for_review. This closes the prior HONEST GAP where _resolve_vertical_floors
 # returned {} and a law customer's floor depended on remembering to author the
 # ceiling. See operator/verticals/law-firm/compliance-floor.md.
@@ -620,7 +620,7 @@ def test_resolve_vertical_failure_falls_through_to_env(monkeypatch) -> None:
 def test_law_floor_narrows_authored_autonomous_send_to_draft(
     env_autonomous, env_vertical_law
 ) -> None:
-    """The reviewer-as-sender floor: a law customer who AUTHORED
+    """The external-send draft floor: a law customer who AUTHORED
     external_send=autonomous is still narrowed to draft (blocked) by the pack
     floor — even on a clean, non-content-sensitive body. This is the HONEST GAP
     closure: the floor no longer depends on the customer authoring the ceiling."""

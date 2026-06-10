@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 
 
 class Ceiling(str, enum.Enum):
-    """Three content classes per ADR 0005 (reviewer-as-sender)."""
+    """Three content classes per ADR 0035."""
 
     AUTONOMOUS = "autonomous"
     DRAFT_FOR_REVIEW = "draft_for_review"
@@ -112,7 +112,7 @@ def _min_ceiling(a: Ceiling, b: Ceiling) -> Ceiling:
 # one skill scalar. Per ADR 0035 there is NO imposed default: ``external_send``
 # (and any unrecognized entitled class) is fail-closed (``refused`` — no send,
 # no draft) when no ``action_ceilings`` entry is authored. ``draft_for_review``
-# (reviewer-as-sender) is a value an engagement authors explicitly, never a
+# is a value an engagement authors explicitly, never a
 # fallback; a vertical-pack floor can only narrow, never widen.
 # ---------------------------------------------------------------------------
 
@@ -134,7 +134,7 @@ def _unauthored_resolution(action: ActionClass, skill_ceiling: Ceiling) -> Ceili
     """How an action class resolves when the engagement authored NO ceiling for
     it. There is no imposed posture (ADR 0035): an unauthored entitled action is
     fail-closed (``refused``) — it does not execute, and no draft is produced.
-    ``draft_for_review`` / reviewer-as-sender is a value an engagement authors
+    ``draft_for_review`` is a value an engagement authors
     explicitly, never a fallback.
 
     ``READ`` resolves to ``autonomous`` at this layer because read *breadth* is
@@ -187,7 +187,7 @@ def resolve_ceiling(
 
 _BANNED_REFUSAL_MESSAGE: Mapping[str, str] = MappingProxyType(
     {
-        "email_send": "autonomous email send is forbidden (ADR 0005 reviewer-as-sender)",
+        "email_send": "autonomous email send is forbidden (ADR 0035)",
         "email_send_message": "autonomous email send is forbidden (ADR 0005)",
         "email_reply": "autonomous email reply is forbidden (ADR 0005)",
         "email_reply_all": "autonomous email reply-all is forbidden (ADR 0005)",
@@ -247,7 +247,7 @@ def enforce(
     floors from the vertical pack. Both optional — when omitted, the unauthored
     resolution applies (ADR 0035): entitled classes such as ``external_send``
     are fail-closed (``refused`` — no send, no draft) until the engagement
-    authors a ceiling. ``draft_for_review`` (reviewer-as-sender) is an authored
+    authors a ceiling. ``draft_for_review`` is an authored
     value, not a fallback posture.
 
     ``current_turn_approval`` is True iff the operator explicitly approved
@@ -348,10 +348,10 @@ def enforce(
                 reason="external_send refused: configured ceiling (or vertical floor) is refused",
                 audit_action="refuse",
             )
-        # draft_for_review — an AUTHORED reviewer-as-sender ceiling (not a default).
+        # draft_for_review — an AUTHORED ceiling (not a default).
         return EnforcementDecision(
             allowed=False,
-            reason="external_send at authored draft_for_review ceiling; routing to draft (reviewer-as-sender)",
+            reason="external_send at authored draft_for_review ceiling; routing to draft",
             audit_action="draft",
         )
 
@@ -569,7 +569,7 @@ def _resolve_action_ceilings(args: dict | None) -> dict[ActionClass, Ceiling]:
 # runtime realization — the Machine reads the customer's ``vertical`` field
 # (cheap, always present), not the full pack manifest.
 #
-#   law-firm / ``reviewer-as-sender-floor`` -> EXTERNAL_SEND pinned to
+#   law-firm / ``external-send-draft-floor`` -> EXTERNAL_SEND pinned to
 #     draft_for_review: client- and tribunal-bound mail ships under a human
 #     reviewer's identity (ADR 0005), non-raisable. See
 #     ``operator/verticals/law-firm/{vertical.yaml,compliance-floor.md}``.
@@ -613,7 +613,7 @@ def _resolve_vertical() -> str:
 def _resolve_vertical_floors() -> dict[ActionClass, Ceiling]:
     """Resolve non-raisable per-action-class floors from the vertical pack.
 
-    The law-firm pack's ``reviewer-as-sender-floor`` pins ``external_send`` to
+    The law-firm pack's ``external-send-draft-floor`` pins ``external_send`` to
     ``draft_for_review`` — a floor a customer's authored ceiling can only narrow,
     never raise (ADR 0025 / ADR 0022). Returns ``{}`` for verticals with no
     declared floor (e.g. customer-zero ``mixed``).

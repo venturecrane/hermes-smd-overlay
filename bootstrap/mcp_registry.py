@@ -56,7 +56,7 @@ class McpConnectorSpec:
             required; a missing source leaves the server unwired this boot.
         blocked_tools: Native (un-prefixed) tool names that must be excluded
             from the agent's toolset — the autonomous-send capabilities
-            (ADR 0005 reviewer-as-sender). These are emitted into the server's
+            (ADR 0035). These are emitted into the server's
             ``tools.exclude`` list. They are ALSO banned at the trust layer
             (``shared.action_classes.BANNED_TOOLS``, under the ``<name>:``
             prefix) as the durable guarantee; the exclude here keeps them off
@@ -93,7 +93,7 @@ class McpConnectorSpec:
 # persona gets its OWN inbox (not the principal's Gmail). The send tools are
 # NOT excluded: ADR 0025 makes autonomous send a CONFIGURABLE per-action
 # ceiling, so the sends stay on the menu and are governed by the trust layer
-# (default draft_for_review = reviewer-as-sender; raised to autonomous only by
+# (default draft_for_review; raised to autonomous only by
 # authored action_ceilings; the content-sensitivity floor forces money /
 # contract / scope / legal to draft regardless). Excluding them here would
 # hide the capability from the very layer meant to govern it. Hosted MCP

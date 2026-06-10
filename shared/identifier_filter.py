@@ -54,7 +54,7 @@ Two deliberate choices, both from the plan's design review:
    it routes the draft to human review with the unverified identifiers
    annotated. It is never a hard block — a mismatched identifier is precisely
    what a human reviewer should *see*, not something to hide behind a refusal.
-   Under a reviewer-as-sender posture the draft already reaches a human; the
+   Under a draft-for-review posture the draft already reaches a human; the
    gate's job there is to annotate, not to stop.
 
 This module is pure (no I/O, no state beyond the register the caller passes).
