@@ -17,7 +17,9 @@ import logging
 from typing import Any
 
 from shared import provenance
+from shared.broker_audit import write_decision
 from shared.secrets import get_secret
+from shared.workspace_broker import GRANT_ARG, authorize
 
 from . import enforce, outbound
 
@@ -56,9 +58,8 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
     """
     try:
         tool_name = kwargs.get("tool_name") or ""
-        args = kwargs.get("args") or {}
-        if not isinstance(args, dict):
-            args = {}
+        raw_args = kwargs.get("args")
+        args = raw_args if isinstance(raw_args, dict) else {}
         customer_slug = kwargs.get("customer_slug")
         if not isinstance(customer_slug, str) or not customer_slug:
             # Fall back to the env var the Machine boots with. The slug is
@@ -79,12 +80,32 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         # Ceiling allowed the call. Run the outbound provenance gate as a
         # SECOND evaluation — it no-ops for non-draft tools and blocks a draft
         # whose body carries a banned fabrication marker / fabricated citation.
-        return outbound.check_outbound_draft(
+        outbound_block = outbound.check_outbound_draft(
             tool_name=tool_name,
             args=args,
             session_id=kwargs.get("session_id") or "",
             tool_call_id=kwargs.get("tool_call_id") or "",
         )
+        if outbound_block is not None:
+            return outbound_block
+
+        if tool_name.startswith("workspace_"):
+            broker_payload = {key: value for key, value in args.items() if key != GRANT_ARG}
+            authorization = authorize(
+                tool_name,
+                broker_payload,
+                customer_slug=customer_slug,
+                session_id=kwargs.get("session_id") or "",
+                tool_call_id=kwargs.get("tool_call_id") or "",
+            )
+            write_decision(
+                operation=tool_name,
+                payload_digest=str(authorization["payload_digest"]),
+                session_id=kwargs.get("session_id") or "",
+                tool_call_id=kwargs.get("tool_call_id") or "",
+            )
+            args[GRANT_ARG] = authorization["grant"]
+        return None
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.exception(
             "hermes-smd-trust: pre_tool_call raised; FAILING CLOSED — blocking "

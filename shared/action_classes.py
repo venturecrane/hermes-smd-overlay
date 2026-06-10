@@ -208,6 +208,26 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # Connector lifecycle — read-only here.
     "connector_get_status": ActionClass.READ,
     "connector_list_bindings": ActionClass.READ,
+    # Mediated Google Workspace tools. Every privileged provider operation is
+    # explicit and classified; no general-purpose tool receives a credential.
+    "workspace_gmail_search": ActionClass.READ,
+    "workspace_gmail_get": ActionClass.READ,
+    "workspace_gmail_create_draft": ActionClass.INTERNAL_WRITE,
+    "workspace_gmail_modify": ActionClass.INTERNAL_WRITE,
+    "workspace_gmail_archive": ActionClass.INTERNAL_WRITE,
+    "workspace_calendar_list": ActionClass.READ,
+    "workspace_calendar_get": ActionClass.READ,
+    "workspace_calendar_create_draft": ActionClass.INTERNAL_WRITE,
+    "workspace_calendar_update_draft": ActionClass.INTERNAL_WRITE,
+    "workspace_drive_list": ActionClass.READ,
+    "workspace_drive_get": ActionClass.READ,
+    "workspace_drive_export": ActionClass.READ,
+    "workspace_docs_create": ActionClass.INTERNAL_WRITE,
+    "workspace_docs_get": ActionClass.READ,
+    "workspace_docs_append": ActionClass.INTERNAL_WRITE,
+    "workspace_sheets_create": ActionClass.INTERNAL_WRITE,
+    "workspace_sheets_get_values": ActionClass.READ,
+    "workspace_sheets_update_values": ActionClass.INTERNAL_WRITE,
 }
 
 

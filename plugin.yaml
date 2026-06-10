@@ -10,3 +10,4 @@ plugins:
   - plugins/hermes-smd-webhook-router
   - plugins/hermes-smd-inbound
   - plugins/hermes-smd-hook-probe
+  - plugins/hermes-smd-workspace
