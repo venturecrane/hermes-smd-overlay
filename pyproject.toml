@@ -34,6 +34,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    "setuptools>=68",
     # botocore.exceptions imports exercised by the skill_capture tests.
     # boto3 already lands botocore as a transitive dep; pinned here so
     # the dev extra is self-contained.
@@ -54,6 +55,9 @@ py-modules = ["webhook_gate"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["plugins*", "shared*", "bootstrap*"]
+
+[tool.setuptools.package-data]
+shared = ["fabrication_markers.json"]
 
 [tool.ruff]
 line-length = 100
