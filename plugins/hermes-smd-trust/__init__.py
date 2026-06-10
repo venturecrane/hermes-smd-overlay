@@ -77,6 +77,18 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
             # draft body that will never be written.
             return ceiling_block
 
+        # Ceiling allowed the call. Run the outbound provenance gate as a
+        # SECOND evaluation — it no-ops for non-draft tools and blocks a draft
+        # whose body carries a banned fabrication marker / fabricated citation.
+        outbound_block = outbound.check_outbound_draft(
+            tool_name=tool_name,
+            args=args,
+            session_id=kwargs.get("session_id") or "",
+            tool_call_id=kwargs.get("tool_call_id") or "",
+        )
+        if outbound_block is not None:
+            return outbound_block
+
         if tool_name.startswith("workspace_"):
             broker_payload = {key: value for key, value in args.items() if key != GRANT_ARG}
             authorization = authorize(
@@ -93,16 +105,7 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
                 tool_call_id=kwargs.get("tool_call_id") or "",
             )
             args[GRANT_ARG] = authorization["grant"]
-
-        # Ceiling allowed the call. Run the outbound provenance gate as a
-        # SECOND evaluation — it no-ops for non-draft tools and blocks a draft
-        # whose body carries a banned fabrication marker / fabricated citation.
-        return outbound.check_outbound_draft(
-            tool_name=tool_name,
-            args=args,
-            session_id=kwargs.get("session_id") or "",
-            tool_call_id=kwargs.get("tool_call_id") or "",
-        )
+        return None
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.exception(
             "hermes-smd-trust: pre_tool_call raised; FAILING CLOSED — blocking "
