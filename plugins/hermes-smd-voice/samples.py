@@ -26,7 +26,6 @@ here. For §7 the implementation is in-overlay.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -49,12 +48,14 @@ class R2SampleReader(Protocol):
     The concrete implementation is :class:`R2VaultSampleReader` (built from the
     Machine's R2 env by :func:`reader_from_env`), an S3-compatible boto3 client
     over the per-customer config bucket. Tests supply a fake implementing the
-    two async methods below.
+    two synchronous methods below. Hermes invokes plugin callbacks
+    synchronously, so the reader must complete before ``pre_llm_call`` returns
+    its context contribution.
     """
 
-    async def list_keys(self, prefix: str) -> list[str]: ...
+    def list_keys(self, prefix: str) -> list[str]: ...
 
-    async def get(self, key: str) -> bytes: ...
+    def get(self, key: str) -> bytes: ...
 
 
 @dataclass(frozen=True)
@@ -74,8 +75,8 @@ class _SampleHit:
 # (lazy boto3 import; env-resolved credentials; graceful None on misconfigured
 # Machine). The Machine env sets R2_ENDPOINT_URL / R2_ACCESS_KEY_ID /
 # R2_SECRET_ACCESS_KEY / R2_BUCKET_CONFIG (bootstrap.sh §"R2 secrets"); the
-# voice vault lives in the config bucket, not a separate one. boto3 is sync, so
-# list/get run in a worker thread to satisfy the async hook contract.
+# voice vault lives in the config bucket, not a separate one. Hermes' plugin
+# dispatcher is synchronous, which matches boto3's API.
 # ---------------------------------------------------------------------------
 
 
@@ -112,7 +113,7 @@ class R2VaultSampleReader:
     def _full_prefix(self, prefix: str) -> str:
         return f"{self._VAULT_ROOT}{prefix}"
 
-    def _list_keys_sync(self, prefix: str) -> list[str]:
+    def list_keys(self, prefix: str) -> list[str]:
         s3 = self._client()
         full = self._full_prefix(prefix)
         keys: list[str] = []
@@ -137,17 +138,11 @@ class R2VaultSampleReader:
                 break
         return keys
 
-    def _get_sync(self, key: str) -> bytes:
+    def get(self, key: str) -> bytes:
         s3 = self._client()
         full = self._full_prefix(key)
         resp = s3.get_object(Bucket=self._bucket, Key=full)
         return resp["Body"].read()
-
-    async def list_keys(self, prefix: str) -> list[str]:
-        return await asyncio.to_thread(self._list_keys_sync, prefix)
-
-    async def get(self, key: str) -> bytes:
-        return await asyncio.to_thread(self._get_sync, key)
 
 
 def reader_from_env() -> R2VaultSampleReader | None:
@@ -174,7 +169,7 @@ def reader_from_env() -> R2VaultSampleReader | None:
     )
 
 
-async def retrieve_relevant_samples_async(
+def retrieve_relevant_samples(
     *,
     customer_slug: str,
     r2_reader: R2SampleReader | None,
@@ -202,7 +197,7 @@ async def retrieve_relevant_samples_async(
 
     prefix = f"{customer_slug}/voice/cohort/"
     try:
-        keys = await r2_reader.list_keys(prefix)
+        keys = r2_reader.list_keys(prefix)
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "voice.samples.list_failed customer=%s prefix=%s err=%s",
@@ -223,7 +218,7 @@ async def retrieve_relevant_samples_async(
     for key in keys:
         cohort = _cohort_from_key(key)
         try:
-            raw = await r2_reader.get(key)
+            raw = r2_reader.get(key)
             diff = json.loads(raw.decode("utf-8"))
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -241,27 +236,6 @@ async def retrieve_relevant_samples_async(
         hits.sort(key=lambda h: 0 if h.cohort == requested_cohort else 1)
 
     return [h.diff for h in hits[:limit]]
-
-
-def retrieve_relevant_samples(customer_slug: str, query_context: dict) -> list[dict]:
-    """Synchronous facade for legacy callers.
-
-    Not used by the hook (which is async) — kept for parity with the
-    original stub signature so tests that call this directly continue
-    to compile. In the runtime path callers should prefer
-    :func:`retrieve_relevant_samples_async`.
-    """
-    if not customer_slug:
-        return []
-    # Synchronous path has no R2 reader wired; an actual sync caller
-    # would need to bind a sync R2 client, which is not part of the
-    # overlay's runtime surface. Returning empty here matches the
-    # graceful-degradation contract.
-    log.debug(
-        "voice.samples.sync_facade_called customer=%s; returning empty",
-        customer_slug,
-    )
-    return []
 
 
 def render_sample_block(samples: list[dict]) -> str:
@@ -435,5 +409,4 @@ __all__ = [
     "reader_from_env",
     "render_sample_block",
     "retrieve_relevant_samples",
-    "retrieve_relevant_samples_async",
 ]
