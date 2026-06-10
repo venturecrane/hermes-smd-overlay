@@ -1,0 +1,8 @@
+name: hermes-smd-workspace
+version: "0.1.0"
+description: "First-class mediated Google Workspace tools."
+requires_env:
+  - SMD_WORKSPACE_BROKER_SOCKET
+  - SMD_CUSTOMER_SLUG
+  - SMD_D1_AUDIT_BINDING
+

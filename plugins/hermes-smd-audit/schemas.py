@@ -121,6 +121,10 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         "LLM_TURN_COMPLETED",
         # Per-tool audit emitted by the post_tool_call hook.
         "TOOL_CALL_COMPLETED",
+        # Mediated connector lifecycle. A decision row is written before grant
+        # redemption; execution is paired with broker-signed receipt evidence.
+        "BROKER_DECISION_ALLOWED",
+        "BROKER_EXECUTED",
         # Subagent lifecycle emitted by the subagent_stop hook
         # (ADR 0021 Stream C — one row per delegated child).
         "SUBAGENT_STOPPED",

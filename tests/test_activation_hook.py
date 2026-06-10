@@ -90,6 +90,7 @@ def _install_fake_plugins(
     async_hook: str | None = None,
     discover_raises: Exception | None = None,
     invoke_raises: Exception | None = None,
+    workspace_tools: set[str] | None = None,
 ) -> dict:
     """Inject a fake ``hermes_cli.plugins`` exposing the three fns the handler
     imports. Returns a dict recording the ``force`` flag and invoke calls."""
@@ -124,6 +125,36 @@ def _install_fake_plugins(
     mod.invoke_hook = invoke_hook  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_cli", parent)
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", mod)
+    tools_parent = types.ModuleType("tools")
+    registry_mod = types.ModuleType("tools.registry")
+
+    class _Registry:
+        @staticmethod
+        def get_all_tool_names():
+            return workspace_tools or {
+                "workspace_gmail_search",
+                "workspace_gmail_get",
+                "workspace_gmail_create_draft",
+                "workspace_gmail_modify",
+                "workspace_gmail_archive",
+                "workspace_calendar_list",
+                "workspace_calendar_get",
+                "workspace_calendar_create_draft",
+                "workspace_calendar_update_draft",
+                "workspace_drive_list",
+                "workspace_drive_get",
+                "workspace_drive_export",
+                "workspace_docs_create",
+                "workspace_docs_get",
+                "workspace_docs_append",
+                "workspace_sheets_create",
+                "workspace_sheets_get_values",
+                "workspace_sheets_update_values",
+            }
+
+    registry_mod.registry = _Registry()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools", tools_parent)
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
     return calls
 
 
@@ -183,6 +214,18 @@ def test_fails_closed_when_trust_not_enforcing(monkeypatch, no_real_exit):
     with pytest.raises(_Exit) as ei:
         asyncio.run(handler.handle("gateway:startup", {}))
     assert ei.value.code == 1
+
+
+def test_fails_closed_when_workspace_tools_are_missing(monkeypatch, no_real_exit):
+    _install_fake_plugins(
+        monkeypatch,
+        hooks=_ALL_HOOKS,
+        invoke_results=_BLOCK,
+        workspace_tools={"workspace_gmail_search"},
+    )
+    handler = _load_handler()
+    with pytest.raises(_Exit):
+        asyncio.run(handler.handle("gateway:startup", {}))
 
 
 def test_fails_closed_when_discover_raises(monkeypatch, no_real_exit):

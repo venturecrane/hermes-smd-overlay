@@ -85,6 +85,27 @@ _BANNED_PROBE_TOOL = "email_send"
 # distinguishable from real-turn audit rows when read back (via the runtime seam).
 _AUDIT_SELFCHECK_SESSION = "smd-activation-selfcheck"
 
+_REQUIRED_WORKSPACE_TOOLS = {
+    "workspace_gmail_search",
+    "workspace_gmail_get",
+    "workspace_gmail_create_draft",
+    "workspace_gmail_modify",
+    "workspace_gmail_archive",
+    "workspace_calendar_list",
+    "workspace_calendar_get",
+    "workspace_calendar_create_draft",
+    "workspace_calendar_update_draft",
+    "workspace_drive_list",
+    "workspace_drive_get",
+    "workspace_drive_export",
+    "workspace_docs_create",
+    "workspace_docs_get",
+    "workspace_docs_append",
+    "workspace_sheets_create",
+    "workspace_sheets_get_values",
+    "workspace_sheets_update_values",
+}
+
 
 def _audit_db_path() -> str | None:
     """Resolve the local audit sqlite path from SMD_D1_AUDIT_BINDING, mirroring
@@ -190,6 +211,21 @@ async def handle(event_type: str, context: dict | None = None) -> None:
             "async callbacks registered in Hermes' synchronous hook dispatcher: "
             f"{incompatible} — these hooks would load but silently return unawaited "
             "coroutines instead of enforcing or observing"
+        )
+        return
+
+    try:
+        from tools.registry import registry
+
+        registered_tools = set(registry.get_all_tool_names())
+    except Exception as e:  # noqa: BLE001
+        _die(f"cannot inspect the live tool registry: {type(e).__name__}: {e}")
+        return
+    missing_tools = _REQUIRED_WORKSPACE_TOOLS - registered_tools
+    if missing_tools:
+        _die(
+            "mediated Workspace tools absent from the live registry after force-discover: "
+            f"missing {sorted(missing_tools)}"
         )
         return
 
