@@ -26,21 +26,23 @@ NOT a core file — is the overlay using Hermes' public API:
      now-present+enabled overlay registers into the LIVE singleton. force=True is
      Hermes' own supported "make plugin changes visible in a long-lived session" path,
      and it is idempotent — re-running yields the same registration, no double-load.
-  2. A LIVE trust self-check: drive ``invoke_hook("pre_tool_call", tool_name="email_send",
-     ...)`` — the EXACT production dispatch fn + singleton a real turn uses — and require
-     the trust ceiling to return a block directive. This asserts the property that
-     actually matters: a hook FIRES through the live turn-path singleton, not merely that
-     ``register()`` ran (the proxy that let the pre-gateway invariant stay green while
-     the gateway was inert). The probe is a permanently-banned tool, so it is
-     deterministic and READ-ONLY.
-  3. A LIVE audit self-check (ss-console#1285 Q2, made self-proving at boot): drive
+  2. A synchronous-contract check over every callback in the live manager. Hermes'
+     dispatcher calls callbacks directly and never awaits them, so any coroutine
+     callback would load successfully but silently do nothing.
+  3. A LIVE trust self-check: drive ``get_pre_tool_call_block_message`` with
+     ``tool_name="email_send"`` — the EXACT pre-execution interpreter model_tools uses —
+     and require a refusal message. This asserts the property that actually matters:
+     trust FIRES through the live turn-path singleton and its result is recognized by
+     the executor. The probe is a permanently-banned tool, so it is deterministic and
+     READ-ONLY.
+  4. A LIVE audit self-check (ss-console#1285 Q2, made self-proving at boot): drive
      ``invoke_hook("post_llm_call", ...)`` and confirm a row actually lands in
      ``audit_log``. This proves the audit WRITE path works live in the gateway process —
      the literal Q2 question ("does a real turn write audit") answered at boot instead of
      by inference. The row carries a distinct session id so it is separable from
      real-turn rows when read back via the runtime seam. Degrades to skipped only when
      the audit DB cannot be resolved; a definitive "wrote nothing" fails closed.
-  4. FAIL-CLOSED: HookRegistry swallows handler exceptions (gateway/hooks.py:19), so a
+  5. FAIL-CLOSED: HookRegistry swallows handler exceptions (gateway/hooks.py:19), so a
      failed self-check cannot rely on raising — the handler calls ``os._exit(1)``.
      ``gateway:startup`` fires before steady-state turns, so exiting prevents the gateway
      from ever serving ungoverned. Better visibly down (crash-loop; Fly restarts) than
@@ -54,6 +56,7 @@ structurally cannot assert the live-turn property. The two are complementary.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from typing import Any
@@ -130,6 +133,20 @@ def _die(reason: str) -> None:
     os._exit(1)
 
 
+def _async_callbacks(manager: Any) -> list[str]:
+    """Return labels for callbacks incompatible with Hermes' sync dispatcher."""
+    found: list[str] = []
+    for hook_name, callbacks in (getattr(manager, "_hooks", {}) or {}).items():
+        for callback in callbacks:
+            call = callback.__call__ if callable(callback) else None
+            if not inspect.iscoroutinefunction(callback) and not inspect.iscoroutinefunction(call):
+                continue
+            module = getattr(callback, "__module__", type(callback).__module__)
+            name = getattr(callback, "__qualname__", type(callback).__qualname__)
+            found.append(f"{hook_name}:{module}.{name}")
+    return sorted(found)
+
+
 async def handle(event_type: str, context: dict | None = None) -> None:
     """Fire at ``gateway:startup``: force-load the overlay into the live singleton,
     then prove it governs the live turn-path or fail closed."""
@@ -137,6 +154,7 @@ async def handle(event_type: str, context: dict | None = None) -> None:
         from hermes_cli.plugins import (
             discover_plugins,
             get_plugin_manager,
+            get_pre_tool_call_block_message,
             invoke_hook,
         )
     except Exception as e:  # noqa: BLE001
@@ -166,29 +184,34 @@ async def handle(event_type: str, context: dict | None = None) -> None:
         )
         return
 
+    incompatible = _async_callbacks(mgr)
+    if incompatible:
+        _die(
+            "async callbacks registered in Hermes' synchronous hook dispatcher: "
+            f"{incompatible} — these hooks would load but silently return unawaited "
+            "coroutines instead of enforcing or observing"
+        )
+        return
+
     # 2. LIVE self-check: drive the REAL dispatch fn + singleton with a banned tool
-    #    and require the trust ceiling to FIRE a block directive. This is the property
-    #    that matters — a hook fires through the live turn-path — not just that
-    #    register() ran. Read-only: a banned tool is gated before any audit write.
-    slug = os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG") or ""
+    #    through the same block-message interpreter model_tools calls immediately
+    #    before execution. Read-only: a banned tool is gated before any audit write.
     try:
-        results: list[Any] = invoke_hook(
-            "pre_tool_call",
+        block_message = get_pre_tool_call_block_message(
             tool_name=_BANNED_PROBE_TOOL,
             args={},
             session_id="smd-activation-selfcheck",
             tool_call_id="smd-activation-selfcheck",
-            customer_slug=slug,
         )
     except Exception as e:  # noqa: BLE001
-        _die(f"invoke_hook(pre_tool_call) self-check raised: {type(e).__name__}: {e}")
+        _die(f"get_pre_tool_call_block_message self-check raised: {type(e).__name__}: {e}")
         return
 
-    blocked = any(isinstance(r, dict) and r.get("action") == "block" for r in (results or []))
-    if not blocked:
+    if not isinstance(block_message, str) or not block_message:
         _die(
             f"TRUST NOT ENFORCING on the live gateway: banned tool {_BANNED_PROBE_TOOL!r} "
-            f"was not gated by any pre_tool_call hook in the live singleton (got {results!r})"
+            "was not blocked by the production pre-tool-call interpreter "
+            f"(got {block_message!r})"
         )
         return
 
