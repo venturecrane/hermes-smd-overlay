@@ -13,7 +13,7 @@ fail-silent anti-pattern. These tests pin the fix:
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 
 import pytest
 
@@ -76,16 +76,21 @@ def test_register_with_r2_env_binds_runtime(voice, fake_ctx, monkeypatch):
     assert voice._R2_READER is not None  # actually bound — not a silent no-op
 
 
+def test_registered_hooks_match_synchronous_hermes_dispatcher(voice):
+    assert not inspect.iscoroutinefunction(voice.on_pre_llm_call)
+    assert not inspect.iscoroutinefunction(voice.on_post_llm_call)
+
+
 class _FakeR2Reader:
     """In-memory R2SampleReader for end-to-end hook exercise."""
 
     def __init__(self, objects: dict[str, bytes]):
         self._objects = objects
 
-    async def list_keys(self, prefix: str) -> list[str]:
+    def list_keys(self, prefix: str) -> list[str]:
         return [k for k in self._objects if k.startswith(prefix)]
 
-    async def get(self, key: str) -> bytes:
+    def get(self, key: str) -> bytes:
         return self._objects[key]
 
 
@@ -105,7 +110,7 @@ def test_pre_llm_call_injects_samples_when_bound(voice):
     )
     voice.bind_runtime(customer_slug="acme", r2_reader=reader)
 
-    result = asyncio.run(voice.on_pre_llm_call(session_id="s", user_message="hi"))
+    result = voice.on_pre_llm_call(session_id="s", user_message="hi")
     assert result is not None
     assert "context" in result
     assert "author voice profile" in result["context"]
@@ -115,5 +120,5 @@ def test_pre_llm_call_noop_when_unbound(voice):
     """Unbound → None (no context). The no-op path still exists; the fix is
     that register() now BINDS when it can, so this path is the genuine
     misconfigured-Machine case, not the default."""
-    result = asyncio.run(voice.on_pre_llm_call(session_id="s", user_message="hi"))
+    result = voice.on_pre_llm_call(session_id="s", user_message="hi")
     assert result is None

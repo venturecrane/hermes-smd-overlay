@@ -67,7 +67,7 @@ def bind_runtime(*, customer_slug: str, r2_reader: samples.R2SampleReader) -> No
     )
 
 
-async def on_pre_llm_call(**kwargs: Any) -> dict | None:
+def on_pre_llm_call(**kwargs: Any) -> dict | None:
     """Inject relevant voice samples into the user message context.
 
     Expected kwargs per docs/hook-surface.md §3 (pre_llm_call):
@@ -95,7 +95,7 @@ async def on_pre_llm_call(**kwargs: Any) -> dict | None:
         if sender_id:
             query_context["sender_id"] = sender_id
 
-        sample_dicts = await samples.retrieve_relevant_samples_async(
+        sample_dicts = samples.retrieve_relevant_samples(
             customer_slug=_CUSTOMER_SLUG,
             r2_reader=_R2_READER,
             query_context=query_context,
@@ -109,7 +109,7 @@ async def on_pre_llm_call(**kwargs: Any) -> dict | None:
         return None
 
 
-async def on_post_llm_call(**kwargs: Any) -> None:
+def on_post_llm_call(**kwargs: Any) -> None:
     """Observe per-turn draft fidelity for the voice samples in play.
 
     Expected kwargs per docs/hook-surface.md §4 (post_llm_call):
@@ -132,7 +132,7 @@ async def on_post_llm_call(**kwargs: Any) -> None:
         if not draft.strip():
             return
 
-        sample_dicts = await samples.retrieve_relevant_samples_async(
+        sample_dicts = samples.retrieve_relevant_samples(
             customer_slug=_CUSTOMER_SLUG,
             r2_reader=_R2_READER,
             query_context=None,
