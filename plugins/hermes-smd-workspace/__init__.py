@@ -25,20 +25,47 @@ STRING = {"type": "string"}
 INTEGER = {"type": "integer", "minimum": 1, "maximum": 100}
 STRINGS = {"type": "array", "items": STRING}
 ROWS = {"type": "array", "items": {"type": "array"}}
+# A managed mailbox the Operator is authored to act on (an executive assistant's
+# delegated access). Omit to act on Crane's own mailbox. The broker fail-closes
+# on any value not in the authored `google_auth.managed_mailboxes`.
+MAILBOX = {
+    "type": "string",
+    "description": (
+        "Managed mailbox address to act on (the authored primary, e.g. the "
+        "principal's box). Omit to use Crane's own mailbox."
+    ),
+}
+# The "Send mail as" identity for the From header when drafting in a managed
+# mailbox. Must be one of that mailbox's authored send_as identities; the broker
+# refuses any other value.
+SEND_AS = {
+    "type": "string",
+    "description": (
+        "Authored 'Send mail as' identity for the From header (managed mailbox "
+        "only). For a reply, use the address the message was delivered to."
+    ),
+}
 
 TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
     "workspace_gmail_search": (
-        "Search the principal's Gmail mailbox.",
-        _schema({"query": STRING, "max_results": INTEGER}, ["query"]),
+        "Search a Gmail mailbox (Crane's own, or an authored managed mailbox).",
+        _schema({"query": STRING, "max_results": INTEGER, "mailbox": MAILBOX}, ["query"]),
     ),
     "workspace_gmail_get": (
         "Read one Gmail message by ID.",
-        _schema({"message_id": STRING}, ["message_id"]),
+        _schema({"message_id": STRING, "mailbox": MAILBOX}, ["message_id"]),
     ),
     "workspace_gmail_create_draft": (
-        "Create a principal Gmail draft without sending it.",
+        "Create a Gmail draft without sending it (Crane's own or a managed mailbox).",
         _schema(
-            {"to": STRING, "subject": STRING, "body": STRING, "thread_id": STRING},
+            {
+                "to": STRING,
+                "subject": STRING,
+                "body": STRING,
+                "thread_id": STRING,
+                "mailbox": MAILBOX,
+                "from": SEND_AS,
+            },
             ["to", "subject", "body"],
         ),
     ),
@@ -49,13 +76,14 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
                 "message_id": STRING,
                 "add_label_ids": STRINGS,
                 "remove_label_ids": STRINGS,
+                "mailbox": MAILBOX,
             },
             ["message_id"],
         ),
     ),
     "workspace_gmail_archive": (
         "Archive a Gmail message.",
-        _schema({"message_id": STRING}, ["message_id"]),
+        _schema({"message_id": STRING, "mailbox": MAILBOX}, ["message_id"]),
     ),
     "workspace_calendar_list": (
         "List Google Calendar events.",
