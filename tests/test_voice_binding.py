@@ -192,9 +192,7 @@ def test_pre_llm_call_injects_samples_from_local_vault(voice, tmp_path):
     }
     (cohort_dir / "s1.json").write_text(json.dumps(sample), encoding="utf-8")
 
-    reader = voice.samples.LocalVaultSampleReader(
-        base_dir=str(tmp_path), customer_slug="acme"
-    )
+    reader = voice.samples.LocalVaultSampleReader(base_dir=str(tmp_path), customer_slug="acme")
     voice.bind_runtime(customer_slug="acme", r2_reader=reader)
     result = voice.on_pre_llm_call(session_id="s", user_message="hi")
     assert result is not None
