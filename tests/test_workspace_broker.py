@@ -52,6 +52,55 @@ def test_plugin_registers_only_the_reviewed_surface() -> None:
     assert "workspace_drive_share" not in ctx.tools
 
 
+def test_gmail_tools_expose_managed_mailbox_targeting() -> None:
+    plugin = load_plugin("hermes-smd-workspace")
+    ctx = ToolContext()
+    plugin.register(ctx)
+    for name in (
+        "workspace_gmail_search",
+        "workspace_gmail_get",
+        "workspace_gmail_create_draft",
+        "workspace_gmail_modify",
+        "workspace_gmail_archive",
+    ):
+        props = ctx.tools[name]["schema"]["properties"]
+        assert "mailbox" in props, f"{name} should accept a managed mailbox target"
+    # send-as From is offered only where a draft is composed; mailbox stays optional.
+    draft_props = ctx.tools["workspace_gmail_create_draft"]["schema"]["properties"]
+    assert "from" in draft_props
+    assert "mailbox" not in ctx.tools["workspace_gmail_create_draft"]["schema"]["required"]
+    assert "from" not in ctx.tools["workspace_gmail_create_draft"]["schema"]["required"]
+
+
+def test_handler_forwards_managed_mailbox_payload(monkeypatch) -> None:
+    plugin = load_plugin("hermes-smd-workspace")
+    captured = {}
+
+    def fake_execute(operation, payload, grant):
+        captured.update(operation=operation, payload=payload, grant=grant)
+        return {"ok": True, "result": {"id": "draft-1"}, "receipt": {"signature": "s"}}
+
+    monkeypatch.setattr(plugin, "execute", fake_execute)
+    monkeypatch.setattr(plugin, "write_execution", lambda **_: None)
+    handler = plugin._handler("workspace_gmail_create_draft")
+
+    handler(
+        {
+            "to": "client@example.com",
+            "subject": "Re: scheduling",
+            "body": "Confirming.",
+            "mailbox": "owner@firm.com",
+            "from": "team@firm.com",
+            GRANT_ARG: "grant-1",
+        }
+    )
+
+    # mailbox/from ride in the payload so they are covered by the grant digest.
+    assert captured["payload"]["mailbox"] == "owner@firm.com"
+    assert captured["payload"]["from"] == "team@firm.com"
+    assert GRANT_ARG not in captured["payload"]
+
+
 def test_handler_requires_grant_and_strips_it_before_execute(monkeypatch) -> None:
     plugin = load_plugin("hermes-smd-workspace")
     captured = {}
