@@ -10,8 +10,10 @@ WORKSPACE_CLASSES = {
     "workspace_gmail_search": ActionClass.READ,
     "workspace_gmail_get": ActionClass.READ,
     "workspace_gmail_create_draft": ActionClass.INTERNAL_WRITE,
-    "workspace_gmail_modify": ActionClass.INTERNAL_WRITE,
-    "workspace_gmail_archive": ActionClass.INTERNAL_WRITE,
+    # modify/archive mutate the principal's real mailbox → DESTRUCTIVE (OP-P0-5):
+    # refused under draft_for_review and on tainted turns, approval-gated otherwise.
+    "workspace_gmail_modify": ActionClass.DESTRUCTIVE,
+    "workspace_gmail_archive": ActionClass.DESTRUCTIVE,
     "workspace_calendar_list": ActionClass.READ,
     "workspace_calendar_get": ActionClass.READ,
     "workspace_calendar_create_draft": ActionClass.INTERNAL_WRITE,
@@ -130,7 +132,7 @@ def test_handler_requires_grant_and_strips_it_before_execute(monkeypatch) -> Non
 def test_trust_hook_mints_grant_only_after_ceiling_allows(monkeypatch) -> None:
     plugin = load_plugin("hermes-smd-trust")
     args = {"title": "Test"}
-    monkeypatch.setattr(plugin.enforce, "evaluate_tool_call", lambda *_: None)
+    monkeypatch.setattr(plugin.enforce, "evaluate_tool_call", lambda *_, **__: None)
     monkeypatch.setattr(plugin.outbound, "check_outbound_draft", lambda **_: None)
     monkeypatch.setattr(
         plugin,
@@ -155,7 +157,7 @@ def test_trust_hook_mints_grant_only_after_ceiling_allows(monkeypatch) -> None:
 
 def test_trust_hook_fails_closed_when_broker_is_unavailable(monkeypatch) -> None:
     plugin = load_plugin("hermes-smd-trust")
-    monkeypatch.setattr(plugin.enforce, "evaluate_tool_call", lambda *_: None)
+    monkeypatch.setattr(plugin.enforce, "evaluate_tool_call", lambda *_, **__: None)
     monkeypatch.setattr(plugin, "authorize", lambda *_, **__: (_ for _ in ()).throw(OSError()))
 
     result = plugin.on_pre_tool_call(

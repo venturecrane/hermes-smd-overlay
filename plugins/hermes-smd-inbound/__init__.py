@@ -75,6 +75,12 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
             try:
                 wrapped = inbound.wrap_inbound(item.content, item.envelope)
                 blocks.append(wrapped)
+                # Mark the session tainted at this item's trust class. The
+                # fenced content now lives in the model context and could
+                # influence any later tool call; the trust gate (pre_tool_call)
+                # reads this sticky signal and refuses autonomous sensitive
+                # actions for the rest of the session (the taint-gate).
+                inbound.SESSION_TAINT.mark(session_id, item.envelope.trust_class)
             except Exception as exc:  # noqa: BLE001 — one bad item must not drop the rest
                 logger.warning(
                     "hermes-smd-inbound: failed to fence item %s (%s); skipping that item",
@@ -95,7 +101,109 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Tool-result read fencing (OP-P0-4 / OP-P1-3)
+#
+# The webhook chokepoint above fences content that arrives via the webhook
+# router (Crane's own AgentMail inbox). It does NOT cover content the agent
+# actively PULLS as a tool result — the scheduled managed-mailbox Gmail read,
+# document/sheet reads, web fetches, practice-management (Clio) records. Those
+# enter the model context as ordinary tool output, unfenced and untrusted. This
+# second chokepoint (``transform_tool_result``) wraps those results in the same
+# nonce fence and marks the session tainted, so the trust gate withholds
+# autonomous sensitive actions for the rest of the session.
+#
+# Membership rule: a READ tool whose result contains third-party /
+# attacker-influenceable content. Internal reads (memory, skills, voice corpus,
+# connector status) are NOT fenced. Extend deliberately — over-fencing only
+# costs autonomy (the agent can still read and draft), under-fencing leaves an
+# injection channel. MCP/connector reads under ``<server>:<tool>`` notation are
+# a follow-on (OP-P1-3): add server-specific read names here as connectors land.
+# ---------------------------------------------------------------------------
+
+
+_FENCED_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        # Managed mailbox + generic email — the primary untrusted channel (OP-P0-4).
+        "workspace_gmail_search",
+        "workspace_gmail_get",
+        "email_list_messages",
+        "email_get_message",
+        "email_search",
+        "email_get_thread",
+        # Web fetches — attacker-controlled page content.
+        "web_search",
+        "web_extract",
+        # Documents / sheets — externally-authored content.
+        "workspace_drive_get",
+        "workspace_drive_export",
+        "workspace_docs_get",
+        "workspace_sheets_get_values",
+        # Practice management (Clio) reads — client-authored matter/doc content (OP-P1-3).
+        "practice_management_get_matter",
+        "practice_management_list_documents",
+        "practice_management_get_document",
+    }
+)
+
+
+def _surface_for(tool_name: str) -> str:
+    """Map a fenced read tool to an inbound surface label (closed vocabulary)."""
+    if tool_name in ("web_search", "web_extract"):
+        return "fetch"
+    if tool_name.startswith("workspace_gmail") or tool_name.startswith("email_"):
+        return "inbox_triage"
+    return "connector"
+
+
+def on_transform_tool_result(**kwargs: Any) -> str | None:
+    """Fence the result of an untrusted-content READ tool, and taint the session.
+
+    Hermes contract (model_tools.py:848-861): the first hook return value that
+    is a ``str`` REPLACES the tool result. We return the nonce-fenced wrap for a
+    fenced read, or ``None`` to leave the result untouched.
+
+    Expected kwargs: tool_name, args, result, task_id, session_id, tool_call_id,
+    duration_ms.
+
+    Fail-safe ordering: the session is marked tainted BEFORE wrapping, so even if
+    the wrap raises, the enforcing layer (the trust gate) still withholds
+    autonomous sensitive actions — the fence is defense-in-depth, the taint is
+    the wall.
+    """
+    try:
+        tool_name = kwargs.get("tool_name") or ""
+        if tool_name not in _FENCED_READ_TOOLS:
+            return None
+        result = kwargs.get("result")
+        if not isinstance(result, str) or not result:
+            return None
+        session_id = kwargs.get("session_id") or ""
+        # Taint first (enforcing), then fence (defense-in-depth).
+        inbound.SESSION_TAINT.mark(session_id, inbound.TRUST_CLASS_UNKNOWN_EXTERNAL)
+        envelope = inbound.make_envelope(
+            content=result,
+            source=tool_name,
+            surface=_surface_for(tool_name),
+            trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
+        )
+        return inbound.wrap_inbound(result, envelope)
+    except Exception as exc:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.warning(
+            "hermes-smd-inbound: transform_tool_result raised (%s); leaving result "
+            "unfenced (the trust gate / taint remains the enforcing wall)",
+            exc,
+        )
+        return None
+
+
 def register(ctx) -> None:
-    """Plugin entry point. Wires pre_llm_call."""
+    """Plugin entry point. Wires both inbound-quarantine chokepoints:
+    pre_llm_call (webhook-router content) and transform_tool_result (untrusted
+    tool-result reads — the managed mailbox, documents, web, connectors)."""
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
-    logger.info("hermes-smd-inbound registered: pre_llm_call (ADR 0027 quarantine chokepoint)")
+    ctx.register_hook("transform_tool_result", on_transform_tool_result)
+    logger.info(
+        "hermes-smd-inbound registered: pre_llm_call + transform_tool_result "
+        "(ADR 0027 quarantine chokepoints; OP-P0-4 read fencing + taint-gate)"
+    )
