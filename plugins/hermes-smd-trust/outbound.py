@@ -248,15 +248,15 @@ def _audit_client() -> tuple[Any, str | None]:
         return _AUDIT_CLIENT, _AUDIT_CUSTOMER_SLUG
     _AUDIT_WIRED = True
     try:
-        from shared.d1_client import D1Client
+        from shared.audit_client import audit_client_from_env
         from shared.secrets import require
 
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
         slug = secrets_map["SMD_CUSTOMER_SLUG"]
-        _AUDIT_CLIENT = D1Client(
-            binding_name=secrets_map["SMD_D1_AUDIT_BINDING"],
-            customer_slug=slug,
-        )
+        # Broker-aware (OP-P1-4): FABRICATION_FILTER_TRIGGERED /
+        # IDENTIFIER_UNVERIFIED rows route through the append-only broker when
+        # SMD_AUDIT_BROKER_SOCKET is set; direct D1Client otherwise.
+        _AUDIT_CLIENT = audit_client_from_env(customer_slug=slug)
         _AUDIT_CUSTOMER_SLUG = slug
     except Exception as exc:  # noqa: BLE001 — audit is best-effort vs the block
         logger.debug("outbound gate: audit client unconfigured (%s); blocks won't emit a row", exc)

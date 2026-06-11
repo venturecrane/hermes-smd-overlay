@@ -6,8 +6,8 @@ import hashlib
 import json
 from typing import Any
 
+from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL, agent_event_params
-from shared.d1_env import d1_client_from_env
 
 
 def _digest(value: Any) -> str:
@@ -23,7 +23,7 @@ def write_decision(
     tool_call_id: str,
 ) -> None:
     """Persist the allowed trust decision before the grant can be redeemed."""
-    client = d1_client_from_env(binding_name="SMD_D1_AUDIT_BINDING")
+    client = audit_client_from_env()
     params = agent_event_params(
         action_type="BROKER_DECISION_ALLOWED",
         metadata={
@@ -38,7 +38,7 @@ def write_decision(
 
 def write_execution(*, operation: str, receipt: dict[str, Any]) -> None:
     """Persist digest-only evidence from the broker-signed execution receipt."""
-    client = d1_client_from_env(binding_name="SMD_D1_AUDIT_BINDING")
+    client = audit_client_from_env()
     params = agent_event_params(
         action_type="BROKER_EXECUTED",
         metadata={

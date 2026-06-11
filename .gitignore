@@ -27,3 +27,7 @@ venv/
 .mypy_cache/
 .tox/
 node_modules/
+
+# test artifacts (D1Client default binding writes a local sqlite file)
+CUSTOMER_DB
+*.db
