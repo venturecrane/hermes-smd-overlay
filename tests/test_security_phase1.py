@@ -39,7 +39,15 @@ def _clean_registers():
 
 @pytest.mark.parametrize(
     "tool",
-    ["execute_code", "terminal", "process", "delegate_task", "computer_use", "cronjob", "skill_manage"],
+    [
+        "execute_code",
+        "terminal",
+        "process",
+        "delegate_task",
+        "computer_use",
+        "cronjob",
+        "skill_manage",
+    ],
 )
 def test_code_exec_tools_classified_code_execution(tool):
     c = classify_tool(tool)
@@ -119,7 +127,12 @@ def test_destructive_refused_under_draft_for_review():
 
 @pytest.mark.parametrize(
     "action",
-    [ActionClass.EXTERNAL_SEND, ActionClass.DESTRUCTIVE, ActionClass.COMMITMENT, ActionClass.CODE_EXECUTION],
+    [
+        ActionClass.EXTERNAL_SEND,
+        ActionClass.DESTRUCTIVE,
+        ActionClass.COMMITMENT,
+        ActionClass.CODE_EXECUTION,
+    ],
 )
 def test_taint_gate_refuses_sensitive_actions_on_tainted_turn(action):
     enforce = _enforce()

@@ -53,7 +53,9 @@ class ActionClass(str, enum.Enum):
     EXTERNAL_SEND = "external_send"  # Email, SMS, posts — gated
     COMMITMENT = "commitment"  # Sign, accept terms, agree to dates — never autonomous
     DESTRUCTIVE = "destructive"  # Delete, drop, irreversible — explicit per-call approval
-    CODE_EXECUTION = "code_execution"  # Arbitrary code / shell / subagent — authored-only, fail-closed
+    CODE_EXECUTION = (
+        "code_execution"  # Arbitrary code / shell / subagent — authored-only, fail-closed
+    )
 
 
 # ---------------------------------------------------------------------------
