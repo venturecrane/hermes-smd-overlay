@@ -19,7 +19,7 @@ import os
 import sys
 from pathlib import Path
 
-from bootstrap import translate
+from bootstrap import cron_sync, translate
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,27 @@ def _run_bootstrap(args: argparse.Namespace) -> int:
         hermes_home=hermes_home,
     )
     logger.info("hermes-smd bootstrap: wrote %d profile(s): %s", len(slugs), ", ".join(slugs))
+
+    # Distinct, independently-failing step: materialize authored cron schedules
+    # into Hermes' native cron store. A cron-sync failure is logged but does NOT
+    # fail boot — the profiles are already written and the agent must still come
+    # up; a registration problem degrades the schedule, it should not crashloop
+    # the Machine. The ss-console validator catches malformed cron at author time.
+    try:
+        registered = cron_sync.sync_cron_jobs(
+            customer_yaml_path=args.customer_yaml,
+            hermes_home=hermes_home,
+        )
+        logger.info(
+            "hermes-smd bootstrap: synced %d cron job(s): %s",
+            len(registered),
+            ", ".join(registered) or "(no changes)",
+        )
+    except cron_sync.CronSyncError:
+        logger.exception(
+            "hermes-smd bootstrap: cron sync FAILED (profiles written; agent will boot "
+            "without the authored schedule — fix customer.yaml cron and re-run bootstrap)"
+        )
     return 0
 
 
