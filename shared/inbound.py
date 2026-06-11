@@ -42,7 +42,7 @@ on the model noticing an injection.
 import hashlib
 import logging
 import secrets
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -293,8 +293,88 @@ class PendingInbound:
 PENDING = PendingInbound()
 
 
+# ---------------------------------------------------------------------------
+# Per-session taint register (sticky) — the runtime half of the taint-gate
+# ---------------------------------------------------------------------------
+
+
+# Restrictiveness ordering for trust classes (higher == less trusted == stickier).
+_TRUST_RANK: dict[str, int] = {
+    TRUST_CLASS_INTERNAL: 0,
+    TRUST_CLASS_KNOWN_EXTERNAL: 1,
+    TRUST_CLASS_UNKNOWN_EXTERNAL: 2,
+}
+
+
+@dataclass
+class SessionTaint:
+    """Sticky per-session taint set by every inbound-quarantine chokepoint.
+
+    Unlike :data:`PENDING` (drained and CLEARED at ``pre_llm_call``), this is
+    NOT cleared: once a session ingests untrusted (non-``internal``) inbound
+    content, that content persists in the model context and could influence ANY
+    later tool call in the session, so the taint must persist too. The trust
+    gate reads this at ``pre_tool_call`` and refuses autonomous SENSITIVE actions
+    (external_send / destructive / commitment / code_execution) on a tainted
+    session — while still allowing READ and INTERNAL_WRITE (drafts), which is the
+    exact executive-assistant behavior we want: read untrusted mail, draft a
+    reply, never autonomously send/file/execute BECAUSE of it.
+
+    Reading ``PENDING`` at ``pre_tool_call`` would not work — it is already
+    empty by then. This register is the durable signal the gate needs.
+
+    Bounded (FIFO eviction at ``max_sessions``) so a long-lived Machine cannot
+    leak unboundedly across sessions. Single tenant per Machine (AGENTS.md #5).
+    """
+
+    max_sessions: int = 512
+    _tainted: "OrderedDict[str, str]" = field(default_factory=OrderedDict)
+
+    def mark(self, session_id: str, trust_class: str) -> None:
+        """Record that ``session_id`` ingested content at ``trust_class``.
+
+        No-op for an empty session id or ``internal`` content. Keeps the
+        MOST-restrictive class seen for the session (``unknown_external`` is
+        never downgraded). Unrecognized classes fall closed to the most
+        restrictive (mirrors ``InboundEnvelope.__post_init__``)."""
+        if not session_id:
+            return
+        rank = _TRUST_RANK.get(trust_class)
+        if rank is None:
+            trust_class = TRUST_CLASS_UNKNOWN_EXTERNAL  # fail closed
+            rank = _TRUST_RANK[trust_class]
+        if rank <= _TRUST_RANK[TRUST_CLASS_INTERNAL]:
+            return
+        existing = self._tainted.get(session_id)
+        if existing is not None and _TRUST_RANK[existing] >= rank:
+            self._tainted.move_to_end(session_id)
+            return
+        self._tainted[session_id] = trust_class
+        self._tainted.move_to_end(session_id)
+        while len(self._tainted) > self.max_sessions:
+            self._tainted.popitem(last=False)
+
+    def trust_class(self, session_id: str) -> str:
+        """Most-restrictive ingested trust class for the session.
+
+        Returns ``internal`` for a clean (or unknown) session — so an absent
+        signal reads as 'not tainted', and the gate only fires on positive
+        evidence of untrusted ingestion."""
+        if not session_id:
+            return TRUST_CLASS_INTERNAL
+        return self._tainted.get(session_id, TRUST_CLASS_INTERNAL)
+
+    def is_tainted(self, session_id: str) -> bool:
+        return self.trust_class(session_id) != TRUST_CLASS_INTERNAL
+
+
+# Process-wide singleton — the inbound chokepoints mark, the trust gate reads.
+SESSION_TAINT = SessionTaint()
+
+
 __all__ = [
     "PENDING",
+    "SESSION_TAINT",
     "TRUST_CLASS_INTERNAL",
     "TRUST_CLASS_KNOWN_EXTERNAL",
     "TRUST_CLASS_UNKNOWN_EXTERNAL",
@@ -304,6 +384,7 @@ __all__ = [
     "InboundEnvelope",
     "InboundItem",
     "PendingInbound",
+    "SessionTaint",
     "content_digest",
     "make_envelope",
     "new_item_id",

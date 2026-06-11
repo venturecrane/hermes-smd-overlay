@@ -53,6 +53,9 @@ class ActionClass(str, enum.Enum):
     EXTERNAL_SEND = "external_send"  # Email, SMS, posts — gated
     COMMITMENT = "commitment"  # Sign, accept terms, agree to dates — never autonomous
     DESTRUCTIVE = "destructive"  # Delete, drop, irreversible — explicit per-call approval
+    CODE_EXECUTION = (
+        "code_execution"  # Arbitrary code / shell / subagent — authored-only, fail-closed
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +216,14 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "workspace_gmail_search": ActionClass.READ,
     "workspace_gmail_get": ActionClass.READ,
     "workspace_gmail_create_draft": ActionClass.INTERNAL_WRITE,
-    "workspace_gmail_modify": ActionClass.INTERNAL_WRITE,
-    "workspace_gmail_archive": ActionClass.INTERNAL_WRITE,
+    # modify/archive mutate the principal's REAL mailbox (apply/remove INBOX,
+    # TRASH, labels) — not internal drafts. DESTRUCTIVE so they require explicit
+    # current-turn approval and are refused under a draft_for_review ceiling and
+    # on any turn tainted by untrusted inbound content (OP-P0-5). An EA triage
+    # run SUGGESTS filing; a human acts on it. (Recoverable from All Mail/Trash,
+    # but "silently buried real client mail" is the harm we gate.)
+    "workspace_gmail_modify": ActionClass.DESTRUCTIVE,
+    "workspace_gmail_archive": ActionClass.DESTRUCTIVE,
     "workspace_calendar_list": ActionClass.READ,
     "workspace_calendar_get": ActionClass.READ,
     "workspace_calendar_create_draft": ActionClass.INTERNAL_WRITE,
@@ -228,6 +237,31 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "workspace_sheets_create": ActionClass.INTERNAL_WRITE,
     "workspace_sheets_get_values": ActionClass.READ,
     "workspace_sheets_update_values": ActionClass.INTERNAL_WRITE,
+    # ----------------------------------------------------------------------
+    # Hermes CORE high-capability tools (OP-P0-1). These are the agent's own
+    # back-door capabilities: arbitrary code, shell, subagent spawn, OS
+    # process control, computer/browser automation, self-scheduling, and
+    # self-authoring of executable skills. Before this they were UNMAPPED →
+    # classified READ → waved through every ceiling (the systemic footgun the
+    # threat model named). They are CODE_EXECUTION: fail-closed unless the
+    # engagement authors a ``code_execution`` ceiling (ADR 0035), refused on
+    # any turn tainted by untrusted inbound content (the taint-gate), and
+    # never reachable by a draft_for_review skill. Legitimate use (e.g.
+    # ar-chaser's ADR-0021 fetch loop) is authored at the customer level and
+    # runs only on untainted turns. NOTE: the broader unmapped→READ default
+    # for unknown CORE tools is a deferred hardening (full core-allowlist +
+    # staging soak) — bounded meanwhile by the WS6 egress allowlist and the
+    # ``unmapped_tool=true`` audit signal.
+    "execute_code": ActionClass.CODE_EXECUTION,
+    "terminal": ActionClass.CODE_EXECUTION,
+    "process": ActionClass.CODE_EXECUTION,
+    "delegate_task": ActionClass.CODE_EXECUTION,
+    "computer_use": ActionClass.CODE_EXECUTION,
+    "cronjob": ActionClass.CODE_EXECUTION,
+    "skill_manage": ActionClass.CODE_EXECUTION,
+    # File mutation — internal write (not code-exec, but not read either).
+    "write_file": ActionClass.INTERNAL_WRITE,
+    "patch": ActionClass.INTERNAL_WRITE,
 }
 
 

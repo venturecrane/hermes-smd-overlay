@@ -67,6 +67,20 @@ from shared.action_classes import (
     ToolClassification,
     classify_tool,
 )
+from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
+
+# Action classes that must never fire autonomously on a turn that ingested
+# untrusted (non-internal) inbound content — the taint-gate. READ and
+# INTERNAL_WRITE (drafts) stay allowed: an EA reads untrusted mail and DRAFTS a
+# reply; it never autonomously sends / files / executes BECAUSE of it.
+_TAINT_GATED_CLASSES: frozenset[ActionClass] = frozenset(
+    {
+        ActionClass.EXTERNAL_SEND,
+        ActionClass.DESTRUCTIVE,
+        ActionClass.COMMITMENT,
+        ActionClass.CODE_EXECUTION,
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +252,7 @@ def enforce(
     current_turn_approval: bool = False,
     action_ceilings: Mapping[ActionClass, Ceiling] | None = None,
     vertical_floors: Mapping[ActionClass, Ceiling] | None = None,
+    inbound_trust_class: str = TRUST_CLASS_INTERNAL,
 ) -> EnforcementDecision:
     """Return whether this tool call is allowed under the configured ceilings.
 
@@ -280,9 +295,29 @@ def enforce(
             audit_action="refuse",
         )
 
-    # READ always allowed regardless of ceiling (non-REFUSED)
+    # READ always allowed regardless of ceiling (non-REFUSED). Reading more
+    # untrusted content is harmless; taint applies to ACTIONS, not reads.
     if action == ActionClass.READ:
         return EnforcementDecision(allowed=True, reason="read action", audit_action="allow")
+
+    # TAINT-GATE (OP-P0-4 / OP-P0-5 / OP-P1-1). This turn's session ingested
+    # untrusted inbound content (an email body, a connector record, a fetched
+    # page). A sensitive action on such a turn cannot be autonomous — an injected
+    # "send/archive/run this" must never execute BECAUSE of untrusted content.
+    # The action is refused here (the agent may still READ and DRAFT). This is
+    # the structural tie between injection-ingress and action-egress; it does not
+    # remove an authored autonomous capability, it withholds it for the tainted
+    # turn only.
+    if inbound_trust_class != TRUST_CLASS_INTERNAL and action in _TAINT_GATED_CLASSES:
+        return EnforcementDecision(
+            allowed=False,
+            reason=(
+                f"{action.value} refused: this turn ingested untrusted inbound "
+                f"content (trust_class={inbound_trust_class}); a sensitive action "
+                f"cannot fire autonomously on a tainted turn — read and draft only"
+            ),
+            audit_action="refuse",
+        )
 
     # COMMITMENT — never autonomous without approval (invariant #3).
     if action == ActionClass.COMMITMENT:
@@ -353,6 +388,35 @@ def enforce(
             allowed=False,
             reason="external_send at authored draft_for_review ceiling; routing to draft",
             audit_action="draft",
+        )
+
+    # CODE_EXECUTION — arbitrary code / shell / subagent / OS control. Governed
+    # by its OWN resolved per-action ceiling (ADR 0035): unauthored is fail-closed
+    # (refused — the agent's back door is shut unless the engagement opens a
+    # ``code_execution`` ceiling). autonomous → allow; anything else → refuse
+    # (there is no "draft" of a code execution).
+    #
+    # Deliberately NOT gated by the skill's output trust_ceiling scalar: code
+    # execution is an internal MECHANISM, not an output class. A draft-for-review
+    # skill (e.g. ar-chaser, whose OUTPUT is drafts) still runs its authored
+    # ADR-0021 fetch loop. The skill scalar only blocks everything via the
+    # REFUSED check at the top; the taint-gate above already withheld code
+    # execution on any untrusted-fed turn.
+    if action == ActionClass.CODE_EXECUTION:
+        eff = resolve_ceiling(action, ceiling, action_ceilings, vertical_floors)
+        if eff == Ceiling.AUTONOMOUS:
+            return EnforcementDecision(
+                allowed=True,
+                reason="code_execution permitted: authored code_execution ceiling is autonomous",
+                audit_action="allow",
+            )
+        return EnforcementDecision(
+            allowed=False,
+            reason=(
+                "code_execution refused: no authored code_execution ceiling "
+                "(fail-closed, ADR 0035) or a vertical floor narrows it"
+            ),
+            audit_action="refuse",
         )
 
     # INTERNAL_WRITE — governed by the resolved per-action ceiling (defaults to
@@ -710,6 +774,7 @@ def evaluate_tool_call(
     tool_name: str,
     args: dict,
     customer_slug: str,
+    session_id: str = "",
 ) -> dict | None:
     """Decide whether a tool call may proceed.
 
@@ -719,7 +784,10 @@ def evaluate_tool_call(
 
     Block precedence (first match wins):
       1. Tool name is in ``BANNED_TOOLS`` — refused regardless of ceiling.
-      2. Resolved ceiling refuses the action class via ``enforce()``.
+      2. Resolved ceiling refuses the action class via ``enforce()``. The
+         per-session taint (``SESSION_TAINT``, set by the inbound chokepoints
+         when untrusted content is ingested) is read by ``session_id`` and
+         passed to ``enforce()`` as the taint-gate input.
 
     Exception safety: any exception in this function is caught at the
     hook boundary; this function may raise internally and the caller's
@@ -769,6 +837,7 @@ def evaluate_tool_call(
             current_turn_approval=_resolve_current_turn_approval(args),
             action_ceilings=action_ceilings,
             vertical_floors=vertical_floors,
+            inbound_trust_class=SESSION_TAINT.trust_class(session_id),
         )
     except Exception:  # noqa: BLE001
         if classification.action_class == ActionClass.READ:

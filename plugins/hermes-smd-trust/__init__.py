@@ -71,7 +71,9 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
             except KeyError:
                 customer_slug = ""
 
-        ceiling_block = enforce.evaluate_tool_call(tool_name, args, customer_slug)
+        ceiling_block = enforce.evaluate_tool_call(
+            tool_name, args, customer_slug, session_id=kwargs.get("session_id") or ""
+        )
         if ceiling_block is not None:
             # The trust ceiling already refuses this call; no need to scan a
             # draft body that will never be written.
