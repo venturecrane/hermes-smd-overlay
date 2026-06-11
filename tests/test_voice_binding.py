@@ -122,3 +122,78 @@ def test_pre_llm_call_noop_when_unbound(voice):
     misconfigured-Machine case, not the default."""
     result = voice.on_pre_llm_call(session_id="s", user_message="hi")
     assert result is None
+
+
+# --- Local vault reader (OP-P0-2: agent holds no R2 credential for voice) ------
+
+
+def test_reader_from_env_prefers_local_vault_dir(voice, monkeypatch, tmp_path):
+    """SMD_VOICE_VAULT_DIR (the boot-synced mirror) wins over R2 env, so the
+    agent reads voice samples without any R2 credential."""
+    samples = voice.samples
+    for k, v in _R2_ENV.items():
+        monkeypatch.setenv(k, v)  # even with R2 env present...
+    monkeypatch.setenv("SMD_VOICE_VAULT_DIR", str(tmp_path))
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    reader = samples.reader_from_env()
+    assert isinstance(reader, samples.LocalVaultSampleReader)
+
+
+def test_reader_from_env_local_dir_must_exist(voice, monkeypatch, tmp_path):
+    """A configured-but-missing vault dir does not shadow the R2 fallback."""
+    samples = voice.samples
+    for k, v in _R2_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("SMD_VOICE_VAULT_DIR", str(tmp_path / "does-not-exist"))
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    reader = samples.reader_from_env()
+    assert isinstance(reader, samples.R2VaultSampleReader)
+
+
+def test_local_reader_round_trips_keys_and_cohort(voice, tmp_path):
+    """list_keys/get return the SAME slug-relative key shape as the R2 reader,
+    so _cohort_from_key and the retrieval path work unchanged."""
+    import json
+
+    samples = voice.samples
+    # Mirror the boot-synced layout: <vault>/cohort/<cohort>/<id>.json
+    cohort_dir = tmp_path / "cohort" / "clients"
+    cohort_dir.mkdir(parents=True)
+    sample = {"greeting_style": "first_name", "recipient_cohort": "clients"}
+    (cohort_dir / "s1.json").write_text(json.dumps(sample), encoding="utf-8")
+
+    reader = samples.LocalVaultSampleReader(base_dir=str(tmp_path), customer_slug="acme")
+    keys = reader.list_keys("acme/voice/cohort/")
+    assert keys == ["acme/voice/cohort/clients/s1.json"]
+    assert samples._cohort_from_key(keys[0]) == "clients"
+    assert json.loads(reader.get(keys[0])) == sample
+
+
+def test_local_reader_empty_dir_returns_no_keys(voice, tmp_path):
+    """An empty/absent vault (the common unconfigured-voice case) yields no
+    keys rather than raising — the plugin stays quietly inactive."""
+    samples = voice.samples
+    reader = samples.LocalVaultSampleReader(base_dir=str(tmp_path), customer_slug="acme")
+    assert reader.list_keys("acme/voice/cohort/") == []
+
+
+def test_pre_llm_call_injects_samples_from_local_vault(voice, tmp_path):
+    """End-to-end through the local reader: a bound plugin returns a context
+    block — proving the OP-P0-2 no-R2-credential path actually drives voice."""
+    import json
+
+    cohort_dir = tmp_path / "cohort" / "clients"
+    cohort_dir.mkdir(parents=True)
+    sample = {
+        "greeting_style": "first_name",
+        "signoff_style": "thanks",
+        "avg_sentence_length": 12.0,
+        "recipient_cohort": "clients",
+    }
+    (cohort_dir / "s1.json").write_text(json.dumps(sample), encoding="utf-8")
+
+    reader = voice.samples.LocalVaultSampleReader(base_dir=str(tmp_path), customer_slug="acme")
+    voice.bind_runtime(customer_slug="acme", r2_reader=reader)
+    result = voice.on_pre_llm_call(session_id="s", user_message="hi")
+    assert result is not None
+    assert "author voice profile" in result["context"]

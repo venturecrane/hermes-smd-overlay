@@ -31,6 +31,7 @@ import logging
 import os
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 log = logging.getLogger("aie.voice.samples")
@@ -145,16 +146,60 @@ class R2VaultSampleReader:
         return resp["Body"].read()
 
 
-def reader_from_env() -> R2VaultSampleReader | None:
-    """Build an R2 voice-sample reader from the Machine env.
+class LocalVaultSampleReader:
+    """An :class:`R2SampleReader` backed by a local mirror of the voice vault.
 
-    Returns ``None`` when any required R2 var is missing — the binder logs a
-    warning and the plugin stays inactive (it must never *silently* register as
-    a no-op; see register() in __init__.py). Mirrors skill_capture's
-    no-reader-on-missing-env posture, using the config-bucket credentials the
-    bootstrap sets (R2_ENDPOINT_URL / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY /
-    R2_BUCKET_CONFIG).
+    The Machine boot-syncs ``s3://<bucket>/vaults/<slug>/voice/`` to a local
+    directory (``SMD_VOICE_VAULT_DIR``, default ``/opt/data/voice``) with the
+    boot-time R2 creds, then STRIPS those creds before the agent starts — so the
+    agent process holds no R2 credential for voice (OP-P0-2). This reader returns
+    the SAME slug-relative key shape as :class:`R2VaultSampleReader`
+    (``<slug>/voice/cohort/<cohort>/<id>.json``), so it is a drop-in for the
+    :class:`R2SampleReader` protocol and ``_cohort_from_key`` parses it the same.
     """
+
+    def __init__(self, *, base_dir: str, customer_slug: str):
+        self._base = Path(base_dir)
+        # Callers pass "<slug>/voice/<rest>" keys; base_dir mirrors
+        # ".../vaults/<slug>/voice/", so map by stripping that head.
+        self._key_head = f"{customer_slug}/voice/"
+
+    def _rest(self, key_or_prefix: str) -> str:
+        if key_or_prefix.startswith(self._key_head):
+            return key_or_prefix[len(self._key_head) :]
+        return key_or_prefix
+
+    def list_keys(self, prefix: str) -> list[str]:
+        root = self._base / self._rest(prefix)
+        if not root.exists():
+            return []
+        keys: list[str] = []
+        for path in sorted(root.rglob("*.json")):
+            rel = path.relative_to(self._base).as_posix()
+            keys.append(f"{self._key_head}{rel}")
+        return keys
+
+    def get(self, key: str) -> bytes:
+        return (self._base / self._rest(key)).read_bytes()
+
+
+def reader_from_env() -> R2SampleReader | None:
+    """Build a voice-sample reader from the Machine env.
+
+    Prefers a LOCAL vault directory (``SMD_VOICE_VAULT_DIR``) — the boot-synced
+    mirror that lets the agent read voice samples WITHOUT holding any R2
+    credential. The account-wide R2 key is stripped from the agent env before the
+    gateway starts (OP-P0-2); voice survives because the vault is on disk, not
+    behind a live R2 fetch. Falls back to the direct R2 reader when no local dir
+    is configured (dev boxes, or a Machine before the boot-sync lands). Returns
+    ``None`` when neither is available — the binder logs a warning and the plugin
+    stays INACTIVE (never a silent no-op; see register() in __init__.py).
+    """
+    vault_dir = os.getenv("SMD_VOICE_VAULT_DIR")
+    slug = os.getenv("SMD_CUSTOMER_SLUG") or os.getenv("CUSTOMER_SLUG")
+    if vault_dir and slug and Path(vault_dir).is_dir():
+        return LocalVaultSampleReader(base_dir=vault_dir, customer_slug=slug)
+
     endpoint = os.getenv("R2_ENDPOINT_URL")
     access_key = os.getenv("R2_ACCESS_KEY_ID")
     secret_key = os.getenv("R2_SECRET_ACCESS_KEY")

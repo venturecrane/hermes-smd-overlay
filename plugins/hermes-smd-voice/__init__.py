@@ -190,7 +190,8 @@ def register(ctx) -> None:
         missing.append("SMD_CUSTOMER_SLUG")
     if reader is None:
         missing.append(
-            "R2 voice vault env (R2_ENDPOINT_URL/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET_CONFIG)"
+            "voice vault (SMD_VOICE_VAULT_DIR boot-sync dir, or R2 env "
+            "R2_ENDPOINT_URL/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET_CONFIG)"
         )
     logger.warning(
         "hermes-smd-voice registered but INACTIVE — voice transformation will NOT run. "
