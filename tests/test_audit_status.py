@@ -76,38 +76,68 @@ def test_read_absent_or_garbage_returns_none(tmp_path) -> None:
 
 
 def test_evaluate_absent_sentinel_degrades_to_unknown() -> None:
-    fact, degraded = ast.evaluate_status(None, live_agent_pid=1234)
+    fact, degraded = ast.evaluate_status(None)
     assert fact == {"writer_wired": None, "transport": None, "reason": None}
     assert degraded and degraded[0]["field"] == "audit.writer_wired"
 
 
-def test_evaluate_pid_match_is_current_boot_fact() -> None:
+def test_evaluate_live_writer_pid_is_current_boot_fact() -> None:
+    # Staleness key is WRITER-PID LIVENESS, not equality with a discovered
+    # "agent pid" — Hermes children inherit SMD_CUSTOMER_SLUG, so discovery
+    # can land on a child of the gateway (live-verified on customer-zero
+    # 2026-06-12: sentinel pid 927, discovered pid a sibling).
     status = {"schema": ast.SCHEMA, "wired": True, "transport": "broker", "reason": None, "pid": 7}
-    fact, degraded = ast.evaluate_status(status, live_agent_pid=7)
+    fact, degraded = ast.evaluate_status(status, pid_alive=lambda pid: pid == 7)
     assert fact["writer_wired"] is True
     assert fact["transport"] == "broker"
     assert degraded == []
 
 
-def test_evaluate_pid_mismatch_degrades_as_previous_boot() -> None:
+def test_evaluate_dead_writer_pid_degrades_as_previous_boot() -> None:
     status = {"schema": ast.SCHEMA, "wired": True, "transport": "broker", "reason": None, "pid": 7}
-    fact, degraded = ast.evaluate_status(status, live_agent_pid=99)
+    fact, degraded = ast.evaluate_status(status, pid_alive=lambda pid: False)
     # The value is still reported (it's a real file), but flagged stale —
     # a wired:true from a previous boot must not read as "currently wired".
     assert fact["writer_wired"] is True
     assert degraded and "previous boot" in degraded[0]["reason"]
 
 
-def test_evaluate_unknown_live_pid_degrades() -> None:
-    status = {"schema": ast.SCHEMA, "wired": False, "transport": None, "reason": "x", "pid": 7}
-    fact, degraded = ast.evaluate_status(status, live_agent_pid=None)
-    assert fact["writer_wired"] is False
-    assert degraded and "staleness" in degraded[0]["reason"]
+def test_evaluate_unusable_sentinel_pid_degrades() -> None:
+    for bogus in (None, -1, "927"):
+        status = {
+            "schema": ast.SCHEMA,
+            "wired": False,
+            "transport": None,
+            "reason": "x",
+            "pid": bogus,
+        }
+        fact, degraded = ast.evaluate_status(status, pid_alive=lambda pid: True)
+        assert fact["writer_wired"] is False
+        assert degraded and "staleness" in degraded[0]["reason"]
+
+
+def test_evaluate_own_process_pid_is_alive_by_default() -> None:
+    # The default pid_alive uses /proc; our own pid must read as alive.
+    import os
+
+    status = {
+        "schema": ast.SCHEMA,
+        "wired": True,
+        "transport": "direct",
+        "reason": None,
+        "pid": os.getpid(),
+    }
+    fact, degraded = ast.evaluate_status(status)
+    if ast._pid_alive(os.getpid()):  # /proc present (Linux/CI)
+        assert degraded == []
+    else:  # macOS dev machines have no /proc — degrades honestly
+        assert degraded and "previous boot" in degraded[0]["reason"]
+    assert fact["writer_wired"] is True
 
 
 def test_evaluate_non_bool_wired_reports_unknown() -> None:
     status = {"schema": ast.SCHEMA, "wired": "yes", "pid": 7}
-    fact, _ = ast.evaluate_status(status, live_agent_pid=7)
+    fact, _ = ast.evaluate_status(status, pid_alive=lambda pid: True)
     assert fact["writer_wired"] is None
 
 
