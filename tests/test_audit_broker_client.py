@@ -68,10 +68,14 @@ class _FakeBroker:
                 self.received = json.loads(buf)
             except ValueError:
                 self.received = None
-            reply = {"ok": True, "id": "01TESTULID0000000000000000"} if self._ok else {
-                "ok": False,
-                "message": "refused for test",
-            }
+            reply = (
+                {"ok": True, "id": "01TESTULID0000000000000000"}
+                if self._ok
+                else {
+                    "ok": False,
+                    "message": "refused for test",
+                }
+            )
             conn.sendall(json.dumps(reply).encode() + b"\n")
 
     def close(self) -> None:

@@ -314,7 +314,9 @@ def register(ctx) -> None:
             try:
                 _WRITER.ensure_schema()
             except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
-                logger.error("hermes-smd-audit: ensure_schema failed; audit writes will fail: %s", exc)
+                logger.error(
+                    "hermes-smd-audit: ensure_schema failed; audit writes will fail: %s", exc
+                )
         # ADR 0022 Stream 2 — skill inventory is MUTABLE agent state
         # (skill_capture INSERTs a 'pending' row then UPDATEs it to
         # 'persisted'/'failed'). It must live in a hermes-WRITABLE file. When
@@ -323,7 +325,9 @@ def register(ctx) -> None:
         # onto its own binding ``SMD_D1_AGENT_STATE_BINDING``. Falls back to
         # the audit binding when that env is unset (direct mode / existing
         # tests) so today's single-file behavior is unchanged.
-        state_binding = os.environ.get("SMD_D1_AGENT_STATE_BINDING") or secrets_map["SMD_D1_AUDIT_BINDING"]
+        state_binding = (
+            os.environ.get("SMD_D1_AGENT_STATE_BINDING") or secrets_map["SMD_D1_AUDIT_BINDING"]
+        )
         _SKILL_D1_CLIENT = D1Client(
             binding_name=state_binding,
             customer_slug=_CUSTOMER_SLUG,

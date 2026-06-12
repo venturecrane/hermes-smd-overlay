@@ -75,8 +75,7 @@ class BrokerAuditClient:
         """
         if len(params) != len(COLUMNS):
             raise AuditWriteError(
-                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, "
-                f"got {len(params)}"
+                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, got {len(params)}"
             )
         # COLUMNS == (id, ts, action_type, ...). Drop id/ts — the broker
         # re-derives them so the agent cannot backdate or collide.
