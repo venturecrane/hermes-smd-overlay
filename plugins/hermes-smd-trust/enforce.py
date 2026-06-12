@@ -103,18 +103,10 @@ class Ceiling(str, enum.Enum):
     REFUSED = "refused"
 
 
-# Strict ordering used by ``_min_ceiling``. Lower index = more restrictive.
-# A customer ceiling of REFUSED beats every SKILL.md declaration.
-_CEILING_ORDER: tuple[Ceiling, ...] = (
-    Ceiling.REFUSED,
-    Ceiling.DRAFT_FOR_REVIEW,
-    Ceiling.AUTONOMOUS,
-)
-
-
-def _min_ceiling(a: Ceiling, b: Ceiling) -> Ceiling:
-    """Return the more restrictive of two ceilings."""
-    return a if _CEILING_ORDER.index(a) <= _CEILING_ORDER.index(b) else b
+# NOTE: ceiling comparison lives in ``_most_restrictive`` below. A second
+# implementation (``_min_ceiling`` over an ordered tuple) coexisted here
+# until the 2026-06-12 code review — two copies of the same comparison that
+# had to agree on any future ceiling tier. One survives.
 
 
 # ---------------------------------------------------------------------------
@@ -834,7 +826,7 @@ def evaluate_tool_call(
     try:
         customer_ceiling = _resolve_customer_ceiling()
         skill_ceiling = _resolve_skill_ceiling(args)
-        effective_ceiling = _min_ceiling(customer_ceiling, skill_ceiling)
+        effective_ceiling = _most_restrictive(customer_ceiling, skill_ceiling)
         action_ceilings = _resolve_action_ceilings(args)
         vertical_floors = _resolve_vertical_floors()
 

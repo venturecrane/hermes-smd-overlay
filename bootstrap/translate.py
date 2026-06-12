@@ -144,7 +144,9 @@ def _write_persona_bundles(
             return (0, removed)
         return (0, 0)
 
-    bundles_dir.mkdir(parents=True, exist_ok=True)
+    # 0700 to match _write_if_changed's posture — bundle yamls can carry
+    # authored config that has no business being world-readable.
+    bundles_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     wrote = 0
     declared_paths: set[Path] = set()
@@ -635,8 +637,14 @@ def _write_if_changed(target: Path, content: bytes) -> bool:
       root-owned by a manual in-container edit (a plain ``write_bytes``
       O_TRUNC would raise ``PermissionError`` and crashloop the boot).
     * A reader (the Hermes gateway) never sees a half-written config.
+
+    Parent directories are created ``0o700``: profile trees hold
+    secret-bearing MCP connector configs (the files themselves are
+    ``0600`` via mkstemp), and a default-umask ``0755`` directory tree
+    would leave them traversable by other users (2026-06-12 code
+    review; same posture as the broker's own 0700 home).
     """
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if target.exists():
         try:
             if target.read_bytes() == content:
@@ -703,7 +711,7 @@ def _install_persona_skills(
             (defensive; :func:`_resolve_skill_pins` validates this earlier).
     """
     dest_root = profile_dir / "skills"
-    dest_root.mkdir(parents=True, exist_ok=True)
+    dest_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     installed = 0
     for skill in persona.get("skills", []) or []:
         if not skill.get("enabled"):
