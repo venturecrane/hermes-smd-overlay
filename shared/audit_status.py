@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -102,21 +103,35 @@ def read_audit_status(hermes_home: str | None = None) -> dict[str, Any] | None:
     return data
 
 
+def _pid_alive(pid: int) -> bool:
+    """Liveness via /proc — no signals sent, works for non-child processes."""
+    return Path(f"/proc/{pid}").is_dir()
+
+
 def evaluate_status(
     status: dict[str, Any] | None,
-    live_agent_pid: int | None,
+    *,
+    pid_alive: Callable[[int], bool] = _pid_alive,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """Turn a raw sentinel + the live agent pid into a snapshot fact (pure).
+    """Turn a raw sentinel into a snapshot fact (pure given ``pid_alive``).
+
+    Staleness key: is the WRITING process still alive? Equality against a
+    single "discovered agent pid" was the first cut, but Hermes children
+    inherit ``SMD_CUSTOMER_SLUG``, so the gate's process discovery can land
+    on a child of the gateway rather than the process that registered the
+    plugin — live-verified on customer-zero 2026-06-12 (sentinel pid 927,
+    discovered pid a sibling). Liveness of the sentinel pid is robust to
+    that ambiguity: a previous boot's pid is gone (fresh PID namespace per
+    Machine boot), a current boot's writer is running.
 
     Returns ``(audit_fact, degraded_entries)`` per the config-snapshot
     truthful-or-degraded contract:
 
-    - sentinel absent            → ``writer_wired: None`` + degraded (the
+    - sentinel absent             → ``writer_wired: None`` + degraded (the
       plugin may never have loaded — unknown, not "unwired")
-    - pid mismatch vs live agent → value reported but degraded (previous boot)
-    - live pid unknowable        → value reported but degraded (staleness
-      can't be ruled out)
-    - pid match                  → current-boot fact, no degradation
+    - sentinel pid not alive      → value reported but degraded (previous boot)
+    - sentinel pid missing/bogus  → value reported but degraded
+    - sentinel pid alive          → current-boot fact, no degradation
     """
     if status is None:
         return (
@@ -131,18 +146,18 @@ def evaluate_status(
     }
     sentinel_pid = status.get("pid")
 
-    if live_agent_pid is None:
+    if not isinstance(sentinel_pid, int) or sentinel_pid <= 0:
         return fact, [
             {
                 "field": "audit.writer_wired",
-                "reason": "agent pid unknown; sentinel staleness undetectable",
+                "reason": "sentinel carries no usable pid; staleness undetectable",
             }
         ]
-    if sentinel_pid != live_agent_pid:
+    if not pid_alive(sentinel_pid):
         return fact, [
             {
                 "field": "audit.writer_wired",
-                "reason": f"sentinel pid {sentinel_pid} != live agent pid (previous boot?)",
+                "reason": f"sentinel writer pid {sentinel_pid} not alive (previous boot?)",
             }
         ]
     return fact, []

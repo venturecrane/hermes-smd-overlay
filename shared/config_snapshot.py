@@ -380,16 +380,14 @@ def snapshot(*, own_slug: str | None = None, hermes_home: str | None = None) -> 
         allowlist = None
 
     found = find_agent_process(slug)
-    agent_pid, agent_env = found if found else (None, None)
+    agent_env = found[1] if found else None
     overlay_ref = resolve_overlay_ref()
     profiles, profile_degraded = read_profiles(home)
 
     # audit wiring fact (#64): the audit plugin's boot sentinel, staleness-
-    # checked against the live agent pid (a dead plugin can't sentinel its own
-    # non-execution; the pid check catches the previous-boot leftover).
-    audit_fact, audit_degraded = audit_status.evaluate_status(
-        audit_status.read_audit_status(home), agent_pid
-    )
+    # checked by WRITER-PID LIVENESS (a dead plugin can't sentinel its own
+    # non-execution; a previous boot's pid is gone in the fresh PID namespace).
+    audit_fact, audit_degraded = audit_status.evaluate_status(audit_status.read_audit_status(home))
 
     return build_snapshot(
         allowlist=allowlist,
