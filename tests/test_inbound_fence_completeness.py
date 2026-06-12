@@ -23,15 +23,12 @@ from tests.conftest import load_plugin
 # attacker-influenceable content.
 UNFENCED_READ_BY_DESIGN: frozenset[str] = frozenset(
     {
-        # Calendar reads: event listing/detail for the principal's own
-        # calendar. NOTE (2026-06-12 review): externally-sent invites can
-        # carry third-party descriptions — these two are fence CANDIDATES
-        # under review, recorded here so the status is explicit not silent.
-        "workspace_calendar_list",
-        "workspace_calendar_get",
         # Drive listing: filename/id metadata, no document body content
         # (body reads go through workspace_drive_get/export, which are
         # fenced).
+        # (workspace_calendar_list/get were fence CANDIDATES here until
+        # 2026-06-12; Captain ruled fence-both — external invites carry
+        # third-party content — and they moved to _FENCED_READ_TOOLS.)
         "workspace_drive_list",
     }
 )
