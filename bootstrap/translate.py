@@ -65,6 +65,7 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -733,7 +734,7 @@ def translate_customer_yaml(
     hermes_home: str,
     *,
     skills_dir: str | None = None,
-    cron_store: CronStore | None = None,
+    cron_store_for: Callable[[str], CronStore] | None = None,
 ) -> list[str]:
     """Translate ``customer.yaml`` into per-profile Hermes config.
 
@@ -856,9 +857,11 @@ def translate_customer_yaml(
     # without Hermes installed. Fail-closed: a bad/unsupported entry raises
     # TranslateError and aborts bootstrap, never a silent drop.
     if any(persona.get("cron") for persona in personas):
-        store = cron_store if cron_store is not None else _real_cron_store()
+        store_for = (
+            cron_store_for if cron_store_for is not None else _real_cron_store_for(profiles_root)
+        )
         try:
-            registered = materialize_cron(customer, store)
+            registered = materialize_cron(customer, store_for)
         except CronMaterializeError as exc:
             raise TranslateError(str(exc)) from exc
         logger.info(
@@ -868,22 +871,41 @@ def translate_customer_yaml(
     return written_slugs
 
 
-def _real_cron_store() -> CronStore:
-    """The live Hermes ``cron.jobs`` store. Imported lazily — Hermes is present
-    on the Machine but not in CI; this is only reached when cron entries exist."""
-    from cron import jobs as _cron_jobs
+def _real_cron_store_for(profiles_root: Path) -> Callable[[str], CronStore]:
+    """Factory of live Hermes cron stores, one per persona PROFILE home.
 
-    class _HermesCronStore:
-        def list_jobs(self, include_disabled: bool = False) -> list[dict[str, Any]]:
-            return _cron_jobs.list_jobs(include_disabled=include_disabled)
+    Each persona's cron must land in ``<profiles_root>/<slug>`` — the home the
+    gateway reads under ``hermes -p <slug> gateway run``. Hermes' ``cron.jobs``
+    captures the home (``JOBS_FILE``) at IMPORT time (``hermes_cli/main.py``
+    pre-sets ``HERMES_HOME`` before module imports), so to target a specific
+    profile home we set ``HERMES_HOME`` and reload the module per operation.
+    Imported lazily — Hermes is present on the Machine but not in CI; reached
+    only when cron entries exist."""
 
-        def create_job(self, **kwargs: Any) -> dict[str, Any]:
-            return _cron_jobs.create_job(**kwargs)
+    def make(slug: str) -> CronStore:
+        home = str(profiles_root / slug)
 
-        def remove_job(self, job_id: str) -> bool:
-            return _cron_jobs.remove_job(job_id)
+        class _HermesProfileCronStore:
+            def _jobs(self):  # type: ignore[no-untyped-def]
+                import importlib
 
-    return _HermesCronStore()
+                os.environ["HERMES_HOME"] = home
+                from cron import jobs as _j
+
+                return importlib.reload(_j)
+
+            def list_jobs(self, include_disabled: bool = False) -> list[dict[str, Any]]:
+                return self._jobs().list_jobs(include_disabled=include_disabled)
+
+            def create_job(self, **kwargs: Any) -> dict[str, Any]:
+                return self._jobs().create_job(**kwargs)
+
+            def remove_job(self, job_id: str) -> bool:
+                return self._jobs().remove_job(job_id)
+
+        return _HermesProfileCronStore()
+
+    return make
 
 
 def start_customer_sync(
