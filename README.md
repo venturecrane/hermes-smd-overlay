@@ -14,6 +14,7 @@ Seven plugins (six production + one rebase probe) that attach to Hermes' documen
 | `hermes-smd-memory-mirror` | `on_session_end` | Mirrors Honcho conclusions to per-customer D1 with provenance; supports Captain dismissal. |
 | `hermes-smd-webhook-router` | `pre_gateway_dispatch` | Routes inbound webhook payloads to skills via `customer.yaml.webhook_triggers[]`. Emits `WEBHOOK_ROUTED` + attaches an inbound provenance envelope and emits `INBOUND_RECEIVED` (ADR 0021 Stream E + ADR 0027). |
 | `hermes-smd-inbound` | `pre_llm_call` | Nonce-fenced quarantine of untrusted inbound content at the single pre-LLM chokepoint (ADR 0027 defense-in-depth). |
+| `hermes-smd-workspace` | registered tools | First-class Google Workspace tools (Gmail / Calendar / Drive / Docs / Sheets — 18 mediated operations) backed by the local capability broker; every execution is broker-validated against the authored `google_auth` posture and audit-recorded. The largest registered tool surface in the overlay. |
 | `hermes-smd-hook-probe` | all six | Smoke plugin for verifying Hermes' hook surface at each rebase. |
 
 Plus a `bootstrap/` CLI (`hermes-smd bootstrap`) that translates `customer.yaml.personas[]` into N Hermes profile directories at customer Machine startup.
