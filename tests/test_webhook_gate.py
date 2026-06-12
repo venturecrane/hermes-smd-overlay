@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import json
 import time
 
 import webhook_gate as gate
@@ -108,6 +109,28 @@ def test_route_secret_reads_per_vendor_env(monkeypatch):
 def test_message_id_extracted_from_agentmail_payload():
     body = b'{"event_type":"message.received","message":{"message_id":"<x@y>"}}'
     assert gate._message_id(body) == "<x@y>"
+
+
+def test_stamp_source_adds_route_as_source():
+    # AgentMail's payload carries event_type but no source; the gate stamps the
+    # verified route slug so the router can route on (source, event_type).
+    body = b'{"event_type":"message.received","message":{"message_id":"m1"}}'
+    out = json.loads(gate._stamp_source(body, "agentmail"))
+    assert out["source"] == "agentmail"
+    assert out["event_type"] == "message.received"
+    assert out["message"]["message_id"] == "m1"  # message block untouched
+
+
+def test_stamp_source_never_overwrites_existing_source():
+    body = b'{"source":"already","event_type":"x"}'
+    assert gate._stamp_source(body, "agentmail") == body  # unchanged bytes
+
+
+def test_stamp_source_fail_safe_on_non_json_or_non_object():
+    # A body the gate cannot parse/stamp is forwarded unchanged (it would not
+    # route anyway; a parse error must never break the forward).
+    assert gate._stamp_source(b"not json", "agentmail") == b"not json"
+    assert gate._stamp_source(b'["a","b"]', "agentmail") == b'["a","b"]'
 
 
 def test_audit_db_path_handles_direct_path_varname_and_fallback(monkeypatch):
