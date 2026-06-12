@@ -176,6 +176,33 @@ def _message_id(body: bytes) -> str | None:
     return None
 
 
+def _stamp_source(body: bytes, route: str) -> bytes:
+    """Stamp the verified ingress provenance (``source = <route>``) onto the
+    forwarded JSON body so the downstream webhook router can route on
+    ``(source, event_type)``.
+
+    The gate is the only place that authoritatively knows the vendor: the route
+    slug (``agentmail``) is the adapter that signed this delivery. Vendor
+    payloads (AgentMail's ``message.received``) carry ``event_type`` but no
+    ``source`` — the router's contract anticipates this provenance being added
+    by the authenticated ingress (``hermes-smd-webhook-router`` accepts a
+    top-level ``source`` or ``metadata.source``). We add the top-level form.
+
+    Stamped AFTER signature verification and BEFORE the forward HMAC is computed,
+    so the re-signed bytes and the stamped bytes are the same — the downstream
+    Generic verify still passes. Fail-safe: a non-JSON or non-object body is
+    forwarded UNCHANGED (it would not route anyway, and a parse error must not
+    break the forward); an existing ``source`` is never overwritten."""
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return body
+    if not isinstance(payload, dict) or payload.get("source"):
+        return body
+    payload["source"] = route
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "hermes-smd-webhook-gate/1.0"
 
@@ -296,6 +323,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": "invalid signature"})
             return
 
+        # Stamp the verified ingress provenance (source == route) so the
+        # downstream router can route on (source, event_type). Done after Svix
+        # verify and before the forward HMAC, so the re-signed bytes ARE the
+        # forwarded bytes. _message_id is read from the ORIGINAL body (the stamp
+        # never touches the message block).
+        request_id = svix_id or (_message_id(body) or "")[:64]
+        body = _stamp_source(body, route)
+
         # Forward to the Hermes adapter with the Generic header it understands
         # (hex HMAC over the exact bytes, same secret) + the Svix delivery id as
         # the idempotency key so adapter dedupes vendor retries.
@@ -303,7 +338,7 @@ class _Handler(BaseHTTPRequestHandler):
         headers = {
             "Content-Type": self.headers.get("Content-Type", "application/json"),
             "X-Webhook-Signature": fwd_sig,
-            "X-Request-ID": svix_id or (_message_id(body) or "")[:64],
+            "X-Request-ID": request_id,
         }
         # Forward over a fixed loopback host:port (http.client, not a dynamic
         # URL) — route is charset-validated above and only forms the path.
