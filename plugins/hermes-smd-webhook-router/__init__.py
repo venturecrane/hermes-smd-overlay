@@ -39,9 +39,9 @@ from pathlib import Path
 from typing import Any
 
 from shared import inbound
+from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
-from shared.d1_client import D1Client
 from shared.secrets import get_secret, require
 
 from . import router, verify  # noqa: F401 - surface for tests
@@ -394,10 +394,10 @@ def register(ctx) -> None:
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
         _CUSTOMER_SLUG = secrets_map["SMD_CUSTOMER_SLUG"]
-        _D1_CLIENT = D1Client(
-            binding_name=secrets_map["SMD_D1_AUDIT_BINDING"],
-            customer_slug=_CUSTOMER_SLUG,
-        )
+        # Broker-aware audit transport (OP-P1-4): routes WEBHOOK_ROUTED /
+        # INBOUND_RECEIVED rows through the append-only broker when
+        # SMD_AUDIT_BROKER_SOCKET is set; direct D1Client otherwise.
+        _D1_CLIENT = audit_client_from_env(customer_slug=_CUSTOMER_SLUG)
     except KeyError as exc:
         _CUSTOMER_SLUG = None
         _D1_CLIENT = None

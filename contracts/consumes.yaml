@@ -52,6 +52,13 @@ vars:
     consumed_by: [webhook-gate, audit, trust, webhook-router, workspace, overlay-activation-hook]
     note: per-customer audit D1 binding (a path, or the NAME of an env var holding the path)
 
+  SMD_D1_AGENT_STATE_BINDING:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [audit]
+    note: per-customer MUTABLE agent-state D1 binding (agent_skills_inventory); falls back to SMD_D1_AUDIT_BINDING when unset (OP-P1-4 ledger/state split)
+
   # ---- Indirect: var name held in a module constant, not a literal at the read ----
   SMD_WORKSPACE_BROKER_SOCKET:
     discovery: indirect
@@ -59,6 +66,13 @@ vars:
     requirement: required
     consumed_by: [workspace]
     note: "read via os.environ.get(SOCKET_ENV) where SOCKET_ENV = 'SMD_WORKSPACE_BROKER_SOCKET' (shared/workspace_broker.py:10); broker raises if unset"
+
+  SMD_AUDIT_BROKER_SOCKET:
+    discovery: indirect
+    stage: agent
+    requirement: optional
+    consumed_by: [audit, trust, webhook-router]
+    note: "read via os.environ.get(SOCKET_ENV) where SOCKET_ENV = 'SMD_AUDIT_BROKER_SOCKET' (shared/audit_client.py); set => audit writes route through the broker's append-only audit_append (OP-P1-4); unset => direct D1 write"
 
   # ---- Optional: plugin no-ops cleanly / a default applies when absent ----
   HERMES_HOME:

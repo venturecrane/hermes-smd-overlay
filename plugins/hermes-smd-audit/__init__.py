@@ -26,6 +26,7 @@ import logging
 import os
 from typing import Any
 
+from shared.audit_client import BrokerAuditClient, audit_client_from_env
 from shared.d1_client import D1Client
 from shared.secrets import require
 
@@ -297,27 +298,57 @@ def register(ctx) -> None:
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
         _CUSTOMER_SLUG = secrets_map["SMD_CUSTOMER_SLUG"]
-        client = D1Client(
-            binding_name=secrets_map["SMD_D1_AUDIT_BINDING"],
-            customer_slug=_CUSTOMER_SLUG,
-        )
+        # Single selection point for the audit transport: a BrokerAuditClient
+        # when SMD_AUDIT_BROKER_SOCKET is set (the ledger file is broker-owned,
+        # OP-P1-4), else a direct D1Client on the audit binding (legacy/test).
+        client = audit_client_from_env(customer_slug=_CUSTOMER_SLUG)
+        _broker_mode = isinstance(client, BrokerAuditClient)
         _WRITER = AuditLogWriter(client)
         # The Machine's bootstrap does not apply the per-customer migrations, so
         # ensure the audit_log table exists before the first write (ss-console
-        # #1285). Idempotent. A failure must not crash plugin load — log loudly
-        # and let the hooks no-op, same posture as a missing binding.
+        # #1285). In broker mode the broker owns the ledger file and its schema
+        # (the agent uid cannot write it), so skip — calling CREATE TABLE through
+        # the broker client (read-only file) would fail. Idempotent otherwise; a
+        # failure must not crash plugin load.
+        if not _broker_mode:
+            try:
+                _WRITER.ensure_schema()
+            except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
+                logger.error(
+                    "hermes-smd-audit: ensure_schema failed; audit writes will fail: %s", exc
+                )
+        # ADR 0022 Stream 2 — skill inventory is MUTABLE agent state
+        # (skill_capture INSERTs a 'pending' row then UPDATEs it to
+        # 'persisted'/'failed'). It must live in a hermes-WRITABLE file. When
+        # the audit ledger is broker-owned (OP-P1-4 hardening), the ledger
+        # file is read-only to the agent uid, so the skills table is split
+        # onto its own binding ``SMD_D1_AGENT_STATE_BINDING``. Falls back to
+        # the audit binding when that env is unset (direct mode / existing
+        # tests) so today's single-file behavior is unchanged.
+        state_binding = (
+            os.environ.get("SMD_D1_AGENT_STATE_BINDING") or secrets_map["SMD_D1_AUDIT_BINDING"]
+        )
+        _SKILL_D1_CLIENT = D1Client(
+            binding_name=state_binding,
+            customer_slug=_CUSTOMER_SLUG,
+        )
+        # The Machine bootstrap does not run the per-customer migrations, so
+        # the agent_skills_inventory table may not exist — and a freshly-split
+        # agent-state file definitely won't have it. Create it idempotently on
+        # the hermes-owned binding (mirrors the audit_log ensure_schema above).
         try:
-            _WRITER.ensure_schema()
+            for ddl in schemas.AUDIT_PLUGIN_DDLS:
+                _SKILL_D1_CLIENT.execute(ddl)
         except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
-            logger.error("hermes-smd-audit: ensure_schema failed; audit writes will fail: %s", exc)
-        # ADR 0022 Stream 2 — skill inventory writes go to the same audit
-        # D1 binding (agent_skills_inventory table lives alongside
-        # audit_log per the ss-console migrations).
-        _SKILL_D1_CLIENT = client
+            logger.error(
+                "hermes-smd-audit: agent-state ensure_schema failed; skill capture will fail: %s",
+                exc,
+            )
         logger.info(
-            "hermes-smd-audit registered (customer=%s binding=%s)",
+            "hermes-smd-audit registered (customer=%s audit_binding=%s state_binding=%s)",
             _CUSTOMER_SLUG,
             secrets_map["SMD_D1_AUDIT_BINDING"],
+            state_binding,
         )
     except KeyError as exc:
         # Per AGENTS.md hard rule #4, the plugin manifest declares its

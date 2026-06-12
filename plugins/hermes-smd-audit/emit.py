@@ -43,6 +43,7 @@ from shared.action_classes import (
     ToolClassification,
     classify_tool,
 )
+from shared.audit_client import AuditWriteError
 from shared.audit_contract import CREATE_INDEX_SQL as _CREATE_INDEX_SQL
 from shared.audit_contract import CREATE_TABLE_SQL as _CREATE_TABLE_SQL
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
@@ -67,15 +68,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class AuditWriteError(RuntimeError):
-    """Raised when the audit log cannot be written.
-
-    The hook wrappers catch this to keep the Hermes dispatcher healthy. The
-    underlying invariant — an unloggable action must not execute — is
-    preserved at the substrate layer above this plugin: the trust-ceiling
-    enforcer (hermes-smd-trust) is the gate that blocks pre-call, not this
-    observer plugin.
-    """
+# AuditWriteError is canonically defined in ``shared.audit_client`` (imported at
+# the top of this module) so the broker transport can raise it without importing
+# this plugin layer. It is re-exported here (see __all__) for backward
+# compatibility with existing importers.
+#
+# The hook wrappers catch it to keep the Hermes dispatcher healthy. The
+# underlying invariant — an unloggable action must not execute — is preserved at
+# the substrate layer above this plugin: the trust-ceiling enforcer
+# (hermes-smd-trust) is the gate that blocks pre-call, not this observer plugin.
 
 
 # ULID generation, ISO-8601 timestamps, and SHA-256 digesting are single-
