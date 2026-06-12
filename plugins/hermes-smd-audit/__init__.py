@@ -27,6 +27,7 @@ import os
 from typing import Any
 
 from shared.audit_client import BrokerAuditClient, audit_client_from_env
+from shared.audit_status import NoAuditWarner, write_audit_status
 from shared.d1_client import D1Client
 from shared.secrets import require
 
@@ -67,6 +68,11 @@ _CUSTOMER_SLUG: str | None = None
 _SKILL_D1_CLIENT: D1Client | None = None
 _R2_CONFIG: R2Config | None = None
 
+# #64: when the writer never wired, every hook is a silent no-op — say so at
+# WARNING on a rate limit (not just once at init) so a dark ledger is visible
+# in the logs for as long as it stays dark.
+_NO_AUDIT_WARNER = NoAuditWarner()
+
 
 def _writer() -> AuditLogWriter | None:
     """Read the module-level writer. Returns ``None`` if registration failed."""
@@ -86,9 +92,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
     """
     writer = _writer()
     if writer is None or _CUSTOMER_SLUG is None:
-        # Registration failed; nothing to do. Log once at debug so we
-        # don't spam every tool call when the audit plugin is disabled.
-        logger.debug("hermes-smd-audit: post_tool_call skipped (writer unconfigured)")
+        # Registration failed; nothing to do. Rate-limited WARNING (#64) so a
+        # dark ledger stays visible without spamming every tool call.
+        _NO_AUDIT_WARNER.warn(logger, "post_tool_call skipped (writer unconfigured)")
         return
 
     tool_name = kwargs.get("tool_name", "") or ""
@@ -223,7 +229,7 @@ def on_subagent_stop(**kwargs: Any) -> None:
     """
     writer = _writer()
     if writer is None or _CUSTOMER_SLUG is None:
-        logger.debug("hermes-smd-audit: subagent_stop skipped (writer unconfigured)")
+        _NO_AUDIT_WARNER.warn(logger, "subagent_stop skipped (writer unconfigured)")
         return
 
     try:
@@ -258,7 +264,7 @@ def on_post_llm_call(**kwargs: Any) -> None:
     """
     writer = _writer()
     if writer is None or _CUSTOMER_SLUG is None:
-        logger.debug("hermes-smd-audit: post_llm_call skipped (writer unconfigured)")
+        _NO_AUDIT_WARNER.warn(logger, "post_llm_call skipped (writer unconfigured)")
         return
 
     try:
@@ -294,6 +300,12 @@ def register(ctx) -> None:
     Audit emission continues unchanged on that misconfiguration.
     """
     global _WRITER, _CUSTOMER_SLUG, _SKILL_D1_CLIENT, _R2_CONFIG
+
+    # #64: boot-scoped wiring sentinel for the config-seam snapshot. Written
+    # FIRST as un-wired so a mid-registration crash leaves an honest
+    # wired:false for this pid (a handler can't sentinel its own
+    # non-execution); overwritten below with the real outcome.
+    write_audit_status(wired=False, transport=None, reason="registration in progress")
 
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
@@ -350,6 +362,11 @@ def register(ctx) -> None:
             secrets_map["SMD_D1_AUDIT_BINDING"],
             state_binding,
         )
+        write_audit_status(
+            wired=True,
+            transport="broker" if _broker_mode else "direct",
+            reason=None,
+        )
     except KeyError as exc:
         # Per AGENTS.md hard rule #4, the plugin manifest declares its
         # ``requires_env`` so Hermes should not load us with missing env.
@@ -359,6 +376,9 @@ def register(ctx) -> None:
         _CUSTOMER_SLUG = None
         _SKILL_D1_CLIENT = None
         logger.warning("hermes-smd-audit: env not configured, hooks will no-op: %s", exc)
+        # KeyError from shared.secrets.require names the missing VAR, never a
+        # value — safe to record as the un-wired reason.
+        write_audit_status(wired=False, transport=None, reason=f"env not configured: {exc}")
 
     # ADR 0022 Stream 2 — R2 skill-bodies config is optional from this
     # plugin's perspective: when missing, the capture path INSERTs the
