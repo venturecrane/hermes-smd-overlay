@@ -31,6 +31,7 @@ authoring one today fails loud rather than mis-wiring it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Protocol
 
 MANAGED_PREFIX = "op-managed"
@@ -60,15 +61,23 @@ def _is_managed(job: dict[str, Any]) -> bool:
     return str(job.get("name", "")).startswith(MANAGED_PREFIX + ":")
 
 
-def _desired_jobs(customer: dict[str, Any]) -> list[tuple[str, str, str]]:
-    """Return (managed_name, schedule, skill) for every authored cron entry.
+def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[tuple[str, str, str]]]:
+    """Return {persona_slug: [(managed_name, schedule, skill), ...]} for every
+    authored cron entry, grouped by persona.
 
-    Raises CronMaterializeError on a malformed entry or an unsupported
-    wake_policy — never silently drops one.
+    Grouped by persona because each persona's cron must be registered in THAT
+    persona's Hermes profile home (``<root>/profiles/<slug>``) — the home the
+    gateway reads when it runs ``hermes -p <slug> gateway run``. Registering in
+    the bare data home (the original bug) left the job somewhere the gateway's
+    ticker never looks, so it never fired.
+
+    Raises CronMaterializeError on a malformed entry or unsupported wake_policy —
+    never silently drops one.
     """
-    desired: list[tuple[str, str, str]] = []
+    by_persona: dict[str, list[tuple[str, str, str]]] = {}
     for persona in customer.get("personas") or []:
-        pslug = persona.get("slug") or persona.get("name") or "?"
+        pslug = str(persona.get("slug") or persona.get("name") or "").strip()
+        entries: list[tuple[str, str, str]] = []
         for entry in persona.get("cron") or []:
             if not isinstance(entry, dict):
                 raise CronMaterializeError(
@@ -87,28 +96,49 @@ def _desired_jobs(customer: dict[str, Any]) -> list[tuple[str, str, str]]:
                     "materializable (only 'always' is wired — ADR 0047 phase 1). "
                     "Aborting bootstrap rather than silently dropping the schedule."
                 )
-            desired.append((managed_name(pslug, skill), schedule, skill))
-    return desired
+            if not pslug:
+                raise CronMaterializeError(f"cron entry has no resolvable persona slug: {entry!r}")
+            entries.append((managed_name(pslug, skill), schedule, skill))
+        if entries:
+            by_persona[pslug] = entries
+    return by_persona
 
 
-def materialize_cron(customer: dict[str, Any], store: CronStore) -> list[str]:
-    """Reconcile Hermes cron jobs from customer.yaml. Returns the managed names
-    now registered. Idempotent: removes all managed jobs, then creates exactly
-    the authored set."""
-    desired = _desired_jobs(customer)  # raises before any store mutation on bad input
+def materialize_cron(
+    customer: dict[str, Any],
+    store_for: Callable[[str], CronStore],
+) -> list[str]:
+    """Reconcile Hermes cron jobs from customer.yaml into each persona's profile
+    home. ``store_for(persona_slug)`` returns a CronStore scoped to that
+    persona's Hermes home, so jobs land where ``hermes -p <slug>`` reads them.
 
-    for job in store.list_jobs(include_disabled=True):
-        if _is_managed(job):
-            store.remove_job(job["id"])
+    Idempotent per persona: for every persona that currently authors ≥1 cron
+    entry, removes that persona's managed jobs and recreates the authored set —
+    so adding, changing, or dropping ONE of a persona's entries reconciles
+    cleanly. Returns the managed names now registered. Fail-closed: a bad or
+    unsupported entry raises BEFORE any store mutation (validate all first).
+
+    Known limitation (acceptable for Phase 1, where cron is being ADDED): a
+    persona that drops ALL its cron entries is no longer reconciled here, so its
+    last managed job is not auto-removed on the next reprovision. Removing every
+    cron from a persona therefore needs a manual ``hermes -p <slug> cron remove``
+    (or re-authoring then removing). The common add/change/drop-one paths are
+    handled."""
+    by_persona = _desired_by_persona(customer)  # raises before any mutation on bad input
 
     registered: list[str] = []
-    for name, schedule, skill in desired:
-        store.create_job(
-            prompt="",
-            schedule=schedule,
-            name=name,
-            skills=[skill],
-            no_agent=False,
-        )
-        registered.append(name)
+    for pslug, desired in by_persona.items():
+        store = store_for(pslug)
+        for job in store.list_jobs(include_disabled=True):
+            if _is_managed(job):
+                store.remove_job(job["id"])
+        for name, schedule, skill in desired:
+            store.create_job(
+                prompt="",
+                schedule=schedule,
+                name=name,
+                skills=[skill],
+                no_agent=False,
+            )
+            registered.append(name)
     return registered
