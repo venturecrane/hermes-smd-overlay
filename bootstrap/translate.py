@@ -75,6 +75,11 @@ except ImportError as exc:  # pragma: no cover - import-time guard
         "PyYAML is required by bootstrap.translate; install with `pip install pyyaml`"
     ) from exc
 
+from bootstrap.cron_materialize import (
+    CronMaterializeError,
+    CronStore,
+    materialize_cron,
+)
 from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
 from bootstrap.validate import validate_customer_yaml
 from shared.secrets import get_secret
@@ -728,6 +733,7 @@ def translate_customer_yaml(
     hermes_home: str,
     *,
     skills_dir: str | None = None,
+    cron_store: CronStore | None = None,
 ) -> list[str]:
     """Translate ``customer.yaml`` into per-profile Hermes config.
 
@@ -842,7 +848,42 @@ def translate_customer_yaml(
             logger.debug("translate: profile %s already up to date", slug)
         written_slugs.append(slug)
 
+    # ADR 0047 — materialize personas[].cron[] into Hermes-native cron jobs.
+    # The authored schedule used to be validated and then silently dropped here;
+    # now it is registered into the cron store before the gateway/scheduler
+    # starts. Only touch the store (and only import Hermes' cron.jobs) when cron
+    # entries actually exist, so translate stays importable/usable in CI envs
+    # without Hermes installed. Fail-closed: a bad/unsupported entry raises
+    # TranslateError and aborts bootstrap, never a silent drop.
+    if any(persona.get("cron") for persona in personas):
+        store = cron_store if cron_store is not None else _real_cron_store()
+        try:
+            registered = materialize_cron(customer, store)
+        except CronMaterializeError as exc:
+            raise TranslateError(str(exc)) from exc
+        logger.info(
+            "translate: materialized %d cron job(s): %s", len(registered), ", ".join(registered)
+        )
+
     return written_slugs
+
+
+def _real_cron_store() -> CronStore:
+    """The live Hermes ``cron.jobs`` store. Imported lazily — Hermes is present
+    on the Machine but not in CI; this is only reached when cron entries exist."""
+    from cron import jobs as _cron_jobs
+
+    class _HermesCronStore:
+        def list_jobs(self, include_disabled: bool = False) -> list[dict[str, Any]]:
+            return _cron_jobs.list_jobs(include_disabled=include_disabled)
+
+        def create_job(self, **kwargs: Any) -> dict[str, Any]:
+            return _cron_jobs.create_job(**kwargs)
+
+        def remove_job(self, job_id: str) -> bool:
+            return _cron_jobs.remove_job(job_id)
+
+    return _HermesCronStore()
 
 
 def start_customer_sync(
