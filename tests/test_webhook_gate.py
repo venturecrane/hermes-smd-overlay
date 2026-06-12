@@ -125,3 +125,13 @@ def test_audit_db_path_handles_direct_path_varname_and_fallback(monkeypatch):
     assert gate._audit_db_path() is None
     assert gate._message_id(b"not json") is None
     assert gate._message_id(b'{"message":{}}') is None
+
+
+def test_boot_self_check_passes_under_freshness_window() -> None:
+    # Regression: the v0.4.17 deploy crash-looped because the boot probe
+    # signed a FIXED epoch (1700000000) that the #61 replay window rejects.
+    # The self-check must sign with a current timestamp and pass against the
+    # default (real-clock) freshness window.
+    from webhook_gate import svix_self_check
+
+    assert svix_self_check() is True

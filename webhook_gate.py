@@ -301,20 +301,32 @@ class _Handler(BaseHTTPRequestHandler):
             conn.close()
 
 
+def svix_self_check() -> bool:
+    """Boot self-check: round-trip a Svix-signed probe through the REAL
+    verifier so a crypto/encoding bug surfaces at boot, not as phantom 401s
+    on live traffic.
+
+    The probe timestamp MUST be current: the #61 replay window rejects
+    anything outside ±SVIX_TIMESTAMP_TOLERANCE_SECONDS, and a fixed epoch
+    here crash-looped the gate on the v0.4.17 deploy (2026-06-12). Signing
+    with now() exercises the production path, freshness window included.
+    Extracted from main() so the regression test can call it directly.
+    """
+    whsec = "whsec_" + base64.b64encode(b"selfcheckkey").decode()
+    key = base64.b64decode(whsec.split("_", 1)[1])
+    probe_ts = str(int(time.time()))
+    signed = f"id1.{probe_ts}.".encode() + b"probe"
+    sig = base64.b64encode(hmac.new(key, signed, hashlib.sha256).digest()).decode()
+    return verify_svix_signature(b"probe", "id1", probe_ts, f"v1,{sig}", whsec)
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.environ.get("WEBHOOK_GATE_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     port = int(os.environ.get("WEBHOOK_GATE_PORT", DEFAULT_GATE_PORT))
-    # Boot self-check: round-trip a Svix-signed probe so a crypto/encoding bug
-    # surfaces here, not as phantom 401s on live traffic.
-    _whsec = "whsec_" + base64.b64encode(b"selfcheckkey").decode()
-    _key = base64.b64decode(_whsec.split("_", 1)[1])
-    _signed = b"id1.1700000000." + b"probe"
-    _sig = base64.b64encode(hmac.new(_key, _signed, hashlib.sha256).digest()).decode()
-    probe = verify_svix_signature(b"probe", "id1", "1700000000", f"v1,{_sig}", _whsec)
-    assert probe, "webhook-gate Svix self-check failed"
+    assert svix_self_check(), "webhook-gate Svix self-check failed"
     httpd = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
     logger.info(
         "webhook-gate listening on 0.0.0.0:%d -> %s:%d (HMAC self-check ok)",
