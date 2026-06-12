@@ -185,3 +185,157 @@ def test_concurrent_writes_do_not_break_reads(tmp_path):
     finally:
         stop.set()
         t.join()
+
+
+# ---------------------------------------------------------------------------
+# read_runtime — audit_export (ss-console#1355 pull-before-destroy)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_export_serves_full_rows_ascending(tmp_path):
+    # The export kind must carry the integrity material the UI kind omits
+    # (digests, trust_ceiling, metadata) and walk oldest→newest so an
+    # interrupted pull resumes without missing rows.
+    db = _audit_db(tmp_path, _IDS)
+    res = rr.read_runtime("audit_export", db_path=db, limit="200")
+    assert [e["id"] for e in res["entries"]] == sorted(_IDS)
+    first = res["entries"][0]
+    assert set(first) == {
+        "id",
+        "ts",
+        "action_type",
+        "actor",
+        "actor_role",
+        "skill_name",
+        "matter_ref",
+        "input_digest",
+        "output_digest",
+        "diff_digest",
+        "trust_ceiling",
+        "metadata",
+    }
+    assert first["input_digest"] == "secretdigest"  # digests ARE exported here
+
+
+def test_audit_export_keyset_pagination_resumes(tmp_path):
+    db = _audit_db(tmp_path, _IDS)
+    page1 = rr.read_runtime("audit_export", db_path=db, limit="2")
+    assert len(page1["entries"]) == 2
+    assert page1["cursor"] == page1["entries"][-1]["id"]
+    page2 = rr.read_runtime("audit_export", db_path=db, cursor=page1["cursor"], limit="200")
+    ids = [e["id"] for e in page1["entries"] + page2["entries"]]
+    assert ids == sorted(_IDS)  # no gaps, no dupes across the page boundary
+
+
+def test_audit_export_missing_db_is_honest_empty(tmp_path):
+    res = rr.read_runtime("audit_export", db_path=str(tmp_path / "absent.db"))
+    assert res == {"entries": [], "cursor": None}
+
+
+# ---------------------------------------------------------------------------
+# read_runtime — memory_export (ADR-0016 Machine-local memory tables)
+# ---------------------------------------------------------------------------
+
+
+def _observations_db(tmp_path):
+    path = tmp_path / "observations.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE persona_observations (
+          observation_id TEXT PRIMARY KEY, persona TEXT, content TEXT,
+          honcho_created_at TEXT
+        );
+        CREATE TABLE persona_observations_archive (
+          observation_id TEXT PRIMARY KEY, persona TEXT, content TEXT,
+          honcho_created_at TEXT, archived_at TEXT
+        );
+        """
+    )
+    for n in range(3):
+        conn.execute(
+            "INSERT INTO persona_observations VALUES (?, 'crane', ?, '2026-06-01T00:00:00Z')",
+            (f"obs-{n}", f"observation body {n}"),
+        )
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_memory_export_pages_allowed_table_by_rowid(tmp_path):
+    db = _observations_db(tmp_path)
+    page1 = rr.read_runtime(
+        "memory_export",
+        db_path=None,
+        table="persona_observations",
+        observations_db_path=db,
+        limit="2",
+    )
+    assert len(page1["entries"]) == 2
+    assert page1["cursor"] == "2"
+    page2 = rr.read_runtime(
+        "memory_export",
+        db_path=None,
+        table="persona_observations",
+        observations_db_path=db,
+        cursor=page1["cursor"],
+        limit="200",
+    )
+    all_ids = [e["observation_id"] for e in page1["entries"] + page2["entries"]]
+    assert all_ids == ["obs-0", "obs-1", "obs-2"]
+    assert page1["entries"][0]["content"] == "observation body 0"
+
+
+def test_memory_export_unknown_table_is_refused(tmp_path):
+    db = _observations_db(tmp_path)
+    res = rr.read_runtime(
+        "memory_export",
+        db_path=None,
+        table="audit_log; DROP TABLE x",
+        observations_db_path=db,
+    )
+    assert res.get("error") == "unknown table"
+    assert res["entries"] == []
+
+
+def test_memory_export_requires_table(tmp_path):
+    db = _observations_db(tmp_path)
+    res = rr.read_runtime("memory_export", db_path=None, table=None, observations_db_path=db)
+    assert res.get("error") == "unknown table"
+
+
+def test_memory_export_skills_table_routes_to_agent_state_db(tmp_path):
+    state = tmp_path / "agent-state.db"
+    conn = sqlite3.connect(state)
+    conn.execute("CREATE TABLE agent_skills_inventory (skill_name TEXT, status TEXT)")
+    conn.execute("INSERT INTO agent_skills_inventory VALUES ('follow-up-cadence', 'persisted')")
+    conn.commit()
+    conn.close()
+    res = rr.read_runtime(
+        "memory_export",
+        db_path=None,
+        table="agent_skills_inventory",
+        observations_db_path=None,
+        agent_state_db_path=str(state),
+    )
+    assert res["entries"][0]["skill_name"] == "follow-up-cadence"
+
+
+def test_memory_export_absent_db_or_table_is_honest_empty(tmp_path):
+    res = rr.read_runtime(
+        "memory_export",
+        db_path=None,
+        table="persona_observations",
+        observations_db_path=str(tmp_path / "absent.db"),
+    )
+    assert res == {"entries": [], "cursor": None}
+    # DB exists but the mirror never created the archive table → honest empty.
+    db = tmp_path / "bare.db"
+    sqlite3.connect(db).close()
+    res = rr.read_runtime(
+        "memory_export",
+        db_path=None,
+        table="persona_observations_archive",
+        observations_db_path=str(db),
+    )
+    assert res == {"entries": [], "cursor": None}

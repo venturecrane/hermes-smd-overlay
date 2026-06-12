@@ -43,8 +43,43 @@ from typing import Any
 # The console's RUNTIME_READ_KINDS. ``audit_log`` reads the per-customer table;
 # ``config`` is a single facts snapshot (no table, no pagination — see
 # read_config); the rest return an honest empty page until their tables exist.
-SUPPORTED_KINDS: frozenset[str] = frozenset({"audit_log", "activity", "draft", "matter", "config"})
-_REAL_KINDS: frozenset[str] = frozenset({"audit_log"})
+#
+# ``audit_export`` / ``memory_export`` (ss-console#1355, pull-before-destroy):
+# the decommission pipeline's preservation reads. ``audit_export`` serves the
+# FULL audit_log row (digests + metadata included — the console UI kind
+# deliberately omits them, a compliance export must not); ``memory_export``
+# serves the ADR-0016 Machine-local memory tables one at a time via ``table=``.
+# Both are read-only, same per-customer auth, and exist precisely so the
+# console can preserve Machine-local state BEFORE `fly apps destroy` burns it.
+SUPPORTED_KINDS: frozenset[str] = frozenset(
+    {"audit_log", "activity", "draft", "matter", "config", "audit_export", "memory_export"}
+)
+_REAL_KINDS: frozenset[str] = frozenset({"audit_log", "audit_export", "memory_export"})
+
+# memory_export table allow-list → which DB path argument serves it. The
+# ADR-0016 mirror tables live on the observations binding; the skills
+# inventory lives on the agent-state binding (audit-binding fallback mirrors
+# the audit plugin's own fallback).
+MEMORY_EXPORT_TABLES: frozenset[str] = frozenset(
+    {"persona_observations", "persona_observations_archive", "agent_skills_inventory"}
+)
+
+# audit_log columns, in canonical schema order, for the export kind. Must stay
+# in sync with shared.audit_contract INSERT_SQL / the ss-console d1-schema doc.
+_AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
+    "id",
+    "ts",
+    "action_type",
+    "actor",
+    "actor_role",
+    "skill_name",
+    "matter_ref",
+    "input_digest",
+    "output_digest",
+    "diff_digest",
+    "trust_ceiling",
+    "metadata",
+)
 
 # A derived key is hex(HMAC-SHA256) = 64 chars; reject anything implausibly short
 # so a blank/placeholder secret can never authenticate.
@@ -129,20 +164,40 @@ def read_runtime(
     db_path: str | None,
     cursor: str | None = None,
     limit: str | None = None,
+    table: str | None = None,
+    observations_db_path: str | None = None,
+    agent_state_db_path: str | None = None,
 ) -> dict[str, Any]:
     """Read one page of runtime detail for this Machine's single customer.
 
     Returns ``{"entries": [...], "cursor": <next|None>}``. Unknown or
     not-yet-materialized kinds return an empty page (honest, never fabricated).
     The caller has already authenticated the request.
+
+    ``audit_export`` reads the same DB as ``audit_log`` but serves the full
+    row. ``memory_export`` requires ``table`` (from MEMORY_EXPORT_TABLES) and
+    reads the observations / agent-state DB for that table.
     """
     if kind not in SUPPORTED_KINDS or kind not in _REAL_KINDS:
         return {"entries": [], "cursor": None}
+
+    if kind == "memory_export":
+        if table not in MEMORY_EXPORT_TABLES:
+            # Unknown table is a caller error, not a degraded read — refuse
+            # rather than guessing (the gate maps this to a 400).
+            return {"entries": [], "cursor": None, "error": "unknown table"}
+        target = agent_state_db_path if table == "agent_skills_inventory" else observations_db_path
+        if not target or not os.path.exists(target):
+            return {"entries": [], "cursor": None}
+        return _read_table_export(target, table, cursor, clamp_limit(limit))
+
     # No binding, or the DB file doesn't exist yet (a fresh Machine before the
     # audit subsystem's first write legitimately has no audit.db) → honest empty,
     # never a 500.
     if not db_path or not os.path.exists(db_path):
         return {"entries": [], "cursor": None}
+    if kind == "audit_export":
+        return _read_audit_export(db_path, _valid_cursor(cursor), clamp_limit(limit))
     return _read_audit_log(db_path, _valid_cursor(cursor), clamp_limit(limit))
 
 
@@ -186,6 +241,70 @@ def _read_audit_log(db_path: str, cursor: str | None, limit: int) -> dict[str, A
     return {"entries": entries, "cursor": next_cursor}
 
 
+def _read_audit_export(db_path: str, cursor: str | None, limit: int) -> dict[str, Any]:
+    """Full-row audit_log export, keyset-paginated ASCENDING by id (ULID).
+
+    The export kind walks oldest→newest so a paged pull that is interrupted
+    and resumed never misses rows written behind the cursor. All twelve
+    canonical columns are served — digests and metadata included, because the
+    compliance archive must carry the integrity material the UI kind omits.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.row_factory = sqlite3.Row
+        cols = ", ".join(_AUDIT_EXPORT_COLUMNS)
+        if cursor is not None:
+            sql = f"SELECT {cols} FROM audit_log WHERE id > ? ORDER BY id ASC LIMIT ?"
+            rows = conn.execute(sql, (cursor, limit)).fetchall()
+        else:
+            sql = f"SELECT {cols} FROM audit_log ORDER BY id ASC LIMIT ?"
+            rows = conn.execute(sql, (limit,)).fetchall()
+    except sqlite3.OperationalError:
+        return {"entries": [], "cursor": None}
+    finally:
+        conn.close()
+
+    entries = [{col: row[col] for col in _AUDIT_EXPORT_COLUMNS} for row in rows]
+    next_cursor = entries[-1]["id"] if len(entries) == limit and entries else None
+    return {"entries": entries, "cursor": next_cursor}
+
+
+def _read_table_export(db_path: str, table: str, cursor: str | None, limit: int) -> dict[str, Any]:
+    """Generic full-row table export, keyset-paginated by sqlite rowid.
+
+    Serves the ADR-0016 memory tables (allow-listed in MEMORY_EXPORT_TABLES —
+    ``table`` is validated by the caller, never interpolated from raw input).
+    rowid keyset works regardless of each table's PK naming; ascending order
+    gives the same resume-safe property as the audit export.
+    """
+    try:
+        cursor_rowid = int(cursor) if cursor is not None else None
+    except ValueError:
+        cursor_rowid = None
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, check_same_thread=False)
+    try:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.row_factory = sqlite3.Row
+        if cursor_rowid is not None:
+            sql = (
+                f"SELECT rowid AS _rowid, * FROM {table} WHERE rowid > ? ORDER BY rowid ASC LIMIT ?"  # noqa: S608 — table is allow-listed
+            )
+            rows = conn.execute(sql, (cursor_rowid, limit)).fetchall()
+        else:
+            sql = f"SELECT rowid AS _rowid, * FROM {table} ORDER BY rowid ASC LIMIT ?"  # noqa: S608 — table is allow-listed
+            rows = conn.execute(sql, (limit,)).fetchall()
+    except sqlite3.OperationalError:
+        # Table not created yet (mirror never wrote) → honest empty.
+        return {"entries": [], "cursor": None}
+    finally:
+        conn.close()
+
+    entries = [dict(row) for row in rows]
+    next_cursor = str(entries[-1]["_rowid"]) if len(entries) == limit and entries else None
+    return {"entries": entries, "cursor": next_cursor}
+
+
 def _shape_audit_row(row: sqlite3.Row) -> dict[str, Any]:
     """Map an audit_log row to the console wire contract.
 
@@ -206,6 +325,7 @@ def _shape_audit_row(row: sqlite3.Row) -> dict[str, Any]:
 
 __all__ = [
     "SUPPORTED_KINDS",
+    "MEMORY_EXPORT_TABLES",
     "MIN_KEY_LEN",
     "DEFAULT_LIMIT",
     "MAX_LIMIT",

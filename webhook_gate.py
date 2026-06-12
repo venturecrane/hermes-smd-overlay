@@ -128,21 +128,39 @@ _RUNTIME_PREFIX = "/runtime/"
 _RUNTIME_KIND_RE = re.compile(r"^[a-z_]{1,32}$")
 
 
-def _audit_db_path() -> str | None:
-    """Resolve the per-customer audit D1 file path.
+def _db_path_from_binding(binding_env: str, *, fallback_env: str | None = None) -> str | None:
+    """Resolve a per-customer D1 file path from a binding env var.
 
-    ``SMD_D1_AUDIT_BINDING`` may carry EITHER a direct filesystem path
-    (e.g. ``/opt/data/audit.db`` — how the live Machine sets it) OR the NAME of
-    another env var that holds the path (the documented indirection). Handle both:
-    a value starting with ``/`` is the path itself; otherwise it is a var name to
-    look up. Falls back to ``CUSTOMER_DB``. Returns None when nothing resolves
-    (→ honest empty page, never a guess)."""
-    binding = os.environ.get("SMD_D1_AUDIT_BINDING")
+    The binding var may carry EITHER a direct filesystem path (e.g.
+    ``/opt/data/audit.db`` — how the live Machine sets it) OR the NAME of
+    another env var that holds the path (the documented indirection). Handle
+    both: a value starting with ``/`` is the path itself; otherwise it is a
+    var name to look up. Returns None when nothing resolves (→ honest empty
+    page, never a guess)."""
+    binding = os.environ.get(binding_env)
     if binding and binding.startswith("/"):
         return binding
     if binding:
         return os.environ.get(binding) or None
-    return os.environ.get("CUSTOMER_DB") or None
+    if fallback_env:
+        return os.environ.get(fallback_env) or None
+    return None
+
+
+def _audit_db_path() -> str | None:
+    """Per-customer audit D1 file path (``SMD_D1_AUDIT_BINDING`` → ``CUSTOMER_DB``)."""
+    return _db_path_from_binding("SMD_D1_AUDIT_BINDING", fallback_env="CUSTOMER_DB")
+
+
+def _observations_db_path() -> str | None:
+    """ADR-0016 persona_observations DB path (memory-mirror's binding)."""
+    return _db_path_from_binding("SMD_D1_OBSERVATIONS_BINDING")
+
+
+def _agent_state_db_path() -> str | None:
+    """agent_skills_inventory DB path; falls back to the audit binding exactly
+    as the audit plugin does when ``SMD_D1_AGENT_STATE_BINDING`` is unset."""
+    return _db_path_from_binding("SMD_D1_AGENT_STATE_BINDING") or _audit_db_path()
 
 
 def _message_id(body: bytes) -> str | None:
@@ -231,7 +249,13 @@ class _Handler(BaseHTTPRequestHandler):
                     db_path=_audit_db_path(),
                     cursor=(params.get("cursor") or [None])[0],
                     limit=(params.get("limit") or [None])[0],
+                    table=(params.get("table") or [None])[0],
+                    observations_db_path=_observations_db_path(),
+                    agent_state_db_path=_agent_state_db_path(),
                 )
+                if result.get("error") == "unknown table":
+                    self._json_nostore(400, {"error": "unknown table"})
+                    return
         except Exception as exc:  # never leak detail; fail closed
             logger.error("runtime read: error serving kind %r: %s", kind, exc)
             self._json_nostore(500, {"error": "read failed"})
