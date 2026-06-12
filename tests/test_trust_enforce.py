@@ -658,3 +658,122 @@ def test_law_floor_does_not_widen_unauthored_send(env_autonomous, env_vertical_l
     result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "pilot-law")
     assert isinstance(result, dict)
     assert result["action"] == "block"
+
+
+# ---------------------------------------------------------------------------
+# Volume-fault fail-closed (2026-06-12 code review)
+#
+# A garbled customer.yaml on a provisioned Machine must propagate out of the
+# ceiling resolvers so evaluate_tool_call's outer handler fails CLOSED for
+# sensitive actions. Before the review fix, _resolve_customer_ceiling caught
+# broad ``Exception`` — an I/O or parse fault silently downgraded an authored
+# ``refused`` posture to the DRAFT_FOR_REVIEW default (fail-open relative to
+# the authored ceiling, ADR 0035). Only the genuinely-absent-file state
+# (``CustomerConfigMissingError``) may fall through to the env override.
+# ---------------------------------------------------------------------------
+
+
+def _patch_from_volume_raise(monkeypatch, exc: Exception) -> None:
+    """Make every CustomerConfig.from_volume() call raise ``exc``."""
+    import shared.customer_config as cc
+
+    def raiser(cls, path=cc.DEFAULT_VOLUME_PATH):
+        raise exc
+
+    monkeypatch.setattr(cc.CustomerConfig, "from_volume", classmethod(raiser))
+
+
+def test_garbled_customer_yaml_fails_closed_for_sensitive_action(
+    env_autonomous, monkeypatch
+) -> None:
+    """YAML parse fault → sensitive (non-READ) action refuses, even though the
+    env override would otherwise allow it. The env path must NOT be reachable
+    past a parse fault — that was the silent-downgrade bug."""
+    import shared.customer_config as cc
+
+    enforce = _load_trust_module("enforce")
+    _patch_from_volume_raise(monkeypatch, cc.CustomerConfigError("customer.yaml is not valid YAML"))
+    result = enforce.evaluate_tool_call("email_create_draft", {}, "acme")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "failing closed" in result["message"]
+
+
+def test_permission_error_on_volume_fails_closed_for_sensitive_action(
+    env_autonomous, monkeypatch
+) -> None:
+    """An OS-level fault (e.g. the 0700-chmod traverse loss class) is the same
+    fail-closed case as a parse fault."""
+    enforce = _load_trust_module("enforce")
+    _patch_from_volume_raise(monkeypatch, PermissionError("denied: /opt/data/customer.yaml"))
+    result = enforce.evaluate_tool_call("email_create_draft", {}, "acme")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "failing closed" in result["message"]
+
+
+def test_volume_fault_still_allows_read(env_autonomous, monkeypatch) -> None:
+    """READ carries no external blast radius; a transient config fault must not
+    brick read-only tooling (documented exception in evaluate_tool_call)."""
+    enforce = _load_trust_module("enforce")
+    _patch_from_volume_raise(monkeypatch, PermissionError("denied"))
+    result = enforce.evaluate_tool_call("email_list_messages", {}, "acme")
+    assert result is None
+
+
+def test_missing_customer_yaml_still_falls_through_to_env(env_autonomous, monkeypatch) -> None:
+    """The absent-file state (dev / test boxes) keeps the env-override path:
+    distinct from a fault on a provisioned Machine."""
+    import shared.customer_config as cc
+
+    enforce = _load_trust_module("enforce")
+    _patch_from_volume_raise(monkeypatch, cc.CustomerConfigMissingError("customer.yaml not found"))
+    result = enforce.evaluate_tool_call("email_create_draft", {}, "acme")
+    assert result is None
+
+
+def test_garbled_customer_yaml_fails_closed_for_authored_send(monkeypatch) -> None:
+    """The full silent-downgrade scenario: with NO env override and a parse
+    fault, an external send must refuse outright — never resolve to the
+    draft-for-review default as if the customer had authored nothing."""
+    import shared.customer_config as cc
+
+    enforce = _load_trust_module("enforce")
+    monkeypatch.delenv("SMD_TRUST_CEILING", raising=False)
+    _patch_from_volume_raise(monkeypatch, cc.CustomerConfigError("unreadable"))
+    result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi"}, "acme")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "failing closed" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# Tool-name normalization (2026-06-12 code review)
+#
+# The registry and BANNED_TOOLS are all-lowercase. Without normalization a
+# runtime surfacing ``Execute_Code`` or ``TERMINAL`` missed the
+# CODE_EXECUTION mapping and fell to the READ default — a case-sensitivity
+# ceiling bypass.
+# ---------------------------------------------------------------------------
+
+
+def test_classify_tool_normalizes_case_and_whitespace() -> None:
+    enforce = _load_trust_module("enforce")
+    assert enforce.classify_tool("Execute_Code").action_class is enforce.ActionClass.CODE_EXECUTION
+    assert enforce.classify_tool(" TERMINAL ").action_class is enforce.ActionClass.CODE_EXECUTION
+    assert enforce.classify_tool("Execute_Code").unmapped is False
+
+
+def test_classify_tool_banned_lookup_is_case_insensitive() -> None:
+    enforce = _load_trust_module("enforce")
+    with pytest.raises(enforce.BannedToolError):
+        enforce.classify_tool("EMAIL_SEND")
+
+
+def test_mixed_case_code_execution_blocked_via_evaluate(env_autonomous) -> None:
+    """End-to-end: a mixed-case execute_code call cannot slip the
+    CODE_EXECUTION ceiling (fail-closed when unauthored)."""
+    enforce = _load_trust_module("enforce")
+    result = enforce.evaluate_tool_call("Execute_Code", {}, "acme")
+    assert isinstance(result, dict)
+    assert result["action"] == "block"

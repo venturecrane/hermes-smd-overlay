@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -61,8 +62,21 @@ def _hex_hmac_sha256(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+# Svix's documented webhook tolerance: deliveries whose signed timestamp is
+# more than this many seconds away from now (either direction — clock skew is
+# symmetric) are rejected even with a valid signature. Closes the replay
+# window (threat model OP-P2-3): before this, a captured legitimate delivery
+# replayed indefinitely until Machine restart (2026-06-12 code review).
+SVIX_TIMESTAMP_TOLERANCE_SECONDS = 300
+
+
 def verify_svix_signature(
-    body: bytes, svix_id: str, svix_ts: str, svix_sig_header: str, secret: str
+    body: bytes,
+    svix_id: str,
+    svix_ts: str,
+    svix_sig_header: str,
+    secret: str,
+    now: float | None = None,
 ) -> bool:
     """Svix webhook verification — AgentMail delivers via Svix.
 
@@ -73,8 +87,21 @@ def verify_svix_signature(
     expected value is base64(HMAC-SHA256(key, signed)); the ``svix-signature``
     header is a space-delimited list of ``v1,<base64>`` — match any in
     constant time. Any missing field is a reject (fail-closed).
+
+    Freshness: the signed timestamp must be within
+    ``SVIX_TIMESTAMP_TOLERANCE_SECONDS`` of ``now`` (injectable for tests;
+    defaults to wall clock). A non-numeric timestamp is a reject — the
+    timestamp is part of the signed content, so a legitimate Svix delivery
+    always carries a parseable epoch.
     """
     if not (svix_id and svix_ts and svix_sig_header and secret):
+        return False
+    try:
+        ts = int(svix_ts)
+    except ValueError:
+        return False
+    reference = time.time() if now is None else now
+    if abs(reference - ts) > SVIX_TIMESTAMP_TOLERANCE_SECONDS:
         return False
     try:
         key_b64 = secret.split("_", 1)[1] if secret.startswith("whsec_") else secret

@@ -56,6 +56,17 @@ class CustomerConfigError(ValueError):
     """Raised when ``customer.yaml`` is missing, unparseable, or invalid."""
 
 
+class CustomerConfigMissingError(CustomerConfigError):
+    """Raised when ``customer.yaml`` does not exist on the volume.
+
+    Distinct from the parent so enforcement-path callers can tell the
+    benign absent-file state (dev / test boxes with no provisioned
+    volume — fall through to env overrides) apart from a fault on a
+    provisioned Machine (unreadable / unparseable / empty file — which
+    must propagate so the trust gate fails CLOSED, never silently
+    downgrading an authored ceiling; 2026-06-12 code review)."""
+
+
 class CustomerConfig:
     """In-memory view of an authored ``customer.yaml``.
 
@@ -104,7 +115,7 @@ class CustomerConfig:
         """
         file_path = Path(path)
         if not file_path.exists():
-            raise CustomerConfigError(f"customer.yaml not found at {path}")
+            raise CustomerConfigMissingError(f"customer.yaml not found at {path}")
         try:
             with file_path.open() as handle:
                 data = yaml.safe_load(handle)
@@ -227,4 +238,5 @@ __all__ = [
     "DEFAULT_VOLUME_PATH",
     "CustomerConfig",
     "CustomerConfigError",
+    "CustomerConfigMissingError",
 ]

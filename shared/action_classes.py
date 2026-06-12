@@ -316,15 +316,25 @@ def classify_tool(tool_name: str) -> ToolClassification:
 
     The unmapped fallback is conservative: an unmapped tool is treated as
     read-only, so the unconfigured surface cannot drive a write.
+
+    Lookups run against a normalized (trimmed, lowercased) form of the
+    name: the registry and ``BANNED_TOOLS`` are all-lowercase, so without
+    normalization a runtime surfacing ``Execute_Code`` or ``TERMINAL``
+    would miss the CODE_EXECUTION mapping and fall to the READ default —
+    a case-sensitivity ceiling bypass (2026-06-12 code review).
     """
     if not tool_name:
         raise ValueError("tool_name is required")
 
-    if tool_name in BANNED_TOOLS:
-        reason = BANNED_REASON.get(tool_name, "banned_tool")
-        raise BannedToolError(tool_name=tool_name, reason=reason)
+    normalized = tool_name.strip().lower()
+    if not normalized:
+        raise ValueError("tool_name is required")
 
-    mapped = _RAW_TOOL_ACTION_CLASS_MAP.get(tool_name)
+    if normalized in BANNED_TOOLS:
+        reason = BANNED_REASON.get(normalized, "banned_tool")
+        raise BannedToolError(tool_name=normalized, reason=reason)
+
+    mapped = _RAW_TOOL_ACTION_CLASS_MAP.get(normalized)
     if mapped is not None:
         return ToolClassification(action_class=mapped, unmapped=False)
 
