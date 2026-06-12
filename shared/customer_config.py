@@ -221,6 +221,42 @@ class CustomerConfig:
         return dict(raw)
 
     # ------------------------------------------------------------------
+    # Demo-only switches
+    # ------------------------------------------------------------------
+
+    @property
+    def demo(self) -> dict[str, Any]:
+        """Return the ``demo`` mapping (demo-only switches).
+
+        Demo switches enable behavior that exists ONLY to drive a tangible
+        prospect demo and must never be authored for a real customer holding
+        real client data. Absent ⇒ ``{}`` (every demo switch reads False/off).
+        """
+        raw = self._data.get("demo") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: demo must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    @property
+    def demo_reply_relay_enabled(self) -> bool:
+        """True iff ``demo.reply_relay`` is authored enabled (fail-closed).
+
+        Gates the ``hermes-smd-demo-relay`` plugin. Absent / non-true ⇒ False,
+        so the relay no-ops for every customer that has not explicitly authored
+        it — a real customer can never be regressed into autonomous send by the
+        relay. Accepts ``enabled``, ``true``, or boolean ``True`` (case- and
+        type-tolerant) as the only positive values; anything else is off.
+        """
+        value = self.demo.get("reply_relay")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"enabled", "true", "on", "yes"}
+        return False
+
+    # ------------------------------------------------------------------
     # Escape hatch
     # ------------------------------------------------------------------
 

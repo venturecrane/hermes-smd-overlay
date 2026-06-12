@@ -372,9 +372,88 @@ class SessionTaint:
 SESSION_TAINT = SessionTaint()
 
 
+# ---------------------------------------------------------------------------
+# Per-session inbound ORIGIN (recipient-lock anchor) — who opened the session
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InboundOrigin:
+    """The verified sender of the untrusted inbound that OPENED a session.
+
+    ``SessionTaint`` records that a session ingested untrusted content and at
+    what trust class; it does NOT record WHO sent it. The demo reply relay
+    (``hermes-smd-demo-relay``) needs that: a reply may go back ONLY to the
+    address that emailed in, keyed on the original message id (recipient-lock).
+    This carries attribution only — never the body — mirroring
+    :class:`InboundEnvelope`.
+
+    ``inbox_id`` is the AgentMail inbox the inbound arrived in (``message
+    .inbox_id`` on the ``message.received`` webhook). The relay needs it to
+    address the threaded reply (``POST /v0/inboxes/{inbox_id}/messages/
+    {message_id}/reply``) — the reply is keyed on the recorded inbox + message,
+    so it threads structurally back to the original sender regardless of any
+    recipient the agent's draft names (the recipient-lock's structural half).
+    """
+
+    sender_address: str
+    message_id: str
+    content_digest: str = ""
+    inbox_id: str = ""
+
+
+@dataclass
+class SessionInboundOrigin:
+    """Sticky per-session record of the inbound sender — the recipient-lock anchor.
+
+    Parallel to :class:`SessionTaint`, but records the SENDER of the tainting
+    inbound, not just its trust class. FIRST inbound wins: a session's
+    recipient-lock is fixed to the address that OPENED it, so a later (possibly
+    injected) "inbound" cannot move the lock to redirect a reply. Bounded FIFO;
+    single tenant per Machine (AGENTS.md #5).
+    """
+
+    max_sessions: int = 512
+    _origins: "OrderedDict[str, InboundOrigin]" = field(default_factory=OrderedDict)
+
+    def record(self, session_id: str, origin: InboundOrigin) -> None:
+        """Record the opening inbound's origin for ``session_id`` (first wins).
+
+        No-op for an empty session id or an origin with no sender address (the
+        recipient-lock would be unanchored — fail closed by recording nothing,
+        so the relay finds no origin and does not send)."""
+        if not session_id or not origin.sender_address:
+            return
+        if session_id in self._origins:
+            # Lock already set by the opening inbound; a later inbound cannot
+            # move it. Refresh recency only.
+            self._origins.move_to_end(session_id)
+            return
+        self._origins[session_id] = origin
+        self._origins.move_to_end(session_id)
+        while len(self._origins) > self.max_sessions:
+            self._origins.popitem(last=False)
+
+    def get(self, session_id: str) -> InboundOrigin | None:
+        """The recipient-lock origin for the session, or ``None`` if unset.
+
+        ``None`` means no recorded inbound sender — the relay MUST NOT send
+        (fail closed: no anchor, no reply)."""
+        if not session_id:
+            return None
+        return self._origins.get(session_id)
+
+
+# Process-wide singleton — the webhook router records, the demo relay reads.
+SESSION_INBOUND_ORIGIN = SessionInboundOrigin()
+
+
 __all__ = [
     "PENDING",
     "SESSION_TAINT",
+    "SESSION_INBOUND_ORIGIN",
+    "InboundOrigin",
+    "SessionInboundOrigin",
     "TRUST_CLASS_INTERNAL",
     "TRUST_CLASS_KNOWN_EXTERNAL",
     "TRUST_CLASS_UNKNOWN_EXTERNAL",
