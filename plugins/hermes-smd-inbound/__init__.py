@@ -143,6 +143,11 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "practice_management_get_matter",
         "practice_management_list_documents",
         "practice_management_get_document",
+        # Calendar reads — external invites carry third-party content (titles,
+        # descriptions, locations are attacker-controllable text). Captain call
+        # 2026-06-12: fence both, closing the code-review fence-candidate note.
+        "workspace_calendar_list",
+        "workspace_calendar_get",
     }
 )
 
