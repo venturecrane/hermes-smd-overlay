@@ -40,9 +40,10 @@ import os
 import sqlite3
 from typing import Any
 
-# The console's RUNTIME_READ_KINDS. Only audit_log has a Machine table today;
-# the rest return an honest empty page until their runtime tables exist.
-SUPPORTED_KINDS: frozenset[str] = frozenset({"audit_log", "activity", "draft", "matter"})
+# The console's RUNTIME_READ_KINDS. ``audit_log`` reads the per-customer table;
+# ``config`` is a single facts snapshot (no table, no pagination — see
+# read_config); the rest return an honest empty page until their tables exist.
+SUPPORTED_KINDS: frozenset[str] = frozenset({"audit_log", "activity", "draft", "matter", "config"})
 _REAL_KINDS: frozenset[str] = frozenset({"audit_log"})
 
 # A derived key is hex(HMAC-SHA256) = 64 chars; reject anything implausibly short
@@ -106,6 +107,20 @@ def _valid_cursor(cursor: str | None) -> str | None:
     if len(cursor) > 64:
         return None
     return cursor
+
+
+def read_config() -> dict[str, Any]:
+    """Read the ``operator.runtime.config/v1`` facts snapshot for this Machine.
+
+    Unlike ``read_runtime`` (paginated table reads), ``config`` is a single
+    snapshot of *materialized state* (env presence, overlay ref, per-profile
+    config + cron) the console's drift audit diffs against declared desired-state.
+    Built by ``shared.config_snapshot`` — presence-only (never a secret value),
+    truthful-or-degraded (never fabricated). Imported lazily so the audit_log
+    read path carries no extra import cost."""
+    from shared import config_snapshot
+
+    return config_snapshot.snapshot()
 
 
 def read_runtime(
@@ -197,4 +212,5 @@ __all__ = [
     "verify_runtime_auth",
     "clamp_limit",
     "read_runtime",
+    "read_config",
 ]
