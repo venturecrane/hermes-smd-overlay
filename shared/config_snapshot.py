@@ -41,6 +41,7 @@ from typing import Any
 
 import yaml
 
+from shared import audit_status
 from shared.consumes_conformance import declared_vars
 
 SCHEMA = "operator.runtime.config/v1"
@@ -91,13 +92,14 @@ def _read_proc_env_names(pid: int) -> dict[str, bool] | None:
     return out
 
 
-def find_agent_env(own_slug: str | None) -> dict[str, bool] | None:
-    """Discover the live agent process and return its ``{NAME: is_empty}`` env map.
+def find_agent_process(own_slug: str | None) -> tuple[int, dict[str, bool]] | None:
+    """Discover the live agent process: ``(pid, {NAME: is_empty})`` or None.
 
     The agent is the process carrying ``SMD_CUSTOMER_SLUG`` (injected only into
     the agent, never into this gate process). When ``own_slug`` is known we also
     require the value to match, so a stray process can't be mistaken for ours.
     Returns None when no such process is readable (→ env_presence degrades).
+    The pid is also the staleness key for the audit-status sentinel (#64).
     """
     proc = Path("/proc")
     if not proc.is_dir():
@@ -121,8 +123,14 @@ def find_agent_env(own_slug: str | None) -> dict[str, bool] | None:
                 continue
             if f"SMD_CUSTOMER_SLUG={own_slug}".encode() not in raw.split(b"\x00"):
                 continue
-        return env
+        return pid, env
     return None
+
+
+def find_agent_env(own_slug: str | None) -> dict[str, bool] | None:
+    """Back-compat shim over :func:`find_agent_process` (env map only)."""
+    found = find_agent_process(own_slug)
+    return found[1] if found else None
 
 
 def resolve_overlay_ref() -> dict[str, str | None]:
@@ -310,6 +318,7 @@ def build_snapshot(
     overlay_ref: dict[str, str | None],
     profiles: list[dict[str, Any]],
     extra_degraded: list[dict[str, str]],
+    audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the wire snapshot from already-read inputs (pure, unit-testable).
 
@@ -338,12 +347,20 @@ def build_snapshot(
     # memory, which the gate cannot read — honestly degraded, not guessed.
     degraded.append({"field": "registry", "reason": "agent in-memory registry not gate-readable"})
 
+    # audit wiring (#64): the fact is computed by the caller from the agent's
+    # boot sentinel (shared.audit_status). None here means the caller didn't
+    # evaluate it at all — degrade rather than fabricate an "unwired".
+    if audit is None:
+        audit = {"writer_wired": None, "transport": None, "reason": None}
+        degraded.append({"field": "audit.writer_wired", "reason": "audit status not evaluated"})
+
     return {
         "schema": SCHEMA,
         "overlay_ref": overlay_ref,
         "env_presence": env_presence,
         "materialized": {"profiles": profiles},
         "registry": {"tools_registered": None, "connectors_active": None},
+        "audit": audit,
         "degraded": degraded,
     }
 
@@ -362,16 +379,25 @@ def snapshot(*, own_slug: str | None = None, hermes_home: str | None = None) -> 
     except Exception:
         allowlist = None
 
-    agent_env = find_agent_env(slug)
+    found = find_agent_process(slug)
+    agent_pid, agent_env = found if found else (None, None)
     overlay_ref = resolve_overlay_ref()
     profiles, profile_degraded = read_profiles(home)
+
+    # audit wiring fact (#64): the audit plugin's boot sentinel, staleness-
+    # checked against the live agent pid (a dead plugin can't sentinel its own
+    # non-execution; the pid check catches the previous-boot leftover).
+    audit_fact, audit_degraded = audit_status.evaluate_status(
+        audit_status.read_audit_status(home), agent_pid
+    )
 
     return build_snapshot(
         allowlist=allowlist,
         agent_env=agent_env,
         overlay_ref=overlay_ref,
         profiles=profiles,
-        extra_degraded=profile_degraded,
+        extra_degraded=profile_degraded + audit_degraded,
+        audit=audit_fact,
     )
 
 
@@ -380,6 +406,7 @@ __all__ = [
     "build_snapshot",
     "snapshot",
     "find_agent_env",
+    "find_agent_process",
     "resolve_overlay_ref",
     "read_profiles",
 ]

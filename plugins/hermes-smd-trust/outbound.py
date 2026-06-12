@@ -36,6 +36,7 @@ from shared import identifier_filter, provenance
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
+from shared.audit_status import NoAuditWarner
 from shared.outbound_gate import GateDecision, evaluate
 
 logger = logging.getLogger(__name__)
@@ -235,13 +236,18 @@ _AUDIT_CLIENT: Any = None
 _AUDIT_CUSTOMER_SLUG: str | None = None
 _AUDIT_WIRED: bool = False
 
+# #64: a gate that blocks/reports without recording is running dark in the
+# accountability sense. Warn per-evaluation on a rate limit, not once at init.
+_NO_AUDIT_WARNER = NoAuditWarner()
+
 
 def _audit_client() -> tuple[Any, str | None]:
     """Lazily resolve (D1Client, customer_slug). Cached across calls.
 
     Returns ``(None, None)`` when the audit env is not configured — the gate
-    still blocks; the row is simply skipped (logged once at debug). Tests can
-    reset the cache by setting the module globals back to their initial values.
+    still blocks; the row is simply skipped (rate-limited WARNING at each
+    skip site, #64). Tests can reset the cache by setting the module globals
+    back to their initial values.
     """
     global _AUDIT_CLIENT, _AUDIT_CUSTOMER_SLUG, _AUDIT_WIRED
     if _AUDIT_WIRED:
@@ -281,6 +287,9 @@ def _emit_fabrication_audit(
     """
     client, slug = _audit_client()
     if client is None or slug is None:
+        _NO_AUDIT_WARNER.warn(
+            logger, f"FABRICATION_FILTER_TRIGGERED on tool={tool_name} not recorded"
+        )
         return
     try:
         metadata: dict = {
@@ -360,6 +369,7 @@ def _report_identifiers(
             return
         client, slug = _audit_client()
         if client is None or slug is None:
+            _NO_AUDIT_WARNER.warn(logger, f"IDENTIFIER_UNVERIFIED on tool={tool_name} not recorded")
             return
         by_kind: dict[str, int] = {}
         for h in unverified:
