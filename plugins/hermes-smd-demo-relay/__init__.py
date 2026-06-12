@@ -42,10 +42,10 @@ from pathlib import Path
 from typing import Any
 
 from shared import inbound
+from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
 from shared.customer_config import CustomerConfig, CustomerConfigError
-from shared.d1_client import D1Client
 from shared.secrets import get_secret
 
 from . import relay  # noqa: F401 - surface for tests
@@ -89,9 +89,7 @@ def _emit_relay_event(*, action_type: str, metadata: dict) -> None:
         )
         _D1_CLIENT.execute(_INSERT_SQL, *params)
     except Exception as exc:  # noqa: BLE001 — audit must never break the hook
-        logger.warning(
-            "hermes-smd-demo-relay: %s emission failed (%s)", action_type, exc
-        )
+        logger.warning("hermes-smd-demo-relay: %s emission failed (%s)", action_type, exc)
 
 
 def _blocked(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
@@ -191,9 +189,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
             },
         )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
-        logger.warning(
-            "hermes-smd-demo-relay: post_tool_call handler error: %s", exc
-        )
+        logger.warning("hermes-smd-demo-relay: post_tool_call handler error: %s", exc)
 
 
 def register(ctx) -> None:
@@ -217,9 +213,7 @@ def register(ctx) -> None:
         _VERTICAL = cfg.vertical
         _COHORT = cfg.slug
     except (CustomerConfigError, OSError) as exc:
-        logger.info(
-            "hermes-smd-demo-relay: customer.yaml unreadable (%s); relay disabled", exc
-        )
+        logger.info("hermes-smd-demo-relay: customer.yaml unreadable (%s); relay disabled", exc)
         ctx.register_hook("post_tool_call", on_post_tool_call)
         return
 
@@ -242,10 +236,11 @@ def register(ctx) -> None:
 
     try:
         _CUSTOMER_SLUG = get_secret("SMD_CUSTOMER_SLUG")
-        _D1_CLIENT = D1Client(
-            binding_name=get_secret("SMD_D1_AUDIT_BINDING"),
-            customer_slug=_CUSTOMER_SLUG,
-        )
+        # Audit MUST go through the broker-aware factory (OP-P1-4): when the
+        # broker is configured this returns a BrokerAuditClient so the agent
+        # cannot write its own tamper-resistant ledger directly; otherwise it
+        # falls back to a D1 client. Same ``.execute(sql, *params)`` seam.
+        _D1_CLIENT = audit_client_from_env(customer_slug=_CUSTOMER_SLUG)
     except KeyError as exc:
         # Audit is observability, not a gate — the relay can still send. Run
         # without it rather than disabling a working demo for a missing binding.

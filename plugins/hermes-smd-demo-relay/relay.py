@@ -155,9 +155,7 @@ def gate_body(scan_text: str, *, vertical: str | None, cohort: str | None) -> Ga
         logger.exception("demo-relay: content floor raised; refusing to relay")
         return GateResult(allowed=False, reason="content_floor_error")
     if floor.sensitive:
-        return GateResult(
-            allowed=False, reason="content_sensitive", categories=floor.categories
-        )
+        return GateResult(allowed=False, reason="content_sensitive", categories=floor.categories)
 
     try:
         decision = outbound_gate.evaluate(scan_text, cohort, vertical)

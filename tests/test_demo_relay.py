@@ -90,16 +90,21 @@ def relay_mod(monkeypatch):
     return mod, fake_d1, sent
 
 
-def _record_origin(sender="greg@whitfield.example", message_id="msg_in", inbox_id="inbox_x",
-                   session="s1"):
+def _record_origin(
+    sender="greg@whitfield.example", message_id="msg_in", inbox_id="inbox_x", session="s1"
+):
     inbound.SESSION_INBOUND_ORIGIN.record(
         session,
         inbound.InboundOrigin(sender_address=sender, message_id=message_id, inbox_id=inbox_id),
     )
 
 
-def _draft(to, text="Thanks for reaching out. We received your intake; we'll be in touch.",
-           subject="Re: New matter", html=""):
+def _draft(
+    to,
+    text="Thanks for reaching out. We received your intake; we'll be in touch.",
+    subject="Re: New matter",
+    html="",
+):
     return {"to": to, "subject": subject, "text": text, "html": html}
 
 
@@ -153,8 +158,9 @@ def test_injected_extra_recipient_fails_lock(relay_mod) -> None:
         session_id="s1",
     )
     assert sent == []
-    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "recipient_mismatch"
-               for a, m in d1.events())
+    assert any(
+        a == "DEMO_RELAY_BLOCKED" and m["reason"] == "recipient_mismatch" for a, m in d1.events()
+    )
 
 
 def test_substituted_recipient_fails_lock(relay_mod) -> None:
@@ -201,8 +207,7 @@ def test_missing_inbox_id_does_not_send(relay_mod) -> None:
         session_id="s1",
     )
     assert sent == []
-    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "no_inbox_id"
-               for a, m in d1.events())
+    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "no_inbox_id" for a, m in d1.events())
 
 
 # ---------------------------------------------------------------------------
@@ -245,13 +250,16 @@ def test_sensitive_body_blocked(relay_mod) -> None:
     # A money/contract body trips the content floor — refuse to relay.
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
-        args=_draft(["greg@whitfield.example"],
-                    text="Our fee for this engagement is $5,000 due on signing the contract."),
+        args=_draft(
+            ["greg@whitfield.example"],
+            text="Our fee for this engagement is $5,000 due on signing the contract.",
+        ),
         session_id="s1",
     )
     assert sent == []
-    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "content_sensitive"
-               for a, m in d1.events())
+    assert any(
+        a == "DEMO_RELAY_BLOCKED" and m["reason"] == "content_sensitive" for a, m in d1.events()
+    )
 
 
 def test_empty_body_blocked(relay_mod) -> None:
@@ -261,7 +269,12 @@ def test_empty_body_blocked(relay_mod) -> None:
     # closed on a bodyless send; the empty-body guard backstops it too).
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
-        args={"to": ["greg@whitfield.example"], "subject": "Re: New matter", "text": "", "html": ""},
+        args={
+            "to": ["greg@whitfield.example"],
+            "subject": "Re: New matter",
+            "text": "",
+            "html": "",
+        },
         session_id="s1",
     )
     assert sent == []
@@ -290,15 +303,16 @@ def test_per_sender_rate_limit(relay_mod) -> None:
             session_id=sid,
         )
     assert len(sent) == 2  # only the first two cleared the per-sender window
-    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "rate_limited"
-               for a, m in d1.events())
+    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "rate_limited" for a, m in d1.events())
 
 
 def test_rate_limiter_window_eviction() -> None:
     mod = load_plugin("hermes-smd-demo-relay")
     clock = {"t": 0.0}
     limiter = mod.relay.RateLimiter(
-        per_sender_max=1, per_sender_window_s=10.0, global_max=100,
+        per_sender_max=1,
+        per_sender_window_s=10.0,
+        global_max=100,
         clock=lambda: clock["t"],
     )
     assert limiter.allow("a@x.test") is True
@@ -375,8 +389,12 @@ def test_send_reply_builds_request() -> None:
         return _Resp()
 
     out = mod.relay.send_reply(
-        api_key="sek", inbox_id="inbox_x", message_id="msg_in",
-        text="hello", html="<p>hello</p>", opener=_opener,
+        api_key="sek",
+        inbox_id="inbox_x",
+        message_id="msg_in",
+        text="hello",
+        html="<p>hello</p>",
+        opener=_opener,
     )
     assert out == "msg_out"
     assert captured["url"].endswith("/inboxes/inbox_x/messages/msg_in/reply")
