@@ -112,6 +112,35 @@ def load_and_register_subplugins(ctx: Any, base: Path | None = None) -> list[str
     return registered
 
 
+def _warn_on_undeclared_env_reads() -> None:
+    """WARN-only env-consumption conformance at boot.
+
+    Logs any env var the overlay reads with a string literal that is NOT
+    declared in ``contracts/consumes.yaml`` — the OP-P0-2 voice-break class,
+    surfaced loudly and early. It NEVER raises and NEVER fails boot: per the
+    Phase A reframe, boot fails only on a liveness check, never on a conformance
+    check (a boot-time scan gate is itself a brick vector). The fail-closed
+    enforcement is the CI test; this is the early-warning twin sharing the same
+    discovery code. The stale-declaration half is CI-only (it needs the full
+    source tree, which a stripped install layout may not carry)."""
+    try:
+        from shared import consumes_conformance as cc
+
+        read = cc.discover_static_env_reads()
+        if not read:
+            return  # source tree not scannable in this layout — CI owns conformance
+        undeclared = read - set(cc.declared_vars())
+        if undeclared:
+            logger.warning(
+                "env-consumption drift: overlay reads %s with a string literal but they are NOT "
+                "declared in contracts/consumes.yaml (the OP-P0-2 voice-break class). "
+                "CI enforces this; boot continues.",
+                sorted(undeclared),
+            )
+    except Exception:  # noqa: BLE001 — a checker hiccup must never affect boot
+        logger.debug("consumes.yaml conformance WARN check skipped", exc_info=True)
+
+
 def register(ctx: Any) -> None:
     """Hermes plugin entry point. Fans out to every declared sub-plugin."""
     registered = load_and_register_subplugins(ctx)
@@ -120,3 +149,4 @@ def register(ctx: Any) -> None:
         len(registered),
         ", ".join(registered),
     )
+    _warn_on_undeclared_env_reads()

@@ -1,0 +1,238 @@
+# ============================================================================
+# Overlay env-consumption declaration — what the hermes-smd-overlay code READS
+# from the environment. The consumer-side twin of ss-console's
+# operator/contracts/env-consumption.yaml (which owns provisioning disposition:
+# who PROVIDES/STRIPS/REQUIRES each var). This file owns ONE fact: "the overlay
+# reads this var, here, for this."
+#
+# WHY THIS EXISTS. OP-P0-2: a security pass stripped the account-wide R2 key
+# from the agent env, not knowing the voice plugin read it — voice went silent.
+# The fact "what reads this var" lived only in someone's head. This file makes
+# it explicit and machine-checkable so the next such drift is a failed check,
+# not a live incident.
+#
+# ENFORCEMENT (all derived from THIS file by shared/consumes_conformance.py):
+#   1. CI, fail-closed (tests/test_consumes_conformance.py): every env var the
+#      overlay reads with a STRING LITERAL (os.environ["X"], os.getenv("X"),
+#      secrets.require("X"), get_secret("X")) MUST appear in `vars` below.
+#      An undeclared literal read fails the build — the voice-break guard.
+#      And every `vars` entry marked `discovery: static` MUST actually be read
+#      (no stale declarations).
+#   2. Boot-time, WARN-only (umbrella __init__.register): the same
+#      reconciliation runs at gateway start and logger.warning()s any
+#      undeclared read. It NEVER fails boot — per the Phase A reframe, boot
+#      fails only on a liveness check, never on a conformance check (a
+#      boot-time grep gate is itself a brick vector). CI is the hard gate.
+#
+# DISCOVERY CLASSES (the `discovery` field on each var):
+#   static   - read with a string literal at the call site; the conformance
+#              test finds it by AST and REQUIRES it here.
+#   indirect - the var NAME is held in a module constant (e.g. SOCKET_ENV);
+#              a real read, but not a literal at the read call, so the AST scan
+#              can't tie it to a name. Declared here; exempt from the "must be
+#              statically found" stale check.
+# Names that are CONSTRUCTED or INDIRECTED at runtime (no single literal name)
+# are documented under `dynamic_reads` instead — they cannot be a `vars` key.
+#
+# Adding a consumer? Add the var here FIRST. If you read a new env var with a
+# literal and forget to declare it, CI goes red on the author, not the Captain.
+
+vars:
+  # ---- Required: the overlay genuinely needs these (no graceful degradation) ----
+  SMD_CUSTOMER_SLUG:
+    discovery: static
+    stage: agent
+    requirement: required
+    consumed_by: [voice, audit, trust, webhook-router, memory-mirror, workspace]
+    note: per-customer identity; read directly and via secrets.require across plugins
+  SMD_D1_AUDIT_BINDING:
+    discovery: static
+    stage: agent
+    requirement: required
+    consumed_by: [webhook-gate, audit, trust, webhook-router, workspace, overlay-activation-hook]
+    note: per-customer audit D1 binding (a path, or the NAME of an env var holding the path)
+
+  # ---- Indirect: var name held in a module constant, not a literal at the read ----
+  SMD_WORKSPACE_BROKER_SOCKET:
+    discovery: indirect
+    stage: broker
+    requirement: required
+    consumed_by: [workspace]
+    note: "read via os.environ.get(SOCKET_ENV) where SOCKET_ENV = 'SMD_WORKSPACE_BROKER_SOCKET' (shared/workspace_broker.py:10); broker raises if unset"
+
+  # ---- Optional: plugin no-ops cleanly / a default applies when absent ----
+  HERMES_HOME:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [audit, bootstrap-cli]
+    note: Hermes home dir; defaults to /opt/data. Also read by the boot-helper CLI.
+  HERMES_ACTIVE_PROFILE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [audit]
+    note: active persona slug (Hermes-native); first in the persona-resolution chain
+  SMD_ACTIVE_PERSONA:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [audit]
+    note: persona-slug fallback when HERMES_ACTIVE_PROFILE is unset
+  SMD_TRUST_CEILING:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: content-class entitlement ceiling; a conservative default applies when unset
+  SMD_VERTICAL:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: vertical/pack identifier used in the provenance gate
+  SMD_COHORT:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: cohort identifier used in the provenance gate
+  CUSTOMER_SLUG:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [voice, shared-d1-env]
+    note: legacy fallback for SMD_CUSTOMER_SLUG
+  SMD_VOICE_VAULT_DIR:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [voice]
+    note: local voice-vault dir (bootstrap Step 2a); preferred so the agent holds NO R2 credential (OP-P0-2)
+  R2_ENDPOINT_URL:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [voice, audit]
+    note: R2 S3 endpoint URL (NOT a credential); voice R2-fallback path + skill_capture
+  R2_ACCESS_KEY_ID:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [voice]
+    note: account-wide R2 key — voice R2-FALLBACK only; stripped from the agent env in bootstrap (OP-P0-2), so absent in practice
+  R2_SECRET_ACCESS_KEY:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [voice]
+    note: paired with R2_ACCESS_KEY_ID; voice R2-fallback only; stripped from the agent env
+  R2_BUCKET_CONFIG:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [voice]
+    note: config-bucket NAME (not a credential); voice R2-fallback path
+  R2_SKILL_BODIES_BUCKET:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [audit]
+    note: bucket NAME for agent-authored skill-body persistence (ADR 0022 Stream 2)
+  R2_SKILL_BODIES_ACCESS_KEY_ID:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [audit]
+    note: bucket-SCOPED token for skill-body persistence; capture no-ops when unset
+  R2_SKILL_BODIES_SECRET_ACCESS_KEY:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [audit]
+    note: paired with R2_SKILL_BODIES_ACCESS_KEY_ID
+  SMD_CUSTOMER_YAML_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-router]
+    note: customer.yaml path; defaults to /opt/data/customer.yaml
+  SMD_WEBHOOK_SIGNING_SECRET:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-router]
+    note: HMAC secret verifying inbound webhooks; when unset the router disables routing (fail-closed) rather than trusting unsigned events
+  CUSTOMER_DB:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: audit D1 path fallback when SMD_D1_AUDIT_BINDING does not resolve
+  OPERATOR_RUNTIME_READ_KEY:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: per-customer ADR 0043 read-seam auth key (HMAC(master, slug)); the seam is inert when unset
+  WEBHOOK_GATE_LOG_LEVEL:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: log level for the webhook gate; defaults to INFO
+  WEBHOOK_GATE_PORT:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: webhook gate listen port
+  WEBHOOK_GATEWAY_HOST:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: upstream Hermes gateway host; defaults to 127.0.0.1
+  WEBHOOK_GATEWAY_PORT:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: upstream Hermes gateway port; defaults to 8644
+  SKILLS_DIR:
+    discovery: static
+    stage: boot-helper
+    requirement: optional
+    consumed_by: [bootstrap-translate]
+    note: skills-dir override during customer.yaml translation
+  SMD_D1_OBSERVATIONS_BINDING:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [memory-mirror]
+    note: Honcho observations mirror binding; inert in Phase 1 (ADR 0016 revised)
+  HONCHO_BASE_URL:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [memory-mirror]
+    note: local Honcho sidecar base URL; inert in Phase 1
+  HONCHO_API_KEY:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [memory-mirror]
+    note: Honcho API key; inert in Phase 1
+
+# Names CONSTRUCTED or INDIRECTED at runtime — no single literal name, so they
+# cannot be a `vars` key. Documented here so a NEW such site is a reviewable
+# diff, and so the conformance scan can legitimately ignore the indirection
+# plumbing (it reads only names already declared above, or per-route names).
+dynamic_reads:
+  - site: webhook_gate.py::_route_secret
+    family: WEBHOOK_SECRET_<ROUTE>
+    note: per-route inbound-webhook HMAC secret; the suffix is the adapter slug, constructed at runtime
+  - site: shared/secrets.py::get_secret / require
+    note: the single env accessor; reads the literal names its callers pass (every such literal is declared in `vars`)
+  - sites: [shared/d1_client.py, webhook_gate.py::_audit_db_path, hooks/smd-overlay-activation/handler.py]
+    note: binding indirection — reads the env var NAMED BY the value of SMD_D1_AUDIT_BINDING when that value is a var name rather than a path
