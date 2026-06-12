@@ -67,6 +67,7 @@ from shared.action_classes import (
     ToolClassification,
     classify_tool,
 )
+from shared.customer_config import CustomerConfigMissingError
 from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
 
 # Action classes that must never fire autonomously on a turn that ingested
@@ -494,10 +495,15 @@ def _resolve_customer_ceiling() -> Ceiling:
     available; falls back to the ``SMD_TRUST_CEILING`` env var; finally
     defaults to ``DRAFT_FOR_REVIEW``.
 
-    The volume read is best-effort: if customer.yaml is not parsed yet
-    (agent E's port is in progress) the function silently falls back. This
-    keeps trust enforcement working in dev / test even when other parts of
-    the overlay are stubs.
+    Only two read outcomes fall through to the env path: the stub state
+    (``NotImplementedError``) and a genuinely absent file
+    (``CustomerConfigMissingError`` — dev / test boxes with no provisioned
+    volume). Any OTHER failure (unreadable file, YAML parse error,
+    attribute miss) propagates so ``evaluate_tool_call``'s outer handler
+    fails CLOSED for sensitive actions. Before the 2026-06-12 code review
+    this caught broad ``Exception``, which silently downgraded an authored
+    ``refused`` ceiling to the DRAFT_FOR_REVIEW default on any I/O fault —
+    a fail-open relative to the authored posture (ADR 0035).
     """
     # Try the shared loader first.
     try:
@@ -511,11 +517,10 @@ def _resolve_customer_ceiling() -> Ceiling:
     except NotImplementedError:
         # Stub state — customer_config not yet ported. Fall through to env.
         pass
-    except Exception:
-        # Any other error (missing file, parse failure, attribute miss) is
-        # logged at debug; we fall through to the env-var path.
+    except CustomerConfigMissingError:
+        # No customer.yaml on the volume (dev / test). Fall through to env.
         logger.debug(
-            "customer_config unavailable for ceiling resolution; falling back to env",
+            "no customer.yaml on volume for ceiling resolution; falling back to env",
             exc_info=True,
         )
 
@@ -610,9 +615,12 @@ def _resolve_action_ceilings(args: dict | None) -> dict[ActionClass, Ceiling]:
             merged.update(_parse_action_ceiling_map(scope.get("action_ceilings")))
     except NotImplementedError:
         pass
-    except Exception:
+    except CustomerConfigMissingError:
+        # No customer.yaml on the volume (dev / test): args / defaults apply.
+        # Any other read fault propagates — evaluate_tool_call fails closed
+        # rather than silently dropping authored per-class overrides.
         logger.debug(
-            "action_ceilings: customer_config unavailable; using args / defaults",
+            "action_ceilings: no customer.yaml on volume; using args / defaults",
             exc_info=True,
         )
     # 2. Active-skill override from args (wins over customer-wide).
@@ -651,12 +659,13 @@ def _resolve_vertical() -> str:
     """Resolve the customer's vertical slug.
 
     Source order: ``customer.yaml`` (via ``shared.customer_config``) ->
-    ``SMD_VERTICAL`` env override (dev / test) -> ``""`` (no vertical). The read
-    is best-effort: any failure falls through to the env / empty path so a
-    transient config error never raises here. Losing the floor on an unreadable
-    config does not *widen* anything — an unauthored ``external_send`` is
-    fail-closed regardless (ADR 0035), and the outer ``evaluate_tool_call``
-    handler already fails closed for sensitive actions on a raise.
+    ``SMD_VERTICAL`` env override (dev / test) -> ``""`` (no vertical).
+    Stub state and a genuinely absent file fall through to the env path;
+    any other read fault (unreadable / unparseable file on a provisioned
+    Machine) propagates so the outer ``evaluate_tool_call`` handler fails
+    closed. A floor must never be silently dropped on an I/O fault — a law
+    customer who authored ``external_send: autonomous`` relies on the pack
+    floor to narrow it back to draft (2026-06-12 code review).
     """
     try:
         from shared.customer_config import CustomerConfig  # local import
@@ -666,9 +675,9 @@ def _resolve_vertical() -> str:
             return vertical
     except NotImplementedError:
         pass
-    except Exception:
+    except CustomerConfigMissingError:
         logger.debug(
-            "vertical resolution: customer_config unavailable; falling back to env",
+            "vertical resolution: no customer.yaml on volume; falling back to env",
             exc_info=True,
         )
     return os.environ.get("SMD_VERTICAL", "")
