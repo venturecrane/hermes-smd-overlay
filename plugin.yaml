@@ -11,3 +11,4 @@ plugins:
   - plugins/hermes-smd-inbound
   - plugins/hermes-smd-hook-probe
   - plugins/hermes-smd-workspace
+  - plugins/hermes-smd-demo-relay

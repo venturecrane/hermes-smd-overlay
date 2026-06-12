@@ -244,16 +244,76 @@ def test_pending_register_bounded_per_session() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Layer 1b — SESSION_INBOUND_ORIGIN (recipient-lock anchor)
+# ---------------------------------------------------------------------------
+
+
+def test_inbound_origin_carries_attribution_not_body() -> None:
+    origin = inbound.InboundOrigin(
+        sender_address="jane@example.com",
+        message_id="msg_1",
+        content_digest=inbound.content_digest("the body"),
+        inbox_id="inbox_9",
+    )
+    # Attribution only — the digest, never the content.
+    assert origin.sender_address == "jane@example.com"
+    assert origin.message_id == "msg_1"
+    assert origin.inbox_id == "inbox_9"
+    assert origin.content_digest == inbound.content_digest("the body")
+    assert "the body" not in repr(origin)
+
+
+def test_session_inbound_origin_first_inbound_wins() -> None:
+    reg = inbound.SessionInboundOrigin()
+    first = inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1")
+    reg.record("sess", first)
+    # A later (possibly injected) inbound cannot move the recipient-lock.
+    reg.record("sess", inbound.InboundOrigin("attacker@evil.test", "msg_2", inbox_id="inbox_2"))
+    got = reg.get("sess")
+    assert got is not None
+    assert got.sender_address == "jane@example.com"
+    assert got.message_id == "msg_1"
+    assert got.inbox_id == "inbox_1"
+
+
+def test_session_inbound_origin_fail_closed_on_empty_sender() -> None:
+    reg = inbound.SessionInboundOrigin()
+    # No sender address ⇒ unanchored recipient-lock ⇒ record nothing.
+    reg.record("sess", inbound.InboundOrigin("", "msg_1", inbox_id="inbox_1"))
+    assert reg.get("sess") is None
+    # And an empty session id records nothing either.
+    reg.record("", inbound.InboundOrigin("jane@example.com", "msg_1"))
+    assert reg.get("") is None
+
+
+def test_session_inbound_origin_unknown_session_is_none() -> None:
+    reg = inbound.SessionInboundOrigin()
+    assert reg.get("never-seen") is None
+
+
+def test_session_inbound_origin_bounded_fifo() -> None:
+    reg = inbound.SessionInboundOrigin(max_sessions=2)
+    reg.record("a", inbound.InboundOrigin("a@x.test", "m_a"))
+    reg.record("b", inbound.InboundOrigin("b@x.test", "m_b"))
+    reg.record("c", inbound.InboundOrigin("c@x.test", "m_c"))  # evicts "a"
+    assert reg.get("a") is None
+    assert reg.get("b") is not None
+    assert reg.get("c") is not None
+
+
+# ---------------------------------------------------------------------------
 # Layer 3 — hermes-smd-inbound pre_llm_call chokepoint
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
 def _clear_pending():
-    """Each test starts with a clean process-wide PENDING register."""
+    """Each test starts with clean process-wide inbound registers."""
     inbound.PENDING._by_session.clear()
+    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
     yield
     inbound.PENDING._by_session.clear()
+    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
 
 
 def test_inbound_plugin_registers_pre_llm_call(fake_ctx) -> None:
@@ -449,6 +509,36 @@ def test_router_to_inbound_end_to_end(tmp_path, monkeypatch) -> None:
     close_idx = ctx.index("<<<INBOUND_DATA_END")
     inj_idx = ctx.index("Ignore prior instructions")
     assert open_idx < inj_idx < close_idx
+
+
+def test_router_records_inbound_origin_for_recipient_lock(tmp_path, monkeypatch) -> None:
+    """A routed AgentMail message records the sender/inbox/message recipient-lock."""
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+    payload = {
+        "source": "agentmail",
+        "event_type": "message.received",
+        "message": {
+            "inbox_id": "inbox_abc",
+            "message_id": "msg_123",
+            "from": "Greg Whitfield <greg@whitfield.example>",
+            "text": "I'd like to discuss a new matter.",
+        },
+    }
+    mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-origin"))
+    origin = inbound.SESSION_INBOUND_ORIGIN.get("sess-origin")
+    assert origin is not None
+    # Display-name form normalized to a bare lower-cased address.
+    assert origin.sender_address == "greg@whitfield.example"
+    assert origin.message_id == "msg_123"
+    assert origin.inbox_id == "inbox_abc"
+
+
+def test_router_no_origin_without_message_block(tmp_path, monkeypatch) -> None:
+    """A routed payload lacking a resolvable sender records no origin (fail closed)."""
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+    payload = {"source": "agentmail", "event_type": "message.received", "body": "no sender here"}
+    mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-nomsg"))
+    assert inbound.SESSION_INBOUND_ORIGIN.get("sess-nomsg") is None
 
 
 def test_module_imports_stable() -> None:

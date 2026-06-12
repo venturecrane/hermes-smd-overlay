@@ -387,11 +387,19 @@ class InboundOrigin:
     address that emailed in, keyed on the original message id (recipient-lock).
     This carries attribution only — never the body — mirroring
     :class:`InboundEnvelope`.
+
+    ``inbox_id`` is the AgentMail inbox the inbound arrived in (``message
+    .inbox_id`` on the ``message.received`` webhook). The relay needs it to
+    address the threaded reply (``POST /v0/inboxes/{inbox_id}/messages/
+    {message_id}/reply``) — the reply is keyed on the recorded inbox + message,
+    so it threads structurally back to the original sender regardless of any
+    recipient the agent's draft names (the recipient-lock's structural half).
     """
 
     sender_address: str
     message_id: str
     content_digest: str = ""
+    inbox_id: str = ""
 
 
 @dataclass

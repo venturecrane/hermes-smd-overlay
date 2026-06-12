@@ -35,6 +35,7 @@ Hook callbacks are exception-safe per AGENTS.md hard rule #3.
 import json
 import logging
 import os
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +158,47 @@ def _inbound_content_for(payload: Any) -> str:
     if isinstance(payload, str):
         return payload
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _inbound_origin_from(payload: Any, *, content: str) -> inbound.InboundOrigin | None:
+    """Extract the recipient-lock origin from an AgentMail ``message.received``
+    payload, or ``None`` if the sender/message-id cannot be resolved.
+
+    The ``message`` block of the AgentMail webhook carries ``from`` (a
+    ``"Display Name <addr@host>"`` string), ``message_id``, and ``inbox_id``.
+    We normalize ``from`` to a bare lower-cased address via ``parseaddr`` — the
+    recipient-lock compares the agent draft's ``to`` against THIS address, so it
+    must be canonical. Returns ``None`` (fail closed — no recorded origin, the
+    relay refuses to send) when there is no sender address or no message id.
+
+    Tolerant of two shapes: the ``message`` block nested under ``message`` (the
+    AgentMail webhook) or under ``data`` (some ingress wrappers). The fields are
+    never trusted as instructions — only as attribution for the structural lock.
+    """
+    if not isinstance(payload, dict):
+        return None
+    msg = payload.get("message")
+    if not isinstance(msg, dict):
+        data = payload.get("data")
+        msg = data.get("message") if isinstance(data, dict) else None
+    if not isinstance(msg, dict):
+        return None
+
+    raw_from = msg.get("from")
+    sender = parseaddr(raw_from)[1].strip().lower() if isinstance(raw_from, str) else ""
+    message_id = msg.get("message_id")
+    message_id = message_id.strip() if isinstance(message_id, str) else ""
+    inbox_id = msg.get("inbox_id")
+    inbox_id = inbox_id.strip() if isinstance(inbox_id, str) else ""
+
+    if not sender or not message_id:
+        return None
+    return inbound.InboundOrigin(
+        sender_address=sender,
+        message_id=message_id,
+        content_digest=inbound.content_digest(content),
+        inbox_id=inbox_id,
+    )
 
 
 def _header(headers: Any, name: str) -> str | None:
@@ -331,6 +373,18 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         inbound.PENDING.enqueue(
             inbound.InboundItem(session_id=session_id, content=content, envelope=envelope)
         )
+        # Recipient-lock anchor (hermes-smd-demo-relay). Record WHO opened this
+        # session — the verified inbound sender + the inbox/message to reply
+        # into — so the demo relay can only send a governed draft back to the
+        # address that emailed in. FIRST inbound wins (SessionInboundOrigin), so
+        # a later injected "inbound" cannot move the lock. Recording the origin
+        # grants NO send capability on its own; the relay is fail-closed on the
+        # demo.reply_relay flag and re-checks the content/fabrication floors. A
+        # payload without a resolvable sender/message-id records nothing (the
+        # relay then finds no origin and refuses to send). Never breaks routing.
+        origin = _inbound_origin_from(payload, content=content)
+        if origin is not None:
+            inbound.SESSION_INBOUND_ORIGIN.record(session_id, origin)
     except Exception as exc:  # noqa: BLE001 — provenance must not break routing
         logger.warning(
             "hermes-smd-webhook-router: inbound envelope/enqueue failed (%s); "
