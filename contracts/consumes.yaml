@@ -75,6 +75,12 @@ vars:
     note: "read via os.environ.get(SOCKET_ENV) where SOCKET_ENV = 'SMD_AUDIT_BROKER_SOCKET' (shared/audit_client.py); set => audit writes route through the broker's append-only audit_append (OP-P1-4); unset => direct D1 write"
 
   # ---- Optional: plugin no-ops cleanly / a default applies when absent ----
+  AGENTMAIL_API_KEY:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [demo-relay]
+    note: "AgentMail REST credential (Bearer) for the demo reply relay's threaded send; read only when demo.reply_relay is authored. Absent => relay disables (no send). Also the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py)."
   HERMES_HOME:
     discovery: static
     stage: agent
