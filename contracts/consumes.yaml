@@ -178,11 +178,11 @@ vars:
     consumed_by: [webhook-router]
     note: HMAC secret verifying inbound webhooks; when unset the router disables routing (fail-closed) rather than trusting unsigned events
   CUSTOMER_DB:
-    discovery: static
+    discovery: indirect
     stage: agent
     requirement: optional
     consumed_by: [webhook-gate]
-    note: audit D1 path fallback when SMD_D1_AUDIT_BINDING does not resolve
+    note: "audit D1 path fallback when SMD_D1_AUDIT_BINDING does not resolve; read via os.environ.get(fallback_env) in webhook_gate._db_path_from_binding (#1355 export kinds generalized the resolver)"
   OPERATOR_RUNTIME_READ_KEY:
     discovery: static
     stage: agent
