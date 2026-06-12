@@ -20,6 +20,7 @@ in consumes.yaml instead.
 from __future__ import annotations
 
 import ast
+import importlib.resources
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,10 +130,26 @@ def discover_static_env_reads(root: Path | None = None) -> set[str]:
     return names
 
 
+def _consumes_text(root: Path | None) -> str:
+    """Read contracts/consumes.yaml from the repo (dev/test) or the wheel.
+
+    With ``root`` given (tests pass it) read the filesystem copy. Otherwise
+    prefer the repo-relative path when present (editable installs), and fall back
+    to the packaged resource — in a pip-installed Machine the repo tree is gone
+    but ``contracts/consumes.yaml`` ships as package data (see pyproject)."""
+    if root is not None:
+        return (root / "contracts" / "consumes.yaml").read_text(encoding="utf-8")
+    fs = overlay_root() / "contracts" / "consumes.yaml"
+    if fs.is_file():
+        return fs.read_text(encoding="utf-8")
+    return (
+        importlib.resources.files("contracts").joinpath("consumes.yaml").read_text(encoding="utf-8")
+    )
+
+
 def declared_vars(root: Path | None = None) -> dict[str, dict]:
     """The `vars` map from contracts/consumes.yaml."""
-    root = root or overlay_root()
-    data = yaml.safe_load((root / "contracts" / "consumes.yaml").read_text(encoding="utf-8")) or {}
+    data = yaml.safe_load(_consumes_text(root)) or {}
     return data.get("vars", {}) or {}
 
 

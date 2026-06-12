@@ -194,12 +194,17 @@ class _Handler(BaseHTTPRequestHandler):
 
         params = parse_qs(query)
         try:
-            result = runtime_read.read_runtime(
-                kind,
-                db_path=_audit_db_path(),
-                cursor=(params.get("cursor") or [None])[0],
-                limit=(params.get("limit") or [None])[0],
-            )
+            if kind == "config":
+                # config is a single materialized-state snapshot — no DB, no
+                # pagination. (auth + slug-sanity already passed above.)
+                result = runtime_read.read_config()
+            else:
+                result = runtime_read.read_runtime(
+                    kind,
+                    db_path=_audit_db_path(),
+                    cursor=(params.get("cursor") or [None])[0],
+                    limit=(params.get("limit") or [None])[0],
+                )
         except Exception as exc:  # never leak detail; fail closed
             logger.error("runtime read: error serving kind %r: %s", kind, exc)
             self._json_nostore(500, {"error": "read failed"})
