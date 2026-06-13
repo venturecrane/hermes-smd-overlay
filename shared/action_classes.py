@@ -156,14 +156,57 @@ BANNED_REASON: Mapping[str, str] = MappingProxyType(
 
 _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # AgentMail MCP — the persona's OWN mailbox (not the principal's Gmail).
-    # MCP tools reach the classifier under `<server>:<tool>` notation, so the
-    # runtime names are prefixed. Sends are EXTERNAL_SEND, governed by the
-    # resolved per-action ceiling (ADR 0025/0035): unauthored is fail-closed
-    # (refused — no send, no draft); draft_for_review and autonomous are both
-    # authored in action_ceilings; vertical floor narrows; content-sensitivity
-    # floor (shared.content_floor) forces sensitive content to draft even under
-    # autonomous. Drafting (`agentmail:create_draft`,
-    # `agentmail:update_draft`) is INTERNAL_WRITE — the agent's own job.
+    #
+    # RUNTIME NAMING (2026-06-12, verified against the live server). Hermes
+    # registers MCP tools as ``mcp_<server>_<tool>`` — underscore-joined, with
+    # dashes in the server name folded to underscores. The agentmail server key
+    # is ``agentmail`` (see bootstrap.mcp_registry), so every tool reaches the
+    # classifier as ``mcp_agentmail_<tool>``. The earlier ``agentmail:<tool>``
+    # colon spelling was an unverified guess: it matched NOTHING at runtime, so
+    # every agentmail send classified READ and slipped the trust ceiling +
+    # taint-gate (the 2026-06-12 demo-law live-test P0 — the agent sent a reply
+    # autonomously on an inbound-tainted turn). The full 24-tool surface is
+    # enumerated below from a live ``tools/list`` so no agentmail tool defaults
+    # to READ. The colon spellings are retained ONLY as capability-contract
+    # aliases (audit prose / TS-side references); they never occur at runtime.
+    #
+    # Sends are EXTERNAL_SEND, governed by the resolved per-action ceiling (ADR
+    # 0025/0035): unauthored is fail-closed (refused — no send, no draft);
+    # draft_for_review and autonomous are both authored in action_ceilings;
+    # vertical floor narrows; the content-sensitivity floor (shared.content_floor)
+    # forces sensitive content to draft even under autonomous. Drafting
+    # (create_draft / update_draft) is INTERNAL_WRITE — the agent's own job.
+    # delete_inbox / delete_thread are DESTRUCTIVE (irreversible loss of received
+    # mail); delete_draft is INTERNAL_WRITE (discarding the agent's own unsent
+    # draft, matching email_delete_draft).
+    #
+    # --- live runtime names (mcp_agentmail_*) — the ONLY form the agent emits
+    "mcp_agentmail_send_message": ActionClass.EXTERNAL_SEND,
+    "mcp_agentmail_send_draft": ActionClass.EXTERNAL_SEND,
+    "mcp_agentmail_reply_to_message": ActionClass.EXTERNAL_SEND,
+    "mcp_agentmail_forward_message": ActionClass.EXTERNAL_SEND,
+    "mcp_agentmail_create_draft": ActionClass.INTERNAL_WRITE,
+    "mcp_agentmail_update_draft": ActionClass.INTERNAL_WRITE,
+    "mcp_agentmail_create_inbox": ActionClass.INTERNAL_WRITE,
+    "mcp_agentmail_update_inbox": ActionClass.INTERNAL_WRITE,
+    "mcp_agentmail_update_thread": ActionClass.INTERNAL_WRITE,
+    "mcp_agentmail_update_message": ActionClass.INTERNAL_WRITE,
+    "mcp_agentmail_delete_draft": ActionClass.INTERNAL_WRITE,
+    "mcp_agentmail_delete_inbox": ActionClass.DESTRUCTIVE,
+    "mcp_agentmail_delete_thread": ActionClass.DESTRUCTIVE,
+    "mcp_agentmail_list_inboxes": ActionClass.READ,
+    "mcp_agentmail_get_inbox": ActionClass.READ,
+    "mcp_agentmail_list_threads": ActionClass.READ,
+    "mcp_agentmail_search_threads": ActionClass.READ,
+    "mcp_agentmail_get_thread": ActionClass.READ,
+    "mcp_agentmail_get_attachment": ActionClass.READ,
+    "mcp_agentmail_list_messages": ActionClass.READ,
+    "mcp_agentmail_search_messages": ActionClass.READ,
+    "mcp_agentmail_list_drafts": ActionClass.READ,
+    "mcp_agentmail_get_draft": ActionClass.READ,
+    "mcp_agentmail_auth_me": ActionClass.READ,
+    # --- capability-contract aliases (colon form) — never emitted at runtime,
+    #     retained so audit prose / TS-side references still resolve.
     "agentmail:send_message": ActionClass.EXTERNAL_SEND,
     "agentmail:send_draft": ActionClass.EXTERNAL_SEND,
     "agentmail:reply_to_message": ActionClass.EXTERNAL_SEND,
