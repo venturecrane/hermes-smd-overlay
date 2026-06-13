@@ -127,14 +127,34 @@ def on_post_tool_call(**kwargs: Any) -> None:
             return
 
         session_id = kwargs.get("session_id") or ""
+        args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
+
         origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id)
         if origin is None:
-            # Fail closed: no recorded inbound sender opened this session, so
-            # there is no verified address to reply to. A create_draft on a
-            # session that did NOT originate from an inbound email never relays.
+            # Recovery path. The router records the recipient-lock origin under
+            # the DISPATCH-time session_id, which can be empty or differ from
+            # this agent-loop session_id — so the session-keyed lookup misses
+            # even though a verified inbound DID open the work. Recover the
+            # origin by matching THIS draft's own recipient against the verified
+            # address index. Injection-safe: only Svix-verified inbound senders
+            # populate the index, so a draft addressed to someone who never
+            # emailed in matches nothing; and the recipient-lock below still
+            # enforces that the draft names ONLY the recovered sender.
+            recovered = inbound.SESSION_INBOUND_ORIGIN.find_for_recipient(
+                relay.draft_recipients(args)
+            )
+            if recovered is not None:
+                logger.info(
+                    "hermes-smd-demo-relay: session-keyed origin missed (session=%r); "
+                    "recovered verified inbound origin by recipient address",
+                    session_id,
+                )
+                origin = recovered
+        if origin is None:
+            # Fail closed: no verified inbound sender matches this draft, so
+            # there is no address to reply to. A create_draft that did NOT
+            # originate from an inbound email never relays.
             return
-
-        args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
 
         # (b) Recipient-lock — the reply can go ONLY to the address that emailed
         # in. An injected extra/substituted recipient fails the lock here.

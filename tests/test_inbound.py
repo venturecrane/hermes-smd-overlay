@@ -278,12 +278,47 @@ def test_session_inbound_origin_first_inbound_wins() -> None:
 
 def test_session_inbound_origin_fail_closed_on_empty_sender() -> None:
     reg = inbound.SessionInboundOrigin()
-    # No sender address ⇒ unanchored recipient-lock ⇒ record nothing.
+    # No sender address ⇒ unanchored recipient-lock ⇒ record nothing anywhere
+    # (neither the session index nor the address-recovery index).
     reg.record("sess", inbound.InboundOrigin("", "msg_1", inbox_id="inbox_1"))
     assert reg.get("sess") is None
-    # And an empty session id records nothing either.
-    reg.record("", inbound.InboundOrigin("jane@example.com", "msg_1"))
+    assert reg.find_for_recipient({""}) is None
+
+
+def test_session_inbound_origin_empty_session_recoverable_by_address() -> None:
+    # The dispatch-time session_id is often empty (the gateway does not carry
+    # one at pre_gateway_dispatch). The SESSION index stays empty — get("") is
+    # None — but the ADDRESS index captures the verified origin so the relay can
+    # recover it by matching its draft's recipient. This is the demo-law
+    # 2026-06-12 fix: without it the origin was dropped and no reply was sent.
+    reg = inbound.SessionInboundOrigin()
+    origin = inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1")
+    reg.record("", origin)
     assert reg.get("") is None
+    recovered = reg.find_for_recipient({"jane@example.com"})
+    assert recovered is not None
+    assert recovered.message_id == "msg_1"
+    assert recovered.inbox_id == "inbox_1"
+
+
+def test_find_for_recipient_only_matches_verified_senders() -> None:
+    # Injection-safety: an address that never emailed in is not in the index,
+    # so a draft addressed to it recovers nothing (the relay then fails closed).
+    reg = inbound.SessionInboundOrigin()
+    reg.record("s1", inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1"))
+    assert reg.find_for_recipient({"attacker@evil.test"}) is None
+    assert reg.find_for_recipient(set()) is None
+
+
+def test_find_for_recipient_returns_most_recent_for_address() -> None:
+    # A sender who emails twice: the recovery threads the reply to their LATEST
+    # inbound message (most-recent wins on the address index).
+    reg = inbound.SessionInboundOrigin()
+    reg.record("s1", inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1"))
+    reg.record("s2", inbound.InboundOrigin("jane@example.com", "msg_2", inbox_id="inbox_1"))
+    got = reg.find_for_recipient({"jane@example.com"})
+    assert got is not None
+    assert got.message_id == "msg_2"
 
 
 def test_session_inbound_origin_unknown_session_is_none() -> None:
@@ -311,9 +346,11 @@ def _clear_pending():
     """Each test starts with clean process-wide inbound registers."""
     inbound.PENDING._by_session.clear()
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     yield
     inbound.PENDING._by_session.clear()
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
 
 
 def test_inbound_plugin_registers_pre_llm_call(fake_ctx) -> None:

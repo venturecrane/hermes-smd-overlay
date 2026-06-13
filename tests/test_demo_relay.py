@@ -50,8 +50,10 @@ class _FakeD1Client:
 @pytest.fixture(autouse=True)
 def _clear_origin():
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     yield
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
 
 
 @pytest.fixture
@@ -163,6 +165,53 @@ def test_runtime_mcp_tool_name_fires_relay(relay_mod) -> None:
     assert len(sent) == 1
     assert sent[0]["inbox_id"] == "inbox_x"
     assert sent[0]["message_id"] == "msg_in"
+
+
+def test_recovers_origin_when_session_id_mismatches(relay_mod) -> None:
+    """The router records the origin under the DISPATCH session_id (often empty);
+    the relay reads under the AGENT session_id. When they differ (the demo-law
+    2026-06-12 live bug — draft created, no reply sent), the relay recovers the
+    verified origin by matching the draft's recipient against the address index."""
+    mod, _d1, sent = relay_mod
+    # Recorded under an empty dispatch session id ...
+    _record_origin(
+        sender="greg@whitfield.example", message_id="msg_in", inbox_id="inbox_x", session=""
+    )
+    # ... while create_draft fires under a DIFFERENT agent session id.
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="agent-20260613-013303",
+    )
+    assert len(sent) == 1
+    assert sent[0]["inbox_id"] == "inbox_x"
+    assert sent[0]["message_id"] == "msg_in"
+
+
+def test_recovery_fails_closed_for_unverified_recipient(relay_mod) -> None:
+    """Recovery only matches verified inbound senders. A draft to an address that
+    never emailed in recovers nothing → no send (injection-safe)."""
+    mod, _d1, sent = relay_mod
+    _record_origin(sender="greg@whitfield.example", session="")
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["attacker@evil.test"]),
+        session_id="agent-x",
+    )
+    assert sent == []
+
+
+def test_recovery_still_blocks_injected_extra_recipient(relay_mod) -> None:
+    """Even on the recovery path, the recipient-lock still requires the draft to
+    name ONLY the verified sender — an injected extra recipient is refused."""
+    mod, _d1, sent = relay_mod
+    _record_origin(sender="greg@whitfield.example", inbox_id="inbox_x", session="")
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["greg@whitfield.example", "attacker@evil.test"]),
+        session_id="agent-x",
+    )
+    assert sent == []
 
 
 def test_injected_extra_recipient_fails_lock(relay_mod) -> None:

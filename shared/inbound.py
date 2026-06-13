@@ -43,6 +43,7 @@ import hashlib
 import logging
 import secrets
 from collections import OrderedDict, deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -415,14 +416,37 @@ class SessionInboundOrigin:
 
     max_sessions: int = 512
     _origins: "OrderedDict[str, InboundOrigin]" = field(default_factory=OrderedDict)
+    # Session-independent recovery index, keyed by lower-cased sender address.
+    # The dispatch-time session_id the router records under can be empty (the
+    # gateway does not always carry one at ``pre_gateway_dispatch``) or differ
+    # from the agent-loop session_id the relay later reads under — in either
+    # case the session-keyed lookup misses and the recipient-lock anchor is
+    # lost. This index lets the relay RECOVER the verified origin by matching
+    # its own draft's recipient. Only Svix-verified inbounds populate it (the
+    # router records after signature verification), so a match is always a
+    # verified sender — the recovery is injection-safe.
+    _by_address: "OrderedDict[str, InboundOrigin]" = field(default_factory=OrderedDict)
 
     def record(self, session_id: str, origin: InboundOrigin) -> None:
-        """Record the opening inbound's origin for ``session_id`` (first wins).
+        """Record the opening inbound's origin (recipient-lock anchor).
 
-        No-op for an empty session id or an origin with no sender address (the
-        recipient-lock would be unanchored — fail closed by recording nothing,
-        so the relay finds no origin and does not send)."""
-        if not session_id or not origin.sender_address:
+        No-op for an origin with no sender address (the lock would be
+        unanchored — fail closed). The ADDRESS index is always populated when a
+        sender is present, even with an empty session id, so the relay can
+        recover the origin when the dispatch session_id is absent or differs
+        from the agent-loop session_id. The SESSION index is populated only when
+        a session id is present and keeps first-inbound-wins semantics."""
+        if not origin.sender_address:
+            return
+        addr = origin.sender_address.strip().lower()
+        if addr:
+            # Most-recent wins for a given address: a later inbound from the
+            # same sender threads the reply to their latest message.
+            self._by_address[addr] = origin
+            self._by_address.move_to_end(addr)
+            while len(self._by_address) > self.max_sessions:
+                self._by_address.popitem(last=False)
+        if not session_id:
             return
         if session_id in self._origins:
             # Lock already set by the opening inbound; a later inbound cannot
@@ -442,6 +466,26 @@ class SessionInboundOrigin:
         if not session_id:
             return None
         return self._origins.get(session_id)
+
+    def find_for_recipient(self, addresses: "Iterable[str]") -> InboundOrigin | None:
+        """Recover a verified inbound origin by matching the draft's intended
+        recipient against the address index — the recovery path when the
+        session-keyed :meth:`get` misses (dispatch session_id absent/differs).
+
+        Returns the most-recently recorded verified origin whose sender is among
+        ``addresses`` (the addresses the agent's draft is addressed to), or
+        ``None``. Injection-safe: only Svix-verified inbound senders populate the
+        index, so a draft naming an address that never emailed in matches nothing
+        and the relay fails closed. The relay's recipient-lock (draft must name
+        ONLY the recovered sender) still applies on top, so an injected EXTRA
+        recipient is still refused."""
+        wanted = {a.strip().lower() for a in addresses if isinstance(a, str) and a.strip()}
+        if not wanted:
+            return None
+        for addr in reversed(self._by_address):
+            if addr in wanted:
+                return self._by_address[addr]
+        return None
 
 
 # Process-wide singleton — the webhook router records, the demo relay reads.
