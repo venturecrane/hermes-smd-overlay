@@ -385,6 +385,25 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         origin = _inbound_origin_from(payload, content=content)
         if origin is not None:
             inbound.SESSION_INBOUND_ORIGIN.record(session_id, origin)
+            # Diagnostic: confirms the recipient-lock anchor recorded, the
+            # session_id it keyed under (empty here is the case the relay's
+            # address-recovery path handles), and that the inbox/message ids
+            # needed to thread the reply are present. Attribution only — never
+            # the body (the audit row already carries the recipient).
+            logger.info(
+                "hermes-smd-webhook-router: recorded inbound origin "
+                "(session=%r, sender=%s, have_inbox_id=%s, have_message_id=%s)",
+                session_id,
+                origin.sender_address,
+                bool(origin.inbox_id),
+                bool(origin.message_id),
+            )
+        else:
+            logger.warning(
+                "hermes-smd-webhook-router: no inbound origin extracted "
+                "(payload keys=%s); demo relay has no recipient anchor to recover",
+                sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+            )
     except Exception as exc:  # noqa: BLE001 — provenance must not break routing
         logger.warning(
             "hermes-smd-webhook-router: inbound envelope/enqueue failed (%s); "
