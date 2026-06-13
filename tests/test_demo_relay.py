@@ -148,6 +148,23 @@ def test_happy_path_sends_to_recorded_inbox_and_message(relay_mod) -> None:
     assert "Thanks for reaching out" not in json.dumps(meta)
 
 
+def test_runtime_mcp_tool_name_fires_relay(relay_mod) -> None:
+    """Regression for the 2026-06-12 demo-law live test: the relay hooked the
+    colon spelling ``agentmail:create_draft``, but Hermes emits the MCP runtime
+    name ``mcp_agentmail_create_draft`` — so the hook never fired in production
+    and the relay was dead. The live runtime name MUST trigger the send."""
+    mod, _d1, sent = relay_mod
+    _record_origin(sender="greg@whitfield.example", message_id="msg_in", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+    assert sent[0]["inbox_id"] == "inbox_x"
+    assert sent[0]["message_id"] == "msg_in"
+
+
 def test_injected_extra_recipient_fails_lock(relay_mod) -> None:
     mod, d1, sent = relay_mod
     _record_origin(sender="greg@whitfield.example")

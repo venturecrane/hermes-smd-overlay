@@ -492,6 +492,56 @@ def test_agentmail_sends_classify_external_send() -> None:
         assert c.unmapped is False
 
 
+def test_agentmail_runtime_mcp_names_classify_external_send() -> None:
+    """Regression for the 2026-06-12 demo-law live-test P0.
+
+    Hermes registers MCP tools as ``mcp_<server>_<tool>``, so agentmail sends
+    reach the classifier as ``mcp_agentmail_*`` — NOT the colon spelling the
+    earlier map assumed. Before the fix these names were unmapped → defaulted to
+    READ → bypassed the trust ceiling + taint-gate, and the agent sent a reply
+    autonomously on an inbound-tainted turn. These are the names the agent
+    actually emits; they MUST classify EXTERNAL_SEND (mapped, not defaulted)."""
+    enforce = _load_trust_module("enforce")
+    for t in (
+        "mcp_agentmail_send_message",
+        "mcp_agentmail_send_draft",
+        "mcp_agentmail_reply_to_message",
+        "mcp_agentmail_forward_message",
+    ):
+        c = enforce.classify_tool(t)
+        assert c.action_class == enforce.ActionClass.EXTERNAL_SEND, t
+        assert c.unmapped is False, t
+
+
+def test_agentmail_runtime_drafts_classify_internal_write() -> None:
+    """Runtime draft tools are the agent's own job — INTERNAL_WRITE, not a send."""
+    enforce = _load_trust_module("enforce")
+    for t in ("mcp_agentmail_create_draft", "mcp_agentmail_update_draft"):
+        c = enforce.classify_tool(t)
+        assert c.action_class == enforce.ActionClass.INTERNAL_WRITE, t
+        assert c.unmapped is False, t
+
+
+def test_agentmail_runtime_deletes_classify_destructive() -> None:
+    """Deleting a received thread or the whole inbox is irreversible mail loss."""
+    enforce = _load_trust_module("enforce")
+    for t in ("mcp_agentmail_delete_inbox", "mcp_agentmail_delete_thread"):
+        c = enforce.classify_tool(t)
+        assert c.action_class == enforce.ActionClass.DESTRUCTIVE, t
+        assert c.unmapped is False, t
+
+
+def test_agentmail_runtime_send_unauthored_is_blocked(env_autonomous) -> None:
+    """End-to-end: the live runtime send name is fail-closed without an authored
+    external_send ceiling — the exact path that escaped governance on demo-law."""
+    enforce = _load_trust_module("enforce")
+    result = enforce.evaluate_tool_call(
+        "mcp_agentmail_reply_to_message", {"text": "someone will be in touch"}, "smd"
+    )
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+
+
 def test_resolve_ceiling_external_send_unauthored_is_refused() -> None:
     # No action_ceilings → unauthored external_send is fail-closed (ADR 0035),
     # not draft_for_review.

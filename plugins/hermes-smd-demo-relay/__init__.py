@@ -3,7 +3,9 @@
 Attaches to one hook at the pinned Hermes ref (v2026.5.16):
 
 - ``post_tool_call`` (``model_tools.py:826-836``) — fires after every tool
-  dispatch. The relay acts only on ``agentmail:create_draft``.
+  dispatch. The relay acts only on the AgentMail draft-creation tool, which
+  reaches the hook under its live Hermes MCP runtime name
+  ``mcp_agentmail_create_draft`` (``mcp_<server>_<tool>``).
 
 What it does (design: ``docs/security/demo-reply-relay-design.md``, ss-console):
 the tangible law demo needs the Operator's intake result emailed back to the
@@ -53,10 +55,17 @@ from . import relay  # noqa: F401 - surface for tests
 logger = logging.getLogger(__name__)
 
 
-# The single tool the relay acts on. AgentMail draft creation is INTERNAL_WRITE
+# The tool the relay acts on. AgentMail draft creation is INTERNAL_WRITE
 # (shared/action_classes.py) — it passes the taint-gate by design (drafting is
 # the safe behavior); the relay turns that governed draft into a sent reply.
-_CREATE_DRAFT_TOOL = "agentmail:create_draft"
+#
+# Hermes registers MCP tools as ``mcp_<server>_<tool>``, so the live runtime
+# name is ``mcp_agentmail_create_draft`` — the ONLY form the agent emits. The
+# colon spelling is retained as an accepted alias (capability-contract / tests);
+# matching a set keeps the hook firing regardless of which form reaches it. The
+# earlier code matched only the colon form, so the hook never fired in
+# production and the relay was dead on demo-law (2026-06-12 live test).
+_CREATE_DRAFT_TOOLS = frozenset({"mcp_agentmail_create_draft", "agentmail:create_draft"})
 
 _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
 
@@ -114,7 +123,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
     if not _ENABLED:
         return
     try:
-        if (kwargs.get("tool_name") or "") != _CREATE_DRAFT_TOOL:
+        if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
             return
 
         session_id = kwargs.get("session_id") or ""
