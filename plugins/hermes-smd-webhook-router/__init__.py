@@ -179,8 +179,12 @@ def _inbound_origin_from(payload: Any, *, content: str) -> inbound.InboundOrigin
         return None
     msg = payload.get("message")
     if not isinstance(msg, dict):
+        # Svix envelope (AgentMail): {"type": ..., "data": {...}}. The message
+        # fields may sit under data.message OR directly under data itself.
         data = payload.get("data")
-        msg = data.get("message") if isinstance(data, dict) else None
+        if isinstance(data, dict):
+            cand = data.get("message")
+            msg = cand if isinstance(cand, dict) else data
     if not isinstance(msg, dict):
         return None
 

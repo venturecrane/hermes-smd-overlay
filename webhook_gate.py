@@ -192,14 +192,49 @@ def _stamp_source(body: bytes, route: str) -> bytes:
     so the re-signed bytes and the stamped bytes are the same — the downstream
     Generic verify still passes. Fail-safe: a non-JSON or non-object body is
     forwarded UNCHANGED (it would not route anyway, and a parse error must not
-    break the forward); an existing ``source`` is never overwritten."""
+    break the forward); an existing ``source``/``event_type`` is never overwritten.
+
+    EVENT TYPE (2026-06-13): the original contract assumed vendor payloads carry
+    a top-level ``event_type``. AgentMail delivers over Svix, whose envelope puts
+    the event name under ``type`` (``{"type":"message.received","data":{...}}``),
+    so the router's ``(source, event_type)`` match never fired — the route was
+    silently skipped and the demo relay's recipient-lock origin was never
+    recorded (the agent ran the skill autonomously, masking it). We now also
+    stamp ``event_type`` from the vendor's native ``type``/``event`` field so the
+    router contract is satisfied regardless of the vendor's envelope spelling."""
     try:
         payload = json.loads(body)
     except Exception:
         return body
-    if not isinstance(payload, dict) or payload.get("source"):
+    if not isinstance(payload, dict):
         return body
-    payload["source"] = route
+    # One-time structural diagnostic (keys only — never body content) so a future
+    # vendor envelope change is debuggable without a redeploy-to-see-the-shape.
+    data = payload.get("data")
+    logger.info(
+        "gate: stamping route=%s top_keys=%s event_type=%r type=%r event=%r "
+        "has_message=%s data_keys=%s",
+        route,
+        sorted(payload.keys()),
+        payload.get("event_type"),
+        payload.get("type"),
+        payload.get("event"),
+        isinstance(payload.get("message"), dict),
+        sorted(data.keys()) if isinstance(data, dict) else None,
+    )
+    changed = False
+    if not payload.get("source"):
+        payload["source"] = route
+        changed = True
+    if not payload.get("event_type"):
+        for k in ("type", "event"):
+            v = payload.get(k)
+            if isinstance(v, str) and v:
+                payload["event_type"] = v
+                changed = True
+                break
+    if not changed:
+        return body
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 

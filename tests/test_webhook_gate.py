@@ -133,6 +133,30 @@ def test_stamp_source_fail_safe_on_non_json_or_non_object():
     assert gate._stamp_source(b'["a","b"]', "agentmail") == b'["a","b"]'
 
 
+def test_stamp_source_derives_event_type_from_svix_type():
+    # Regression (demo-law 2026-06-13): AgentMail delivers over Svix, whose
+    # envelope carries the event name under "type", not "event_type". The gate
+    # must stamp event_type from "type" so the router's (source, event_type)
+    # match fires — without it the route was silently skipped and the relay's
+    # recipient-lock origin was never recorded.
+    body = b'{"type":"message.received","data":{"message_id":"m1"}}'
+    out = json.loads(gate._stamp_source(body, "agentmail"))
+    assert out["source"] == "agentmail"
+    assert out["event_type"] == "message.received"
+
+
+def test_stamp_source_derives_event_type_from_event_field():
+    body = b'{"event":"message.received","data":{}}'
+    out = json.loads(gate._stamp_source(body, "agentmail"))
+    assert out["event_type"] == "message.received"
+
+
+def test_stamp_source_keeps_explicit_event_type_over_type():
+    body = b'{"event_type":"explicit","type":"other","message":{}}'
+    out = json.loads(gate._stamp_source(body, "agentmail"))
+    assert out["event_type"] == "explicit"  # never overwritten
+
+
 def test_audit_db_path_handles_direct_path_varname_and_fallback(monkeypatch):
     # Direct filesystem path (how the live Machine sets it).
     monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "/opt/data/audit.db")
