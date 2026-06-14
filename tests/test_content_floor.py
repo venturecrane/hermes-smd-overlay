@@ -70,8 +70,7 @@ def test_sensitive_categories_trip_floor(text, category) -> None:
         "Nothing in this note should be read as legal advice.",
         "This is not legal advice.",
         "This email does not constitute legal advice.",
-        "This is not intended as legal advice and no attorney-client "
-        "relationship is created.",
+        "This is not intended as legal advice and no attorney-client relationship is created.",
         "We cannot provide legal advice in this format.",
         "Please note: this should not be construed as legal advice.",
         "No attorney-client relationship is formed by this message.",
