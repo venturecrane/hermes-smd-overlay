@@ -208,19 +208,14 @@ def _stamp_source(body: bytes, route: str) -> bytes:
         return body
     if not isinstance(payload, dict):
         return body
-    # One-time structural diagnostic (keys only — never body content) so a future
-    # vendor envelope change is debuggable without a redeploy-to-see-the-shape.
-    data = payload.get("data")
+    # Concise structural log (keys/markers only — never body content) so a future
+    # vendor envelope change is debuggable from the gate's own (visible) INFO.
     logger.info(
-        "gate: stamping route=%s top_keys=%s event_type=%r type=%r event=%r "
-        "has_message=%s data_keys=%s",
+        "gate: stamping route=%s event_type=%r type=%r has_message=%s",
         route,
-        sorted(payload.keys()),
         payload.get("event_type"),
         payload.get("type"),
-        payload.get("event"),
         isinstance(payload.get("message"), dict),
-        sorted(data.keys()) if isinstance(data, dict) else None,
     )
     changed = False
     if not payload.get("source"):
