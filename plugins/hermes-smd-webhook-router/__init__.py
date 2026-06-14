@@ -315,6 +315,9 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     ``None``. Per AGENTS.md hard rule #3, the callback never raises.
     """
     if _TABLE.size() == 0:
+        # DIAGNOSTIC (temp, 2026-06-14): visible WARNING so an empty route table
+        # (webhook_triggers not loaded) is debuggable. Remove once confirmed.
+        logger.warning("WEBHOOK_ROUTER_DIAG: table EMPTY — no routes loaded")
         return None
 
     payload = kwargs.get("payload")
@@ -328,7 +331,25 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         return None
 
     if decision.trigger is None:
+        # DIAGNOSTIC (temp): the markers the router actually saw vs the table.
+        try:
+            markers = router.detect_webhook_markers(payload)
+            keys = sorted(str(k) for k in payload.keys()) if isinstance(payload, dict) else None
+            logger.warning(
+                "WEBHOOK_ROUTER_DIAG: NO route match — markers=%s payload_keys=%s table_size=%d",
+                markers,
+                keys,
+                _TABLE.size(),
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return None
+    logger.warning(
+        "WEBHOOK_ROUTER_DIAG: ROUTED key=%s -> skill=%s persona=%s",
+        decision.matched_key,
+        getattr(decision.trigger, "skill", "?"),
+        getattr(decision.trigger, "persona", "?"),
+    )
 
     # Verify the inbound webhook before routing (issue #13). An attacker
     # who learns the dispatch URL must not be able to drive skill actions
@@ -394,8 +415,8 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
             # address-recovery path handles), and that the inbox/message ids
             # needed to thread the reply are present. Attribution only — never
             # the body (the audit row already carries the recipient).
-            logger.info(
-                "hermes-smd-webhook-router: recorded inbound origin "
+            logger.warning(  # DIAGNOSTIC (temp): visible confirmation + session_id keyed under
+                "WEBHOOK_ROUTER_DIAG: recorded inbound origin "
                 "(session=%r, sender=%s, have_inbox_id=%s, have_message_id=%s)",
                 session_id,
                 origin.sender_address,
