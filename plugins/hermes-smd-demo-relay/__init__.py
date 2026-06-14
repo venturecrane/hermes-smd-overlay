@@ -120,33 +120,6 @@ def on_post_tool_call(**kwargs: Any) -> None:
     already created); the relay performs an out-of-band send and never alters
     the tool result. Exception-safe: any failure is logged and swallowed.
     """
-    # DIAGNOSTIC (temp, 2026-06-14): the relay's decision path is otherwise
-    # invisible — silent returns emit nothing and gateway-plugin INFO is
-    # suppressed in the logs. Emit one WARNING per create_draft so the live send
-    # path is debuggable. Placed BEFORE the _ENABLED gate so a disabled relay is
-    # visible too. Revert to INFO / remove once the send path is confirmed.
-    _diag_tool = kwargs.get("tool_name") or ""
-    if _diag_tool in _CREATE_DRAFT_TOOLS:
-        try:
-            _diag_args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
-            _diag_sid = kwargs.get("session_id") or ""
-            logger.warning(
-                "DEMO_RELAY_DIAG enabled=%s tool=%s session=%r sess_hit=%s "
-                "recips=%s recovery_hit=%s by_address=%d",
-                _ENABLED,
-                _diag_tool,
-                _diag_sid,
-                inbound.SESSION_INBOUND_ORIGIN.get(_diag_sid) is not None,
-                sorted(relay.draft_recipients(_diag_args)),
-                inbound.SESSION_INBOUND_ORIGIN.find_for_recipient(
-                    relay.draft_recipients(_diag_args)
-                )
-                is not None,
-                len(inbound.SESSION_INBOUND_ORIGIN._by_address),
-            )
-        except Exception as _diag_exc:  # noqa: BLE001
-            logger.warning("DEMO_RELAY_DIAG failed: %s", _diag_exc)
-
     if not _ENABLED:
         return
     try:
