@@ -570,6 +570,29 @@ def test_router_records_inbound_origin_for_recipient_lock(tmp_path, monkeypatch)
     assert origin.inbox_id == "inbox_abc"
 
 
+def test_router_records_origin_from_svix_data_envelope(tmp_path, monkeypatch) -> None:
+    """Svix envelope (AgentMail): the message fields sit under ``data`` rather
+    than ``message`` (the gate has already stamped source + event_type from the
+    Svix ``type``). Origin extraction must find them there — without this the
+    recipient-lock origin was never recorded and the demo relay never sent."""
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+    payload = {
+        "source": "agentmail",
+        "event_type": "message.received",
+        "data": {
+            "inbox_id": "inbox_abc",
+            "message_id": "msg_777",
+            "from": "Greg Whitfield <greg@whitfield.example>",
+        },
+    }
+    mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-svix"))
+    origin = inbound.SESSION_INBOUND_ORIGIN.get("sess-svix")
+    assert origin is not None
+    assert origin.sender_address == "greg@whitfield.example"
+    assert origin.message_id == "msg_777"
+    assert origin.inbox_id == "inbox_abc"
+
+
 def test_router_no_origin_without_message_block(tmp_path, monkeypatch) -> None:
     """A routed payload lacking a resolvable sender records no origin (fail closed)."""
     mod, _ = _load_router_with_table(tmp_path, monkeypatch)
