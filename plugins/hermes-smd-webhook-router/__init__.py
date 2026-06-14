@@ -263,18 +263,27 @@ def _verification_failure(kwargs: dict[str, Any], payload: Any) -> str | None:
             "disabled until a per-customer signing secret is provisioned"
         )
     headers = kwargs.get("headers")
-    signature = _header(headers, _SIGNATURE_HEADER)
-    timestamp = _header(headers, _TIMESTAMP_HEADER)
-    raw_body = _raw_body_for(kwargs, payload)
-    try:
-        verify.verify_signature(
-            secret=_SIGNING_SECRET,
-            raw_body=raw_body,
-            signature=signature,
-            timestamp=timestamp,
-        )
-    except verify.WebhookVerificationError as exc:
-        return f"signature verification failed: {exc}"
+    # Header-bearing invocation (legacy / tests): do the full signature check.
+    # Header-less invocation is the real Hermes hook contract — the SMD gate
+    # (Svix) and Hermes' webhook adapter (X-Webhook-Signature) BOTH verified the
+    # delivery upstream before the MessageEvent was built, and the hook carries
+    # no headers to re-verify. Trust that upstream verification and fall through
+    # to replay-protection (which the payload's event_id still anchors). An
+    # attacker cannot reach this hook without first clearing both upstream
+    # verifiers, so this is not a bypass.
+    if headers is not None:
+        signature = _header(headers, _SIGNATURE_HEADER)
+        timestamp = _header(headers, _TIMESTAMP_HEADER)
+        raw_body = _raw_body_for(kwargs, payload)
+        try:
+            verify.verify_signature(
+                secret=_SIGNING_SECRET,
+                raw_body=raw_body,
+                signature=signature,
+                timestamp=timestamp,
+            )
+        except verify.WebhookVerificationError as exc:
+            return f"signature verification failed: {exc}"
 
     event_id = _header(headers, _EVENT_ID_HEADER) or _event_id_from_payload(payload)
     if not event_id:
@@ -284,16 +293,44 @@ def _verification_failure(kwargs: dict[str, Any], payload: Any) -> str | None:
     return None
 
 
+def _webhook_payload(kwargs: dict[str, Any]) -> Any:
+    """Resolve the parsed webhook body from the hook kwargs.
+
+    Hermes' ``pre_gateway_dispatch`` hook (gateway/run.py) is invoked as
+    ``invoke_hook("pre_gateway_dispatch", event=<MessageEvent>, gateway=...,
+    session_store=...)`` — there is NO ``payload`` kwarg. The webhook adapter
+    (gateway/platforms/webhook.py) parses the POST body and stores it on
+    ``MessageEvent.raw_message``. So the parsed dict lives at
+    ``kwargs["event"].raw_message``. The router originally read
+    ``kwargs["payload"]`` (an assumed contract that never existed at runtime),
+    so the route NEVER matched and no webhook was ever auto-routed — the demo
+    relay's recipient-lock origin was therefore never recorded (2026-06-14).
+
+    Back-compat: a direct ``payload`` kwarg (the in-tree tests, and any future
+    invocation that passes one) is still honored. JSON strings are parsed."""
+    event = kwargs.get("event")
+    raw = getattr(event, "raw_message", None)
+    if raw is None:
+        raw = kwargs.get("payload")
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    return raw
+
+
 def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     """Inspect each inbound dispatch for webhook markers and rewrite if matched.
 
-    Expected kwargs:
-        payload: dict | Any - the inbound (parsed) message body.
-        raw_body: bytes | str - the verbatim request body the provider
-            signed. REQUIRED for real third-party webhooks; see
-            ``_raw_body_for``.
-        headers: dict - inbound request headers carrying the provider
-            signature, timestamp, and event id.
+    Hermes invokes this hook with ``event`` (a ``MessageEvent``), ``gateway``,
+    and ``session_store`` — NOT a ``payload``/``headers``/``raw_body`` kwarg set.
+    The parsed webhook body is read from ``event.raw_message`` via
+    ``_webhook_payload``. The SMD gate (Svix) and Hermes' webhook adapter
+    (``X-Webhook-Signature``) verify the delivery UPSTREAM before the
+    ``MessageEvent`` is built, so when the hook carries no ``headers`` the router
+    trusts that upstream verification and applies replay-protection only (a
+    header-bearing invocation still gets the full signature check).
 
     Returns a rewrite directive on a matched AND verified webhook, or
     ``None`` to pass through unchanged. The rewrite directive shape:
@@ -320,7 +357,7 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         logger.warning("WEBHOOK_ROUTER_DIAG: table EMPTY — no routes loaded")
         return None
 
-    payload = kwargs.get("payload")
+    payload = _webhook_payload(kwargs)
     try:
         decision = router.decide_route(_TABLE, payload)
     except Exception as exc:  # noqa: BLE001

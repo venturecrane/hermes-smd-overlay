@@ -601,6 +601,39 @@ def test_router_no_origin_without_message_block(tmp_path, monkeypatch) -> None:
     assert inbound.SESSION_INBOUND_ORIGIN.get("sess-nomsg") is None
 
 
+def test_router_routes_via_event_raw_message_no_headers(tmp_path, monkeypatch) -> None:
+    """Regression for THE 2026-06-14 demo-law root cause. Hermes invokes
+    pre_gateway_dispatch with ``event`` (a MessageEvent carrying the parsed body
+    on ``.raw_message``), NOT a ``payload``/``headers`` kwarg set. The router read
+    ``kwargs['payload']`` — always None — so the route NEVER matched and the
+    recipient-lock origin was never recorded; the demo relay then had nothing to
+    send. The real event-shaped, header-less (upstream-verified) invocation MUST
+    route AND record the origin (by address — session_id is absent at dispatch)."""
+    from types import SimpleNamespace
+
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+    payload = {
+        "source": "agentmail",
+        "event_type": "message.received",
+        "event_id": "evt-real-1",
+        "message": {
+            "inbox_id": "inbox_abc",
+            "message_id": "msg_real",
+            "from": "Greg Whitfield <greg@whitfield.example>",
+        },
+    }
+    event = SimpleNamespace(raw_message=payload, source=None, text="inbound")
+    result = mod.on_pre_gateway_dispatch(event=event, gateway=None, session_store=None)
+    # Routed — a rewrite directive is returned (no headers ⇒ trust upstream verify).
+    assert isinstance(result, dict)
+    assert result.get("skill") == "triage_inbox"
+    # Origin recorded and recoverable by the draft recipient (the relay's path).
+    rec = inbound.SESSION_INBOUND_ORIGIN.find_for_recipient({"greg@whitfield.example"})
+    assert rec is not None
+    assert rec.message_id == "msg_real"
+    assert rec.inbox_id == "inbox_abc"
+
+
 def test_module_imports_stable() -> None:
     """shared.inbound and the new plugin import cleanly."""
     assert "shared.inbound" in sys.modules or importlib.util.find_spec("shared.inbound")
