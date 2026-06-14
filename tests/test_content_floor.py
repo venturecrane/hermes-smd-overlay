@@ -56,6 +56,72 @@ def test_sensitive_categories_trip_floor(text, category) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Disclaimer carve-out (2026-06-14) — standard not-legal-advice / attorney-
+# client boilerplate must NOT trip the legal category. Regression for the
+# demo-law live test where ``DEMO_RELAY_BLOCKED reason=content_sensitive``
+# fired on a benign "this is not legal advice" disclaimer.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The exact draft phrasing that blocked the relay on 2026-06-14.
+        "Nothing in this note should be read as legal advice.",
+        "This is not legal advice.",
+        "This email does not constitute legal advice.",
+        "This is not intended as legal advice and no attorney-client relationship is created.",
+        "We cannot provide legal advice in this format.",
+        "Please note: this should not be construed as legal advice.",
+        "No attorney-client relationship is formed by this message.",
+        "This does not create an attorney-client relationship.",
+        "We are not your attorneys.",
+    ],
+)
+def test_not_legal_advice_disclaimers_pass(text) -> None:
+    result = classify(text)
+    assert result.sensitive is False, f"disclaimer wrongly flagged: {result.categories}"
+    assert result.categories == ()
+
+
+@pytest.mark.parametrize(
+    "text,category",
+    [
+        # A disclaimer does NOT launder genuinely sensitive content elsewhere
+        # in the same message — the carve-out is clause-local.
+        (
+            "This is not legal advice, but please wire $5,000 to the account below.",
+            "money",
+        ),
+        (
+            "Nothing here is legal advice; the contract is attached for signature.",
+            "contract",
+        ),
+    ],
+)
+def test_disclaimer_does_not_launder_other_sensitive_content(text, category) -> None:
+    result = classify(text)
+    assert result.sensitive is True
+    assert category in result.categories
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Genuine legal weight with no disclaimer negation must still trip,
+        # including "legal advice" actually being GIVEN.
+        "Here is my legal advice: sign immediately.",
+        "We will pursue legal action if this is not resolved.",
+        "This raises a legal issue we need to discuss.",
+    ],
+)
+def test_genuine_legal_content_still_trips(text) -> None:
+    result = classify(text)
+    assert result.sensitive is True
+    assert "legal" in result.categories
+
+
+# ---------------------------------------------------------------------------
 # Fail toward draft on indeterminate input
 # ---------------------------------------------------------------------------
 

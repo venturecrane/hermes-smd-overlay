@@ -129,6 +129,45 @@ _CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Disclaimer carve-out (2026-06-14). The standard UPL "this is not legal advice"
+# / "no attorney-client relationship" boilerplate is the SAFEST outbound
+# legal-domain language there is — a law-vertical operator's auto-reply should
+# always be able to carry it — yet it contains the words "legal" / "attorney"
+# that the LEGAL patterns above match, so a benign disclaimer was forcing the
+# whole reply to draft (demo-law live test 2026-06-14, ``DEMO_RELAY_BLOCKED
+# reason=content_sensitive`` on "Nothing in this note should be read as legal
+# advice").
+#
+# Fix: before scanning, blank out recognized disclaimer clauses, then run the
+# category patterns on the remainder. The carve-out is the OPPOSITE of weakening
+# the floor — it removes a false positive, not a real signal. It is deliberately
+# CLAUSE-LOCAL (``[^.?!\n]*?`` runs, non-greedy): a disclaimer can neutralize
+# only its own clause, so genuinely sensitive content elsewhere in the same
+# message (money, contract, scope, a real legal commitment) still trips. The
+# empty/indeterminate fail-toward-draft check in ``classify`` runs on the
+# ORIGINAL text, so a disclaimer-only body does not flip to "indeterminate".
+_DISCLAIMER_PATTERNS: tuple[str, ...] = (
+    # not-legal-advice family: a negation / hedge in the same clause as the
+    # phrase "legal advice". Covers "this is not legal advice", "nothing here
+    # should be read as legal advice", "does not constitute legal advice",
+    # "we cannot provide legal advice", "not intended as legal advice".
+    r"\b(?:no|not|nothing|never|neither|cannot|can't|won't|will not|do not|"
+    r"don't|does not|doesn't|should not|shouldn't|isn't|aren't)\b"
+    r"[^.?!\n]*?\blegal advice\b",
+    # hedge verbs introducing the phrase even without an explicit negation,
+    # e.g. "...construed / relied upon as legal advice".
+    r"\b(?:read|construed|taken|considered|interpreted|relied\s+(?:up)?on|"
+    r"treated|intended)\b[^.?!\n]*?\bas legal advice\b",
+    # attorney-client relationship disclaimers ("no attorney-client
+    # relationship is formed", "does not create an attorney-client privilege",
+    # "we are not your attorneys").
+    r"\bno attorney-client\b",
+    r"\b(?:not|does not|doesn't|do not|don't|without|no)\b[^.?!\n]*?"
+    r"\battorney-client (?:relationship|privilege)\b",
+    r"\bnot(?:\s+acting\s+as)?\s+your\s+attorneys?\b",
+)
+
+
 @dataclass(frozen=True)
 class ContentFloorResult:
     """Outcome of a content-sensitivity scan.
@@ -156,6 +195,26 @@ def _compiled() -> tuple[tuple[str, re.Pattern[str]], ...]:
     return tuple(out)
 
 
+@lru_cache(maxsize=1)
+def _disclaimer_compiled() -> tuple[re.Pattern[str], ...]:
+    """Compile the disclaimer carve-out patterns once. Immutable for process life."""
+    return tuple(re.compile(pat, re.IGNORECASE) for pat in _DISCLAIMER_PATTERNS)
+
+
+def _neutralize_disclaimers(text: str) -> str:
+    """Blank recognized UPL / not-legal-advice disclaimer clauses.
+
+    Replaces each matched disclaimer span with a single space so the category
+    scan never sees the "legal" / "attorney" inside standard boilerplate, while
+    leaving every other clause intact (the patterns are clause-local, so this
+    cannot mask an adjacent committing sentence). Pure; no I/O.
+    """
+    out = text
+    for pat in _disclaimer_compiled():
+        out = pat.sub(" ", out)
+    return out
+
+
 def classify(text: str | None) -> ContentFloorResult:
     """Classify outbound text against the content-sensitivity floor.
 
@@ -177,10 +236,16 @@ def classify(text: str | None) -> ContentFloorResult:
             hits=(),
         )
 
+    # Carve out standard not-legal-advice / attorney-client disclaimer clauses
+    # before scanning (see ``_DISCLAIMER_PATTERNS``). The empty check above
+    # intentionally runs on the ORIGINAL text, so a disclaimer-only body stays
+    # clear rather than flipping to "indeterminate".
+    scan_text = _neutralize_disclaimers(text)
+
     categories: set[str] = set()
     hits: set[str] = set()
     for category, pattern in _compiled():
-        for m in pattern.finditer(text):
+        for m in pattern.finditer(scan_text):
             matched = m.group(0).strip().lower()
             if matched:
                 categories.add(category)
