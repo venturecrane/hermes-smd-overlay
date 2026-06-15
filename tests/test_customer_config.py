@@ -297,3 +297,74 @@ def test_validate_rejects_memory_vectorize_index_mismatch(tmp_path):
     path = _write(tmp_path, bad)
     errors = validate_customer_yaml(path)
     assert any("vectorize_index" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Live-read config block accessors (ADR 0044)
+# ---------------------------------------------------------------------------
+
+
+_BLOCKS_YAML = VALID_YAML + dedent(
+    """\
+
+    escalation:
+      red_flag_recipients:
+        - team@acme.test
+      failure_recipients:
+        - ops@acme.test
+
+    google_auth:
+      mode: dwd
+      subject: agent@acme.test
+      scopes:
+        - https://www.googleapis.com/auth/gmail.modify
+
+    telegram:
+      enabled: true
+      allow_from:
+        - '7367659986'
+      require_mention: false
+    """
+)
+
+
+def test_escalation_accessor_reads_block(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, _BLOCKS_YAML)))
+    assert cfg.escalation == {
+        "red_flag_recipients": ["team@acme.test"],
+        "failure_recipients": ["ops@acme.test"],
+    }
+
+
+def test_memory_accessor_reads_block(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, VALID_YAML)))
+    assert cfg.memory["d1_namespace"] == "acme"
+    assert cfg.memory["r2_vault_path"] == "vaults/acme/"
+
+
+def test_google_auth_accessor_reads_block(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, _BLOCKS_YAML)))
+    assert cfg.google_auth["mode"] == "dwd"
+    assert cfg.google_auth["subject"] == "agent@acme.test"
+
+
+def test_telegram_accessor_reads_block(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, _BLOCKS_YAML)))
+    assert cfg.telegram["enabled"] is True
+    assert cfg.telegram["allow_from"] == ["7367659986"]
+
+
+def test_live_read_blocks_absent_default_to_empty(tmp_path):
+    # VALID_YAML carries memory but no escalation/google_auth/telegram —
+    # absent blocks must read {} (fail-soft), never raise.
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, VALID_YAML)))
+    assert cfg.escalation == {}
+    assert cfg.google_auth == {}
+    assert cfg.telegram == {}
+
+
+def test_live_read_block_non_mapping_raises(tmp_path):
+    bad = VALID_YAML + "\nescalation: not-a-mapping\n"
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, bad)))
+    with pytest.raises(CustomerConfigError):
+        _ = cfg.escalation
