@@ -422,9 +422,7 @@ def test_config_export_unknown_section_is_refused(tmp_path):
     p.write_text("customer_id: acme\n")
     # scope is a real block but NOT in the config_export allow-list — refused so
     # a blanket config dump (which would leak connector secrets) is impossible.
-    res = rr.read_runtime(
-        "config_export", db_path=None, section="scope", customer_yaml_path=str(p)
-    )
+    res = rr.read_runtime("config_export", db_path=None, section="scope", customer_yaml_path=str(p))
     assert res.get("error") == "unknown section"
     assert res["entries"] == []
 
