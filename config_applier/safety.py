@@ -40,6 +40,8 @@ import enum
 from collections.abc import Mapping
 from typing import Any
 
+from shared.action_classes import VERTICAL_FLOORS as _SHARED_VERTICAL_FLOORS
+
 # ---------------------------------------------------------------------------
 # Ceiling permissiveness ordering
 #
@@ -109,34 +111,37 @@ def classify_direction(old: object, new: object) -> Direction:
 
 
 # ---------------------------------------------------------------------------
-# Vertical-pack compliance floors (mirrors hermes-smd-trust/enforce.py)
+# Vertical-pack compliance floors — DERIVED from the shared source of truth
 #
 # A floor pins an action class to a ceiling that a customer's authored config
-# can only *narrow*, never raise. The live path must additionally reject any
-# diff that would raise an effective ceiling above its floor. Keyed by vertical
-# slug, matching ``_VERTICAL_FLOORS`` in enforce.py — the runtime realization of
-# each pack's declared ``compliance:`` floor.
+# can only *narrow*, never raise. The live applier must additionally reject any
+# diff that would raise an effective ceiling above its floor. The authoritative
+# map is ``shared.action_classes.VERTICAL_FLOORS`` (string-keyed) — the SAME map
+# ``hermes-smd-trust/enforce.py`` derives its runtime enum map from. Reading it
+# here (rather than hand-copying) means the apply-time floor check and the live
+# ceiling resolver can never disagree about which floors are in force; a new
+# floor added to the shared map is honored by both without a second edit
+# (derive-don't-duplicate, 2026-06-15 review of PR #81).
 #
 # law-firm / external-send-draft-floor → external_send pinned to
 #   draft_for_review (client-/tribunal-bound mail ships under a human reviewer's
 #   identity, ADR 0005). Non-raisable on the live path.
 # ---------------------------------------------------------------------------
 
-_VERTICAL_FLOORS: Mapping[str, Mapping[str, str]] = {
-    "law-firm": {"external_send": "draft_for_review"},
-}
-
 
 def vertical_floors(vertical: object) -> dict[str, str]:
     """Return the per-action-class compliance floors for a vertical slug.
 
-    Returns ``{}`` for verticals with no declared floor (e.g. ``mixed``). A
-    non-string / unknown vertical yields ``{}`` — there is no floor to enforce,
-    which is correct: a floor only ever *adds* a constraint.
+    Reads the shared source-of-truth map (``shared.action_classes.VERTICAL_FLOORS``)
+    so it tracks ``enforce.py`` automatically. Returns ``{}`` for verticals with
+    no declared floor (e.g. ``mixed``). A non-string / unknown vertical yields
+    ``{}`` — there is no floor to enforce, which is correct: a floor only ever
+    *adds* a constraint. Returns a fresh dict so callers cannot mutate the
+    shared source.
     """
     if not isinstance(vertical, str):
         return {}
-    floors = _VERTICAL_FLOORS.get(vertical.strip().lower())
+    floors = _SHARED_VERTICAL_FLOORS.get(vertical.strip().lower())
     return dict(floors) if floors else {}
 
 

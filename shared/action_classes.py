@@ -59,6 +59,36 @@ class ActionClass(str, enum.Enum):
 
 
 # ---------------------------------------------------------------------------
+# Vertical-pack safety floors (ADR 0022 / ADR 0037 Tenet 3) — SOURCE OF TRUTH
+#
+# A vertical pack declares non-raisable safety floors in its manifest
+# (``operator/verticals/<vertical>/vertical.yaml`` -> ``compliance:``). A floor
+# can only *narrow* a customer's authored ceiling, never raise it. The floor
+# SEMANTICS are encoded here keyed by vertical slug -> {action_class -> ceiling},
+# both as the closed-vocabulary STRINGS (the ``ActionClass`` values above and the
+# ADR 0035 ceiling strings ``refused`` / ``draft_for_review`` / ``autonomous``).
+#
+# This lives in ``shared/`` — the lowest layer both enforcement surfaces import
+# downward — so there is ONE definition:
+#   * ``hermes-smd-trust/enforce.py`` derives its enum-keyed runtime map from
+#     this (the live ``pre_tool_call`` ceiling resolver), and
+#   * ``config_applier/safety.py`` reads it directly (the apply-time floor check)
+#     so a config that widens past a floor is rejected before it is written.
+# A copy in either consumer would silently drift; this is the single source.
+#
+#   law-firm / ``external-send-draft-floor`` -> external_send pinned to
+#     draft_for_review: client-/tribunal-bound mail ships under a human
+#     reviewer's identity (ADR 0005), non-raisable. See
+#     ``operator/verticals/law-firm/{vertical.yaml,compliance-floor.md}``.
+# ---------------------------------------------------------------------------
+
+
+VERTICAL_FLOORS: dict[str, dict[str, str]] = {
+    "law-firm": {ActionClass.EXTERNAL_SEND.value: "draft_for_review"},
+}
+
+
+# ---------------------------------------------------------------------------
 # Banned tools — Pattern A / Pattern B forbidden capabilities
 #
 # A tool name in this set NEVER reaches trust-ceiling enforcement. The
@@ -395,6 +425,7 @@ __all__ = [
     "BANNED_TOOLS",
     "BannedToolError",
     "TOOL_ACTION_CLASS_MAP",
+    "VERTICAL_FLOORS",
     "ToolClassification",
     "classify_tool",
 ]

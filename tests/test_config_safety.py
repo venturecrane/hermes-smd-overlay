@@ -320,3 +320,38 @@ def test_safety_public_surface():
         "non_live_writable_changes",
     ):
         assert hasattr(safety, name)
+
+
+# ---------------------------------------------------------------------------
+# Derive-don't-duplicate: the apply-time floor map MUST track enforce.py
+#
+# Both surfaces derive from the single source ``shared.action_classes.
+# VERTICAL_FLOORS``. These tests pin that contract so a floor added to the shared
+# map (or to enforce.py's runtime realization) can never silently diverge from
+# the apply-time gate. Reviewed concern, overlay PR #81 (2026-06-15).
+# ---------------------------------------------------------------------------
+
+
+def test_vertical_floors_reads_shared_source_of_truth():
+    from shared.action_classes import VERTICAL_FLOORS
+
+    # safety.vertical_floors() must return exactly what the shared map declares
+    # for every vertical it knows, by string key.
+    for vertical, floors in VERTICAL_FLOORS.items():
+        assert vertical_floors(vertical) == dict(floors)
+
+
+def test_apply_floor_map_matches_enforce_runtime_map():
+    # enforce.py builds an enum-keyed runtime map from the same shared source;
+    # convert it back to strings and assert byte-for-byte agreement with the
+    # apply-time string map for law-firm. A hand-copy in either place would fail
+    # this the moment the two drifted.
+    from tests.conftest import load_plugin
+
+    enforce = load_plugin("hermes-smd-trust").enforce
+    enforce_law = {
+        ac.value: ceiling.value for ac, ceiling in enforce._VERTICAL_FLOORS["law-firm"].items()
+    }
+    assert vertical_floors("law-firm") == enforce_law
+    # And the concrete contract value the law-firm pack pins.
+    assert vertical_floors("law-firm") == {"external_send": "draft_for_review"}
