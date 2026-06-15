@@ -59,9 +59,17 @@ _REAL_KINDS: frozenset[str] = frozenset({"audit_log", "audit_export", "memory_ex
 # memory_export table allow-list → which DB path argument serves it. The
 # ADR-0016 mirror tables live on the observations binding; the skills
 # inventory lives on the agent-state binding (audit-binding fallback mirrors
-# the audit plugin's own fallback).
+# the audit plugin's own fallback); voice_corrections (migration 0010) lives on
+# the main per-customer D1 (hermes-<slug>-d1 == the audit/main binding), where
+# every numbered migration applies — the legible relationship surface reads it
+# (ADR 0048).
 MEMORY_EXPORT_TABLES: frozenset[str] = frozenset(
-    {"persona_observations", "persona_observations_archive", "agent_skills_inventory"}
+    {
+        "persona_observations",
+        "persona_observations_archive",
+        "agent_skills_inventory",
+        "voice_corrections",
+    }
 )
 
 # audit_log columns, in canonical schema order, for the export kind. Must stay
@@ -186,7 +194,14 @@ def read_runtime(
             # Unknown table is a caller error, not a degraded read — refuse
             # rather than guessing (the gate maps this to a 400).
             return {"entries": [], "cursor": None, "error": "unknown table"}
-        target = agent_state_db_path if table == "agent_skills_inventory" else observations_db_path
+        if table == "agent_skills_inventory":
+            target = agent_state_db_path
+        elif table == "voice_corrections":
+            # migration 0010 applies to the main per-customer D1 (the audit/main
+            # binding), not the observations DB (ADR 0048).
+            target = db_path
+        else:
+            target = observations_db_path
         if not target or not os.path.exists(target):
             return {"entries": [], "cursor": None}
         return _read_table_export(target, table, cursor, clamp_limit(limit))

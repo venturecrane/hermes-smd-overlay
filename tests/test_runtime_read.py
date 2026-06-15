@@ -321,6 +321,33 @@ def test_memory_export_skills_table_routes_to_agent_state_db(tmp_path):
     assert res["entries"][0]["skill_name"] == "follow-up-cadence"
 
 
+def test_memory_export_voice_corrections_routes_to_main_db(tmp_path):
+    # voice_corrections (migration 0010) lives on the MAIN per-customer D1, which
+    # the gate passes as db_path (the audit/main binding) — not the observations
+    # DB. The legible relationship surface reads it this way (ADR 0048).
+    main = tmp_path / "customer.db"
+    conn = sqlite3.connect(main)
+    conn.execute(
+        "CREATE TABLE voice_corrections (id TEXT, correction_kind TEXT, "
+        "before_pattern TEXT, after_text TEXT, source TEXT, superseded_by TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO voice_corrections VALUES "
+        "('vc1', 'signoff', 'Sincerely,', 'Best,', 'live_edit', NULL)"
+    )
+    conn.commit()
+    conn.close()
+    res = rr.read_runtime(
+        "memory_export",
+        db_path=str(main),
+        table="voice_corrections",
+        observations_db_path=None,  # must NOT be served from the observations DB
+        agent_state_db_path=None,
+    )
+    assert res["entries"][0]["correction_kind"] == "signoff"
+    assert res["entries"][0]["after_text"] == "Best,"
+
+
 def test_memory_export_absent_db_or_table_is_honest_empty(tmp_path):
     res = rr.read_runtime(
         "memory_export",
