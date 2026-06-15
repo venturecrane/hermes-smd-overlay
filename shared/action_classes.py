@@ -87,6 +87,15 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         "payments_refund",
         "payments_authorize_charge",
         "payments_void_authorization",
+        # Smokeball trust-account writes — IOLTA fund movement. The law wedge is
+        # trust-funds-read-only (vertical floor); these are a HARD BAN, never a
+        # configurable ceiling. Runtime names are mcp_smokeball_<tool> (server key
+        # "smokeball"). Without these explicit bans they would hit the unmapped
+        # READ fallback and slip every ceiling — the Risk-3 footgun the threat
+        # model named.
+        "mcp_smokeball_create_transaction",
+        "mcp_smokeball_protect_funds",
+        "mcp_smokeball_unprotect_funds",
         # Calendar / matter destructive — irreversible state changes.
         "calendar_delete_event",
         "practice_management_delete_matter",
@@ -138,6 +147,9 @@ BANNED_REASON: Mapping[str, str] = MappingProxyType(
         "practice_management_close_matter_permanent": "banned_tool_destructive",
         "connector_revoke_oauth": "banned_tool_destructive",
         "connector_unbind_permanent": "banned_tool_destructive",
+        "mcp_smokeball_create_transaction": "banned_tool_destructive",
+        "mcp_smokeball_protect_funds": "banned_tool_destructive",
+        "mcp_smokeball_unprotect_funds": "banned_tool_destructive",
         # agentmail sends are NOT banned (ADR 0025) — see the note in
         # BANNED_TOOLS above. They are EXTERNAL_SEND, ceiling-governed.
     }
@@ -244,6 +256,52 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "practice_management_create_task_draft": ActionClass.INTERNAL_WRITE,
     "practice_management_update_matter_field": ActionClass.INTERNAL_WRITE,
     "practice_management_open_matter_draft": ActionClass.COMMITMENT,
+    # ----------------------------------------------------------------------
+    # Smokeball MCP — the law wedge's system of record. Server key "smokeball",
+    # so Hermes registers every tool as mcp_smokeball_<tool>. Native surface from
+    # operator/verticals/law-firm/smokeball-surface.md. Reads → READ; the one
+    # wedge write is create_memo (INTERNAL_WRITE); create_matter is COMMITMENT
+    # (never autonomous — gated draft); contact/task/file writes INTERNAL_WRITE;
+    # file delete DESTRUCTIVE. Trust-account writes (create_transaction /
+    # protect_funds / unprotect_funds) are NOT here — they are hard-BANNED above.
+    # Every Smokeball tool the server exposes MUST appear here or in BANNED_TOOLS;
+    # an omission hits the unmapped READ fallback and slips the ceiling.
+    "mcp_smokeball_auth_status": ActionClass.READ,
+    "mcp_smokeball_list_matters": ActionClass.READ,
+    "mcp_smokeball_get_matter": ActionClass.READ,
+    "mcp_smokeball_list_matter_types": ActionClass.READ,
+    "mcp_smokeball_get_stage_sets": ActionClass.READ,
+    "mcp_smokeball_get_stage_to_matter_mappings": ActionClass.READ,
+    "mcp_smokeball_get_contacts": ActionClass.READ,
+    "mcp_smokeball_get_contact": ActionClass.READ,
+    "mcp_smokeball_get_contact_relations": ActionClass.READ,
+    "mcp_smokeball_list_tasks": ActionClass.READ,
+    "mcp_smokeball_get_task": ActionClass.READ,
+    "mcp_smokeball_search_staff": ActionClass.READ,
+    "mcp_smokeball_get_staff": ActionClass.READ,
+    "mcp_smokeball_get_roles_on_matter": ActionClass.READ,
+    "mcp_smokeball_get_relationships_on_matter": ActionClass.READ,
+    "mcp_smokeball_get_files_on_matter": ActionClass.READ,
+    "mcp_smokeball_get_file": ActionClass.READ,
+    "mcp_smokeball_get_download_url": ActionClass.READ,
+    "mcp_smokeball_get_memos_on_matter": ActionClass.READ,
+    "mcp_smokeball_get_bank_accounts": ActionClass.READ,
+    "mcp_smokeball_get_matter_balances": ActionClass.READ,
+    "mcp_smokeball_get_matter_billing_config": ActionClass.READ,
+    "mcp_smokeball_get_fees": ActionClass.READ,
+    "mcp_smokeball_get_expenses": ActionClass.READ,
+    "mcp_smokeball_get_webhook_subscriptions": ActionClass.READ,
+    "mcp_smokeball_get_event_types": ActionClass.READ,
+    "mcp_smokeball_create_memo": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_patch_matter": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_create_contact": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_create_task": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_update_task": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_add_file": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_get_upload_url": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_create_matter": ActionClass.COMMITMENT,
+    "mcp_smokeball_delete_file": ActionClass.DESTRUCTIVE,
     # Memory — read-only via this registry.
     "memory_search": ActionClass.READ,
     "memory_get_rule": ActionClass.READ,
