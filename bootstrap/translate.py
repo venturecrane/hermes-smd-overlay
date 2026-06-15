@@ -562,6 +562,10 @@ def _persona_config(
         # No memory-provider block: Phase 1 runs on Hermes' always-on
         # flat-file core (MEMORY.md / USER.md). Honcho (inferred memory)
         # is deferred to Phase 2 — see the module docstring and ADR 0016.
+        # Authored behavioral lane (ADR 0048). Customer-level (same for every
+        # persona); also rendered into SOUL.md by _soul_body so the agent acts
+        # on it. Informational only — never an entitlement (enforced elsewhere).
+        "relationship": customer.get("relationship") or {},
     }
 
     # Materialize `mcp:` connector backends into the Hermes-native
@@ -615,7 +619,61 @@ def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
         f"{vertical}\n\n"
         f"## Tone\n\n"
         f"{tone_block}\n"
+        f"{_relationship_soul_section(customer)}"
     )
+
+
+def _relationship_soul_section(customer: dict[str, Any]) -> str:
+    """Render the ``## Working relationships`` SOUL.md section (ADR 0048).
+
+    Authored per-person working preferences so the Operator works the way each
+    person likes from day one. Returns ``""`` when no people are authored, so a
+    customer without a ``relationship:`` block produces a byte-identical SOUL.md
+    (the idempotency contract _write_if_changed relies on).
+
+    These are PREFERENCES, not PERMISSIONS — the rendered guidance is explicit
+    that honoring them never changes what the agent is allowed to do (ADR 0048
+    §2c; entitlements are enforced by trust_ceiling regardless of this text).
+    Only the closed-set fields are rendered; malformed entries are skipped.
+    """
+    relationship = customer.get("relationship") or {}
+    if not isinstance(relationship, dict):
+        return ""
+    people = relationship.get("people")
+    if not isinstance(people, list):
+        return ""
+
+    blocks: list[str] = []
+    for person in people:
+        if not isinstance(person, dict):
+            continue
+        name = person.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        role = person.get("role")
+        heading = f"### {name}"
+        if isinstance(role, str) and role:
+            heading += f" — {role}"
+        lines = [heading]
+        prefers = [s for s in (person.get("prefers") or []) if isinstance(s, str) and s]
+        avoid = [s for s in (person.get("avoid") or []) if isinstance(s, str) and s]
+        if prefers:
+            lines.append("Prefers:")
+            lines.extend(f"- {s}" for s in prefers)
+        if avoid:
+            lines.append("Avoid:")
+            lines.extend(f"- {s}" for s in avoid)
+        blocks.append("\n".join(lines))
+
+    if not blocks:
+        return ""
+
+    intro = (
+        "You work with specific people here. Honor how each likes to be worked "
+        "with. These are preferences, not permissions — they never change what "
+        "you are allowed to do."
+    )
+    return "\n## Working relationships\n\n" + intro + "\n\n" + "\n\n".join(blocks) + "\n"
 
 
 def _write_if_changed(target: Path, content: bytes) -> bool:
