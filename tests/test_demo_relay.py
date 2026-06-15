@@ -57,13 +57,18 @@ def _clear_origin():
 
 
 @pytest.fixture
-def relay_mod(monkeypatch):
-    """Load the plugin and put it in the ENABLED demo state with fakes.
+def relay_mod(monkeypatch, tmp_path):
+    """Load the plugin and put it in the infra-ready + authored demo state.
 
-    A fake D1 records audit rows; ``send_reply`` is replaced (via monkeypatch so
-    it auto-restores — ``load_plugin`` returns the process-cached module) with a
-    capturing stub so no network call happens. Tests that want the disabled path
-    flip ``mod._ENABLED`` themselves.
+    Infra readiness (``_INFRA_READY`` + key + limiter + audit) is register-time
+    state, monkeypatched directly. Authorization is read LIVE per call (ADR 0044
+    WS2), so the relay is enabled by pointing ``_YAML_PATH`` at a customer.yaml
+    that authors ``demo.reply_relay: enabled`` (and ``vertical: law-firm``, which
+    drives the content floor). Tests that want the disabled path rewrite that
+    file to drop the flag, proving the live-read disables mid-flight with no
+    restart. ``send_reply`` is replaced (via monkeypatch so it auto-restores —
+    ``load_plugin`` returns the process-cached module) with a capturing stub so
+    no network call happens.
     """
     mod = load_plugin("hermes-smd-demo-relay")
     fake_d1 = _FakeD1Client()
@@ -81,13 +86,17 @@ def relay_mod(monkeypatch):
         )
         return "msg_sent_1"
 
-    monkeypatch.setattr(mod, "_ENABLED", True, raising=False)
-    monkeypatch.setattr(mod, "_VERTICAL", "law-firm", raising=False)
-    monkeypatch.setattr(mod, "_COHORT", "demo-law", raising=False)
+    yaml_path = tmp_path / "customer.yaml"
+    yaml_path.write_text(
+        "customer_id: demo-law\nvertical: law-firm\ndemo:\n  reply_relay: enabled\n"
+    )
+
+    monkeypatch.setattr(mod, "_INFRA_READY", True, raising=False)
     monkeypatch.setattr(mod, "_API_KEY", "test-key", raising=False)
     monkeypatch.setattr(mod, "_CUSTOMER_SLUG", "demo-law", raising=False)
     monkeypatch.setattr(mod, "_D1_CLIENT", fake_d1, raising=False)
     monkeypatch.setattr(mod, "_LIMITER", mod.relay.RateLimiter(), raising=False)
+    monkeypatch.setattr(mod, "_YAML_PATH", yaml_path, raising=False)
     monkeypatch.setattr(mod.relay, "send_reply", _fake_send)
     return mod, fake_d1, sent
 
@@ -283,7 +292,10 @@ def test_missing_inbox_id_does_not_send(relay_mod) -> None:
 
 def test_disabled_flag_never_sends(relay_mod) -> None:
     mod, d1, sent = relay_mod
-    mod._ENABLED = False  # real customer: demo.reply_relay unauthored
+    # Real customer: demo.reply_relay unauthored. The flag is read LIVE, so
+    # rewriting the authored customer.yaml to drop it disables the relay on the
+    # very next call — no restart, no re-register (ADR 0044 WS2).
+    mod._YAML_PATH.write_text("customer_id: demo-law\nvertical: law-firm\n")
     _record_origin(sender="greg@whitfield.example")
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
@@ -292,6 +304,45 @@ def test_disabled_flag_never_sends(relay_mod) -> None:
     )
     assert sent == []
     assert d1.events() == []  # not even an audit row — byte-for-byte unaffected
+
+
+def test_live_flag_enables_mid_flight(relay_mod) -> None:
+    """The positive WS2 guarantee: authoring demo.reply_relay ON applies on the
+    next call with no restart. Start with it OFF (no send), flip the authored
+    customer.yaml ON, and the very next identical call relays."""
+    mod, _d1, sent = relay_mod
+    mod._YAML_PATH.write_text("customer_id: demo-law\nvertical: law-firm\n")  # off
+    _record_origin(sender="greg@whitfield.example", message_id="msg_in", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="s1",
+    )
+    assert sent == []
+    # Author it ON — no re-register, no restart.
+    mod._YAML_PATH.write_text(
+        "customer_id: demo-law\nvertical: law-firm\ndemo:\n  reply_relay: enabled\n"
+    )
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+
+
+def test_unreadable_yaml_fails_closed(relay_mod) -> None:
+    """If customer.yaml is missing/unreadable at decision time, the relay cannot
+    confirm it is authored, so it fails closed and never sends."""
+    mod, _d1, sent = relay_mod
+    mod._YAML_PATH.unlink()  # remove the authored file out from under the live read
+    _record_origin(sender="greg@whitfield.example")
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="s1",
+    )
+    assert sent == []
 
 
 def test_non_create_draft_tool_ignored(relay_mod) -> None:

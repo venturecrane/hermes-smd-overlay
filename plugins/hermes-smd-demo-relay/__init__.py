@@ -15,9 +15,11 @@ DRAFTS the reply — exactly the safe behavior — but cannot autonomously send 
 This relay sends that already-governed draft back to the verified inbound
 sender, OUTSIDE the model's governed tool path, with fixed demo-scoped behavior:
 
-  1. **Fail-closed flag.** Acts only when the customer authored
-     ``demo.reply_relay: enabled``. Read once at register time; absent ⇒ the
-     hook no-ops for every tool call. A real customer can never be regressed.
+  1. **Fail-closed flag, read live.** Acts only when the customer authored
+     ``demo.reply_relay: enabled``, re-read from customer.yaml on every call
+     (ADR 0044 WS2) so authoring it on/off takes effect on the next draft with
+     no restart. Absent / unreadable ⇒ the hook no-ops. A real customer can
+     never be regressed: the flag is checked live and they never author it.
   2. **Recipient-lock.** Sends only to the recorded inbound sender
      (``SESSION_INBOUND_ORIGIN``, first-inbound-wins), keyed on the recorded
      inbox + message id — an injected/substituted recipient cannot redirect it.
@@ -70,16 +72,20 @@ _CREATE_DRAFT_TOOLS = frozenset({"mcp_agentmail_create_draft", "agentmail:create
 _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
 
 
-# Module-level state — populated by ``register()``. Hook callbacks are fast
-# paths that never re-read disk. ``_ENABLED`` is the fail-closed master switch:
-# False ⇒ the hook returns immediately for every tool call.
-_ENABLED: bool = False
-_VERTICAL: str = ""
-_COHORT: str | None = None
+# Module-level state — populated by ``register()``. ``_INFRA_READY`` is the
+# register-time gate: True only when the relay CAN send (AgentMail key resolved
+# and the rate-limiter built). It does NOT mean the relay is authorized — that
+# is the live ``demo.reply_relay`` flag, re-read from customer.yaml on every
+# call (ADR 0044 WS2). Splitting "can send" (infra, register-bound: env secrets
+# + process objects that only change on a restart) from "should send" (flag,
+# live) is what lets authoring the flag on/off take effect without a restart
+# while keeping the send credential off the hot path.
+_INFRA_READY: bool = False
 _API_KEY: str | None = None
 _CUSTOMER_SLUG: str | None = None
 _D1_CLIENT: Any | None = None
 _LIMITER: relay.RateLimiter | None = None
+_YAML_PATH: Path = Path(_DEFAULT_CUSTOMER_YAML_PATH)
 
 
 def _emit_relay_event(*, action_type: str, metadata: dict) -> None:
@@ -120,11 +126,29 @@ def on_post_tool_call(**kwargs: Any) -> None:
     already created); the relay performs an out-of-band send and never alters
     the tool result. Exception-safe: any failure is logged and swallowed.
     """
-    if not _ENABLED:
+    if not _INFRA_READY:
         return
     try:
         if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
             return
+
+        # Authorization is read LIVE (ADR 0044 WS2): demo.reply_relay can be
+        # authored on/off without a restart, so the relay re-reads it here and
+        # acts only if the customer currently authors it. Fail closed if
+        # customer.yaml is unreadable — a relay that cannot confirm it is
+        # authored never sends.
+        try:
+            cfg = CustomerConfig.from_volume(str(_YAML_PATH))
+        except (CustomerConfigError, OSError) as exc:
+            logger.warning(
+                "hermes-smd-demo-relay: customer.yaml live-read failed (%s); "
+                "not relaying this call",
+                exc,
+            )
+            return
+        if not cfg.demo_reply_relay_enabled:
+            return
+        vertical = cfg.vertical or None
 
         session_id = kwargs.get("session_id") or ""
         args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
@@ -169,7 +193,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
         scan_text, send_text, send_html = relay.draft_body(args)
 
         # (c) Re-apply the content + fabrication floors to the draft body.
-        gate = relay.gate_body(scan_text, vertical=_VERTICAL, cohort=_COHORT)
+        gate = relay.gate_body(scan_text, vertical=vertical, cohort=_CUSTOMER_SLUG)
         if not gate.allowed:
             _blocked(gate.reason, origin, categories=list(gate.categories))
             return
@@ -224,41 +248,31 @@ def on_post_tool_call(**kwargs: Any) -> None:
 def register(ctx) -> None:
     """Plugin entry point. Wires ``post_tool_call``.
 
-    Reads ``demo.reply_relay`` (fail-closed master switch), the vertical, and
-    the customer slug from customer.yaml at register time, plus the AgentMail
-    API key + D1 audit binding from the environment. The hook is registered
-    UNCONDITIONALLY (so the plugin set is uniform across customers) but no-ops
-    when the flag is off or required config is missing — the relay never acts
-    for a customer that did not author it.
+    Resolves the send infrastructure at register time — the AgentMail API key,
+    the customer slug, the audit binding, the rate-limiter — and sets
+    ``_INFRA_READY`` accordingly. The ``demo.reply_relay`` authorization flag is
+    deliberately NOT bound here: it is re-read from customer.yaml on every call
+    (``on_post_tool_call``) so authoring it on/off takes effect on the next
+    draft with no restart (ADR 0044 WS2). The hook is registered unconditionally
+    so the plugin set is uniform across customers; it no-ops whenever the relay
+    is not infra-ready or the live flag is off.
     """
-    global _ENABLED, _VERTICAL, _COHORT, _API_KEY, _CUSTOMER_SLUG, _D1_CLIENT, _LIMITER
+    global _INFRA_READY, _API_KEY, _CUSTOMER_SLUG, _D1_CLIENT, _LIMITER, _YAML_PATH
 
-    _ENABLED = False  # fail closed until everything resolves
+    _INFRA_READY = False  # fail closed until the send infra resolves
+    _YAML_PATH = Path(os.environ.get("SMD_CUSTOMER_YAML_PATH") or _DEFAULT_CUSTOMER_YAML_PATH)
 
-    yaml_path = Path(os.environ.get("SMD_CUSTOMER_YAML_PATH") or _DEFAULT_CUSTOMER_YAML_PATH)
-    try:
-        cfg = CustomerConfig.from_volume(str(yaml_path))
-        enabled = cfg.demo_reply_relay_enabled
-        _VERTICAL = cfg.vertical
-        _COHORT = cfg.slug
-    except (CustomerConfigError, OSError) as exc:
-        logger.info("hermes-smd-demo-relay: customer.yaml unreadable (%s); relay disabled", exc)
-        ctx.register_hook("post_tool_call", on_post_tool_call)
-        return
-
-    if not enabled:
-        logger.info("hermes-smd-demo-relay: demo.reply_relay not authored; relay disabled")
-        ctx.register_hook("post_tool_call", on_post_tool_call)
-        return
-
-    # Flag is on — resolve the send credential + audit binding. Any missing
-    # piece leaves the relay disabled (fail closed) but still registered.
+    # Resolve the send credential UNCONDITIONALLY — do not gate it on the flag.
+    # Because the flag is now read live, the relay must be ready to act the
+    # instant a customer authors demo.reply_relay on, with no reprovision. A
+    # customer without the AgentMail key simply never becomes infra-ready and
+    # never relays (the live flag is moot without a credential to send with).
     try:
         _API_KEY = get_secret("AGENTMAIL_API_KEY")
     except KeyError:
-        logger.warning(
-            "hermes-smd-demo-relay: demo.reply_relay enabled but AGENTMAIL_API_KEY "
-            "is unset; relay disabled (cannot send)"
+        logger.info(
+            "hermes-smd-demo-relay: AGENTMAIL_API_KEY unset; relay cannot send "
+            "(infra not ready). Hook registered; it no-ops every call."
         )
         ctx.register_hook("post_tool_call", on_post_tool_call)
         return
@@ -273,7 +287,7 @@ def register(ctx) -> None:
     except KeyError as exc:
         # Audit is observability, not a gate — the relay can still send. Run
         # without it rather than disabling a working demo for a missing binding.
-        _CUSTOMER_SLUG = _CUSTOMER_SLUG or None
+        _CUSTOMER_SLUG = None
         _D1_CLIENT = None
         logger.warning(
             "hermes-smd-demo-relay: audit binding unconfigured (%s); relay will "
@@ -282,10 +296,10 @@ def register(ctx) -> None:
         )
 
     _LIMITER = relay.RateLimiter()
-    _ENABLED = True
+    _INFRA_READY = True
     ctx.register_hook("post_tool_call", on_post_tool_call)
     logger.info(
-        "hermes-smd-demo-relay registered + ENABLED (customer=%s, vertical=%s)",
+        "hermes-smd-demo-relay registered (infra_ready=True, customer=%s); "
+        "relay gated on the live demo.reply_relay flag",
         _CUSTOMER_SLUG,
-        _VERTICAL,
     )

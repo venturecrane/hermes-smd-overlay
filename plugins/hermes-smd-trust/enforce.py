@@ -67,6 +67,9 @@ from shared.action_classes import (
     ToolClassification,
     classify_tool,
 )
+from shared.action_classes import (
+    VERTICAL_FLOORS as _SHARED_VERTICAL_FLOORS,
+)
 from shared.customer_config import CustomerConfigMissingError
 from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
 
@@ -627,11 +630,15 @@ def _resolve_action_ceilings(args: dict | None) -> dict[ActionClass, Ceiling]:
 # A vertical pack declares non-raisable safety floors in its manifest
 # (``operator/verticals/<vertical>/vertical.yaml`` -> ``compliance:``). A floor
 # can only *narrow* a customer's authored ceiling, never raise it
-# (``resolve_ceiling``). The floor SEMANTICS are encoded here keyed by vertical
-# slug: each pack-declared compliance slug maps to the action-class ceiling it
-# pins. The pack's slug list is the source of truth; this registry is its
-# runtime realization — the Machine reads the customer's ``vertical`` field
+# (``resolve_ceiling``). The Machine reads the customer's ``vertical`` field
 # (cheap, always present), not the full pack manifest.
+#
+# DERIVED, NOT DUPLICATED: the source of truth is the string-keyed
+# ``shared.action_classes.VERTICAL_FLOORS``, which ``config_applier.safety`` also
+# consumes for the apply-time floor check. This module builds the enum-keyed
+# runtime map from it so the live ceiling resolver and the apply-time gate can
+# never disagree about which floors are in force (a hand-copy here drifted from
+# the applier on any new floor — 2026-06-15 review of overlay PR #81).
 #
 #   law-firm / ``external-send-draft-floor`` -> EXTERNAL_SEND pinned to
 #     draft_for_review: client- and tribunal-bound mail ships under a human
@@ -640,11 +647,24 @@ def _resolve_action_ceilings(args: dict | None) -> dict[ActionClass, Ceiling]:
 # ---------------------------------------------------------------------------
 
 
-_VERTICAL_FLOORS: Mapping[str, Mapping[ActionClass, Ceiling]] = MappingProxyType(
-    {
-        "law-firm": MappingProxyType({ActionClass.EXTERNAL_SEND: Ceiling.DRAFT_FOR_REVIEW}),
-    }
-)
+def _derive_vertical_floors() -> Mapping[str, Mapping[ActionClass, Ceiling]]:
+    """Build the enum-keyed runtime floor map from the shared string source.
+
+    Converts each ``{vertical: {action_class_str: ceiling_str}}`` entry in
+    ``shared.action_classes.VERTICAL_FLOORS`` into the ``ActionClass`` / ``Ceiling``
+    enums this module enforces with. A malformed entry (unknown action class or
+    ceiling string) raises at import — a floor that cannot be enforced is a
+    fail-closed boot error, never silently dropped.
+    """
+    out: dict[str, Mapping[ActionClass, Ceiling]] = {}
+    for vertical, floors in _SHARED_VERTICAL_FLOORS.items():
+        out[vertical] = MappingProxyType(
+            {ActionClass(ac): Ceiling(ceiling) for ac, ceiling in floors.items()}
+        )
+    return MappingProxyType(out)
+
+
+_VERTICAL_FLOORS: Mapping[str, Mapping[ActionClass, Ceiling]] = _derive_vertical_floors()
 
 
 def _resolve_vertical() -> str:

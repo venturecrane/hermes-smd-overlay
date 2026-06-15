@@ -268,6 +268,70 @@ class CustomerConfig:
         return False
 
     # ------------------------------------------------------------------
+    # Live-read config blocks (ADR 0044 — read fresh per use, no restart)
+    # ------------------------------------------------------------------
+
+    @property
+    def escalation(self) -> dict[str, Any]:
+        """Return the ``escalation`` mapping (red-flag / failure recipients).
+
+        Read live so that changing who an operator escalates to applies on the
+        next action without a restart (ADR 0044). Skills that escalate should
+        read this via ``from_volume().escalation`` at decision time rather than
+        binding recipients at register/boot. Absent ⇒ ``{}``.
+        """
+        raw = self._data.get("escalation") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: escalation must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    @property
+    def memory(self) -> dict[str, Any]:
+        """Return the ``memory`` mapping (d1_namespace, r2_vault_path, index).
+
+        Memory bindings are structural (rebuild-class, ADR 0044) — this accessor
+        exists so the broker/console can read the authored values, not so they
+        can be hot-swapped. Absent ⇒ ``{}``.
+        """
+        raw = self._data.get("memory") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: memory must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    @property
+    def google_auth(self) -> dict[str, Any]:
+        """Return the ``google_auth`` mapping (mode, subject, scopes, managed mailboxes).
+
+        Exposed so the broker can live-check authored managed-mailbox / send-as
+        allowlists. Absent ⇒ ``{}``.
+        """
+        raw = self._data.get("google_auth") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: google_auth must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    @property
+    def telegram(self) -> dict[str, Any]:
+        """Return the ``telegram`` mapping (enabled, allow_from, require_mention).
+
+        The numeric allow-list lives behind a Hermes-core platform binding that
+        loads at gateway start; this accessor exposes the authored values for
+        the broker/console. Absent ⇒ ``{}``.
+        """
+        raw = self._data.get("telegram") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: telegram must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    # ------------------------------------------------------------------
     # Relationship — authored behavioral lane (ADR 0048)
     # ------------------------------------------------------------------
 

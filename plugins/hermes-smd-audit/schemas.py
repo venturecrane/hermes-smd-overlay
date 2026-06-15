@@ -149,6 +149,14 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         # metadata — never the content itself. Canonical type added ss-console-
         # side by PR-B; mirrored here so the overlay's AuditLogWriter accepts it.
         "INBOUND_RECEIVED",
+        # Live config apply written to the volume by the root-owned config
+        # applier (ADR 0044 WS3 — config_applier.apply). One row per applied
+        # customer.yaml; the customer slug, new config-epoch, and changed-path
+        # list/count land in metadata, with input/output digests carrying the
+        # old/new config provenance — never the config CONTENT (it can carry
+        # token_ref / secret material). If a parallel ss-console action-type
+        # registry also gates this, add CONFIG_WRITE there too.
+        "CONFIG_WRITE",
     }
 )
 

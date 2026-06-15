@@ -8,11 +8,12 @@ Attaches to one hook at the pinned Hermes ref (v2026.5.16):
   return value can rewrite the dispatch.
 
 ADR 0021 Stream E. The router reads
-``customer.yaml.webhook_triggers[]`` at register time and builds an
-in-memory ``(source, event_type)`` -> skill mapping. On each fire,
-the inbound payload is inspected for webhook markers; matches are
-rewritten to invoke the configured skill, non-matches pass through
-unchanged.
+``customer.yaml.webhook_triggers[]`` live on each dispatch (ADR 0044
+WS2) and builds the ``(source, event_type)`` -> skill mapping fresh,
+so editing the triggers takes effect on the next inbound webhook with
+no restart. The inbound payload is inspected for webhook markers;
+matches are rewritten to invoke the configured skill, non-matches
+pass through unchanged.
 
 Per ADR 0016 mirror-don't-gate: a successful route emits one
 ``WEBHOOK_ROUTED`` audit row directly via the shared D1Client. The
@@ -50,9 +51,18 @@ from . import router, verify  # noqa: F401 - surface for tests
 logger = logging.getLogger(__name__)
 
 
-# Module-level state - populated by ``register()``. Hook callbacks are
-# fast paths that never re-read disk.
-_TABLE: router.RoutingTable = router.RoutingTable.empty()
+# Default path; overridden at register time from SMD_CUSTOMER_YAML_PATH.
+_DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
+
+# Module-level state - populated by ``register()``.
+#
+# The routing table is NOT cached here: ``on_pre_gateway_dispatch`` rebuilds it
+# live from customer.yaml on every dispatch (ADR 0044 WS2) so editing
+# ``webhook_triggers`` takes effect on the next inbound webhook with no restart.
+# ``_YAML_PATH`` is the authored-config path the live build reads. The env
+# secrets below (slug, audit binding, signing secret) DO bind at register —
+# they change only on a restart.
+_YAML_PATH: Path = Path(_DEFAULT_CUSTOMER_YAML_PATH)
 _CUSTOMER_SLUG: str | None = None
 _D1_CLIENT: Any | None = None
 # Per-customer webhook signing secret (issue #13). None disables routing:
@@ -66,9 +76,6 @@ _REPLAY = verify.ReplayCache()
 _SIGNATURE_HEADER = "x-webhook-signature"
 _TIMESTAMP_HEADER = "x-webhook-timestamp"
 _EVENT_ID_HEADER = "x-webhook-id"
-
-
-_DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
 
 
 # ULID, ISO-Z timestamps, and the audit_log INSERT contract are single-sourced
@@ -351,12 +358,17 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     Exception-safe: any failure logs at warning level and returns
     ``None``. Per AGENTS.md hard rule #3, the callback never raises.
     """
-    if _TABLE.size() == 0:
+    # Rebuild the routing table live from customer.yaml (ADR 0044 WS2): editing
+    # webhook_triggers applies on the next dispatch with no restart. The build is
+    # lenient (returns an empty table on any read/parse failure), so a transient
+    # bad file fails safe to "no routing" rather than raising.
+    table = router.build_routing_table(_YAML_PATH)
+    if table.size() == 0:
         return None
 
     payload = _webhook_payload(kwargs)
     try:
-        decision = router.decide_route(_TABLE, payload)
+        decision = router.decide_route(table, payload)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "hermes-smd-webhook-router: decide_route failed (%s); passing through",
@@ -498,12 +510,14 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
 def register(ctx) -> None:
     """Plugin entry point. Wires pre_gateway_dispatch.
 
-    Reads customer.yaml at register time and builds the routing table.
-    Any failure during table build leaves the table empty; the hook
-    stays registered so Hermes' dispatcher contract holds, but
-    dispatches pass through unchanged.
+    Binds the env secrets (customer slug, audit binding, signing secret) and
+    records the authored-config path. The routing table itself is NOT built
+    here — ``on_pre_gateway_dispatch`` rebuilds it live from customer.yaml on
+    every dispatch (ADR 0044 WS2), so editing ``webhook_triggers`` takes effect
+    on the next inbound webhook with no restart. A one-shot build runs here only
+    to log the table size at boot; it is not retained.
     """
-    global _TABLE, _CUSTOMER_SLUG, _D1_CLIENT, _SIGNING_SECRET
+    global _YAML_PATH, _CUSTOMER_SLUG, _D1_CLIENT, _SIGNING_SECRET
 
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
@@ -534,14 +548,12 @@ def register(ctx) -> None:
             "webhooks cannot be verified and will NOT be routed until it is provisioned"
         )
 
-    customer_yaml_path = Path(
-        os.environ.get("SMD_CUSTOMER_YAML_PATH") or _DEFAULT_CUSTOMER_YAML_PATH
-    )
-    _TABLE = router.build_routing_table(customer_yaml_path)
+    _YAML_PATH = Path(os.environ.get("SMD_CUSTOMER_YAML_PATH") or _DEFAULT_CUSTOMER_YAML_PATH)
     logger.info(
-        "hermes-smd-webhook-router registered (customer=%s, routing_table_size=%d)",
+        "hermes-smd-webhook-router registered (customer=%s, routing_table_size=%d, "
+        "table read live per dispatch)",
         _CUSTOMER_SLUG,
-        _TABLE.size(),
+        router.build_routing_table(_YAML_PATH).size(),
     )
 
     ctx.register_hook("pre_gateway_dispatch", on_pre_gateway_dispatch)

@@ -308,7 +308,9 @@ def test_register_wires_pre_gateway_dispatch(fake_ctx, monkeypatch, with_custome
     mod = load_plugin("hermes-smd-webhook-router")
     mod.register(fake_ctx)
     assert "pre_gateway_dispatch" in fake_ctx.registered
-    assert mod._TABLE.size() == 2
+    # The table is read live per dispatch (ADR 0044 WS2), not cached on the
+    # module; register records the path the live build reads.
+    assert mod.router.build_routing_table(mod._YAML_PATH).size() == 2
 
 
 def test_register_no_ops_when_env_missing(fake_ctx, monkeypatch, with_customer_yaml):
@@ -363,6 +365,31 @@ def test_on_pre_gateway_dispatch_returns_rewrite_on_match(
     # The ADR 0027 envelope is attached to the dispatch directive.
     assert result["inbound_envelope"]["trust_class"] == "unknown_external"
     assert result["inbound_envelope"]["verification"] == "verified"
+
+
+def test_webhook_triggers_apply_live_without_restart(fake_ctx, monkeypatch, with_customer_yaml):
+    """ADR 0044 WS2: editing webhook_triggers takes effect on the next dispatch
+    with no re-register. Start matched, remove the trigger live → next identical
+    dispatch passes through; add it back live → routes again. Each dispatch uses
+    a fresh event id so the replay cache never masks the routing decision."""
+    path = with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    monkeypatch.setenv("SMD_WEBHOOK_SIGNING_SECRET", _SIGNING_SECRET)
+    mod = load_plugin("hermes-smd-webhook-router")
+    mod.register(fake_ctx)
+    mod._D1_CLIENT = FakeD1Client()
+
+    payload = {"source": "filevine", "event_type": "matter.created"}
+    assert mod.on_pre_gateway_dispatch(**signed_kwargs(payload, event_id="evt-1")) is not None
+
+    # Remove all triggers live — no re-register, no restart.
+    path.write_text(YAML_NO_TRIGGERS)
+    assert mod.on_pre_gateway_dispatch(**signed_kwargs(payload, event_id="evt-2")) is None
+
+    # Restore them live.
+    path.write_text(YAML_WITH_TWO_TRIGGERS)
+    assert mod.on_pre_gateway_dispatch(**signed_kwargs(payload, event_id="evt-3")) is not None
 
 
 def test_on_pre_gateway_dispatch_passthrough_on_no_marker(
