@@ -328,6 +328,29 @@ _BLOCKS_YAML = VALID_YAML + dedent(
 )
 
 
+# Relationship — authored behavioral lane (ADR 0048)
+# ---------------------------------------------------------------------------
+
+
+_RELATIONSHIP_YAML = VALID_YAML + dedent(
+    """\
+
+    relationship:
+      people:
+        - id: scott-durgan
+          name: Scott Durgan
+          role: Principal
+          prefers:
+            - Lead with the material change
+          avoid:
+            - Inventing estimates
+          extra_field: should-be-dropped
+        - id: no-name
+        - name: no-id person
+    """
+)
+
+
 def test_escalation_accessor_reads_block(tmp_path):
     cfg = CustomerConfig.from_volume(str(_write(tmp_path, _BLOCKS_YAML)))
     assert cfg.escalation == {
@@ -368,3 +391,32 @@ def test_live_read_block_non_mapping_raises(tmp_path):
     cfg = CustomerConfig.from_volume(str(_write(tmp_path, bad)))
     with pytest.raises(CustomerConfigError):
         _ = cfg.escalation
+
+
+def test_relationship_people_normalizes_and_drops_unknown_keys(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, _RELATIONSHIP_YAML)))
+    people = cfg.relationship_people()
+    # Entries missing id or name are skipped (defensive parse).
+    assert [p["id"] for p in people] == ["scott-durgan"]
+    # Closed-set normalization: only id/name/role/prefers/avoid survive.
+    assert people[0] == {
+        "id": "scott-durgan",
+        "name": "Scott Durgan",
+        "role": "Principal",
+        "prefers": ["Lead with the material change"],
+        "avoid": ["Inventing estimates"],
+    }
+    assert "extra_field" not in people[0]
+
+
+def test_relationship_absent_block_is_empty(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, VALID_YAML)))
+    assert cfg.relationship == {}
+    assert cfg.relationship_people() == []
+
+
+def test_relationship_non_mapping_raises(tmp_path):
+    bad = VALID_YAML + "\nrelationship:\n  - not\n  - a\n  - map\n"
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, bad)))
+    with pytest.raises(CustomerConfigError):
+        _ = cfg.relationship

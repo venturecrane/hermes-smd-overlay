@@ -52,6 +52,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_VOLUME_PATH = "/opt/data/customer.yaml"
 
 
+def _clean_str_list(value: Any) -> list[str]:
+    """Coerce an unknown to a list of non-empty strings, dropping anything else.
+
+    Used to normalize ``relationship.people[].prefers``/``avoid`` for the
+    ``config_export`` seam (ADR 0048) — never trust the authored shape blindly.
+    """
+    if not isinstance(value, list):
+        return []
+    return [s for s in value if isinstance(s, str) and s]
+
+
 class CustomerConfigError(ValueError):
     """Raised when ``customer.yaml`` is missing, unparseable, or invalid."""
 
@@ -319,6 +330,61 @@ class CustomerConfig:
                 f"customer.yaml: telegram must be a mapping; got {type(raw).__name__}"
             )
         return dict(raw)
+
+    # ------------------------------------------------------------------
+    # Relationship — authored behavioral lane (ADR 0048)
+    # ------------------------------------------------------------------
+
+    @property
+    def relationship(self) -> dict[str, Any]:
+        """Return the ``relationship`` mapping (authored behavioral lane).
+
+        Per-person standing working preferences (ADR 0048). Absent ⇒ ``{}``.
+        Informational only — these shape how the Operator drafts/helps and never
+        grant capability (entitlements live in ``scope``/``escalation``).
+        """
+        raw = self._data.get("relationship") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: relationship must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    def relationship_people(self) -> list[dict[str, Any]]:
+        """Normalized, allow-listed per-person preferences for the surface.
+
+        Returns ONLY the closed-set fields (``id``, ``name``, ``role``,
+        ``prefers``, ``avoid``); any other key authored on a person is dropped,
+        so the ``config_export`` seam can never surface an unexpected field
+        (secret-safe by construction — the block carries no secrets, and this
+        keeps it that way even if the authored shape drifts). Malformed entries
+        (missing id/name, wrong types) are skipped rather than half-rendered —
+        same defensive posture as the console-side parser.
+        """
+        people = self.relationship.get("people")
+        if not isinstance(people, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for entry in people:
+            if not isinstance(entry, dict):
+                continue
+            pid = entry.get("id")
+            name = entry.get("name")
+            if not isinstance(pid, str) or not pid:
+                continue
+            if not isinstance(name, str) or not name:
+                continue
+            role = entry.get("role")
+            out.append(
+                {
+                    "id": pid,
+                    "name": name,
+                    "role": role if isinstance(role, str) and role else None,
+                    "prefers": _clean_str_list(entry.get("prefers")),
+                    "avoid": _clean_str_list(entry.get("avoid")),
+                }
+            )
+        return out
 
     # ------------------------------------------------------------------
     # Escape hatch

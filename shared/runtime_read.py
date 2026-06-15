@@ -52,9 +52,29 @@ from typing import Any
 # Both are read-only, same per-customer auth, and exist precisely so the
 # console can preserve Machine-local state BEFORE `fly apps destroy` burns it.
 SUPPORTED_KINDS: frozenset[str] = frozenset(
-    {"audit_log", "activity", "draft", "matter", "config", "audit_export", "memory_export"}
+    {
+        "audit_log",
+        "activity",
+        "draft",
+        "matter",
+        "config",
+        "audit_export",
+        "memory_export",
+        "config_export",
+    }
 )
-_REAL_KINDS: frozenset[str] = frozenset({"audit_log", "audit_export", "memory_export"})
+_REAL_KINDS: frozenset[str] = frozenset(
+    {"audit_log", "audit_export", "memory_export", "config_export"}
+)
+
+# config_export section allow-list (ADR 0048). Unlike ``config`` (a
+# materialized-state *facts snapshot* the drift audit diffs), ``config_export``
+# serves authored CONTENT blocks from the live ``customer.yaml`` for the admin
+# relationship surface. It is allow-listed to specific non-secret sections and
+# never returns the whole document — ``config.yaml``/``customer.yaml`` carry
+# connector secrets, and a blanket export would leak them. ``relationship`` is
+# the authored behavioral lane; new safe content sections append here.
+CONFIG_EXPORT_SECTIONS: frozenset[str] = frozenset({"relationship"})
 
 # memory_export table allow-list → which DB path argument serves it. The
 # ADR-0016 mirror tables live on the observations binding; the skills
@@ -175,6 +195,8 @@ def read_runtime(
     table: str | None = None,
     observations_db_path: str | None = None,
     agent_state_db_path: str | None = None,
+    section: str | None = None,
+    customer_yaml_path: str | None = None,
 ) -> dict[str, Any]:
     """Read one page of runtime detail for this Machine's single customer.
 
@@ -184,10 +206,19 @@ def read_runtime(
 
     ``audit_export`` reads the same DB as ``audit_log`` but serves the full
     row. ``memory_export`` requires ``table`` (from MEMORY_EXPORT_TABLES) and
-    reads the observations / agent-state DB for that table.
+    reads the observations / agent-state DB for that table. ``config_export``
+    requires ``section`` (from CONFIG_EXPORT_SECTIONS) and reads the authored
+    block from the live ``customer.yaml`` (ADR 0048).
     """
     if kind not in SUPPORTED_KINDS or kind not in _REAL_KINDS:
         return {"entries": [], "cursor": None}
+
+    if kind == "config_export":
+        if section not in CONFIG_EXPORT_SECTIONS:
+            # Unknown section is a caller error, not a degraded read — refuse
+            # rather than guessing (the gate maps this to a 400).
+            return {"entries": [], "cursor": None, "error": "unknown section"}
+        return _read_config_export(section, customer_yaml_path)
 
     if kind == "memory_export":
         if table not in MEMORY_EXPORT_TABLES:
@@ -214,6 +245,38 @@ def read_runtime(
     if kind == "audit_export":
         return _read_audit_export(db_path, _valid_cursor(cursor), clamp_limit(limit))
     return _read_audit_log(db_path, _valid_cursor(cursor), clamp_limit(limit))
+
+
+def _read_config_export(section: str, customer_yaml_path: str | None) -> dict[str, Any]:
+    """Serve an allow-listed authored block from the live ``customer.yaml``.
+
+    Currently serves ``relationship`` (ADR 0048) as one entry per person, via
+    the normalized, closed-set accessor on :class:`CustomerConfig` (so unknown
+    keys can never leak through the seam). Fail-safe: an absent / unparseable
+    ``customer.yaml`` (a fresh or half-provisioned box) returns an honest empty
+    page rather than a 500 — same posture as the audit reads on a missing DB.
+    Imported lazily so the hot audit_log read path carries no extra import cost.
+    """
+    from shared.customer_config import (
+        DEFAULT_VOLUME_PATH,
+        CustomerConfig,
+        CustomerConfigError,
+    )
+
+    path = customer_yaml_path or DEFAULT_VOLUME_PATH
+    try:
+        cfg = CustomerConfig.from_volume(path)
+    except CustomerConfigError:
+        # Missing (CustomerConfigMissingError) or unparseable — both subclasses.
+        # The relationship surface fails closed to "empty", never leaks a fault.
+        return {"entries": [], "cursor": None}
+
+    if section == "relationship":
+        try:
+            return {"entries": cfg.relationship_people(), "cursor": None}
+        except CustomerConfigError:
+            return {"entries": [], "cursor": None}
+    return {"entries": [], "cursor": None}
 
 
 # audit_log columns (per-customer D1) → the console wire shape consumed by
@@ -341,6 +404,7 @@ def _shape_audit_row(row: sqlite3.Row) -> dict[str, Any]:
 __all__ = [
     "SUPPORTED_KINDS",
     "MEMORY_EXPORT_TABLES",
+    "CONFIG_EXPORT_SECTIONS",
     "MIN_KEY_LEN",
     "DEFAULT_LIMIT",
     "MAX_LIMIT",

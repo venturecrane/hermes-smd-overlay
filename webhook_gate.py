@@ -309,9 +309,13 @@ class _Handler(BaseHTTPRequestHandler):
                     table=(params.get("table") or [None])[0],
                     observations_db_path=_observations_db_path(),
                     agent_state_db_path=_agent_state_db_path(),
+                    section=(params.get("section") or [None])[0],
                 )
                 if result.get("error") == "unknown table":
                     self._json_nostore(400, {"error": "unknown table"})
+                    return
+                if result.get("error") == "unknown section":
+                    self._json_nostore(400, {"error": "unknown section"})
                     return
         except Exception as exc:  # never leak detail; fail closed
             logger.error("runtime read: error serving kind %r: %s", kind, exc)

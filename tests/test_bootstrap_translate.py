@@ -157,6 +157,58 @@ def test_translate_writes_persona_identity_into_soul_md(tmp_path):
     assert "- concise" in soul
 
 
+_RELATIONSHIP_BLOCK = dedent(
+    """\
+
+    relationship:
+      people:
+        - id: scott-durgan
+          name: Scott Durgan
+          role: Principal
+          prefers:
+            - Lead with the material change
+          avoid:
+            - Inventing estimates
+    """
+)
+
+
+def test_translate_renders_relationship_into_soul_and_config(tmp_path):
+    """ADR 0048: the authored behavioral lane reaches both the agent (SOUL.md)
+    and the materialized config.yaml."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, VALID_YAML + _RELATIONSHIP_BLOCK)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "## Working relationships" in soul
+    assert "### Scott Durgan — Principal" in soul
+    assert "- Lead with the material change" in soul
+    assert "- Inventing estimates" in soul
+    # The preferences-not-permissions guardrail is rendered (ADR 0048 §2c).
+    assert "preferences, not permissions" in soul
+
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert config["relationship"]["people"][0]["id"] == "scott-durgan"
+
+
+def test_translate_omits_relationship_soul_section_when_absent(tmp_path):
+    """No `relationship:` block ⇒ SOUL.md has no Working-relationships section
+    (byte-identical contract) and config carries an empty block, never dropped."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML, no block
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "Working relationships" not in soul
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert config["relationship"] == {}
+
+
 def test_translate_emits_no_memory_provider_block(tmp_path):
     """Phase 1: config.yaml carries NO honcho / memory-provider block.
 
