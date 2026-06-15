@@ -474,8 +474,10 @@ def _load_router_with_table(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("SMD_WEBHOOK_SIGNING_SECRET", _SIGNING_SECRET)
 
     mod = load_plugin("hermes-smd-webhook-router")
-    # Build the routing table from the env-pointed customer.yaml.
-    mod._TABLE = mod.router.build_routing_table(customer_yaml)
+    # The routing table is read live per dispatch (ADR 0044 WS2); point the
+    # router's authored-config path at the env-pointed customer.yaml so the
+    # live build resolves the trigger.
+    mod._YAML_PATH = customer_yaml
     mod._SIGNING_SECRET = _SIGNING_SECRET
     fake = _FakeD1Client()
     mod._D1_CLIENT = fake
