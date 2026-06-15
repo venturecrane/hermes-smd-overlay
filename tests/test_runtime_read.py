@@ -366,3 +366,88 @@ def test_memory_export_absent_db_or_table_is_honest_empty(tmp_path):
         observations_db_path=str(db),
     )
     assert res == {"entries": [], "cursor": None}
+
+
+# ---------------------------------------------------------------------------
+# config_export — authored relationship lane from customer.yaml (ADR 0048)
+# ---------------------------------------------------------------------------
+
+_RELATIONSHIP_CUSTOMER_YAML = (
+    "customer_id: acme\n"
+    "relationship:\n"
+    "  people:\n"
+    "    - id: scott-durgan\n"
+    "      name: Scott Durgan\n"
+    "      role: Principal\n"
+    "      prefers:\n"
+    "        - Lead with the material change\n"
+    "      avoid:\n"
+    "        - Inventing estimates\n"
+    "      secret_field: should-be-dropped\n"
+    "    - id: office-manager\n"
+    "      name: Office Manager\n"
+    "    - name: no-id person\n"
+)
+
+
+def test_config_export_relationship_returns_normalized_people(tmp_path):
+    p = tmp_path / "customer.yaml"
+    p.write_text(_RELATIONSHIP_CUSTOMER_YAML)
+    res = rr.read_runtime(
+        "config_export", db_path=None, section="relationship", customer_yaml_path=str(p)
+    )
+    assert res["cursor"] is None
+    # Malformed (no-id) entry skipped; closed-set normalization applied.
+    assert [e["id"] for e in res["entries"]] == ["scott-durgan", "office-manager"]
+    assert res["entries"][0] == {
+        "id": "scott-durgan",
+        "name": "Scott Durgan",
+        "role": "Principal",
+        "prefers": ["Lead with the material change"],
+        "avoid": ["Inventing estimates"],
+    }
+    # The unknown key never crosses the seam (secret-safe by construction).
+    assert "secret_field" not in res["entries"][0]
+    assert res["entries"][1] == {
+        "id": "office-manager",
+        "name": "Office Manager",
+        "role": None,
+        "prefers": [],
+        "avoid": [],
+    }
+
+
+def test_config_export_unknown_section_is_refused(tmp_path):
+    p = tmp_path / "customer.yaml"
+    p.write_text("customer_id: acme\n")
+    # scope is a real block but NOT in the config_export allow-list — refused so
+    # a blanket config dump (which would leak connector secrets) is impossible.
+    res = rr.read_runtime(
+        "config_export", db_path=None, section="scope", customer_yaml_path=str(p)
+    )
+    assert res.get("error") == "unknown section"
+    assert res["entries"] == []
+
+
+def test_config_export_missing_customer_yaml_is_honest_empty(tmp_path):
+    res = rr.read_runtime(
+        "config_export",
+        db_path=None,
+        section="relationship",
+        customer_yaml_path=str(tmp_path / "absent.yaml"),
+    )
+    assert res == {"entries": [], "cursor": None}
+
+
+def test_config_export_absent_relationship_block_is_empty(tmp_path):
+    p = tmp_path / "customer.yaml"
+    p.write_text("customer_id: acme\n")
+    res = rr.read_runtime(
+        "config_export", db_path=None, section="relationship", customer_yaml_path=str(p)
+    )
+    assert res == {"entries": [], "cursor": None}
+
+
+def test_config_export_is_a_supported_real_kind():
+    assert "config_export" in rr.SUPPORTED_KINDS
+    assert "relationship" in rr.CONFIG_EXPORT_SECTIONS
