@@ -169,7 +169,7 @@ def validate_bytes(data: bytes) -> list[str]:
 
 
 def atomic_write(path: str | Path, data: bytes) -> None:
-    """Atomically write ``data`` to ``path``.
+    """Atomically write ``data`` to ``path``, preserving the target's owner/mode.
 
     Writes to a temp file in the SAME directory (so ``os.replace`` is a
     same-filesystem atomic rename), fsyncs the file, then renames over the
@@ -177,6 +177,17 @@ def atomic_write(path: str | Path, data: bytes) -> None:
     never a partial write — a crash mid-apply cannot corrupt the running config.
     The containing directory is fsynced too so the rename is durable across a
     Machine restart.
+
+    OWNER/MODE PRESERVATION (on-box critical). ``tempfile.mkstemp`` creates the
+    staging file as ``root:root 0600`` (the applier runs as root). Left as-is,
+    the replaced ``/opt/data/customer.yaml`` would become root-owned 0600 and the
+    ``hermes`` agent could no longer read its OWN config — enforcement fails
+    closed / boot breaks. So when the target already exists, its uid/gid/mode are
+    captured BEFORE the replace and restored onto the staging file BEFORE the
+    rename, so the file appears at the target path already wearing the right
+    owner+mode (live file is ``hermes:hermes 0644``). For a brand-new target
+    (initial seed) there is nothing to preserve — the caller's umask/explicit
+    chown governs, matching prior behavior.
 
     Raises:
         ConfigApplyError: the write or rename failed. On failure the temp file
@@ -192,6 +203,11 @@ def atomic_write(path: str | Path, data: bytes) -> None:
     except OSError as exc:
         raise ConfigApplyError(f"atomic_write: cannot create {directory}: {exc}") from exc
 
+    # Capture the existing target's ownership/mode BEFORE we touch anything, so a
+    # root-run replace restores hermes:hermes 0644 rather than leaving root:root
+    # 0600. ``None`` means the target does not exist yet (initial seed).
+    preserve = _stat_for_preserve(target)
+
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=str(directory))
     tmp_path = Path(tmp_name)
     try:
@@ -199,6 +215,9 @@ def atomic_write(path: str | Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+        # Restore owner+mode onto the staging file BEFORE the rename so the file
+        # is never momentarily unreadable at the target path.
+        _apply_preserve(tmp_path, preserve)
         os.replace(tmp_path, target)
         _fsync_dir(directory)
     except OSError as exc:
@@ -210,6 +229,52 @@ def atomic_write(path: str | Path, data: bytes) -> None:
         except OSError:
             logger.warning("atomic_write: could not remove temp file %s", tmp_path)
         raise ConfigApplyError(f"atomic_write: writing {target} failed: {exc}") from exc
+
+
+def _stat_for_preserve(target: Path) -> tuple[int, int, int] | None:
+    """Return ``(uid, gid, mode)`` of an existing target, or ``None`` if absent.
+
+    ``mode`` is the permission bits (``st_mode & 0o7777``). A stat failure on an
+    existing file is surfaced as ``None`` (we then fall back to default temp-file
+    ownership) and logged — better to apply with default perms than to refuse the
+    config write; the boot-time chown in entrypoint is the backstop.
+    """
+    try:
+        st = target.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("atomic_write: could not stat %s for owner/mode preserve: %s", target, exc)
+        return None
+    return (st.st_uid, st.st_gid, st.st_mode & 0o7777)
+
+
+def _apply_preserve(tmp_path: Path, preserve: tuple[int, int, int] | None) -> None:
+    """Restore captured ``(uid, gid, mode)`` onto the staging file before rename.
+
+    No-op when ``preserve`` is ``None`` (initial seed — no prior file). chown is
+    attempted before chmod; a chown failure (e.g. not privileged in a dev/test
+    run, or the target was root-owned and we are not root) is logged and the mode
+    is still applied — ownership preservation is the root-on-box concern, and a
+    non-root test run cannot chown to an arbitrary uid anyway.
+    """
+    if preserve is None:
+        return
+    uid, gid, mode = preserve
+    try:
+        os.chown(tmp_path, uid, gid)
+    except OSError as exc:
+        logger.warning(
+            "atomic_write: could not restore owner %d:%d on %s (%s); mode still applied",
+            uid,
+            gid,
+            tmp_path,
+            exc,
+        )
+    try:
+        os.chmod(tmp_path, mode)
+    except OSError as exc:
+        logger.warning("atomic_write: could not restore mode %o on %s: %s", mode, tmp_path, exc)
 
 
 def _fsync_dir(directory: Path) -> None:
