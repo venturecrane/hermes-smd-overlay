@@ -1214,6 +1214,14 @@ def test_subagent_action_types_accepted() -> None:
     assert "AGENT_SKILL_CREATED" in mod.schemas.ACCEPTED_ACTION_TYPES
 
 
+def test_config_write_action_type_accepted() -> None:
+    # The root-owned config applier (config_applier.apply, ADR 0044 WS3) emits a
+    # CONFIG_WRITE row per applied customer.yaml. The action type must be in the
+    # accepted vocabulary or the audit writer would reject the row.
+    mod = load_plugin("hermes-smd-audit")
+    assert "CONFIG_WRITE" in mod.schemas.ACCEPTED_ACTION_TYPES
+
+
 def test_register_wires_subagent_stop_hook(fake_ctx, monkeypatch) -> None:
     """register(ctx) MUST register subagent_stop alongside the existing hooks."""
     monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")

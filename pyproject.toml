@@ -54,7 +54,7 @@ py-modules = ["webhook_gate"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["plugins*", "shared*", "bootstrap*", "contracts*"]
+include = ["plugins*", "shared*", "bootstrap*", "contracts*", "config_applier*"]
 
 [tool.setuptools.package-data]
 shared = ["fabrication_markers.json"]
