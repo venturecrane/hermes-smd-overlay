@@ -27,6 +27,11 @@ dependencies = [
     # bootstrap.sh); declared here so the plugin import path works in
     # dev environments and the wheel resolves cleanly.
     "boto3>=1.34",
+    # Clerk OAuth validation for the Machine-hosted MCP front door
+    # (shared/mcp_auth.py). Hermes already pins PyJWT[crypto]==2.12.1, so this
+    # resolves to the same wheel on the customer Machine; declared here so the
+    # import path works in dev environments too.
+    "PyJWT[crypto]>=2.12",
 ]
 
 [project.optional-dependencies]

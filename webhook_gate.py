@@ -337,6 +337,80 @@ def _mcp_stub_authorized(auth_header: str | None) -> bool:
     return hmac.compare_digest(auth_header[len("Bearer ") :], token)
 
 
+def _load_mcp_binding():
+    """Build the Clerk auth binding, or None when Clerk is not configured here.
+
+    issuer + resource_uri are materialized to the Machine env at provision time
+    (issuer from the console's D1 mcp_clerk_bindings; resource_uri is THIS
+    Machine's own /mcp URL). enabled + access are read LIVE from customer.yaml so
+    authoring access on/off takes effect with no restart. None => Clerk not
+    configured (e.g. staging spine tests), which falls back to the transitional
+    stub bearer.
+    """
+    issuer = os.environ.get("SMD_MCP_CLERK_ISSUER")
+    resource_uri = os.environ.get("SMD_MCP_RESOURCE_URI")
+    if not issuer or not resource_uri:
+        return None
+    from shared import mcp_auth  # lazy: keeps jwt off the gate's non-mcp boot path
+
+    path = os.environ.get("SMD_CUSTOMER_YAML_PATH") or "/opt/data/customer.yaml"
+    try:
+        import yaml
+
+        with open(path, encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle) or {}
+    except (OSError, ValueError) as exc:
+        logger.warning("mcp: customer.yaml read failed (%s); auth fail-closed", exc)
+        return None
+    mc = cfg.get("mcp_connector") if isinstance(cfg, dict) else None
+    if not isinstance(mc, dict):
+        return None
+    access = tuple(
+        mcp_auth.McpAccessEntry(e["email"], e["profile"], e["clerk_subject"])
+        for e in (mc.get("access") or [])
+        if isinstance(e, dict) and e.get("email") and e.get("profile") and e.get("clerk_subject")
+    )
+    return mcp_auth.McpAuthBinding(
+        issuer=issuer,
+        resource_uri=resource_uri,
+        clerk_org_id=os.environ.get("SMD_MCP_CLERK_ORG_ID") or None,
+        enabled=bool(mc.get("enabled")),
+        access=access,
+    )
+
+
+def _mcp_authenticate(auth_header: str | None) -> bool:
+    """Authenticate an /mcp request. Clerk when configured (the production path);
+    the transitional stub bearer ONLY when Clerk is not configured on this
+    Machine. Fail-closed either way."""
+    binding = _load_mcp_binding()
+    if binding is not None:
+        from shared import mcp_auth
+
+        token = mcp_auth.extract_bearer_token(auth_header)
+        result = mcp_auth.validate_mcp_token(token, binding)
+        if isinstance(result, mcp_auth.McpPrincipal):
+            return True
+        logger.info("mcp: Clerk auth refused (%s)", getattr(result, "reason", "unknown"))
+        return False
+    return _mcp_stub_authorized(auth_header)
+
+
+def _mcp_protected_resource_metadata() -> dict | None:
+    """RFC 9728 protected-resource-metadata for THIS Machine's /mcp, or None when
+    Clerk is not configured. Public + unauthenticated (carries no secret)."""
+    issuer = os.environ.get("SMD_MCP_CLERK_ISSUER")
+    resource_uri = os.environ.get("SMD_MCP_RESOURCE_URI")
+    if not issuer or not resource_uri:
+        return None
+    return {
+        "resource": resource_uri,
+        "authorization_servers": [issuer],
+        "scopes_supported": ["openid", "profile", "email"],
+        "bearer_methods_supported": ["header"],
+    }
+
+
 def _rpc_ok(req_id: object, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
@@ -480,6 +554,17 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _json_headers(self, status: int, obj: dict, extra: dict | None = None) -> None:
+        """``_json`` plus optional extra response headers (e.g. WWW-Authenticate)."""
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _json_nostore(self, status: int, obj: dict) -> None:
         """Like ``_json`` but with ``Cache-Control: no-store`` — runtime reads
         return tenant audit data that must never be cached by any proxy."""
@@ -496,6 +581,12 @@ class _Handler(BaseHTTPRequestHandler):
         path = split.path
         if path.rstrip("/") == "/health":
             self._json(200, {"status": "ok", "platform": "webhook-gate"})
+        elif path.startswith("/.well-known/oauth-protected-resource"):
+            # RFC 9728 discovery for the Machine-hosted MCP connector. Public,
+            # unauthenticated, carries no secret. One Machine == one resource, so
+            # the same doc serves every suffix the client may request.
+            meta = _mcp_protected_resource_metadata()
+            self._json(200, meta) if meta else self._json(404, {"error": "not found"})
         elif path.startswith(_RUNTIME_PREFIX):
             self._handle_runtime(path, split.query)
         else:
@@ -562,8 +653,19 @@ class _Handler(BaseHTTPRequestHandler):
         Beat-1 stub auth (bearer) then JSON-RPC dispatch; ``tools/call`` drives
         one agent turn and returns its answer in-line via the result store.
         """
-        if not _mcp_stub_authorized(self.headers.get("Authorization")):
-            self._json(401, {"error": "unauthorized"})
+        if not _mcp_authenticate(self.headers.get("Authorization")):
+            # RFC 9728 §5.1: on a Clerk-configured Machine, point the client at
+            # the discovery doc so it knows where to authenticate.
+            meta = _mcp_protected_resource_metadata()
+            extra = None
+            if meta:
+                parts = urlsplit(meta["resource"])
+                murl = (
+                    f"{parts.scheme}://{parts.netloc}"
+                    f"/.well-known/oauth-protected-resource{parts.path}"
+                )
+                extra = {"WWW-Authenticate": f'Bearer resource_metadata="{murl}"'}
+            self._json_headers(401, {"error": "unauthorized"}, extra)
             return
         length = int(self.headers.get("Content-Length") or 0)
         if length > _MAX_BODY_BYTES:
