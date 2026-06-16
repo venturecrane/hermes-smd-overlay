@@ -405,6 +405,8 @@ _INBOUND_EMAIL_PROMPT = (
 # routed skill's content REPLACES this prompt (webhook.py L419-436), so this
 # echo wording only ever runs for the skill-less echo verb.
 _INBOUND_MCP_PROMPT = (
+    "[[mcp-cid:{correlation_id}]] operator-internal correlation token — do NOT "
+    "repeat it or mention it in your reply.\n"
     "An MCP request arrived through the Operator's Claude connector for the "
     "action '{event_type}'. Reply with EXACTLY the text below and nothing else "
     "— no preamble, no quotation marks, no sign-off.\n"
