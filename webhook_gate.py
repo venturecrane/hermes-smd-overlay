@@ -391,7 +391,25 @@ def _mcp_authenticate(auth_header: str | None) -> bool:
         result = mcp_auth.validate_mcp_token(token, binding)
         if isinstance(result, mcp_auth.McpPrincipal):
             return True
-        logger.info("mcp: Clerk auth refused (%s)", getattr(result, "reason", "unknown"))
+        # Diagnostic: surface the token's actual aud/iss/sub (identifiers, not
+        # secrets) vs what THIS Machine expects, so an OAuth audience/issuer
+        # mismatch is debuggable without guessing. Temporary.
+        claims_note = ""
+        try:
+            if token:
+                import jwt
+
+                unverified = jwt.decode(token, options={"verify_signature": False})
+                claims_note = (
+                    f" token.aud={unverified.get('aud')!r} token.iss={unverified.get('iss')!r}"
+                    f" token.sub={unverified.get('sub')!r}"
+                    f" | expected resource={binding.resource_uri!r} issuer={binding.issuer!r}"
+                )
+        except Exception:  # noqa: BLE001
+            claims_note = " (token un-decodable)"
+        logger.info(
+            "mcp: Clerk auth refused (%s)%s", getattr(result, "reason", "unknown"), claims_note
+        )
         return False
     return _mcp_stub_authorized(auth_header)
 
