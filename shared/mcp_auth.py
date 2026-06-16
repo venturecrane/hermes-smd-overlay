@@ -145,13 +145,18 @@ def _validate_claims(claims: dict, binding: McpAuthBinding) -> McpAuthError | No
         return McpAuthError(CLAIMS_INVALID, "required token claims are invalid")
     if iss != binding.issuer:
         return McpAuthError(WRONG_ISSUER, "token issuer does not match resource", subject=sub)
+    # aud is validated ONLY when the authorization server provides one (defense
+    # in depth): a token explicitly bound to a DIFFERENT resource is refused.
+    # When the AS emits no audience — this Clerk instance does not (verified live
+    # 2026-06-16; its AS metadata advertises no resource-indicator support) — the
+    # resource binding is unavailable, and authorization rests on the issuer
+    # (per-customer Clerk app = customer isolation) + the authored subject below.
+    # Privileged-content isolation is enforced by Machine hosting, independent of
+    # the token. If Clerk later emits a resource-bound aud, this check engages
+    # automatically with no code change.
     audience = _audience_list(claims.get("aud"))
-    if binding.resource_uri not in audience:
-        return McpAuthError(
-            WRONG_AUDIENCE,
-            "token is bound to another resource" if audience else "token has no audience claim",
-            subject=sub,
-        )
+    if audience and binding.resource_uri not in audience:
+        return McpAuthError(WRONG_AUDIENCE, "token is bound to another resource", subject=sub)
     if binding.clerk_org_id and claims.get("org_id") != binding.clerk_org_id:
         return McpAuthError(
             ORGANIZATION_MISMATCH, "token organization does not match customer", subject=sub
