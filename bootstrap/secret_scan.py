@@ -126,6 +126,16 @@ _HEX_LONG = re.compile(r"^[a-f0-9]{40,}$")
 _BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _ARRAY_INDEX = re.compile(r"\[\d+\]")
 
+# Clerk PUBLIC identifiers (``user_…`` / ``org_…``) — they appear in URLs and API
+# responses; they are NOT secrets. They are high-entropy and so trip the generic
+# shape heuristic. Exempt them from the SHAPE check only — the provider-key and
+# banned-field-name checks still run (a real key cannot hide behind a user_/org_
+# prefix). This is value-based so it covers BOTH the parsed pass (has a path) and
+# the raw line pass (bare list items, path=None). Fixes the
+# mcp_connector.access[*].clerk_subjects[*] false-positive that crash-looped
+# customer-zero on 2026-06-15.
+_CLERK_PUBLIC_ID = re.compile(r"^(?:user|org)_[A-Za-z0-9]{16,}$")
+
 
 def _shannon_entropy(s: str) -> float:
     """Bits per character. Random base64 ~5.5, English prose ~3.5."""
@@ -202,6 +212,8 @@ def _scan_value_shape(value: str, path: str | None, extra: tuple[str, ...]) -> s
     provider = _check_provider_patterns(value)
     if provider is not None:
         return provider
+    if _CLERK_PUBLIC_ID.match(value.strip()):
+        return None
     if _is_path_shape_allowlisted(path, extra):
         return None
     return _check_shape_heuristics(value)
