@@ -36,6 +36,7 @@ package free of bootstrap imports.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -110,12 +111,21 @@ class CustomerConfig:
         self._data = data
 
     @classmethod
-    def from_volume(cls, path: str = DEFAULT_VOLUME_PATH) -> "CustomerConfig":
+    def from_volume(cls, path: str | None = None) -> "CustomerConfig":
         """Load a customer config from the Fly volume.
 
         Args:
             path: Absolute path to ``customer.yaml`` on the Machine's
-                volume. Defaults to ``/opt/data/customer.yaml``.
+                volume. When ``None`` (the default), the path is resolved
+                at call time from the ``SMD_CUSTOMER_YAML_PATH`` environment
+                variable, falling back to ``/opt/data/customer.yaml``.
+
+                This indirection is the keystone config-isolation seam: the
+                boot path relocates the live ``customer.yaml`` off the
+                agent-writable ``/opt/data`` volume into a root-owned
+                directory (read-only to the hermes uid) and points every
+                reader here via the env var, so the agent can no longer
+                rewrite its own trust ceiling / vertical floor.
 
         Returns:
             A parsed and validated :class:`CustomerConfig`.
@@ -124,6 +134,8 @@ class CustomerConfig:
             CustomerConfigError: If the file is missing, unparseable,
                 or fails schema validation.
         """
+        if path is None:
+            path = os.environ.get("SMD_CUSTOMER_YAML_PATH") or DEFAULT_VOLUME_PATH
         file_path = Path(path)
         if not file_path.exists():
             raise CustomerConfigMissingError(f"customer.yaml not found at {path}")
