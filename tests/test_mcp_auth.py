@@ -66,8 +66,26 @@ def test_valid_token_resolves_principal(keypair):
     assert result.subject == _SUB
 
 
+def test_no_audience_accepted_via_issuer_and_subject(keypair):
+    # Clerk emits NO aud (verified live 2026-06-16). Authorization then rests on
+    # issuer + authored subject; the token must still resolve the principal.
+    claims = {"sub": _SUB, "iss": _ISSUER, "exp": int(time.time()) + 3600}  # no aud
+    tok = jwt.encode(claims, keypair, algorithm="RS256")
+    result = mcp_auth.validate_mcp_token(tok, _binding())
+    assert isinstance(result, McpPrincipal) and result.subject == _SUB
+
+
+def test_no_audience_still_requires_authored_subject(keypair):
+    # aud absent does NOT mean "anyone in": an un-authored Clerk subject is refused.
+    claims = {"sub": "user_outsider", "iss": _ISSUER, "exp": int(time.time()) + 3600}
+    tok = jwt.encode(claims, keypair, algorithm="RS256")
+    result = mcp_auth.validate_mcp_token(tok, _binding())
+    assert isinstance(result, McpAuthError) and result.reason == mcp_auth.IDENTITY_NOT_AUTHORED
+
+
 def test_wrong_audience_rejected(keypair):
-    # A token minted for the CONSOLE resource must not validate at the Machine.
+    # A token EXPLICITLY bound to another resource must not validate (defense in
+    # depth, when an aud is present).
     tok = _token(keypair, aud="https://smd.services/api/operator/smd/mcp")
     result = mcp_auth.validate_mcp_token(tok, _binding())
     assert isinstance(result, McpAuthError) and result.reason == mcp_auth.WRONG_AUDIENCE
