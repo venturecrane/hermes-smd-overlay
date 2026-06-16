@@ -12,3 +12,4 @@ plugins:
   - plugins/hermes-smd-hook-probe
   - plugins/hermes-smd-workspace
   - plugins/hermes-smd-demo-relay
+  - plugins/hermes-smd-peer-memory

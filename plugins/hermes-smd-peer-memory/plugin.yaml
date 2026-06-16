@@ -1,0 +1,20 @@
+name: hermes-smd-peer-memory
+version: "0.1.0"
+description: "Per-peer working-preference memory (ADR 0048 learned lane). Injects how each person likes to work with the operator before each turn, and captures stated/demonstrated preferences via an agent-callable tool with server-side peer attribution. Writes the peer_preferences table on the per-customer agent-state D1 binding; taint-gated so injected content cannot plant a preference."
+author: VentureCrane
+requires_env:
+  - SMD_CUSTOMER_SLUG
+# The store binds to the agent-state D1 binding, falling back to the audit
+# binding when unset (same fallback the audit plugin uses). Both are optional
+# from this plugin's perspective: with neither, capture/inject no-op cleanly.
+optional_env:
+  - SMD_D1_AGENT_STATE_BINDING
+  - SMD_D1_AUDIT_BINDING
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
+  - on_session_end
+hooks:
+  - pre_llm_call
+  - post_tool_call
+  - on_session_end

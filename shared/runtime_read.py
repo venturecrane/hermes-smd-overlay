@@ -78,13 +78,24 @@ CONFIG_EXPORT_SECTIONS: frozenset[str] = frozenset({"relationship"})
 
 # memory_export table allow-list → which DB path argument serves it. The
 # ADR-0016 mirror tables live on the observations binding; the skills
-# inventory lives on the agent-state binding (audit-binding fallback mirrors
-# the audit plugin's own fallback).
+# inventory and the ADR-0048 per-peer learned preferences live on the
+# agent-state binding (audit-binding fallback mirrors the audit plugin's
+# own fallback).
 MEMORY_EXPORT_TABLES: frozenset[str] = frozenset(
     {
         "persona_observations",
         "persona_observations_archive",
         "agent_skills_inventory",
+        "peer_preferences",
+    }
+)
+
+# Tables served from the agent-state DB path (hermes-writable) rather than the
+# observations DB. Both are agent-authored, runtime-read, admin-visible.
+_AGENT_STATE_TABLES: frozenset[str] = frozenset(
+    {
+        "agent_skills_inventory",
+        "peer_preferences",
     }
 )
 
@@ -221,7 +232,7 @@ def read_runtime(
             # Unknown table is a caller error, not a degraded read — refuse
             # rather than guessing (the gate maps this to a 400).
             return {"entries": [], "cursor": None, "error": "unknown table"}
-        if table == "agent_skills_inventory":
+        if table in _AGENT_STATE_TABLES:
             target = agent_state_db_path
         else:
             target = observations_db_path
