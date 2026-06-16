@@ -321,6 +321,26 @@ def test_memory_export_skills_table_routes_to_agent_state_db(tmp_path):
     assert res["entries"][0]["skill_name"] == "follow-up-cadence"
 
 
+def test_memory_export_peer_preferences_routes_to_agent_state_db(tmp_path):
+    state = tmp_path / "agent-state.db"
+    conn = sqlite3.connect(state)
+    conn.execute(
+        "CREATE TABLE peer_preferences (peer_id TEXT, preference TEXT, source TEXT, superseded_by TEXT)"
+    )
+    conn.execute("INSERT INTO peer_preferences VALUES ('chris', 'Wants bullets', 'stated', NULL)")
+    conn.commit()
+    conn.close()
+    res = rr.read_runtime(
+        "memory_export",
+        db_path=None,
+        table="peer_preferences",
+        observations_db_path=None,
+        agent_state_db_path=str(state),
+    )
+    assert res["entries"][0]["peer_id"] == "chris"
+    assert res["entries"][0]["preference"] == "Wants bullets"
+
+
 def test_memory_export_absent_db_or_table_is_honest_empty(tmp_path):
     res = rr.read_runtime(
         "memory_export",
