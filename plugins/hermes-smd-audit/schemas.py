@@ -87,9 +87,6 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         "CONNECTOR_HEALTH_PROBE_FAILED",
         # Scope changes
         "SCOPE_CHANGED",
-        # Sent-folder watching
-        "SENT_DETECTED",
-        "SENT_DIFF_INDEXED",
         # Safety substrate
         "INVARIANT_VIOLATION",
         "INVARIANT_BOOT_CHECK_FAILED",
