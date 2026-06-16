@@ -396,6 +396,22 @@ _INBOUND_EMAIL_PROMPT = (
 )
 
 
+# MCP channel (Claude as an inbound channel): the fallback prompt the webhook
+# adapter renders for an inbound MCP verb that routes to NO skill. The forwarded
+# payload is {source: mcp, event_type: <verb>, message: <args>}; dot-notation
+# keys resolve against it. BEAT 1 (echo spine): instruct a verbatim echo so the
+# synchronous-return path can be proven end to end with no skill. Real verbs
+# (fetch/store) are authored as webhook_triggers(source="mcp") → skills, and a
+# routed skill's content REPLACES this prompt (webhook.py L419-436), so this
+# echo wording only ever runs for the skill-less echo verb.
+_INBOUND_MCP_PROMPT = (
+    "An MCP request arrived through the Operator's Claude connector for the "
+    "action '{event_type}'. Reply with EXACTLY the text below and nothing else "
+    "— no preamble, no quotation marks, no sign-off.\n"
+    "{message.message}"
+)
+
+
 def _route_name_from_webhook_url(url: str) -> str | None:
     """Last path segment of a ``connectors[].webhook_url`` = the route name.
 
@@ -460,6 +476,32 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
             "prompt": _INBOUND_EMAIL_PROMPT,
         }
         adapter_to_route[adapter] = route
+
+    # MCP channel (Claude as an inbound channel): the Operator's Claude connector
+    # arrives as a webhook route like every other channel, materialized from
+    # mcp_connector.enabled (not a vendor connector). Fail-closed on its secret
+    # exactly like a vendor route. Verbs are authored as webhook_triggers(
+    # source="mcp") → skills, which populate events/skills via the loop below; the
+    # beat-1 echo spine needs no skill, so the route runs with allow-all events
+    # (empty events) and the generic MCP echo prompt. See
+    # docs/design/operator/03-mcp-server-exposure.md.
+    mcp_connector = customer.get("mcp_connector") or {}
+    if isinstance(mcp_connector, dict) and mcp_connector.get("enabled"):
+        try:
+            mcp_secret = get_secret("WEBHOOK_SECRET_MCP")
+        except KeyError:
+            logger.warning(
+                "translate: mcp_connector.enabled but WEBHOOK_SECRET_MCP is unset; "
+                "mcp route NOT emitted this boot (fail-closed, no unverifiable webhook)"
+            )
+        else:
+            routes["mcp"] = {
+                "secret": mcp_secret,
+                "events": [],
+                "skills": [],
+                "prompt": _INBOUND_MCP_PROMPT,
+            }
+            adapter_to_route["mcp"] = "mcp"
 
     for trig in triggers:
         if not isinstance(trig, dict):

@@ -81,6 +81,24 @@ vars:
     requirement: optional
     consumed_by: [demo-relay]
     note: "AgentMail REST credential (Bearer) for the demo reply relay's threaded send; read only when demo.reply_relay is authored. Absent => relay disables (no send). Also the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py)."
+  SMD_MCP_STORE_DIR:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate, mcp-result-sink]
+    note: "directory for the MCP channel's cross-process result store (shared/mcp_result_store.py); the agent-side result-sink writes, the gate's /mcp long-poll reads. Defaults to /run/smd-mcp (tmpfs) when unset."
+  SMD_MCP_STUB_TOKEN:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "beat-1 stub bearer token for the /mcp route; FAIL-CLOSED when unset (no token => /mcp rejects every request, never an open endpoint). Replaced by Clerk OAuth in beat 2."
+  WEBHOOK_SECRET_MCP:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [bootstrap-translate, webhook-gate]
+    note: "the mcp channel's inbound-webhook HMAC secret; read as a literal by translate (route materialization, fail-closed/omitted when unset) and via the WEBHOOK_SECRET_<ROUTE> family by the gate's loopback-forward signing. Also gates the webhook-gate launch in bootstrap.sh (AGENTMAIL or MCP secret)."
   HERMES_HOME:
     discovery: static
     stage: agent

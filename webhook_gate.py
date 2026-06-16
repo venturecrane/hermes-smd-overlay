@@ -38,10 +38,11 @@ import logging
 import os
 import re
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from shared import runtime_read
+from shared import mcp_result_store, runtime_read
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
 # to build the forward URL, so the only dynamic part of the urllib call is a
@@ -233,6 +234,191 @@ def _stamp_source(body: bytes, route: str) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
+# ---- MCP CHANNEL (Claude as an inbound channel) ------------------------------
+# Beat-1 synchronous-return spine. The /mcp route terminates a JSON-RPC MCP
+# request and drives ONE agent turn through the same loopback path the webhook
+# routes use (the `mcp` webhook route → router → agent loop → broker → memory,
+# identical to email), then long-polls the cross-process result store the
+# agent-side result-sink wrote and returns the answer IN-LINE — the synchronous
+# return MCP requires but Hermes' fire-and-forget dispatch (202 + out-of-band
+# deliver) does not provide. See docs/design/operator/03-mcp-server-exposure.md.
+#
+# AUTH (beat 1): a stub bearer token (SMD_MCP_STUB_TOKEN), fail-closed when
+# unset so a Machine that has not authored it never exposes an open /mcp. Beat 2
+# replaces this with Clerk OAuth (per-customer JWKS / iss / aud / sub), ported
+# from ss-console src/lib/operator/mcp/token-validation.ts.
+
+MCP_ROUTE = "mcp"  # webhook route name; session id == webhook:mcp:<correlation_id>
+MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_SERVER_INFO = {
+    "name": "smd-operator-connector",
+    "title": "SMD Operator",
+    "version": "0.1.0",
+}
+
+# Long-poll budget for the synchronous return. Kept under typical MCP client
+# tool timeouts; on expiry the call returns an explicit "still working" result
+# rather than hanging the client (MCP is stateless — the client may retry).
+_MCP_POLL_TIMEOUT_S = 55.0
+_MCP_POLL_INTERVAL_S = 0.25
+
+_JSON_RPC_PARSE_ERROR = -32700
+_JSON_RPC_INVALID_REQUEST = -32600
+_JSON_RPC_METHOD_NOT_FOUND = -32601
+_JSON_RPC_INVALID_PARAMS = -32602
+_JSON_RPC_INTERNAL_ERROR = -32603
+
+# Beat-1 tool surface: one echo verb to prove the spine end to end. Real verbs
+# (fetch/store) are authored per customer and advertised here from that authored
+# set in later beats.
+_MCP_TOOLS = [
+    {
+        "name": "echo",
+        "description": "Echo a message back through the Operator (synchronous-spine proof).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
+        },
+    }
+]
+_MCP_TOOL_NAMES = frozenset(t["name"] for t in _MCP_TOOLS)
+
+
+def _mcp_stub_authorized(auth_header: str | None) -> bool:
+    """Beat-1 stub auth: constant-time bearer check against SMD_MCP_STUB_TOKEN.
+
+    Fail-closed: an unset token rejects every request, so a Machine that never
+    authored the stub token can never expose an open /mcp. Replaced by Clerk
+    OAuth in beat 2.
+    """
+    token = os.environ.get("SMD_MCP_STUB_TOKEN")
+    if not token:
+        return False
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return False
+    return hmac.compare_digest(auth_header[len("Bearer ") :], token)
+
+
+def _rpc_ok(req_id: object, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _rpc_err(req_id: object, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+def _drive_agent_turn(tool_name: str, args: dict) -> dict | None:
+    """Forward one MCP verb into the agent loop and long-poll for its answer.
+
+    Mints a correlation id that becomes the Hermes delivery id (X-Request-ID),
+    so the turn's session is ``webhook:mcp:<cid>`` and the result-sink stores the
+    completed turn's answer under ``<cid>`` for us to collect here. Returns the
+    stored payload (``{"answer": ...}``) or None on forward failure / timeout.
+    """
+    secret = _route_secret(MCP_ROUTE)
+    if not secret:
+        logger.warning("mcp: WEBHOOK_SECRET_%s unset — cannot forward", MCP_ROUTE.upper())
+        return None
+
+    correlation_id = uuid.uuid4().hex
+    body = json.dumps(
+        {"source": MCP_ROUTE, "event_type": tool_name, "message": args},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Webhook-Signature": _hex_hmac_sha256(body, secret),
+        "X-Request-ID": correlation_id,
+    }
+    conn = http.client.HTTPConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=30)
+    try:
+        conn.request("POST", f"/webhooks/{MCP_ROUTE}", body=body, headers=headers)
+        resp = conn.getresponse()
+        resp.read()
+        if resp.status not in (200, 202):
+            logger.warning("mcp: forward returned %d", resp.status)
+            return None
+    except Exception as exc:  # gateway down / cold-start race
+        logger.error("mcp: forward failed: %s", exc)
+        return None
+    finally:
+        conn.close()
+
+    # Long-poll the cross-process store the agent-side result-sink writes.
+    deadline = time.monotonic() + _MCP_POLL_TIMEOUT_S
+    while time.monotonic() < deadline:
+        result = mcp_result_store.take(correlation_id)
+        if result is not None:
+            return result
+        time.sleep(_MCP_POLL_INTERVAL_S)
+    logger.warning("mcp: poll timed out (tool=%s)", tool_name)
+    return None
+
+
+def _mcp_tools_call(req: dict) -> tuple[int, dict]:
+    """Handle a JSON-RPC ``tools/call`` → drive the agent turn, return in-line."""
+    req_id = req.get("id")
+    params = req.get("params")
+    if not isinstance(params, dict):
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "tools/call requires params")
+    name = params.get("name")
+    args = params.get("arguments") or {}
+    if not isinstance(name, str) or not name:
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "tools/call requires a tool name")
+    if not isinstance(args, dict):
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "arguments must be an object")
+    if name not in _MCP_TOOL_NAMES:
+        return 200, _rpc_err(req_id, _JSON_RPC_METHOD_NOT_FOUND, f"unknown tool: {name}")
+
+    result = _drive_agent_turn(name, args)
+    if result is None:
+        return 200, _rpc_ok(
+            req_id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "The Operator did not return a result in time. Please retry.",
+                    }
+                ],
+                "isError": True,
+            },
+        )
+    answer = result.get("answer")
+    text = answer if isinstance(answer, str) else json.dumps(answer)
+    return 200, _rpc_ok(req_id, {"content": [{"type": "text", "text": text}]})
+
+
+def _mcp_dispatch(req: dict) -> tuple[int, dict | None]:
+    """Dispatch one already-authorized JSON-RPC MCP request.
+
+    Returns ``(http_status, json_rpc_response | None)``. The ``initialized``
+    notification gets 202 + no body (per JSON-RPC, a notification has no
+    response); every other method returns 200 + a JSON-RPC response object.
+    """
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        return 200, _rpc_ok(
+            req_id,
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": MCP_SERVER_INFO,
+            },
+        )
+    if method == "notifications/initialized":
+        return 202, None
+    if method == "ping":
+        return 200, _rpc_ok(req_id, {})
+    if method == "tools/list":
+        return 200, _rpc_ok(req_id, {"tools": _MCP_TOOLS})
+    if method == "tools/call":
+        return _mcp_tools_call(req)
+    return 200, _rpc_err(req_id, _JSON_RPC_METHOD_NOT_FOUND, f"method not found: {method}")
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "hermes-smd-webhook-gate/1.0"
 
@@ -323,7 +509,48 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json_nostore(200, result)
 
+    def _handle_mcp(self) -> None:
+        """Terminate a JSON-RPC MCP request on /mcp (Claude-as-a-channel).
+
+        Beat-1 stub auth (bearer) then JSON-RPC dispatch; ``tools/call`` drives
+        one agent turn and returns its answer in-line via the result store.
+        """
+        if not _mcp_stub_authorized(self.headers.get("Authorization")):
+            self._json(401, {"error": "unauthorized"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > _MAX_BODY_BYTES:
+            self._json(413, {"error": "payload too large"})
+            return
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw)
+        except Exception:
+            self._json(200, _rpc_err(None, _JSON_RPC_PARSE_ERROR, "invalid JSON"))
+            return
+        if (
+            not isinstance(req, dict)
+            or req.get("jsonrpc") != "2.0"
+            or not isinstance(req.get("method"), str)
+        ):
+            self._json(200, _rpc_err(None, _JSON_RPC_INVALID_REQUEST, "not a JSON-RPC 2.0 request"))
+            return
+        try:
+            status, body = _mcp_dispatch(req)
+        except Exception as exc:  # never leak detail; fail closed
+            logger.error("mcp: dispatch error: %s", exc)
+            self._json(200, _rpc_err(req.get("id"), _JSON_RPC_INTERNAL_ERROR, "internal error"))
+            return
+        if body is None:
+            self.send_response(status)
+            self.end_headers()
+            return
+        self._json(status, body)
+
     def do_POST(self) -> None:  # noqa: N802
+        if urlsplit(self.path).path.rstrip("/") == "/mcp":
+            self._handle_mcp()
+            return
         if not self.path.startswith("/webhooks/"):
             self._json(404, {"error": "unknown path"})
             return

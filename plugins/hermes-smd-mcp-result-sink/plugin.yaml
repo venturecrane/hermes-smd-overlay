@@ -1,0 +1,9 @@
+name: hermes-smd-mcp-result-sink
+version: "0.1.0"
+description: "Agent-side half of the MCP channel's synchronous return: captures a completed webhook:mcp:* turn's answer in post_llm_call and writes it to the cross-process result store, where the gate's /mcp long-poll collects it. Structural, content-agnostic, no external side effect (design: docs/design/operator/03-mcp-server-exposure.md)."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - post_llm_call
+hooks:
+  - post_llm_call
