@@ -322,8 +322,18 @@ def _drive_agent_turn(tool_name: str, args: dict) -> dict | None:
         return None
 
     correlation_id = uuid.uuid4().hex
+    # correlation_id rides in the BODY (not just the X-Request-ID header) so the
+    # route prompt can render it into the turn's user_message — the result-sink
+    # recovers it there. The gateway's webhook:mcp:<id> chat-id is NOT the
+    # agent-loop session_id (they differ), so message-carried correlation is the
+    # reliable handle, verified on staging.
     body = json.dumps(
-        {"source": MCP_ROUTE, "event_type": tool_name, "message": args},
+        {
+            "source": MCP_ROUTE,
+            "event_type": tool_name,
+            "message": args,
+            "correlation_id": correlation_id,
+        },
         separators=(",", ":"),
     ).encode("utf-8")
     headers = {

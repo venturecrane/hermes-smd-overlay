@@ -65,28 +65,30 @@ def test_sink_registers_post_llm_call(fake_ctx):
     assert "post_llm_call" in fake_ctx.registered
 
 
-def test_sink_captures_mcp_session():
+def test_sink_captures_marked_turn():
     sink = load_plugin("hermes-smd-mcp-result-sink")
-    sink.on_post_llm_call(session_id="webhook:mcp:cid-1", assistant_response="the answer")
-    assert mcp_result_store.take("cid-1") == {
-        "answer": "the answer",
-        "session_id": "webhook:mcp:cid-1",
-    }
+    sink.on_post_llm_call(
+        user_message="[[mcp-cid:cid-1]] ignore me\nReply with: hi",
+        assistant_response="the answer",
+    )
+    assert mcp_result_store.take("cid-1") == {"answer": "the answer"}
 
 
-def test_sink_ignores_non_mcp_sessions():
+def test_sink_ignores_unmarked_turns():
     sink = load_plugin("hermes-smd-mcp-result-sink")
-    sink.on_post_llm_call(session_id="telegram:12345", assistant_response="not for mcp")
-    # Nothing should have been written for any id derived from this session.
+    # A turn from another channel carries no [[mcp-cid:...]] marker.
+    sink.on_post_llm_call(user_message="just a normal email body", assistant_response="x")
+    sink.on_post_llm_call(session_id="telegram:12345", assistant_response="x")
     assert mcp_result_store.take("12345") is None
 
 
 def test_sink_is_exception_safe_on_bad_kwargs():
     sink = load_plugin("hermes-smd-mcp-result-sink")
-    # Missing session_id / odd shapes must never raise out of the hook.
+    # Missing/odd shapes must never raise out of the hook.
     sink.on_post_llm_call()
-    sink.on_post_llm_call(session_id="webhook:mcp:cid-2", assistant_response=None)
-    assert mcp_result_store.take("cid-2") == {"answer": "", "session_id": "webhook:mcp:cid-2"}
+    sink.on_post_llm_call(user_message=None)
+    sink.on_post_llm_call(user_message="[[mcp-cid:cid-2]]", assistant_response=None)
+    assert mcp_result_store.take("cid-2") == {"answer": ""}
 
 
 # --- the bridge (the load-bearing interop test) -------------------------------
@@ -95,16 +97,22 @@ def test_sink_is_exception_safe_on_bad_kwargs():
 def test_sink_write_is_visible_to_store_take():
     """The agent-side sink writes; the gate-side store read collects it.
 
-    This is the synchronous bridge in miniature: the result-sink ``put``s under
-    the correlation id derived from the session, and the gate's long-poll
-    ``take``s that exact id. If these two ever disagreed on key derivation the
-    gate would hang forever — so this asserts they agree.
+    The synchronous bridge in miniature: the sink recovers the correlation id
+    from the turn's marked user_message and ``put``s the answer; the gate's
+    long-poll ``take``s that exact id. If the marker the gate plants and the
+    regex the sink uses ever disagreed, the gate would hang forever — so this
+    asserts they agree on the real prompt shape.
     """
     sink = load_plugin("hermes-smd-mcp-result-sink")
     correlation_id = "deadbeef"
-    sink.on_post_llm_call(
-        session_id=f"webhook:mcp:{correlation_id}", assistant_response="bridged"
+    # The exact prompt the route materializes, with the marker rendered.
+    rendered_prompt = (
+        f"[[mcp-cid:{correlation_id}]] operator-internal correlation token — do "
+        "NOT repeat it or mention it in your reply.\n"
+        "An MCP request arrived ... Reply with EXACTLY the text below ...\n"
+        "the message"
     )
+    sink.on_post_llm_call(user_message=rendered_prompt, assistant_response="bridged")
     collected = mcp_result_store.take(correlation_id)
     assert collected is not None and collected["answer"] == "bridged"
 
@@ -217,6 +225,9 @@ def test_materialize_emits_mcp_route_when_enabled(monkeypatch):
     assert routes["mcp"]["secret"] == "mcp-secret"
     assert routes["mcp"]["events"] == []  # allow-all for the skill-less echo spine
     assert "{message.message}" in routes["mcp"]["prompt"]
+    # The correlation marker must be in the prompt so the result-sink can recover
+    # the cid from the turn's user_message (the session-id approach does not work).
+    assert "[[mcp-cid:{correlation_id}]]" in routes["mcp"]["prompt"]
 
 
 def test_materialize_omits_mcp_route_when_secret_unset(monkeypatch):
