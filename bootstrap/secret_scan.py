@@ -105,7 +105,18 @@ _SHAPE_HEURISTIC_ALLOWLIST_PATHS: tuple[str, ...] = (
     # string, carrying no secret. Bypass shape heuristics so the path is not
     # flagged as base64-shaped or high-entropy.
     "connectors.*.token_ref",
+    # clerk_subject is a stable PUBLIC identifier (``user_…`` / ``org_…``) — high
+    # entropy but not a secret. Provider-key + banned-name checks still run on it;
+    # only the generic shape heuristic is skipped (same posture as above).
+    "mcp_connector.access[*].clerk_subject",
 )
+
+# Field NAMES exempt from the shape heuristic in the RAW line scan, where the
+# structural path is unavailable (path is None, so the path allowlist cannot
+# match). Mirrors the path allowlist for the fail-closed raw pass. The
+# authoritative parsed pass still provider-key-checks these fields, so skipping
+# the raw shape heuristic here cannot let a provider-shaped key through.
+_SHAPE_HEURISTIC_ALLOWLIST_FIELDS: frozenset[str] = frozenset({"clerk_subject"})
 
 
 @dataclass(frozen=True)
@@ -291,6 +302,13 @@ def scan_raw_yaml(text: str, extra_allowlist: tuple[str, ...] = ()) -> list[Secr
                 )
         cleaned = _strip_comment_and_quotes(value_text)
         if cleaned == "":
+            continue
+        if (
+            field_name is not None
+            and field_name.strip("\"'").lower() in _SHAPE_HEURISTIC_ALLOWLIST_FIELDS
+        ):
+            # High-entropy but non-secret (e.g. clerk_subject). The authoritative
+            # parsed pass still provider-key-checks this value.
             continue
         category = _scan_value_shape(cleaned, None, extra_allowlist)
         if category is not None:

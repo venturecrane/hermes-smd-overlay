@@ -110,6 +110,32 @@ def test_skips_shape_heuristics_in_signature_html():
     assert "base64_long" not in _categories(findings)
 
 
+_CLERK_SUBJECT = "user_3E1RPGrTMxkSqciXMTyybUNSJWu"  # public Clerk id: high-entropy, not a secret
+
+
+def test_clerk_subject_not_shape_flagged_parsed():
+    # The regression that crash-looped customer-zero (2026-06-16): a real Clerk
+    # subject in mcp_connector.access tripped the high-entropy heuristic.
+    findings = scan_parsed_value(
+        {"mcp_connector": {"access": [{"clerk_subject": _CLERK_SUBJECT}]}}
+    )
+    assert "high_entropy_long" not in _categories(findings)
+
+
+def test_clerk_subject_not_shape_flagged_raw():
+    findings = scan_raw_yaml("      clerk_subject: " + _CLERK_SUBJECT + "\n")
+    assert "high_entropy_long" not in _categories(findings)
+
+
+def test_provider_key_in_clerk_subject_still_flagged():
+    # The exemption skips only the generic shape heuristic — a real provider key
+    # smuggled into clerk_subject is still caught (parsed pass is authoritative).
+    findings = scan_parsed_value(
+        {"mcp_connector": {"access": [{"clerk_subject": SYNTH["openai_key"]}]}}
+    )
+    assert "openai_api_key" in _categories(findings)
+
+
 def test_skips_shape_heuristics_on_token_ref():
     findings = scan_parsed_value(
         {
