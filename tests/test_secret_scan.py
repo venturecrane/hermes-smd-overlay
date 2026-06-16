@@ -269,3 +269,32 @@ def test_validator_rejects_banned_field_name(tmp_path):
     bad = _VALID_MIN + "\napi_key: anything\n"
     errors = validate_customer_yaml(_write(tmp_path, bad))
     assert any("secret-shaped value" in e for e in errors)
+
+
+def test_clerk_public_ids_are_not_flagged_as_secrets():
+    """Clerk PUBLIC identifiers (user_/org_) are high-entropy but not secrets.
+    Regression for the 2026-06-15 customer-zero crash-loop: a legit
+    mcp_connector.access[*].clerk_subjects[*] value (a Clerk user id) was flagged
+    secret-shaped and failed customer.yaml validation. Must be exempt in BOTH the
+    parsed pass (path) and the raw line pass (bare list item, path=None), while a
+    real key cannot hide behind the prefix.
+    """
+    clerk_yaml = dedent(
+        """
+        mcp_connector:
+          access:
+            - email: a@b.com
+              clerk_subjects:
+                - user_3EEs0aMBRgu6PRxBa4g5YhHjggD
+                - user_3E1RPGrTMxkSqciXMTyybUNSJWu
+                - org_2AbCdEfGhIjKlMnOpQrStUvWxYz
+        """
+    )
+    import yaml
+
+    assert scan_parsed_value(yaml.safe_load(clerk_yaml)) == []
+    assert scan_raw_yaml(clerk_yaml) == []
+    # The exemption is narrow: a genuinely secret-shaped value (no user_/org_
+    # Clerk shape) is STILL flagged — the fix did not widen the net.
+    assert scan_raw_yaml(f"some_key: {_BODY_HEX_64}\n") != []
+    assert scan_parsed_value({"x": _BODY_HEX_64}) != []
