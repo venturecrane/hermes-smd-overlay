@@ -280,7 +280,44 @@ _MCP_TOOLS = [
             "properties": {"message": {"type": "string"}},
             "required": ["message"],
         },
-    }
+    },
+    {
+        "name": "fetch_documents",
+        "description": (
+            "List the documents the Operator can reach in Google Drive, optionally "
+            "filtered. Read-only; returns file names and ids."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional Drive search query (e.g. a name fragment).",
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Optional Drive folder id to list within.",
+                },
+            },
+        },
+    },
+    {
+        "name": "store_document",
+        "description": (
+            "Store content back to Google Drive as a Google Doc — create a new doc "
+            "('title' + 'content') or append to an existing one ('document_id' + "
+            "'text'). The human approves this action in their Claude client."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Title for a new doc."},
+                "content": {"type": "string", "description": "Body for a new doc."},
+                "document_id": {"type": "string", "description": "Existing doc id to append to."},
+                "text": {"type": "string", "description": "Text to append."},
+            },
+        },
+    },
 ]
 _MCP_TOOL_NAMES = frozenset(t["name"] for t in _MCP_TOOLS)
 

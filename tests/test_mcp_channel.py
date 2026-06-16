@@ -151,10 +151,27 @@ def test_dispatch_ping_is_empty_result():
     assert status == 200 and body["result"] == {}
 
 
-def test_dispatch_tools_list_includes_echo():
+def test_dispatch_tools_list_includes_all_verbs():
     _, body = gate._mcp_dispatch({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "echo" in names
+    assert {"echo", "fetch_documents", "store_document"} <= names
+
+
+def test_tools_call_fetch_documents_drives_a_turn(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        gate, "_drive_agent_turn", lambda n, a: captured.update(tool=n, args=a) or {"answer": "ok"}
+    )
+    _, body = gate._mcp_dispatch(
+        {
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "fetch_documents", "arguments": {"query": "henderson"}},
+        }
+    )
+    assert captured == {"tool": "fetch_documents", "args": {"query": "henderson"}}
+    assert body["result"]["content"][0]["text"] == "ok"
 
 
 def test_dispatch_unknown_method_is_method_not_found():
@@ -222,12 +239,15 @@ def test_materialize_emits_mcp_route_when_enabled(monkeypatch):
     monkeypatch.setenv("WEBHOOK_SECRET_MCP", "mcp-secret")
     out = translate._materialize_webhook_platform({"mcp_connector": {"enabled": True}})
     routes = out["webhook"]["extra"]["routes"]
+    prompt = routes["mcp"]["prompt"]
     assert routes["mcp"]["secret"] == "mcp-secret"
-    assert routes["mcp"]["events"] == []  # allow-all for the skill-less echo spine
-    assert "{message.message}" in routes["mcp"]["prompt"]
+    assert routes["mcp"]["events"] == []  # allow-all; the generic prompt dispatches on verb
     # The correlation marker must be in the prompt so the result-sink can recover
     # the cid from the turn's user_message (the session-id approach does not work).
-    assert "[[mcp-cid:{correlation_id}]]" in routes["mcp"]["prompt"]
+    assert "[[mcp-cid:{correlation_id}]]" in prompt
+    # The generic prompt carries the action + arguments and dispatches the verbs.
+    assert "{event_type}" in prompt and "{message}" in prompt
+    assert "fetch_documents" in prompt and "store_document" in prompt
 
 
 def test_materialize_omits_mcp_route_when_secret_unset(monkeypatch):
