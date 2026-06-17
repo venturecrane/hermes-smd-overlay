@@ -83,25 +83,23 @@ def _is_decided(tool_name: str) -> bool:
 # entry from the registry entirely is the stronger fix; that is a coordinated
 # call for the lead (see this PR's description).
 # ---------------------------------------------------------------------------
-UNCLASSIFIED_CONNECTORS_BY_DESIGN: dict[str, str] = {
-    # clio-oktopeak (@oktopeak/clio-mcp): the law wedge's ORIGINAL practice-
-    # management backend. Superseded by the build-side Smokeball adapter
-    # ("the Operator is a Smokeball expert, not a Clio facade" — law-firm
-    # smokeball-surface.md). The registry entry and its translate path are
-    # retained, but NO in-repo customer config binds mcp:clio-oktopeak (only
-    # tests/test_bootstrap_translate.py exercises it synthetically). Its tools
-    # are therefore intentionally unclassified: were it bound to a live
-    # customer, every Clio write verb (e.g. mcp_clio_oktopeak_create_matter)
-    # would hit the unmapped->READ fallback and run autonomously — the exact
-    # EFF-07 hole. Disposition deferred to the lead: either (a) classify the
-    # full @oktopeak/clio-mcp surface here, or (b) drop the dormant
-    # clio-oktopeak entry from MCP_CONNECTOR_REGISTRY. Tracked in this PR.
-    "clio-oktopeak": (
-        "dormant — superseded by the Smokeball build adapter; bound to no live "
-        "customer config; pending lead disposition (classify-surface vs "
-        "remove-registry-entry)"
-    ),
-}
+# Connectors deliberately left without a classified tool surface.
+#
+# This set is EMPTY by design, and the bar for adding an entry is deliberately
+# almost-unmeetable. A connector may sit in MCP_CONNECTOR_REGISTRY without any
+# classified tools ONLY if it is bound by NO customer.yaml anywhere — and
+# "anywhere" includes ss-console operator/customers/, which is NOT visible from
+# this overlay worktree. That invisibility is the trap: the first occupant
+# here, clio-oktopeak, was carved out as "dormant — bound to no live customer"
+# based on the overlay repo alone, then found bound by TWO live law configs
+# (pilot-law / Ashton & Price, and demo-law) as their active PracticeManagement
+# backend. A passing test that launders a live fail-open into "benign-dormant"
+# is worse than no test. So: prefer classifying the surface
+# (PINNED_CONNECTOR_SURFACES) over a carve-out, and never assert dormancy from
+# the overlay alone. An entry here without an attached, current proof of
+# zero bindings across BOTH repos is a bug.
+# ---------------------------------------------------------------------------
+UNCLASSIFIED_CONNECTORS_BY_DESIGN: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +197,49 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_smokeball_create_transaction",
             "mcp_smokeball_protect_funds",
             "mcp_smokeball_unprotect_funds",
+        }
+    ),
+    # Clio (mcp:clio-oktopeak, @oktopeak/clio-mcp) — the LIVE practice-management
+    # backend for the law configs that ride Clio while the Smokeball API is still
+    # gated: pilot-law (Ashton & Price) and demo-law both bind
+    # backend: mcp:clio-oktopeak, enabled: true (ss-console
+    # operator/customers/{pilot-law,demo-law}/customer.yaml). This is NOT a
+    # dormant entry — it is bound and active, so the full surface MUST be
+    # classified (it was the live EFF-07 hole until the surface was mapped).
+    # Runtime prefix is mcp_clio_oktopeak_ (Hermes sanitize_mcp_name_component
+    # re.sub([^A-Za-z0-9_], "_") folds the dash). The 23-tool surface is sourced
+    # from ss-console operator/verticals/law-firm/clio-surface.md; reads → READ,
+    # note/task/doc writes → INTERNAL_WRITE, and create_matter /
+    # create_calendar_entry / log_time_entry / create_activity → COMMITMENT
+    # (never autonomous). A new Clio verb that misses classification fails here.
+    "clio-oktopeak": frozenset(
+        {
+            # reads
+            "mcp_clio_oktopeak_list_matters",
+            "mcp_clio_oktopeak_get_matter",
+            "mcp_clio_oktopeak_search_contacts",
+            "mcp_clio_oktopeak_get_contact",
+            "mcp_clio_oktopeak_list_documents",
+            "mcp_clio_oktopeak_get_document",
+            "mcp_clio_oktopeak_list_tasks",
+            "mcp_clio_oktopeak_list_calendars",
+            "mcp_clio_oktopeak_list_calendar_entries",
+            "mcp_clio_oktopeak_list_time_entries",
+            "mcp_clio_oktopeak_get_billing_summary",
+            "mcp_clio_oktopeak_list_users",
+            "mcp_clio_oktopeak_get_user",
+            "mcp_clio_oktopeak_export_audit_log",
+            # internal writes (notes / tasks / documents)
+            "mcp_clio_oktopeak_create_note",
+            "mcp_clio_oktopeak_create_task",
+            "mcp_clio_oktopeak_update_task",
+            "mcp_clio_oktopeak_complete_task",
+            "mcp_clio_oktopeak_upload_document",
+            # commitments (never autonomous — gated)
+            "mcp_clio_oktopeak_create_matter",
+            "mcp_clio_oktopeak_create_calendar_entry",
+            "mcp_clio_oktopeak_log_time_entry",
+            "mcp_clio_oktopeak_create_activity",
         }
     ),
 }
