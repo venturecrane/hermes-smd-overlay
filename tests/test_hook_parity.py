@@ -62,6 +62,7 @@ _HOOK_SURFACE = _REPO / "docs" / "hook-surface.md"
 # Helpers — parse the manifests and the contract doc.
 # --------------------------------------------------------------------------- #
 
+
 def _declared_subplugin_dirs() -> list[Path]:
     """Sub-plugin directories from the umbrella manifest (single source of
     truth). Mirrors umbrella.declared_subplugins() but returns absolute dirs."""
@@ -115,6 +116,7 @@ def _contract_table() -> dict[str, bool]:
 # Fixtures
 # --------------------------------------------------------------------------- #
 
+
 @pytest.fixture(scope="module")
 def env(tmp_path_factory):
     """The audit/peer-memory/etc. sub-plugins resolve per-customer namespace +
@@ -142,6 +144,7 @@ def env(tmp_path_factory):
 # --------------------------------------------------------------------------- #
 # Invariant 1 — manifest ↔ register parity, per plugin.
 # --------------------------------------------------------------------------- #
+
 
 def test_manifest_declares_exactly_the_hooks_register_wires(env):
     """Every hook a plugin wires must be declared in its manifest, and every
@@ -173,6 +176,7 @@ def test_manifest_declares_exactly_the_hooks_register_wires(env):
 # Invariant 2 — contract ↔ registered parity (the SEC-33 guard).
 # --------------------------------------------------------------------------- #
 
+
 def test_every_contracted_hook_is_registered(env):
     """Every hook docs/hook-surface.md marks "Used by overlay? yes" must be
     registered by some plugin in the live fan-out. This is the SEC-33 guard:
@@ -199,9 +203,7 @@ def test_every_registered_hook_is_contracted_yes(env):
     contract = _contract_table()
     registered = _registered_hooks_per_plugin()
     all_registered: set[str] = set().union(*registered.values()) if registered else set()
-    not_contracted = {
-        h for h in all_registered if not contract.get(h, False)
-    }
+    not_contracted = {h for h in all_registered if not contract.get(h, False)}
     assert not not_contracted, (
         "these hooks are registered by a plugin but docs/hook-surface.md does "
         f"NOT mark them 'Used by overlay? yes': {sorted(not_contracted)}. Update "
@@ -212,6 +214,7 @@ def test_every_registered_hook_is_contracted_yes(env):
 # --------------------------------------------------------------------------- #
 # Invariant 3 — every registered hook is a valid Hermes hook.
 # --------------------------------------------------------------------------- #
+
 
 def test_every_registered_hook_is_a_valid_hermes_hook(env):
     """No plugin may attach to a hook name Hermes does not expose at the pinned
