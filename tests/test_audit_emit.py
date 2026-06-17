@@ -444,10 +444,13 @@ def test_classify_tool_returns_registry_value_for_known_tool() -> None:
     assert cls.unmapped is False
 
 
-def test_classify_tool_returns_read_default_for_unknown_tool() -> None:
+def test_classify_tool_fails_closed_to_refused_for_unknown_tool() -> None:
+    """Unknown tool fails closed to REFUSED, not READ (issue #1327); the
+    ``unmapped=True`` flag is preserved so the audit row still tags the gap."""
     mod = load_plugin("hermes-smd-audit")
     cls = mod.emit.classify_tool("some_brand_new_tool")
-    assert cls.action_class is mod.schemas.HookActionClass.READ
+    assert cls.action_class is mod.schemas.HookActionClass.REFUSED
+    assert cls.action_class is not mod.schemas.HookActionClass.READ
     assert cls.unmapped is True
 
 
@@ -631,8 +634,8 @@ def test_build_metadata_tags_unmapped_tool() -> None:
     md = mod.emit.build_per_tool_metadata(
         customer="acme",
         tool_name="some_brand_new_tool",
-        action_class=mod.schemas.HookActionClass.READ,
-        outcome="ok",
+        action_class=mod.schemas.HookActionClass.REFUSED,  # #1327 — unmapped fails closed
+        outcome="blocked",
         unmapped=True,
     )
     assert md["unmapped_tool"] is True
@@ -713,7 +716,7 @@ def test_emit_tool_event_unknown_tool_tags_unmapped() -> None:
     )
     md = json.loads(client.rows()[0]["metadata"])
     assert md["unmapped_tool"] is True
-    assert md["action_class"] == "read"
+    assert md["action_class"] == "refused"  # #1327 — unmapped fails closed, not read
 
 
 def test_emit_tool_event_banned_tool_writes_invariant_violation_row() -> None:

@@ -60,6 +60,59 @@ def test_file_mutation_tools_classified_internal_write(tool):
     assert classify_tool(tool).action_class is ActionClass.INTERNAL_WRITE
 
 
+# ---------------------------------------------------------------------------
+# #1327 — unmapped/unknown tool fails closed (was: silent READ default)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "totally_made_up_tool",
+        "mcp_unknownserver_do_something",
+        "some_new_core_verb",
+        "workspace_gmail_send_for_real",  # a plausible-but-unregistered send verb
+    ],
+)
+def test_unmapped_tool_classified_refused_not_read(tool):
+    """An unregistered tool name fails closed to REFUSED, not READ. The old
+    READ default (issue #1327) waved every unknown tool through every ceiling.
+    The unmapped=True audit signal is preserved as telemetry."""
+    c = classify_tool(tool)
+    assert c.action_class is ActionClass.REFUSED
+    assert c.action_class is not ActionClass.READ
+    assert c.unmapped is True
+
+
+def test_unmapped_tool_blocked_under_autonomous_ceiling():
+    """Even with the most permissive scalar ceiling and an authored autonomous
+    grant for every other class, an unknown tool is refused — REFUSED is a
+    terminal class that no authored ceiling can widen."""
+    enforce = _enforce()
+    d = enforce.enforce(
+        ceiling=enforce.Ceiling.AUTONOMOUS,
+        action=ActionClass.REFUSED,
+        skill_name="s",
+        tool_name="totally_made_up_tool",
+        action_ceilings={
+            ActionClass.CODE_EXECUTION: enforce.Ceiling.AUTONOMOUS,
+            ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS,
+        },
+    )
+    assert d.allowed is False
+    assert d.audit_action == "refuse"
+
+
+def test_unmapped_tool_blocked_end_to_end():
+    """Full chain through evaluate_tool_call: an unknown tool is blocked."""
+    enforce = _enforce()
+    block = enforce.evaluate_tool_call(
+        "totally_made_up_tool", {}, "smd", session_id="sess"
+    )
+    assert block is not None
+    assert block["action"] == "block"
+
+
 def test_code_execution_unauthored_is_refused():
     """No authored code_execution ceiling → fail-closed (ADR 0035)."""
     enforce = _enforce()

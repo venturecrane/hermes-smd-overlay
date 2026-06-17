@@ -422,8 +422,8 @@ def emit_tool_event(
         ``metadata.banned_tool=true`` and ``outcome=blocked``.
       * Known tool → look up action class, build metadata, emit
         ``TOOL_CALL_COMPLETED``.
-      * Unknown tool → default action class is READ; metadata is tagged
-        ``unmapped_tool=true`` so the dashboard surfaces it.
+      * Unknown tool → fail-closed action class is REFUSED (issue #1327);
+        metadata is tagged ``unmapped_tool=true`` so the dashboard surfaces it.
 
     Returns the inserted ULID, or ``None`` if the write failed (the writer
     raised ``AuditWriteError`` and the hook wrapper swallowed it).

@@ -56,6 +56,7 @@ class ActionClass(str, enum.Enum):
     CODE_EXECUTION = (
         "code_execution"  # Arbitrary code / shell / subagent — authored-only, fail-closed
     )
+    REFUSED = "refused"  # Unknown / unmapped tool — fail-closed terminal class, never executes
 
 
 # ---------------------------------------------------------------------------
@@ -380,9 +381,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # never reachable by a draft_for_review skill. Legitimate use (e.g.
     # ar-chaser's ADR-0021 fetch loop) is authored at the customer level and
     # runs only on untainted turns. NOTE: the broader unmapped→READ default
-    # for unknown CORE tools is a deferred hardening (full core-allowlist +
-    # staging soak) — bounded meanwhile by the WS6 egress allowlist and the
-    # ``unmapped_tool=true`` audit signal.
+    # for unknown CORE tools was the residual footgun; it is now closed (issue
+    # #1327). ``classify_tool`` fails closed to ``REFUSED`` for any name not in
+    # this map, so this map IS the core read-allowlist: a legitimately
+    # read-safe core tool must be enumerated here to be reachable.
     "execute_code": ActionClass.CODE_EXECUTION,
     "terminal": ActionClass.CODE_EXECUTION,
     "process": ActionClass.CODE_EXECUTION,
@@ -429,7 +431,9 @@ class ToolClassification:
 
     ``action_class`` is the action class the trust-ceiling enforcer should
     use for this tool call. ``unmapped`` is True if the tool name was not
-    in ``TOOL_ACTION_CLASS_MAP`` (the helper returned the READ default).
+    in ``TOOL_ACTION_CLASS_MAP`` (the helper returned the fail-closed
+    ``REFUSED`` default). The flag is retained for audit telemetry even
+    though the action class itself now blocks the call.
     """
 
     action_class: ActionClass
@@ -443,10 +447,20 @@ def classify_tool(tool_name: str) -> ToolClassification:
     - ``tool_name`` in ``BANNED_TOOLS`` → ``BannedToolError`` (the exception
       carries the categorical ``reason`` code from ``BANNED_REASON``).
     - ``tool_name`` in registry → mapped action class, ``unmapped=False``.
-    - Otherwise → default to ``ActionClass.READ``, ``unmapped=True``.
+    - Otherwise → ``ActionClass.REFUSED``, ``unmapped=True``.
 
-    The unmapped fallback is conservative: an unmapped tool is treated as
-    read-only, so the unconfigured surface cannot drive a write.
+    The unmapped fallback is fail-closed: an unmapped tool is an UNKNOWN
+    capability, not a benign read. The prior READ default (issue #1327)
+    silently waved every unregistered tool through every ceiling — any new
+    Hermes-core tool, any newly surfaced MCP verb, any rename would slip the
+    trust gate as "read". ``REFUSED`` is a terminal class: ``enforce()`` blocks
+    it outright and it is deliberately NOT routed through ``resolve_ceiling``,
+    so an authored ceiling (even ``code_execution: autonomous``) can never
+    widen it. The ``unmapped=True`` flag is preserved so the audit row still
+    carries ``metadata.unmapped_tool=true`` — the telemetry that surfaces the
+    gap so the registry gets the new name added (the intended remediation,
+    versus a silent allow). Legitimately read-safe tools must be enumerated in
+    ``TOOL_ACTION_CLASS_MAP`` above; that map IS the core read-allowlist.
 
     Lookups run against a normalized (trimmed, lowercased) form of the
     name: the registry and ``BANNED_TOOLS`` are all-lowercase, so without
@@ -471,10 +485,10 @@ def classify_tool(tool_name: str) -> ToolClassification:
 
     logger.warning(
         "classify_tool: tool_name=%s not in TOOL_ACTION_CLASS_MAP; "
-        "defaulting to READ and tagging metadata.unmapped_tool=true",
+        "failing closed to REFUSED and tagging metadata.unmapped_tool=true",
         tool_name,
     )
-    return ToolClassification(action_class=ActionClass.READ, unmapped=True)
+    return ToolClassification(action_class=ActionClass.REFUSED, unmapped=True)
 
 
 __all__ = [

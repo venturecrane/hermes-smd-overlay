@@ -296,6 +296,22 @@ def enforce(
     if action == ActionClass.READ:
         return EnforcementDecision(allowed=True, reason="read action", audit_action="allow")
 
+    # REFUSED action class — an UNKNOWN/unmapped tool (issue #1327). This is a
+    # terminal fail-closed class, NOT routed through resolve_ceiling: no authored
+    # ceiling can widen it. Refused on every turn, tainted or not, before any
+    # other action handling. The agent surfaces the gap; the registry gets the
+    # name added (that is the remediation), versus the old silent READ allow.
+    if action == ActionClass.REFUSED:
+        return EnforcementDecision(
+            allowed=False,
+            reason=(
+                f"tool {tool_name} is not in the action-class registry; "
+                f"unknown tools fail closed (issue #1327) — add it to "
+                f"TOOL_ACTION_CLASS_MAP or BANNED_TOOLS to govern it"
+            ),
+            audit_action="refuse",
+        )
+
     # TAINT-GATE (OP-P0-4 / OP-P0-5 / OP-P1-1). This turn's session ingested
     # untrusted inbound content (an email body, a connector record, a fetched
     # page). A sensitive action on such a turn cannot be autonomous — an injected
