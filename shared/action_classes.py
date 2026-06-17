@@ -332,6 +332,51 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_matter": ActionClass.COMMITMENT,
     "mcp_smokeball_delete_file": ActionClass.DESTRUCTIVE,
+    # ----------------------------------------------------------------------
+    # Clio MCP (oktopeak/clio-mcp v2.0.0) — the law wedge's ORIGINAL
+    # practice-management system of record, bound by pilot-law (Ashton & Price)
+    # and demo-law as `mcp:clio-oktopeak`. Hermes sanitizes the server key
+    # `clio-oktopeak` -> `clio_oktopeak` (sanitize_mcp_name_component: every
+    # non-[A-Za-z0-9_] char -> `_`), so every tool registers as
+    # mcp_clio_oktopeak_<tool>. Surface pinned in
+    # ss-console operator/verticals/law-firm/clio-surface.md (23 tools, read
+    # against the connector source 2026-06-05).
+    #
+    # THIS BLOCK CLOSES A LIVE FAIL-OPEN (EFF-07): the connector materializes
+    # and is bound on two running Machines, but had ZERO classified tools — so
+    # every Clio write went unmapped->READ->autonomous, fired even on an
+    # injection-tainted turn. The pilot-law config comment claiming create_matter
+    # / create_calendar_entry are "GATED / fail-closed" described only the SKILL
+    # authoring posture (draft-and-surface), which injection bypasses; nothing in
+    # the trust layer enforced it. Mirrors the Smokeball classification exactly:
+    # reads -> READ; note/task/document writes -> INTERNAL_WRITE; the
+    # system-of-record / financial / scheduling commitments (create_matter,
+    # create_calendar_entry, log_time_entry, create_activity) -> COMMITMENT
+    # (never autonomous). Clio exposes no IOLTA/trust-account tool and no delete
+    # (clio-surface.md), so there is nothing to hard-BAN here.
+    "mcp_clio_oktopeak_list_matters": ActionClass.READ,
+    "mcp_clio_oktopeak_get_matter": ActionClass.READ,
+    "mcp_clio_oktopeak_search_contacts": ActionClass.READ,
+    "mcp_clio_oktopeak_get_contact": ActionClass.READ,
+    "mcp_clio_oktopeak_list_documents": ActionClass.READ,
+    "mcp_clio_oktopeak_get_document": ActionClass.READ,
+    "mcp_clio_oktopeak_list_tasks": ActionClass.READ,
+    "mcp_clio_oktopeak_list_calendars": ActionClass.READ,
+    "mcp_clio_oktopeak_list_calendar_entries": ActionClass.READ,
+    "mcp_clio_oktopeak_list_time_entries": ActionClass.READ,
+    "mcp_clio_oktopeak_get_billing_summary": ActionClass.READ,
+    "mcp_clio_oktopeak_list_users": ActionClass.READ,
+    "mcp_clio_oktopeak_get_user": ActionClass.READ,
+    "mcp_clio_oktopeak_export_audit_log": ActionClass.READ,
+    "mcp_clio_oktopeak_create_note": ActionClass.INTERNAL_WRITE,
+    "mcp_clio_oktopeak_create_task": ActionClass.INTERNAL_WRITE,
+    "mcp_clio_oktopeak_update_task": ActionClass.INTERNAL_WRITE,
+    "mcp_clio_oktopeak_complete_task": ActionClass.INTERNAL_WRITE,
+    "mcp_clio_oktopeak_upload_document": ActionClass.INTERNAL_WRITE,
+    "mcp_clio_oktopeak_create_matter": ActionClass.COMMITMENT,
+    "mcp_clio_oktopeak_create_calendar_entry": ActionClass.COMMITMENT,
+    "mcp_clio_oktopeak_log_time_entry": ActionClass.COMMITMENT,
+    "mcp_clio_oktopeak_create_activity": ActionClass.COMMITMENT,
     # Memory — read-only via this registry.
     "memory_search": ActionClass.READ,
     "memory_get_rule": ActionClass.READ,
