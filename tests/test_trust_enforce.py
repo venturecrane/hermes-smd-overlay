@@ -3,7 +3,8 @@
 Covers:
   - The plugin registers ``pre_tool_call`` and ``transform_tool_result``.
   - ``classify_tool`` correctly maps known tools, refuses banned tools,
-    and defaults unknown tools to READ with ``unmapped=True``.
+    and fails closed for unknown tools to REFUSED with ``unmapped=True``
+    (issue #1327).
   - The policy core (``enforce``) returns the right decision for every
     (Ceiling, ActionClass, approval) combination.
   - ``evaluate_tool_call`` returns the expected block directive shape
@@ -77,10 +78,13 @@ def test_classify_tool_known_commitment_tool() -> None:
     assert classification.unmapped is False
 
 
-def test_classify_tool_unknown_falls_back_to_read_unmapped() -> None:
+def test_classify_tool_unknown_fails_closed_to_refused_unmapped() -> None:
+    """Unknown tool fails closed to REFUSED, not READ (issue #1327). The
+    ``unmapped=True`` flag is preserved as audit telemetry."""
     enforce = _load_trust_module("enforce")
     classification = enforce.classify_tool("never_seen_before_tool")
-    assert classification.action_class == enforce.ActionClass.READ
+    assert classification.action_class == enforce.ActionClass.REFUSED
+    assert classification.action_class != enforce.ActionClass.READ
     assert classification.unmapped is True
 
 
@@ -368,13 +372,16 @@ def test_evaluate_tool_call_customer_ceiling_caps_skill(env_draft_for_review) ->
     assert result is None
 
 
-def test_evaluate_tool_call_unknown_tool_defaults_to_read_allowed(
+def test_evaluate_tool_call_unknown_tool_fails_closed_blocked(
     env_autonomous,
 ) -> None:
+    """An unknown tool fails closed to REFUSED and is BLOCKED even under an
+    autonomous ceiling (issue #1327). Previously it defaulted to READ and was
+    silently allowed — the residual footgun this fix closes."""
     enforce = _load_trust_module("enforce")
     result = enforce.evaluate_tool_call("wholly_unknown_tool_xyz", {}, "acme")
-    # Default classification is READ; allowed under non-refused ceilings.
-    assert result is None
+    assert result is not None
+    assert result["action"] == "block"
 
 
 def test_evaluate_tool_call_empty_name_is_passthrough(env_autonomous) -> None:

@@ -162,7 +162,7 @@ def test_fenced_agentmail_entries_are_classified_reads() -> None:
 
 def test_every_workspace_tool_has_an_action_class() -> None:
     """A registered workspace tool absent from TOOL_ACTION_CLASS_MAP would
-    fall to the unmapped READ default — every registered tool must be
-    deliberately classified."""
+    fail closed to REFUSED (issue #1327) and be unreachable — every registered
+    tool must be deliberately classified to function."""
     unmapped = [t for t in _workspace_tools() if t not in TOOL_ACTION_CLASS_MAP]
     assert unmapped == [], f"workspace tools missing from TOOL_ACTION_CLASS_MAP: {sorted(unmapped)}"
