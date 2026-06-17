@@ -81,6 +81,42 @@ vars:
     requirement: optional
     consumed_by: [demo-relay]
     note: "AgentMail REST credential (Bearer) for the demo reply relay's threaded send; read only when demo.reply_relay is authored. Absent => relay disables (no send). Also the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py)."
+  SMD_MCP_STORE_DIR:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate, mcp-result-sink]
+    note: "directory for the MCP channel's cross-process result store (shared/mcp_result_store.py); the agent-side result-sink writes, the gate's /mcp long-poll reads. Defaults to /run/smd-mcp (tmpfs) when unset."
+  SMD_MCP_STUB_TOKEN:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "beat-1 stub bearer token for the /mcp route; FAIL-CLOSED when unset (no token => /mcp rejects every request, never an open endpoint). Replaced by Clerk OAuth in beat 2."
+  WEBHOOK_SECRET_MCP:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [bootstrap-translate, webhook-gate]
+    note: "the mcp channel's inbound-webhook HMAC secret; read as a literal by translate (route materialization, fail-closed/omitted when unset) and via the WEBHOOK_SECRET_<ROUTE> family by the gate's loopback-forward signing. Also gates the webhook-gate launch in bootstrap.sh (AGENTMAIL or MCP secret)."
+  SMD_MCP_CLERK_ISSUER:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "the customer's Clerk issuer URL (from the console's D1 mcp_clerk_bindings), materialized at provision. Set => the gate's /mcp validates real Clerk tokens (production auth); unset => transitional stub bearer. The gate's /.well-known/oauth-protected-resource names it as the authorization server."
+  SMD_MCP_RESOURCE_URI:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "THIS Machine's own /mcp canonical URL (e.g. https://hermes-smd.fly.dev/mcp), materialized at provision. The Clerk token's aud MUST equal it — the isolation invariant that makes a console-minted token unusable here. Required (with the issuer) to enable Clerk auth."
+  SMD_MCP_CLERK_ORG_ID:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "optional Clerk org id; when set, the gate additionally requires the token's org_id to match (multi-org isolation). Unset for single-principal customers like smd."
   HERMES_HOME:
     discovery: static
     stage: agent

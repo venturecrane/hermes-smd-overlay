@@ -38,10 +38,11 @@ import logging
 import os
 import re
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from shared import runtime_read
+from shared import mcp_result_store, mcp_thread_store, runtime_read
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
 # to build the forward URL, so the only dynamic part of the urllib call is a
@@ -233,6 +234,364 @@ def _stamp_source(body: bytes, route: str) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
+# ---- MCP CHANNEL (Claude as an inbound channel) ------------------------------
+# Beat-1 synchronous-return spine. The /mcp route terminates a JSON-RPC MCP
+# request and drives ONE agent turn through the same loopback path the webhook
+# routes use (the `mcp` webhook route → router → agent loop → broker → memory,
+# identical to email), then long-polls the cross-process result store the
+# agent-side result-sink wrote and returns the answer IN-LINE — the synchronous
+# return MCP requires but Hermes' fire-and-forget dispatch (202 + out-of-band
+# deliver) does not provide. See docs/design/operator/03-mcp-server-exposure.md.
+#
+# AUTH (beat 1): a stub bearer token (SMD_MCP_STUB_TOKEN), fail-closed when
+# unset so a Machine that has not authored it never exposes an open /mcp. Beat 2
+# replaces this with Clerk OAuth (per-customer JWKS / iss / aud / sub), ported
+# from ss-console src/lib/operator/mcp/token-validation.ts.
+
+MCP_ROUTE = "mcp"  # webhook route name; session id == webhook:mcp:<correlation_id>
+MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_SERVER_INFO = {
+    "name": "smd-operator-connector",
+    "title": "SMD Operator",
+    "version": "0.1.0",
+}
+
+# Long-poll budget for the synchronous return. Kept under typical MCP client
+# tool timeouts; on expiry the call returns an explicit "still working" result
+# rather than hanging the client (MCP is stateless — the client may retry).
+_MCP_POLL_TIMEOUT_S = 55.0
+_MCP_POLL_INTERVAL_S = 0.25
+
+_JSON_RPC_PARSE_ERROR = -32700
+_JSON_RPC_INVALID_REQUEST = -32600
+_JSON_RPC_METHOD_NOT_FOUND = -32601
+_JSON_RPC_INVALID_PARAMS = -32602
+_JSON_RPC_INTERNAL_ERROR = -32603
+
+# Tool surface: ONE conversational verb. The MCP connector is a communication
+# channel to the worker, not a remote-procedure menu — so it exposes a single
+# "talk to it" verb and lets the worker's intelligence decide what to do, exactly
+# as it would with an email or a chat. (Earlier beats listed typed verbs —
+# echo/fetch_documents/store_document — but a verb menu invites the connecting
+# client to route conversation into RPCs, which is the narrowing this channel
+# exists to remove. The worker reaches Drive, the inbox, memory, etc. with its
+# own tools inside the turn.)
+ASK_TOOL_NAME = "ask_operator"
+_MCP_TOOLS = [
+    {
+        "name": ASK_TOOL_NAME,
+        "description": (
+            "Talk to the Operator. Send it a message — a question, an instruction, "
+            "anything you would say to a capable coworker who has your Drive, your "
+            "inbox, your memory, and judgment. It understands what you want, does it, "
+            "and replies. Pass a stable 'thread_id' to keep the same conversation "
+            "going across turns (it remembers what was already said in that thread)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "What you want to say to the Operator.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. A stable id for THIS conversation; reuse it across "
+                        "turns so the Operator keeps context. Scoped to your identity."
+                    ),
+                },
+            },
+            "required": ["message"],
+        },
+    },
+]
+_MCP_TOOL_NAMES = frozenset(t["name"] for t in _MCP_TOOLS)
+
+
+# Stable synthetic subject for the transitional stub-auth path (staging, where
+# Clerk is not configured). There is no real identity behind a shared bearer
+# token, so all stub-authed turns share ONE conversation namespace — which is
+# correct: staging has a single operator. The Clerk path (prod) carries the real
+# per-user subject.
+STUB_PRINCIPAL_SUBJECT = "smd-mcp-stub"
+
+
+def _mcp_stub_authorized(auth_header: str | None) -> str | None:
+    """Beat-1 stub auth: constant-time bearer check against SMD_MCP_STUB_TOKEN.
+
+    Returns the synthetic stub subject on success, else None. Fail-closed: an
+    unset token rejects every request, so a Machine that never authored the stub
+    token can never expose an open /mcp. Used ONLY when Clerk is not configured.
+    """
+    token = os.environ.get("SMD_MCP_STUB_TOKEN")
+    if not token:
+        return None
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+    if hmac.compare_digest(auth_header[len("Bearer ") :], token):
+        return STUB_PRINCIPAL_SUBJECT
+    return None
+
+
+def _load_mcp_binding():
+    """Build the Clerk auth binding, or None when Clerk is not configured here.
+
+    issuer + resource_uri are materialized to the Machine env at provision time
+    (issuer from the console's D1 mcp_clerk_bindings; resource_uri is THIS
+    Machine's own /mcp URL). enabled + access are read LIVE from customer.yaml so
+    authoring access on/off takes effect with no restart. None => Clerk not
+    configured (e.g. staging spine tests), which falls back to the transitional
+    stub bearer.
+    """
+    issuer = os.environ.get("SMD_MCP_CLERK_ISSUER")
+    resource_uri = os.environ.get("SMD_MCP_RESOURCE_URI")
+    if not issuer or not resource_uri:
+        return None
+    from shared import mcp_auth  # lazy: keeps jwt off the gate's non-mcp boot path
+
+    path = os.environ.get("SMD_CUSTOMER_YAML_PATH") or "/opt/data/customer.yaml"
+    try:
+        import yaml
+
+        with open(path, encoding="utf-8") as handle:
+            cfg = yaml.safe_load(handle) or {}
+    except (OSError, ValueError) as exc:
+        logger.warning("mcp: customer.yaml read failed (%s); auth fail-closed", exc)
+        return None
+    mc = cfg.get("mcp_connector") if isinstance(cfg, dict) else None
+    if not isinstance(mc, dict):
+        return None
+    access = tuple(
+        mcp_auth.McpAccessEntry(e["email"], e["profile"], e["clerk_subject"])
+        for e in (mc.get("access") or [])
+        if isinstance(e, dict) and e.get("email") and e.get("profile") and e.get("clerk_subject")
+    )
+    return mcp_auth.McpAuthBinding(
+        issuer=issuer,
+        resource_uri=resource_uri,
+        clerk_org_id=os.environ.get("SMD_MCP_CLERK_ORG_ID") or None,
+        enabled=bool(mc.get("enabled")),
+        access=access,
+    )
+
+
+def _mcp_authenticate(auth_header: str | None) -> str | None:
+    """Authenticate an /mcp request; return the principal SUBJECT or None.
+
+    Clerk when configured (the production path) — returns the authenticated
+    Clerk subject, which namespaces the caller's conversation thread so no
+    identity can address another's. The transitional stub bearer is used ONLY
+    when Clerk is not configured on this Machine, returning a single synthetic
+    subject. Fail-closed either way (None => reject)."""
+    binding = _load_mcp_binding()
+    if binding is not None:
+        from shared import mcp_auth
+
+        token = mcp_auth.extract_bearer_token(auth_header)
+        result = mcp_auth.validate_mcp_token(token, binding)
+        if isinstance(result, mcp_auth.McpPrincipal):
+            return result.subject
+        # Diagnostic: surface the token's actual aud/iss/sub (identifiers, not
+        # secrets) vs what THIS Machine expects, so an OAuth audience/issuer
+        # mismatch is debuggable without guessing. Temporary.
+        claims_note = ""
+        try:
+            if token:
+                import jwt
+
+                unverified = jwt.decode(token, options={"verify_signature": False})
+                claims_note = (
+                    f" token.aud={unverified.get('aud')!r} token.iss={unverified.get('iss')!r}"
+                    f" token.sub={unverified.get('sub')!r}"
+                    f" | expected resource={binding.resource_uri!r} issuer={binding.issuer!r}"
+                )
+        except Exception:  # noqa: BLE001
+            claims_note = " (token un-decodable)"
+        logger.info(
+            "mcp: Clerk auth refused (%s)%s", getattr(result, "reason", "unknown"), claims_note
+        )
+        return None
+    return _mcp_stub_authorized(auth_header)
+
+
+def _mcp_protected_resource_metadata() -> dict | None:
+    """RFC 9728 protected-resource-metadata for THIS Machine's /mcp, or None when
+    Clerk is not configured. Public + unauthenticated (carries no secret)."""
+    issuer = os.environ.get("SMD_MCP_CLERK_ISSUER")
+    resource_uri = os.environ.get("SMD_MCP_RESOURCE_URI")
+    if not issuer or not resource_uri:
+        return None
+    return {
+        "resource": resource_uri,
+        "authorization_servers": [issuer],
+        "scopes_supported": ["openid", "profile", "email"],
+        "bearer_methods_supported": ["header"],
+    }
+
+
+def _rpc_ok(req_id: object, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _rpc_err(req_id: object, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+
+
+def _drive_agent_turn(
+    message: str, *, principal_subject: str, thread_id: str | None
+) -> dict | None:
+    """Forward one conversational message into the agent loop, return its reply.
+
+    Mints a fresh per-call correlation id (the result-bridge handle: it rides the
+    BODY so the route prompt renders it into the turn's user_message, and the
+    agent-side result-sink stores the completed turn's answer under it for us to
+    collect). The correlation id is ALSO the Hermes delivery/dedup id
+    (X-Request-ID), so it MUST stay unique per call — which is why it cannot
+    double as the conversation key.
+
+    Continuity is supplied in the overlay (see ``mcp_thread_store``): when the
+    caller passes a ``thread_id``, we load the recent transcript for THIS
+    principal+thread and render it into the turn so the worker remembers the
+    conversation; after the reply lands we append this exchange. The thread key
+    is principal-namespaced, so a caller can only ever read/extend their own
+    thread. Returns the stored payload (``{"answer": ...}``) or None on forward
+    failure / timeout.
+    """
+    secret = _route_secret(MCP_ROUTE)
+    if not secret:
+        logger.warning("mcp: WEBHOOK_SECRET_%s unset — cannot forward", MCP_ROUTE.upper())
+        return None
+
+    # Principal-namespaced conversation key (None => one-shot, no continuity).
+    tkey = mcp_thread_store.thread_key(principal_subject, thread_id) if thread_id else None
+    history_text = mcp_thread_store.render(mcp_thread_store.history(tkey)) if tkey else ""
+
+    correlation_id = uuid.uuid4().hex
+    body = json.dumps(
+        {
+            "source": MCP_ROUTE,
+            "event_type": ASK_TOOL_NAME,
+            "message": message,
+            "history": history_text,
+            "correlation_id": correlation_id,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Webhook-Signature": _hex_hmac_sha256(body, secret),
+        "X-Request-ID": correlation_id,
+    }
+    conn = http.client.HTTPConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=30)
+    try:
+        conn.request("POST", f"/webhooks/{MCP_ROUTE}", body=body, headers=headers)
+        resp = conn.getresponse()
+        resp.read()
+        if resp.status not in (200, 202):
+            logger.warning("mcp: forward returned %d", resp.status)
+            return None
+    except Exception as exc:  # gateway down / cold-start race
+        logger.error("mcp: forward failed: %s", exc)
+        return None
+    finally:
+        conn.close()
+
+    # Long-poll the cross-process store the agent-side result-sink writes.
+    deadline = time.monotonic() + _MCP_POLL_TIMEOUT_S
+    while time.monotonic() < deadline:
+        result = mcp_result_store.take(correlation_id)
+        if result is not None:
+            # Persist the exchange so the next turn on this thread has context.
+            if tkey:
+                answer = result.get("answer")
+                reply_text = answer if isinstance(answer, str) else json.dumps(answer)
+                mcp_thread_store.append(tkey, message, reply_text)
+            return result
+        time.sleep(_MCP_POLL_INTERVAL_S)
+    logger.warning("mcp: poll timed out (thread=%s)", bool(tkey))
+    return None
+
+
+def _mcp_tools_call(req: dict, *, principal_subject: str) -> tuple[int, dict]:
+    """Handle a JSON-RPC ``tools/call`` → drive the agent turn, return in-line.
+
+    ``principal_subject`` is the authenticated caller (from /mcp auth); it
+    namespaces the conversation thread so a caller can only ever read/extend
+    their own.
+    """
+    req_id = req.get("id")
+    params = req.get("params")
+    if not isinstance(params, dict):
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "tools/call requires params")
+    name = params.get("name")
+    args = params.get("arguments") or {}
+    if not isinstance(name, str) or not name:
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "tools/call requires a tool name")
+    if not isinstance(args, dict):
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "arguments must be an object")
+    if name not in _MCP_TOOL_NAMES:
+        return 200, _rpc_err(req_id, _JSON_RPC_METHOD_NOT_FOUND, f"unknown tool: {name}")
+
+    message = args.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "ask_operator requires a 'message'")
+    thread_id = args.get("thread_id")
+    if thread_id is not None and not isinstance(thread_id, str):
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "'thread_id' must be a string")
+
+    result = _drive_agent_turn(message, principal_subject=principal_subject, thread_id=thread_id)
+    if result is None:
+        return 200, _rpc_ok(
+            req_id,
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "The Operator did not return a result in time. Please retry.",
+                    }
+                ],
+                "isError": True,
+            },
+        )
+    answer = result.get("answer")
+    text = answer if isinstance(answer, str) else json.dumps(answer)
+    return 200, _rpc_ok(req_id, {"content": [{"type": "text", "text": text}]})
+
+
+def _mcp_dispatch(req: dict, *, principal_subject: str = "") -> tuple[int, dict | None]:
+    """Dispatch one already-authorized JSON-RPC MCP request.
+
+    Returns ``(http_status, json_rpc_response | None)``. The ``initialized``
+    notification gets 202 + no body (per JSON-RPC, a notification has no
+    response); every other method returns 200 + a JSON-RPC response object.
+
+    ``principal_subject`` is the authenticated caller, threaded to ``tools/call``
+    so the conversation thread is namespaced to that identity. The unauthenticated
+    metadata methods (initialize/ping/tools/list) ignore it.
+    """
+    method = req.get("method")
+    req_id = req.get("id")
+    if method == "initialize":
+        return 200, _rpc_ok(
+            req_id,
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": MCP_SERVER_INFO,
+            },
+        )
+    if method == "notifications/initialized":
+        return 202, None
+    if method == "ping":
+        return 200, _rpc_ok(req_id, {})
+    if method == "tools/list":
+        return 200, _rpc_ok(req_id, {"tools": _MCP_TOOLS})
+    if method == "tools/call":
+        return _mcp_tools_call(req, principal_subject=principal_subject)
+    return 200, _rpc_err(req_id, _JSON_RPC_METHOD_NOT_FOUND, f"method not found: {method}")
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "hermes-smd-webhook-gate/1.0"
 
@@ -243,6 +602,17 @@ class _Handler(BaseHTTPRequestHandler):
         data = json.dumps(obj).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _json_headers(self, status: int, obj: dict, extra: dict | None = None) -> None:
+        """``_json`` plus optional extra response headers (e.g. WWW-Authenticate)."""
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        for name, value in (extra or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -263,6 +633,12 @@ class _Handler(BaseHTTPRequestHandler):
         path = split.path
         if path.rstrip("/") == "/health":
             self._json(200, {"status": "ok", "platform": "webhook-gate"})
+        elif path.startswith("/.well-known/oauth-protected-resource"):
+            # RFC 9728 discovery for the Machine-hosted MCP connector. Public,
+            # unauthenticated, carries no secret. One Machine == one resource, so
+            # the same doc serves every suffix the client may request.
+            meta = _mcp_protected_resource_metadata()
+            self._json(200, meta) if meta else self._json(404, {"error": "not found"})
         elif path.startswith(_RUNTIME_PREFIX):
             self._handle_runtime(path, split.query)
         else:
@@ -323,7 +699,60 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json_nostore(200, result)
 
+    def _handle_mcp(self) -> None:
+        """Terminate a JSON-RPC MCP request on /mcp (Claude-as-a-channel).
+
+        Beat-1 stub auth (bearer) then JSON-RPC dispatch; ``tools/call`` drives
+        one agent turn and returns its answer in-line via the result store.
+        """
+        principal_subject = _mcp_authenticate(self.headers.get("Authorization"))
+        if not principal_subject:
+            # RFC 9728 §5.1: on a Clerk-configured Machine, point the client at
+            # the discovery doc so it knows where to authenticate.
+            meta = _mcp_protected_resource_metadata()
+            extra = None
+            if meta:
+                parts = urlsplit(meta["resource"])
+                murl = (
+                    f"{parts.scheme}://{parts.netloc}"
+                    f"/.well-known/oauth-protected-resource{parts.path}"
+                )
+                extra = {"WWW-Authenticate": f'Bearer resource_metadata="{murl}"'}
+            self._json_headers(401, {"error": "unauthorized"}, extra)
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > _MAX_BODY_BYTES:
+            self._json(413, {"error": "payload too large"})
+            return
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw)
+        except Exception:
+            self._json(200, _rpc_err(None, _JSON_RPC_PARSE_ERROR, "invalid JSON"))
+            return
+        if (
+            not isinstance(req, dict)
+            or req.get("jsonrpc") != "2.0"
+            or not isinstance(req.get("method"), str)
+        ):
+            self._json(200, _rpc_err(None, _JSON_RPC_INVALID_REQUEST, "not a JSON-RPC 2.0 request"))
+            return
+        try:
+            status, body = _mcp_dispatch(req, principal_subject=principal_subject)
+        except Exception as exc:  # never leak detail; fail closed
+            logger.error("mcp: dispatch error: %s", exc)
+            self._json(200, _rpc_err(req.get("id"), _JSON_RPC_INTERNAL_ERROR, "internal error"))
+            return
+        if body is None:
+            self.send_response(status)
+            self.end_headers()
+            return
+        self._json(status, body)
+
     def do_POST(self) -> None:  # noqa: N802
+        if urlsplit(self.path).path.rstrip("/") == "/mcp":
+            self._handle_mcp()
+            return
         if not self.path.startswith("/webhooks/"):
             self._json(404, {"error": "unknown path"})
             return
