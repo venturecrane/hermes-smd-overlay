@@ -683,7 +683,8 @@ def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
 
     return (
         f"# {persona_name}\n\n"
-        f"You are {persona_name}, {title} at {customer_name}.\n\n"
+        f"You are {persona_name}, {title} at {customer_name}.\n"
+        f"{_principal_soul_line(customer)}\n"
         f"## Vertical\n\n"
         f"{vertical}\n\n"
         f"## Tone\n\n"
@@ -691,6 +692,36 @@ def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
         f"{_relationship_soul_section(customer)}"
         f"{_escalation_soul_section(customer)}"
     )
+
+
+def _principal_soul_line(customer: dict[str, Any]) -> str:
+    """Render the "You work for …" line from the authored ``users[]`` list.
+
+    The principal is the ``users[]`` entry with ``role == "principal"`` — the
+    person the Operator answers to. Source is authored customer.yaml data only:
+    if no principal entry exists (or the list is absent/malformed), this emits
+    nothing rather than fabricating a name, so a customer without an authored
+    principal produces a byte-identical SOUL.md.
+
+    The name key is ``full_name`` (customer.yaml schema; see secret_scan.py
+    ``users[*].full_name``), with ``name`` accepted as a tolerant fallback.
+    """
+    users = customer.get("users")
+    if not isinstance(users, list):
+        return ""
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        if user.get("role") != "principal":
+            continue
+        name = user.get("full_name") or user.get("name")
+        if not isinstance(name, str) or not name:
+            return ""
+        email = user.get("email")
+        if isinstance(email, str) and email:
+            return f"\nYou work for {name} ({email}).\n"
+        return f"\nYou work for {name}.\n"
+    return ""
 
 
 def _escalation_soul_section(customer: dict[str, Any]) -> str:
