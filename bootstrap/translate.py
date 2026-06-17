@@ -633,6 +633,57 @@ def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
         f"## Tone\n\n"
         f"{tone_block}\n"
         f"{_relationship_soul_section(customer)}"
+        f"{_escalation_soul_section(customer)}"
+    )
+
+
+def _escalation_soul_section(customer: dict[str, Any]) -> str:
+    """Render the ``## Allocating heavy work`` SOUL.md section (ADR 0049).
+
+    Rendered ONLY when the seat authors an ``escalation_model`` (the roster's
+    second tier). A single-tier seat omits it entirely → byte-identical SOUL.md
+    (the idempotency contract _write_if_changed relies on). Because the
+    instruction lives here — in standing identity, not in any skill — it covers
+    authored skills, agent-created skills, and one-off requests uniformly, and
+    skills stay tier-unaware so one pack runs on every roster.
+
+    Encodes the two verified runtime constraints (hermes-agent delegate_tool +
+    overlay hermes-smd-trust/enforce.py): ``delegate_task`` is a CODE_EXECUTION
+    action that is taint-gated — so escalation must happen BEFORE reading
+    untrusted material — and is fail-closed unless the seat authors a
+    ``code_execution`` ceiling — so the agent must fall back to doing the work
+    itself when escalation is unavailable. The escalation model itself is never
+    named here (the native ``delegation`` block routes it); the text is
+    roster-agnostic, gated only on the model's presence.
+    """
+    escalation_model = (customer.get("escalation_model") or "").strip()
+    if not escalation_model:
+        return ""
+    return (
+        "\n## Allocating heavy work\n\n"
+        "You run on a fast, capable model that handles the great majority of "
+        "your work directly — conversation, routing, drafting, the day-to-day. "
+        "For the rare task that genuinely needs deeper reasoning than you can "
+        "reliably give — analyzing a long document set, complex multi-step "
+        "reasoning over large material, demanding synthesis — hand the whole "
+        "task to a sub-agent with `delegate_task`. The sub-agent runs on your "
+        "escalation model and returns its result to you.\n\n"
+        "Three rules for escalating:\n\n"
+        "1. **Escalate first, before reading.** Decide to delegate from the "
+        "request itself, before you read any client document, email body, or "
+        "other untrusted content yourself. Once you have read untrusted "
+        "material this turn, delegation is withheld — so let the sub-agent do "
+        "the reading, keeping the heavy reasoning and the reading together on "
+        "the stronger model.\n"
+        "2. **Carry the rules into the sub-agent.** It must follow the same "
+        "skill and the same limits you would — content ceilings, never-draft "
+        "lines, citation requirements, privilege, send posture. State them in "
+        "the delegated task; the sub-agent starts fresh and assumes nothing.\n"
+        "3. **Never let escalation block the work.** If delegation is "
+        "unavailable, do the task yourself on your own model. A heavier model "
+        "is a quality preference, never a precondition.\n\n"
+        "This allocation is yours to manage and invisible to the people you "
+        "work with — they experience one capable colleague, not a model menu.\n"
     )
 
 
