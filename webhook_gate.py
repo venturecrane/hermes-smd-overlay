@@ -334,6 +334,36 @@ def _mcp_stub_authorized(auth_header: str | None) -> str | None:
     return None
 
 
+def _mcp_access_entries(mc: dict) -> tuple:
+    """Expand ``mcp_connector.access[]`` into one McpAccessEntry per authorized
+    Clerk subject.
+
+    Mirrors the console's ``customer-resolution.ts``: an access entry may carry
+    ``clerk_subjects`` (plural list) and/or ``clerk_subject`` (singular); every
+    listed subject is authorized for that entry's email+profile. The authored
+    SMD schema uses the plural form, so reading only the singular key (the prior
+    behaviour) silently dropped the entry and refused every real token with
+    ``identity_not_authored``. Entries missing email/profile, or carrying no
+    subject at all, are dropped — fail-closed.
+    """
+    from shared import mcp_auth
+
+    entries = []
+    for e in mc.get("access") or []:
+        if not (isinstance(e, dict) and e.get("email") and e.get("profile")):
+            continue
+        subjects: list[str] = []
+        plural = e.get("clerk_subjects")
+        if isinstance(plural, list):
+            subjects.extend(s for s in plural if isinstance(s, str) and s)
+        singular = e.get("clerk_subject")
+        if isinstance(singular, str) and singular:
+            subjects.append(singular)
+        for subject in dict.fromkeys(subjects):  # dedupe, preserve authored order
+            entries.append(mcp_auth.McpAccessEntry(e["email"], e["profile"], subject))
+    return tuple(entries)
+
+
 def _load_mcp_binding():
     """Build the Clerk auth binding, or None when Clerk is not configured here.
 
@@ -362,17 +392,12 @@ def _load_mcp_binding():
     mc = cfg.get("mcp_connector") if isinstance(cfg, dict) else None
     if not isinstance(mc, dict):
         return None
-    access = tuple(
-        mcp_auth.McpAccessEntry(e["email"], e["profile"], e["clerk_subject"])
-        for e in (mc.get("access") or [])
-        if isinstance(e, dict) and e.get("email") and e.get("profile") and e.get("clerk_subject")
-    )
     return mcp_auth.McpAuthBinding(
         issuer=issuer,
         resource_uri=resource_uri,
         clerk_org_id=os.environ.get("SMD_MCP_CLERK_ORG_ID") or None,
         enabled=bool(mc.get("enabled")),
-        access=access,
+        access=_mcp_access_entries(mc),
     )
 
 
