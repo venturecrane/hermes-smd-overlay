@@ -164,9 +164,7 @@ def _validate_claims(claims: dict, binding: McpAuthBinding) -> McpAuthError | No
     return None
 
 
-def validate_mcp_token(
-    token: str | None, binding: McpAuthBinding
-) -> McpPrincipal | McpAuthError:
+def validate_mcp_token(token: str | None, binding: McpAuthBinding) -> McpPrincipal | McpAuthError:
     """Validate a bearer token against the customer's Clerk binding.
 
     Returns an :class:`McpPrincipal` on success, or an :class:`McpAuthError` with

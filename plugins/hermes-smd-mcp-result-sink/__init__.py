@@ -73,9 +73,7 @@ def on_post_llm_call(**kwargs: Any) -> None:
 
         ok = mcp_result_store.put(cid, {"answer": answer})
         if not ok:
-            logger.warning(
-                "hermes-smd-mcp-result-sink: failed to store result for an MCP turn"
-            )
+            logger.warning("hermes-smd-mcp-result-sink: failed to store result for an MCP turn")
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-mcp-result-sink: post_llm_call handler error: %s", exc)
 

@@ -116,9 +116,7 @@ _CLERK_SUBJECT = "user_3E1RPGrTMxkSqciXMTyybUNSJWu"  # public Clerk id: high-ent
 def test_clerk_subject_not_shape_flagged_parsed():
     # The regression that crash-looped customer-zero (2026-06-16): a real Clerk
     # subject in mcp_connector.access tripped the high-entropy heuristic.
-    findings = scan_parsed_value(
-        {"mcp_connector": {"access": [{"clerk_subject": _CLERK_SUBJECT}]}}
-    )
+    findings = scan_parsed_value({"mcp_connector": {"access": [{"clerk_subject": _CLERK_SUBJECT}]}})
     assert "high_entropy_long" not in _categories(findings)
 
 
