@@ -193,7 +193,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `post_tool_call` | yes | audit |
 | `transform_terminal_output` | no | terminal-output canonicalization (not relevant) |
 | `transform_tool_result` | yes | inbound quarantine of untrusted tool-result reads (`hermes-smd-inbound`, ADR 0027 / OP-P0-4 read fencing) |
-| `transform_llm_output` | no | vocabulary/personality transformation (potential future use) |
+| `transform_llm_output` | yes | Layer-2 structural voice reshape — `hermes-smd-voice` fires `transform_draft()` post-LLM; first non-empty string returned replaces the response |
 | `pre_llm_call` | yes | voice sample injection + inbound quarantine (ADR 0027) |
 | `post_llm_call` | yes | LLM audit |
 | `pre_api_request` | no | gateway-level API request (not relevant) |

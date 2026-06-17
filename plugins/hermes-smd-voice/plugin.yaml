@@ -15,7 +15,9 @@ requires_env:
   - R2_BUCKET_CONFIG
 provides_hooks:
   - pre_llm_call
+  - transform_llm_output
   - post_llm_call
 hooks:
   - pre_llm_call
+  - transform_llm_output
   - post_llm_call
