@@ -568,6 +568,19 @@ def _persona_config(
         "relationship": customer.get("relationship") or {},
     }
 
+    # ADR 0049 — escalate-up tier. When the seat authors an `escalation_model`,
+    # emit Hermes' native `delegation` block so any skill that calls
+    # delegate_task runs heavy reasoning on that model while the seat's main
+    # `model` stays light. Provider/key/transport are intentionally omitted:
+    # with delegation.provider empty, Hermes' _resolve_delegation_credentials
+    # inherits the parent agent's provider, key, and api_mode (verified in
+    # tools/delegate_tool.py) — so an Anthropic main + an Anthropic escalation
+    # model share one credential, swapping only the model. Omitted entirely when
+    # unset, so single-tier seats stay byte-identical to before.
+    escalation_model = (customer.get("escalation_model") or "").strip()
+    if escalation_model:
+        config["delegation"] = {"model": escalation_model}
+
     # Materialize `mcp:` connector backends into the Hermes-native
     # `mcp_servers` block Hermes actually reads. The `connectors` map above is
     # our own metadata; without this block Hermes wires no MCP server. Only
