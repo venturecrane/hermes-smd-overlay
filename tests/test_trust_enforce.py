@@ -513,6 +513,66 @@ def test_agentmail_runtime_mcp_names_classify_external_send() -> None:
         assert c.unmapped is False, t
 
 
+def test_clio_runtime_mcp_names_are_all_classified() -> None:
+    """Regression for the EFF-07 live fail-open on the law configs (2026-06-17).
+
+    `clio-oktopeak` is bound by pilot-law (Ashton & Price) and demo-law and
+    fully materializes, but its tools were UNCLASSIFIED — every write hit the
+    unmapped->READ default and would fire autonomously on an injection-tainted
+    turn. The server key sanitizes to `clio_oktopeak`, so the runtime names are
+    `mcp_clio_oktopeak_*`. Every one MUST be mapped (never unmapped), and the
+    system-of-record / financial / scheduling commitments MUST be COMMITMENT
+    (never autonomous) — the skill-level draft-and-surface posture is bypassable
+    by injection and is NOT a substitute for trust-layer classification."""
+    enforce = _load_trust_module("enforce")
+    AC = enforce.ActionClass
+
+    reads = [
+        "mcp_clio_oktopeak_list_matters",
+        "mcp_clio_oktopeak_get_matter",
+        "mcp_clio_oktopeak_search_contacts",
+        "mcp_clio_oktopeak_get_contact",
+        "mcp_clio_oktopeak_list_documents",
+        "mcp_clio_oktopeak_get_document",
+        "mcp_clio_oktopeak_list_tasks",
+        "mcp_clio_oktopeak_list_calendars",
+        "mcp_clio_oktopeak_list_calendar_entries",
+        "mcp_clio_oktopeak_list_time_entries",
+        "mcp_clio_oktopeak_get_billing_summary",
+        "mcp_clio_oktopeak_list_users",
+        "mcp_clio_oktopeak_get_user",
+        "mcp_clio_oktopeak_export_audit_log",
+    ]
+    internal_writes = [
+        "mcp_clio_oktopeak_create_note",
+        "mcp_clio_oktopeak_create_task",
+        "mcp_clio_oktopeak_update_task",
+        "mcp_clio_oktopeak_complete_task",
+        "mcp_clio_oktopeak_upload_document",
+    ]
+    commitments = [
+        "mcp_clio_oktopeak_create_matter",
+        "mcp_clio_oktopeak_create_calendar_entry",
+        "mcp_clio_oktopeak_log_time_entry",
+        "mcp_clio_oktopeak_create_activity",
+    ]
+
+    for t in reads:
+        c = enforce.classify_tool(t)
+        assert c.unmapped is False, f"{t} unmapped -> READ fail-open"
+        assert c.action_class == AC.READ, t
+    for t in internal_writes:
+        c = enforce.classify_tool(t)
+        assert c.unmapped is False, f"{t} unmapped -> READ fail-open"
+        assert c.action_class == AC.INTERNAL_WRITE, t
+    for t in commitments:
+        c = enforce.classify_tool(t)
+        assert c.unmapped is False, f"{t} unmapped -> READ fail-open"
+        # COMMITMENT never fires autonomously, even on a clean turn — the safe
+        # floor for a system-of-record / financial / scheduling write.
+        assert c.action_class == AC.COMMITMENT, t
+
+
 def test_agentmail_runtime_drafts_classify_internal_write() -> None:
     """Runtime draft tools are the agent's own job — INTERNAL_WRITE, not a send."""
     enforce = _load_trust_module("enforce")
