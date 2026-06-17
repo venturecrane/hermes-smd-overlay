@@ -872,3 +872,115 @@ def test_telegram_block_lands_in_persona_config():
     config = _wh._persona_config(persona, cust, {})
     assert config["telegram"]["allow_from"] == ["7367659986"]
     assert config["telegram"]["require_mention"] is False
+
+
+# ---------------------------------------------------------------------------
+# Cron materialization: pre_run_decides staging (ADR 0047 phase 2)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingCronStore:
+    """Records create_job calls; no Hermes cron.jobs import (CI has none)."""
+
+    def __init__(self) -> None:
+        self.creates: list[dict] = []
+
+    def list_jobs(self, include_disabled: bool = False) -> list[dict]:
+        return []
+
+    def create_job(self, **kwargs):
+        self.creates.append(kwargs)
+        return {"id": "job-1", **kwargs}
+
+    def remove_job(self, job_id: str) -> bool:
+        return False
+
+
+_ESCALATOR_YAML = dedent(
+    """\
+    schema_version: 1
+    customer_id: acme
+    customer_name: Acme Corp
+    vertical: law-firm
+    fly_region: iad
+    model: claude-opus-4-7
+    hermes_ref: v2026.5.16-smd.0
+
+    personas:
+      - slug: marcus
+        status: active
+        name: Marcus
+        title: AI Associate
+        tone:
+          - plainspoken
+          - concise
+        skills:
+          - name: deadline-miss-escalator
+            version: pending
+            trust_ceiling: draft_for_review
+            enabled: true
+        cron:
+          - skill: deadline-miss-escalator
+            schedule: '0 8 * * *'
+            pre_run: pre_run.py
+            wake_policy: pre_run_decides
+
+    connectors:
+      Email:
+        adapter: gmail
+        backend: mcp:gmail
+        enabled: true
+
+    scope:
+      email_folders_visible: [Inbox]
+      email_folders_blind: []
+      email_keyword_blocks: []
+      domain_blocks: []
+
+    voice_library:
+      samples_path: 'r2://vaults/acme/voice/samples/'
+
+    memory:
+      d1_namespace: acme
+      r2_vault_path: 'vaults/acme/'
+      vectorize_index: 'hermes-acme-vault'
+    """
+)
+
+
+def test_translate_stages_pre_run_script_and_registers_ref(tmp_path):
+    """A pre_run_decides cron entry: the skill's pre_run.py is copied into the
+    persona profile's scripts/ dir (Hermes' scheduler refuses scripts outside
+    HERMES_HOME/scripts/) and the job is registered with the resolved ref."""
+    customer_yaml = tmp_path / "customer.yaml"
+    customer_yaml.write_text(_ESCALATOR_YAML)
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "deadline-miss-escalator").mkdir(parents=True)
+    (skills_dir / "deadline-miss-escalator" / "SKILL.md").write_text("# escalator\n")
+    (skills_dir / "deadline-miss-escalator" / "pre_run.py").write_text(
+        "print('{\"wakeAgent\": false}')\n"
+    )
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+
+    stores: dict[str, _RecordingCronStore] = {}
+
+    def store_for(slug: str) -> _RecordingCronStore:
+        return stores.setdefault(slug, _RecordingCronStore())
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+        cron_store_for=store_for,
+    )
+
+    staged = (
+        hermes_home / "profiles" / "marcus" / "scripts" / "deadline-miss-escalator" / "pre_run.py"
+    )
+    assert staged.is_file(), "pre_run script must be staged into the profile scripts dir"
+    assert "wakeAgent" in staged.read_text()
+    create = stores["marcus"].creates[0]
+    assert create["script"] == "deadline-miss-escalator/pre_run.py"
+    assert create["no_agent"] is False
+    assert create["skills"] == ["deadline-miss-escalator"]

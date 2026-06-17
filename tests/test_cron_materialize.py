@@ -157,12 +157,122 @@ def test_unsupported_wake_policy_fails_closed() -> None:
     f = FakeFactory()
     with pytest.raises(CronMaterializeError, match="wake_policy"):
         materialize_cron(
-            _customer(
-                [{"skill": "watch", "schedule": "* * * * *", "wake_policy": "pre_run_decides"}]
-            ),
+            _customer([{"skill": "watch", "schedule": "* * * * *", "wake_policy": "manual_poll"}]),
             f,
         )
     assert f.asked == [], "must not touch any store when an entry is unmaterializable"
+
+
+# --- pre_run_decides (ADR 0047 phase 2) -------------------------------------
+
+
+class _RecordingStager:
+    """Fake script stager: records calls, returns a ``<skill>/<base>`` ref."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.fail = fail
+
+    def __call__(self, persona_slug: str, skill: str, pre_run: str) -> str:
+        self.calls.append((persona_slug, skill, pre_run))
+        if self.fail:
+            raise FileNotFoundError(f"no such script: {pre_run}")
+        return f"{skill}/{pre_run}"
+
+
+def test_pre_run_decides_registers_job_with_staged_script() -> None:
+    f = FakeFactory()
+    stager = _RecordingStager()
+    registered = materialize_cron(
+        _customer(
+            [
+                {
+                    "skill": "deadline-miss-escalator",
+                    "schedule": "0 8 * * *",
+                    "pre_run": "pre_run.py",
+                    "wake_policy": "pre_run_decides",
+                }
+            ]
+        ),
+        f,
+        stager,
+    )
+    assert registered == [managed_name("crane", "deadline-miss-escalator")]
+    assert stager.calls == [("crane", "deadline-miss-escalator", "pre_run.py")]
+    create = f.stores["crane"].creates[0]
+    # The pre-run script gates the wake; the agent still runs the skill when woken.
+    assert create["script"] == "deadline-miss-escalator/pre_run.py"
+    assert create["no_agent"] is False
+    assert create["skills"] == ["deadline-miss-escalator"]
+    assert create["schedule"] == "0 8 * * *"
+
+
+def test_always_entry_registers_no_script() -> None:
+    f = FakeFactory()
+    materialize_cron(
+        _customer([{"skill": "inbox-triage", "schedule": "0 7 * * *", "wake_policy": "always"}]),
+        f,
+        _RecordingStager(),
+    )
+    assert "script" not in f.stores["crane"].creates[0]
+
+
+def test_pre_run_decides_without_pre_run_fails_closed() -> None:
+    f = FakeFactory()
+    with pytest.raises(CronMaterializeError, match="requires a 'pre_run' script"):
+        materialize_cron(
+            _customer(
+                [{"skill": "watch", "schedule": "0 8 * * *", "wake_policy": "pre_run_decides"}]
+            ),
+            f,
+            _RecordingStager(),
+        )
+    assert f.asked == [], "must not touch any store when a pre_run script is missing"
+
+
+def test_pre_run_decides_without_stager_fails_closed() -> None:
+    f = FakeFactory()
+    with pytest.raises(CronMaterializeError, match="script stager"):
+        materialize_cron(
+            _customer(
+                [
+                    {
+                        "skill": "watch",
+                        "schedule": "0 8 * * *",
+                        "pre_run": "pre_run.py",
+                        "wake_policy": "pre_run_decides",
+                    }
+                ]
+            ),
+            f,  # no stager passed
+        )
+    assert f.asked == [], "must not touch any store when no stager is available"
+
+
+def test_stage_failure_aborts_before_store_mutation() -> None:
+    """A pre-run script that cannot be staged fails closed with the store
+    untouched — no managed job removed, none created."""
+    store = FakeCronStore(
+        jobs=[{"id": "m-1", "name": "op-managed:crane:old", "schedule": "0 1 * * *"}]
+    )
+    f = FakeFactory(preset={"crane": store})
+    with pytest.raises(CronMaterializeError, match="could not stage pre_run"):
+        materialize_cron(
+            _customer(
+                [
+                    {
+                        "skill": "deadline-miss-escalator",
+                        "schedule": "0 8 * * *",
+                        "pre_run": "pre_run.py",
+                        "wake_policy": "pre_run_decides",
+                    }
+                ]
+            ),
+            f,
+            _RecordingStager(fail=True),
+        )
+    assert store.removed == []
+    assert store.creates == []
 
 
 def test_missing_skill_or_schedule_fails_closed() -> None:

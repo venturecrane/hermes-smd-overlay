@@ -927,7 +927,7 @@ def translate_customer_yaml(
             cron_store_for if cron_store_for is not None else _real_cron_store_for(profiles_root)
         )
         try:
-            registered = materialize_cron(customer, store_for)
+            registered = materialize_cron(customer, store_for, _real_script_stager(profiles_root))
         except CronMaterializeError as exc:
             raise TranslateError(str(exc)) from exc
         logger.info(
@@ -972,6 +972,34 @@ def _real_cron_store_for(profiles_root: Path) -> Callable[[str], CronStore]:
         return _HermesProfileCronStore()
 
     return make
+
+
+def _real_script_stager(profiles_root: Path) -> Callable[[str, str, str], str]:
+    """Factory of the real pre-run-script stager for cron materialization.
+
+    A ``pre_run_decides`` cron entry names a pre-run script that ships inside the
+    skill body (e.g. ``deadline-miss-escalator/pre_run.py``). Hermes' scheduler
+    only executes scripts that resolve INSIDE ``$HERMES_HOME/scripts/`` (a
+    path-traversal guard in ``cron/scheduler.py``); the skill body dir is outside
+    that guard. ``_install_persona_skills`` has already copied the skill body
+    into ``<profile>/skills/<skill>/`` by the time cron is materialized, so this
+    copies the named script from there into ``<profile>/scripts/<skill>/<base>``
+    and returns the ref ``<skill>/<base>`` the scheduler resolves under the
+    scripts dir. Idempotent: re-copied each boot so a catalog update propagates.
+    """
+
+    def stage(persona_slug: str, skill: str, pre_run: str) -> str:
+        profile_dir = profiles_root / persona_slug
+        src = profile_dir / "skills" / skill / pre_run
+        if not src.is_file():
+            raise FileNotFoundError(f"pre_run script not found at {src} (skill body installed?)")
+        base = Path(pre_run).name
+        dest_dir = profile_dir / "scripts" / skill
+        dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copy2(src, dest_dir / base)
+        return f"{skill}/{base}"
+
+    return stage
 
 
 def start_customer_sync(
