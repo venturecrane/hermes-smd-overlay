@@ -4,7 +4,7 @@
 **License:** MIT
 **Verified:** 2026-05-24
 
-This document captures the exact upstream surface that the four `hermes-smd-overlay` plugins (`hermes-smd-audit`, `hermes-smd-trust`, `hermes-smd-voice`, `hermes-smd-memory-mirror`) attach to. Every claim below is grounded in a file:line citation at the pinned ref. Re-verify at every Hermes rebase by re-running the citation grep and the `hermes-smd-hook-probe` smoke plugin.
+This document captures the exact upstream surface that the `hermes-smd-overlay` plugins attach to. The six hooks detailed below (`pre_tool_call`, `post_tool_call`, `pre_llm_call`, `post_llm_call`, `on_session_end`, plus `pre_gateway_dispatch` and `transform_tool_result` / `subagent_stop` cited in the appendix) carry file:line citations at the pinned ref. The **appendix table is the authoritative used/unused contract** — `tests/test_hook_parity.py` asserts, on the live fan-out, that every hook marked "Used by overlay? yes" is registered by some plugin and that no registered hook is marked "no" (the SEC-33 spec↔code drift guard). Re-verify at every Hermes rebase by re-running the citation grep and the `hermes-smd-hook-probe` smoke plugin.
 
 ## Registration API
 
@@ -192,7 +192,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `pre_tool_call` | yes | trust ceiling |
 | `post_tool_call` | yes | audit |
 | `transform_terminal_output` | no | terminal-output canonicalization (not relevant) |
-| `transform_tool_result` | no | tool-result transformation (not relevant) |
+| `transform_tool_result` | yes | inbound quarantine of untrusted tool-result reads (`hermes-smd-inbound`, ADR 0027 / OP-P0-4 read fencing) |
 | `transform_llm_output` | no | vocabulary/personality transformation (potential future use) |
 | `pre_llm_call` | yes | voice sample injection + inbound quarantine (ADR 0027) |
 | `post_llm_call` | yes | LLM audit |
@@ -202,7 +202,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `on_session_end` | yes | memory-mirror trigger |
 | `on_session_finalize` | no | session-end finalization |
 | `on_session_reset` | no | session reset |
-| `subagent_stop` | no | subagent lifecycle |
+| `subagent_stop` | yes | one SUBAGENT_STOPPED audit row per delegated child (`hermes-smd-audit`, ADR 0021 Stream C) |
 | `pre_gateway_dispatch` | yes | webhook routing + inbound envelope attach (ADR 0021 Stream E / ADR 0027) |
 | `pre_approval_request` | no | approval lifecycle observer |
 | `post_approval_response` | no | approval lifecycle observer |

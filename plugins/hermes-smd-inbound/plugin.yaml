@@ -1,9 +1,11 @@
 name: hermes-smd-inbound
 version: "0.1.0"
-description: "Nonce-fenced quarantine of untrusted inbound content at the pre_llm_call chokepoint (ADR 0027 inbound convergence, defense-in-depth)."
+description: "Nonce-fenced quarantine of untrusted inbound content at two chokepoints — pre_llm_call (webhook-router content) and transform_tool_result (untrusted tool-result reads: managed mailbox, documents, web, connectors) — per ADR 0027 inbound convergence + OP-P0-4 read fencing."
 author: VentureCrane
 requires_env: []
 provides_hooks:
   - pre_llm_call
+  - transform_tool_result
 hooks:
   - pre_llm_call
+  - transform_tool_result
