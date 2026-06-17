@@ -131,6 +131,24 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "email_get_message",
         "email_search",
         "email_get_thread",
+        # AgentMail — the persona's OWN inbox (SEC-05/13 residual). The webhook
+        # PUSH path (Crane's inbound mail dispatched by the webhook router) is
+        # already fenced+tainted at pre_llm_call. This covers the PULL path: the
+        # agent actively READING its own inbox as a tool result. The agent calls
+        # these via the live runtime names (mcp_agentmail_*) — the colon-form
+        # aliases never occur at runtime (see shared.action_classes). A thread /
+        # message / attachment read carries sender-authored (attacker-
+        # influenceable) text; a draft read can re-surface quoted inbound content
+        # in a reply draft. Inbox metadata (list_inboxes/get_inbox), the draft
+        # LIST, and the agent's own auth identity (auth_me) are NOT third-party
+        # content and are unfenced by design (see the completeness test).
+        "mcp_agentmail_list_threads",
+        "mcp_agentmail_search_threads",
+        "mcp_agentmail_get_thread",
+        "mcp_agentmail_list_messages",
+        "mcp_agentmail_search_messages",
+        "mcp_agentmail_get_attachment",
+        "mcp_agentmail_get_draft",
         # Web fetches — attacker-controlled page content.
         "web_search",
         "web_extract",
@@ -156,7 +174,11 @@ def _surface_for(tool_name: str) -> str:
     """Map a fenced read tool to an inbound surface label (closed vocabulary)."""
     if tool_name in ("web_search", "web_extract"):
         return "fetch"
-    if tool_name.startswith("workspace_gmail") or tool_name.startswith("email_"):
+    if (
+        tool_name.startswith("workspace_gmail")
+        or tool_name.startswith("email_")
+        or tool_name.startswith("mcp_agentmail_")
+    ):
         return "inbox_triage"
     return "connector"
 
