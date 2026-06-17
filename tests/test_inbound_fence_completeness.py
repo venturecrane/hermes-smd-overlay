@@ -38,6 +38,14 @@ UNFENCED_READ_BY_DESIGN: frozenset[str] = frozenset(
         # 2026-06-12; Captain ruled fence-both — external invites carry
         # third-party content — and they moved to _FENCED_READ_TOOLS.)
         "workspace_drive_list",
+        # Gmail search/list: returns only message {id, threadId} metadata
+        # (messages.list contract — no snippet, subject, or body), so it carries
+        # no attacker-influenceable content. The message BODY read
+        # (workspace_gmail_get) IS fenced. Unfenced so the agent can reuse the
+        # returned ids as the message_id for the body read — fencing the id list
+        # breaks the inherent list->get read pattern for zero security gain (same
+        # rationale as workspace_drive_list / drive_get).
+        "workspace_gmail_search",
         # AgentMail (mcp_agentmail_*) READ tools whose output is agent-owned
         # config/identity/metadata, NOT sender-authored content. The
         # content-bearing reads (threads/messages/attachments/draft body) are
