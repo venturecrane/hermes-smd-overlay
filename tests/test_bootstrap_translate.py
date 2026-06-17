@@ -260,6 +260,9 @@ def test_translate_renders_escalation_soul_when_escalation_model(tmp_path):
     soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
     assert "## Allocating heavy work" in soul
     assert "Escalate first, before reading" in soul
+    # The instruction consumes the skill marker, so weighted skills escalate
+    # deterministically rather than on judgment alone.
+    assert "weight: heavy" in soul
     # Roster-agnostic: the escalation model is never named in SOUL.
     assert "claude-opus-4-8" not in soul
 
