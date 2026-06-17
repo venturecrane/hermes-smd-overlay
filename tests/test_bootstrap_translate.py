@@ -209,6 +209,77 @@ def test_translate_omits_relationship_soul_section_when_absent(tmp_path):
     assert config["relationship"] == {}
 
 
+def test_translate_emits_delegation_block_from_escalation_model(tmp_path):
+    """ADR 0049: an authored `escalation_model` materializes Hermes' native
+    `delegation` block, so any skill calling delegate_task runs the heavy
+    reasoning on the escalation tier while the seat's main model stays light.
+    Provider/key are intentionally omitted — Hermes inherits the parent's."""
+    body = VALID_YAML.replace(
+        "model: claude-opus-4-7\n",
+        "model: claude-sonnet-4-6\nescalation_model: claude-opus-4-8\n",
+    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert config["model"] == "claude-sonnet-4-6"
+    assert config["delegation"] == {"model": "claude-opus-4-8"}
+
+
+def test_translate_omits_delegation_when_no_escalation_model(tmp_path):
+    """No `escalation_model` ⇒ no `delegation` block. Single-tier seats stay
+    byte-identical; delegated work inherits the main model (ADR 0049)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML, no escalation_model
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert "delegation" not in config
+
+
+def test_translate_renders_escalation_soul_when_escalation_model(tmp_path):
+    """ADR 0049: a seat with an escalation_model gets the standing 'Allocating
+    heavy work' instruction in SOUL.md. The general escalation behavior lives
+    once in identity — not in any skill — so authored, agent-created, and
+    one-off work all inherit it, and skills stay tier-unaware."""
+    body = VALID_YAML.replace(
+        "model: claude-opus-4-7\n",
+        "model: claude-sonnet-4-6\nescalation_model: claude-opus-4-8\n",
+    )
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "## Allocating heavy work" in soul
+    assert "Escalate first, before reading" in soul
+    # The instruction consumes the skill marker, so weighted skills escalate
+    # deterministically rather than on judgment alone.
+    assert "weight: heavy" in soul
+    # Roster-agnostic: the escalation model is never named in SOUL.
+    assert "claude-opus-4-8" not in soul
+
+
+def test_translate_omits_escalation_soul_when_single_tier(tmp_path):
+    """No escalation_model ⇒ no 'Allocating heavy work' section. Single-tier
+    seats stay byte-identical; the same pack runs on every roster (ADR 0049)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML, single-tier
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "Allocating heavy work" not in soul
+
+
 def test_translate_emits_no_memory_provider_block(tmp_path):
     """Phase 1: config.yaml carries NO honcho / memory-provider block.
 
