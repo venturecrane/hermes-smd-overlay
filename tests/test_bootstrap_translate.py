@@ -157,6 +157,60 @@ def test_translate_writes_persona_identity_into_soul_md(tmp_path):
     assert "- concise" in soul
 
 
+_USERS_BLOCK = dedent(
+    """\
+
+    users:
+      - full_name: Scott Durgan
+        email: scott@smd.services
+        role: principal
+      - full_name: Pat Lee
+        email: pat@smd.services
+        role: staff
+    """
+)
+
+
+def test_translate_materializes_principal_into_soul_md(tmp_path):
+    """#1326: the principal from the authored users[] list reaches SOUL.md so
+    the running agent has a statement of whom it works for."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, VALID_YAML + _USERS_BLOCK)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "You work for Scott Durgan (scott@smd.services)." in soul
+    # Only the principal is named — staff users do not produce a "work for" line.
+    assert "Pat Lee" not in soul
+
+
+def test_translate_omits_principal_line_when_no_principal(tmp_path):
+    """No principal entry ⇒ no fabricated fallback name, byte-identical SOUL.md."""
+    staff_only = _USERS_BLOCK.replace("role: principal", "role: staff", 1)
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, VALID_YAML + staff_only)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "You work for" not in soul
+
+
+def test_translate_omits_principal_line_when_users_absent(tmp_path):
+    """No users[] block at all ⇒ no principal line, no fabrication."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML, no users[]
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "You work for" not in soul
+
+
 _RELATIONSHIP_BLOCK = dedent(
     """\
 
