@@ -109,9 +109,7 @@ def test_every_agentmail_read_tool_is_fenced_or_explicitly_unfenced() -> None:
         "AgentMail surface may have been renamed; this guard would pass vacuously."
     )
     undecided = [
-        name
-        for name in reads
-        if name not in fenced and name not in UNFENCED_READ_BY_DESIGN
+        name for name in reads if name not in fenced and name not in UNFENCED_READ_BY_DESIGN
     ]
     assert undecided == [], (
         f"AgentMail READ tool(s) with no fencing decision: {sorted(undecided)}. "
@@ -156,11 +154,7 @@ def test_fenced_agentmail_entries_are_classified_reads() -> None:
     write/draft tool wrongly placed in the read fence (those are governed by the
     trust ceiling, not the taint fence)."""
     reads = set(_agentmail_read_tools())
-    mis = {
-        t
-        for t in _fenced_read_tools()
-        if t.startswith("mcp_agentmail_") and t not in reads
-    }
+    mis = {t for t in _fenced_read_tools() if t.startswith("mcp_agentmail_") and t not in reads}
     assert mis == set(), (
         f"fenced mcp_agentmail_* tools that are not classified READS: {sorted(mis)}"
     )
