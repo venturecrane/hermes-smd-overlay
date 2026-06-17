@@ -327,6 +327,47 @@ def _webhook_payload(kwargs: dict[str, Any]) -> Any:
     return raw
 
 
+# Source label the MCP gate stamps on a conversational ask_operator turn
+# (webhook_gate.py forwards ``{"source": "mcp", ...}``).
+_MCP_SOURCE = "mcp"
+
+
+def _quarantine_inbound_mcp(kwargs: dict[str, Any], payload: Any) -> None:
+    """Fence + taint a conversational MCP turn, regardless of skill routing.
+
+    The ask_operator channel routes to no skill, so it bypasses the matched-route
+    enqueue in :func:`on_pre_gateway_dispatch`. This records the operator's
+    message in :data:`shared.inbound.PENDING` so the ``hermes-smd-inbound``
+    pre_llm_call chokepoint fences it and marks the session tainted — the same
+    untrusted-origin treatment inbound email gets. The reply still flows (the
+    synchronous return rides the result store, not a send tool), and reads/drafts
+    are unaffected; only autonomous sensitive third-party actions are withheld for
+    the tainted turn. Trust class stays ``unknown_external`` — a verified channel
+    is still untrusted third-party data. Never raises (provenance must not break
+    dispatch)."""
+    try:
+        content = _inbound_content_for(payload)
+        envelope = inbound.make_envelope(
+            content=content,
+            source=_MCP_SOURCE,
+            surface="webhook",
+            verification="verified",
+            trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
+        )
+        session_id = kwargs.get("session_id")
+        if not isinstance(session_id, str):
+            session_id = ""
+        inbound.PENDING.enqueue(
+            inbound.InboundItem(session_id=session_id, content=content, envelope=envelope)
+        )
+    except Exception as exc:  # noqa: BLE001 — provenance must not break dispatch
+        logger.warning(
+            "hermes-smd-webhook-router: mcp inbound quarantine failed (%s); "
+            "route still passed through (the trust gate remains the enforcing wall)",
+            exc,
+        )
+
+
 def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     """Inspect each inbound dispatch for webhook markers and rewrite if matched.
 
@@ -358,6 +399,21 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     Exception-safe: any failure logs at warning level and returns
     ``None``. Per AGENTS.md hard rule #3, the callback never raises.
     """
+    payload = _webhook_payload(kwargs)
+
+    # Conversational MCP channel (ask_operator): "just talk" routes to NO skill,
+    # so it never reaches the matched-route enqueue below. But its message is
+    # untrusted external input — on the Claude connector it is literally another
+    # model relaying arbitrary text — so it MUST fence + taint the session exactly
+    # as inbound email does, or an instruction smuggled inside a conversational
+    # message would slip past the taint-gate. Quarantine here and short-circuit:
+    # the conversational channel is always the generic worker prompt, never a
+    # skill. Over-tainting is fail-safe; the delivery is HMAC-verified upstream by
+    # the webhook adapter before this hook runs.
+    if isinstance(payload, dict) and payload.get("source") == _MCP_SOURCE:
+        _quarantine_inbound_mcp(kwargs, payload)
+        return None
+
     # Rebuild the routing table live from customer.yaml (ADR 0044 WS2): editing
     # webhook_triggers applies on the next dispatch with no restart. The build is
     # lenient (returns an empty table on any read/parse failure), so a transient
@@ -366,7 +422,6 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     if table.size() == 0:
         return None
 
-    payload = _webhook_payload(kwargs)
     try:
         decision = router.decide_route(table, payload)
     except Exception as exc:  # noqa: BLE001

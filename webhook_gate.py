@@ -42,7 +42,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from shared import mcp_result_store, runtime_read
+from shared import mcp_result_store, mcp_thread_store, runtime_read
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
 # to build the forward URL, so the only dynamic part of the urllib call is a
@@ -268,73 +268,70 @@ _JSON_RPC_METHOD_NOT_FOUND = -32601
 _JSON_RPC_INVALID_PARAMS = -32602
 _JSON_RPC_INTERNAL_ERROR = -32603
 
-# Beat-1 tool surface: one echo verb to prove the spine end to end. Real verbs
-# (fetch/store) are authored per customer and advertised here from that authored
-# set in later beats.
+# Tool surface: ONE conversational verb. The MCP connector is a communication
+# channel to the worker, not a remote-procedure menu — so it exposes a single
+# "talk to it" verb and lets the worker's intelligence decide what to do, exactly
+# as it would with an email or a chat. (Earlier beats listed typed verbs —
+# echo/fetch_documents/store_document — but a verb menu invites the connecting
+# client to route conversation into RPCs, which is the narrowing this channel
+# exists to remove. The worker reaches Drive, the inbox, memory, etc. with its
+# own tools inside the turn.)
+ASK_TOOL_NAME = "ask_operator"
 _MCP_TOOLS = [
     {
-        "name": "echo",
-        "description": "Echo a message back through the Operator (synchronous-spine proof).",
+        "name": ASK_TOOL_NAME,
+        "description": (
+            "Talk to the Operator. Send it a message — a question, an instruction, "
+            "anything you would say to a capable coworker who has your Drive, your "
+            "inbox, your memory, and judgment. It understands what you want, does it, "
+            "and replies. Pass a stable 'thread_id' to keep the same conversation "
+            "going across turns (it remembers what was already said in that thread)."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"message": {"type": "string"}},
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "What you want to say to the Operator.",
+                },
+                "thread_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. A stable id for THIS conversation; reuse it across "
+                        "turns so the Operator keeps context. Scoped to your identity."
+                    ),
+                },
+            },
             "required": ["message"],
-        },
-    },
-    {
-        "name": "fetch_documents",
-        "description": (
-            "List the documents the Operator can reach in Google Drive, optionally "
-            "filtered. Read-only; returns file names and ids."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Optional Drive search query (e.g. a name fragment).",
-                },
-                "folder_id": {
-                    "type": "string",
-                    "description": "Optional Drive folder id to list within.",
-                },
-            },
-        },
-    },
-    {
-        "name": "store_document",
-        "description": (
-            "Store content back to Google Drive as a Google Doc — create a new doc "
-            "('title' + 'content') or append to an existing one ('document_id' + "
-            "'text'). The human approves this action in their Claude client."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Title for a new doc."},
-                "content": {"type": "string", "description": "Body for a new doc."},
-                "document_id": {"type": "string", "description": "Existing doc id to append to."},
-                "text": {"type": "string", "description": "Text to append."},
-            },
         },
     },
 ]
 _MCP_TOOL_NAMES = frozenset(t["name"] for t in _MCP_TOOLS)
 
 
-def _mcp_stub_authorized(auth_header: str | None) -> bool:
+# Stable synthetic subject for the transitional stub-auth path (staging, where
+# Clerk is not configured). There is no real identity behind a shared bearer
+# token, so all stub-authed turns share ONE conversation namespace — which is
+# correct: staging has a single operator. The Clerk path (prod) carries the real
+# per-user subject.
+STUB_PRINCIPAL_SUBJECT = "smd-mcp-stub"
+
+
+def _mcp_stub_authorized(auth_header: str | None) -> str | None:
     """Beat-1 stub auth: constant-time bearer check against SMD_MCP_STUB_TOKEN.
 
-    Fail-closed: an unset token rejects every request, so a Machine that never
-    authored the stub token can never expose an open /mcp. Replaced by Clerk
-    OAuth in beat 2.
+    Returns the synthetic stub subject on success, else None. Fail-closed: an
+    unset token rejects every request, so a Machine that never authored the stub
+    token can never expose an open /mcp. Used ONLY when Clerk is not configured.
     """
     token = os.environ.get("SMD_MCP_STUB_TOKEN")
     if not token:
-        return False
+        return None
     if not auth_header or not auth_header.startswith("Bearer "):
-        return False
-    return hmac.compare_digest(auth_header[len("Bearer ") :], token)
+        return None
+    if hmac.compare_digest(auth_header[len("Bearer ") :], token):
+        return STUB_PRINCIPAL_SUBJECT
+    return None
 
 
 def _load_mcp_binding():
@@ -379,10 +376,14 @@ def _load_mcp_binding():
     )
 
 
-def _mcp_authenticate(auth_header: str | None) -> bool:
-    """Authenticate an /mcp request. Clerk when configured (the production path);
-    the transitional stub bearer ONLY when Clerk is not configured on this
-    Machine. Fail-closed either way."""
+def _mcp_authenticate(auth_header: str | None) -> str | None:
+    """Authenticate an /mcp request; return the principal SUBJECT or None.
+
+    Clerk when configured (the production path) — returns the authenticated
+    Clerk subject, which namespaces the caller's conversation thread so no
+    identity can address another's. The transitional stub bearer is used ONLY
+    when Clerk is not configured on this Machine, returning a single synthetic
+    subject. Fail-closed either way (None => reject)."""
     binding = _load_mcp_binding()
     if binding is not None:
         from shared import mcp_auth
@@ -390,7 +391,7 @@ def _mcp_authenticate(auth_header: str | None) -> bool:
         token = mcp_auth.extract_bearer_token(auth_header)
         result = mcp_auth.validate_mcp_token(token, binding)
         if isinstance(result, mcp_auth.McpPrincipal):
-            return True
+            return result.subject
         # Diagnostic: surface the token's actual aud/iss/sub (identifiers, not
         # secrets) vs what THIS Machine expects, so an OAuth audience/issuer
         # mismatch is debuggable without guessing. Temporary.
@@ -410,7 +411,7 @@ def _mcp_authenticate(auth_header: str | None) -> bool:
         logger.info(
             "mcp: Clerk auth refused (%s)%s", getattr(result, "reason", "unknown"), claims_note
         )
-        return False
+        return None
     return _mcp_stub_authorized(auth_header)
 
 
@@ -437,30 +438,42 @@ def _rpc_err(req_id: object, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
-def _drive_agent_turn(tool_name: str, args: dict) -> dict | None:
-    """Forward one MCP verb into the agent loop and long-poll for its answer.
+def _drive_agent_turn(
+    message: str, *, principal_subject: str, thread_id: str | None
+) -> dict | None:
+    """Forward one conversational message into the agent loop, return its reply.
 
-    Mints a correlation id that becomes the Hermes delivery id (X-Request-ID),
-    so the turn's session is ``webhook:mcp:<cid>`` and the result-sink stores the
-    completed turn's answer under ``<cid>`` for us to collect here. Returns the
-    stored payload (``{"answer": ...}``) or None on forward failure / timeout.
+    Mints a fresh per-call correlation id (the result-bridge handle: it rides the
+    BODY so the route prompt renders it into the turn's user_message, and the
+    agent-side result-sink stores the completed turn's answer under it for us to
+    collect). The correlation id is ALSO the Hermes delivery/dedup id
+    (X-Request-ID), so it MUST stay unique per call — which is why it cannot
+    double as the conversation key.
+
+    Continuity is supplied in the overlay (see ``mcp_thread_store``): when the
+    caller passes a ``thread_id``, we load the recent transcript for THIS
+    principal+thread and render it into the turn so the worker remembers the
+    conversation; after the reply lands we append this exchange. The thread key
+    is principal-namespaced, so a caller can only ever read/extend their own
+    thread. Returns the stored payload (``{"answer": ...}``) or None on forward
+    failure / timeout.
     """
     secret = _route_secret(MCP_ROUTE)
     if not secret:
         logger.warning("mcp: WEBHOOK_SECRET_%s unset — cannot forward", MCP_ROUTE.upper())
         return None
 
+    # Principal-namespaced conversation key (None => one-shot, no continuity).
+    tkey = mcp_thread_store.thread_key(principal_subject, thread_id) if thread_id else None
+    history_text = mcp_thread_store.render(mcp_thread_store.history(tkey)) if tkey else ""
+
     correlation_id = uuid.uuid4().hex
-    # correlation_id rides in the BODY (not just the X-Request-ID header) so the
-    # route prompt can render it into the turn's user_message — the result-sink
-    # recovers it there. The gateway's webhook:mcp:<id> chat-id is NOT the
-    # agent-loop session_id (they differ), so message-carried correlation is the
-    # reliable handle, verified on staging.
     body = json.dumps(
         {
             "source": MCP_ROUTE,
-            "event_type": tool_name,
-            "message": args,
+            "event_type": ASK_TOOL_NAME,
+            "message": message,
+            "history": history_text,
             "correlation_id": correlation_id,
         },
         separators=(",", ":"),
@@ -489,14 +502,24 @@ def _drive_agent_turn(tool_name: str, args: dict) -> dict | None:
     while time.monotonic() < deadline:
         result = mcp_result_store.take(correlation_id)
         if result is not None:
+            # Persist the exchange so the next turn on this thread has context.
+            if tkey:
+                answer = result.get("answer")
+                reply_text = answer if isinstance(answer, str) else json.dumps(answer)
+                mcp_thread_store.append(tkey, message, reply_text)
             return result
         time.sleep(_MCP_POLL_INTERVAL_S)
-    logger.warning("mcp: poll timed out (tool=%s)", tool_name)
+    logger.warning("mcp: poll timed out (thread=%s)", bool(tkey))
     return None
 
 
-def _mcp_tools_call(req: dict) -> tuple[int, dict]:
-    """Handle a JSON-RPC ``tools/call`` → drive the agent turn, return in-line."""
+def _mcp_tools_call(req: dict, *, principal_subject: str) -> tuple[int, dict]:
+    """Handle a JSON-RPC ``tools/call`` → drive the agent turn, return in-line.
+
+    ``principal_subject`` is the authenticated caller (from /mcp auth); it
+    namespaces the conversation thread so a caller can only ever read/extend
+    their own.
+    """
     req_id = req.get("id")
     params = req.get("params")
     if not isinstance(params, dict):
@@ -510,7 +533,14 @@ def _mcp_tools_call(req: dict) -> tuple[int, dict]:
     if name not in _MCP_TOOL_NAMES:
         return 200, _rpc_err(req_id, _JSON_RPC_METHOD_NOT_FOUND, f"unknown tool: {name}")
 
-    result = _drive_agent_turn(name, args)
+    message = args.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "ask_operator requires a 'message'")
+    thread_id = args.get("thread_id")
+    if thread_id is not None and not isinstance(thread_id, str):
+        return 200, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "'thread_id' must be a string")
+
+    result = _drive_agent_turn(message, principal_subject=principal_subject, thread_id=thread_id)
     if result is None:
         return 200, _rpc_ok(
             req_id,
@@ -529,12 +559,16 @@ def _mcp_tools_call(req: dict) -> tuple[int, dict]:
     return 200, _rpc_ok(req_id, {"content": [{"type": "text", "text": text}]})
 
 
-def _mcp_dispatch(req: dict) -> tuple[int, dict | None]:
+def _mcp_dispatch(req: dict, *, principal_subject: str = "") -> tuple[int, dict | None]:
     """Dispatch one already-authorized JSON-RPC MCP request.
 
     Returns ``(http_status, json_rpc_response | None)``. The ``initialized``
     notification gets 202 + no body (per JSON-RPC, a notification has no
     response); every other method returns 200 + a JSON-RPC response object.
+
+    ``principal_subject`` is the authenticated caller, threaded to ``tools/call``
+    so the conversation thread is namespaced to that identity. The unauthenticated
+    metadata methods (initialize/ping/tools/list) ignore it.
     """
     method = req.get("method")
     req_id = req.get("id")
@@ -554,7 +588,7 @@ def _mcp_dispatch(req: dict) -> tuple[int, dict | None]:
     if method == "tools/list":
         return 200, _rpc_ok(req_id, {"tools": _MCP_TOOLS})
     if method == "tools/call":
-        return _mcp_tools_call(req)
+        return _mcp_tools_call(req, principal_subject=principal_subject)
     return 200, _rpc_err(req_id, _JSON_RPC_METHOD_NOT_FOUND, f"method not found: {method}")
 
 
@@ -671,7 +705,8 @@ class _Handler(BaseHTTPRequestHandler):
         Beat-1 stub auth (bearer) then JSON-RPC dispatch; ``tools/call`` drives
         one agent turn and returns its answer in-line via the result store.
         """
-        if not _mcp_authenticate(self.headers.get("Authorization")):
+        principal_subject = _mcp_authenticate(self.headers.get("Authorization"))
+        if not principal_subject:
             # RFC 9728 §5.1: on a Clerk-configured Machine, point the client at
             # the discovery doc so it knows where to authenticate.
             meta = _mcp_protected_resource_metadata()
@@ -703,7 +738,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, _rpc_err(None, _JSON_RPC_INVALID_REQUEST, "not a JSON-RPC 2.0 request"))
             return
         try:
-            status, body = _mcp_dispatch(req)
+            status, body = _mcp_dispatch(req, principal_subject=principal_subject)
         except Exception as exc:  # never leak detail; fail closed
             logger.error("mcp: dispatch error: %s", exc)
             self._json(200, _rpc_err(req.get("id"), _JSON_RPC_INTERNAL_ERROR, "internal error"))
