@@ -1,11 +1,18 @@
 """hermes-smd-voice — sample-driven voice transformation.
 
-Attaches to two hooks at the pinned Hermes ref (v2026.5.16):
+Attaches to three hooks at the pinned Hermes ref (v2026.5.16):
 
 - ``pre_llm_call`` (run_agent.py:12447-12457) — injects relevant voice
   samples from the customer's R2 vault into the user-message context
   BEFORE the model sees the turn. Per Hermes' contract, this preserves
   the system-prompt cache.
+
+- ``transform_llm_output`` (run_agent.py:15874-15893) — structurally
+  reshapes the model's response to match the customer's authored voice.
+  Layer 1 (pre_llm_call) sets the register; Layer 2 (this hook) reshapes
+  whatever the model produced. First non-empty string returned wins; None
+  leaves the response unchanged. Exception-safe: a failed transform never
+  breaks the agent loop.
 
 - ``post_llm_call`` (run_agent.py:15901-15910) — evaluates the draft
   response for voice fidelity (observational; the real fidelity gate
@@ -19,33 +26,50 @@ transformation logic lives in :mod:`transform`; R2 retrieval in
 below invoke through exception-safe wrappers.
 
 Per AGENTS.md hard rule #3: a noisy callback creates log spam but a
-raising callback can still create context churn. Both hooks below catch
+raising callback can still create context churn. All hooks below catch
 every exception, log a warning, and return a safe value (``None`` for
-pre_llm_call, nothing for post_llm_call). A voice-transformation
-failure on one turn never breaks the agent loop.
+pre_llm_call and transform_llm_output, nothing for post_llm_call). A
+voice-transformation failure on one turn never breaks the agent loop.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from . import samples, transform  # noqa: F401 — surface module imports for tests
+from .diff import SCHEMA_VERSION as _DIFF_SCHEMA_VERSION
+from .diff import StructuralDiff
+from .transform import (
+    GENERAL_VOICE_COHORT,
+    TransformStatus,
+    VoiceProfileBundle,
+    build_voice_profile,
+    transform_draft,
+)
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Module-level runtime state
+# ---------------------------------------------------------------------------
 
-# Module-level R2 reader binding. The Machine boot path wires a real
-# R2 client into this slot before the agent loop starts; tests can
-# patch it directly. ``None`` means "no binding available" — the hook
-# degrades to a no-op rather than raising.
+# R2 reader and customer slug. Wired by bind_runtime(); None until then.
 _R2_READER: samples.R2SampleReader | None = None
-
-# Module-level customer slug. Resolved at register-time from
-# ``SMD_CUSTOMER_SLUG``. Missing slug means "single-tenant Machine boot
-# misconfigured" — the hook degrades to a no-op rather than raising so
-# the agent still responds.
 _CUSTOMER_SLUG: str | None = None
+
+# Cached VoiceProfileBundle built from all available samples.  Built lazily
+# on the first transform_llm_output call and reused for the lifetime of the
+# process (samples change only when the Machine reboots and re-syncs the
+# voice vault).  A new bind_runtime() call (e.g. in tests) resets the cache.
+_VOICE_BUNDLE: VoiceProfileBundle | None = None
+_VOICE_BUNDLE_LOCK = threading.Lock()
+
+# Max samples to load when building the structural profile.  Higher than
+# MAX_SAMPLES_PER_TURN (which caps prompt context); profile accuracy improves
+# with more samples and the cost is paid once at cache-build time, not per turn.
+_PROFILE_SAMPLE_LIMIT = 256
 
 
 def bind_runtime(*, customer_slug: str, r2_reader: samples.R2SampleReader) -> None:
@@ -54,17 +78,120 @@ def bind_runtime(*, customer_slug: str, r2_reader: samples.R2SampleReader) -> No
     Called by :func:`register` itself (which constructs the reader from the
     Machine's R2 env via ``samples.reader_from_env``), and directly by tests
     that inject a fake reader. Until this runs, ``_R2_READER`` is ``None`` and
-    both hooks no-op; register() emits a WARNING in that case so an unbound
+    all hooks no-op; register() emits a WARNING in that case so an unbound
     plugin is never mistaken for a healthy one.
+
+    Resets the cached VoiceProfileBundle so the next transform call rebuilds
+    it from the newly-bound reader.
     """
-    global _R2_READER, _CUSTOMER_SLUG
+    global _R2_READER, _CUSTOMER_SLUG, _VOICE_BUNDLE
     _R2_READER = r2_reader
     _CUSTOMER_SLUG = customer_slug
+    _VOICE_BUNDLE = None  # invalidate on rebind (tests, reprovision)
     logger.info(
         "hermes-smd-voice: runtime bound customer=%s r2=%s",
         customer_slug,
         type(r2_reader).__name__,
     )
+
+
+# ---------------------------------------------------------------------------
+# Voice bundle helpers
+# ---------------------------------------------------------------------------
+
+
+def _dicts_to_structural_diffs(raw_dicts: list[dict]) -> list[StructuralDiff]:
+    """Convert a list of structural-diff dicts (from R2) into StructuralDiff objects.
+
+    Mirrors the conversion logic in evaluate_draft_voice_fidelity — both
+    surfaces read from the same R2 JSON schema.  Malformed rows are silently
+    skipped so one corrupt sample never aborts the profile build.
+    """
+    result: list[StructuralDiff] = []
+    for raw in raw_dicts:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            result.append(
+                StructuralDiff(
+                    schema_version=int(raw.get("schema_version", _DIFF_SCHEMA_VERSION)),
+                    word_count=int(raw.get("word_count", 0)),
+                    sentence_count=int(raw.get("sentence_count", 0)),
+                    paragraph_count=int(raw.get("paragraph_count", 0)),
+                    subject_word_count=int(raw.get("subject_word_count", 0)),
+                    avg_sentence_length=float(raw.get("avg_sentence_length", 0.0)),
+                    sentence_length_distribution=dict(
+                        raw.get("sentence_length_distribution", {})
+                    ),
+                    greeting_style=str(raw.get("greeting_style", "unknown")),
+                    signoff_style=str(raw.get("signoff_style", "unknown")),
+                    opener_template=str(raw.get("opener_template", "")),
+                    closer_template=str(raw.get("closer_template", "")),
+                    punctuation_rhythm=dict(raw.get("punctuation_rhythm", {})),
+                    recipient_cohort=str(raw.get("recipient_cohort", "")),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _build_bundle() -> VoiceProfileBundle | None:
+    """Load all available samples and aggregate into a VoiceProfileBundle.
+
+    Builds only the general (customer-wide) profile — per-user and
+    per-cohort profiling are Phase 2 (requires authored voice_profile_id
+    assignments in customer.yaml and sufficient per-reviewer sample counts).
+
+    Returns None when no samples are available or the reader is unbound.
+    """
+    if _R2_READER is None or not _CUSTOMER_SLUG:
+        return None
+
+    raw_diffs = samples.retrieve_relevant_samples(
+        customer_slug=_CUSTOMER_SLUG,
+        r2_reader=_R2_READER,
+        query_context=None,
+        limit=_PROFILE_SAMPLE_LIMIT,
+    )
+    if not raw_diffs:
+        logger.warning(
+            "hermes-smd-voice: no voice samples found for customer=%s; "
+            "transform will passthrough until samples are ingested",
+            _CUSTOMER_SLUG,
+        )
+        return None
+
+    struct_diffs = _dicts_to_structural_diffs(raw_diffs)
+    if not struct_diffs:
+        return None
+
+    general_profile = build_voice_profile(
+        cohort_id=GENERAL_VOICE_COHORT,
+        samples=struct_diffs,
+    )
+    logger.info(
+        "hermes-smd-voice: built general voice profile customer=%s samples=%d",
+        _CUSTOMER_SLUG,
+        general_profile.sample_count,
+    )
+    return VoiceProfileBundle(general=general_profile, per_user={}, per_user_cohort={})
+
+
+def _get_cached_bundle() -> VoiceProfileBundle | None:
+    """Return the cached VoiceProfileBundle, building it lazily on first call."""
+    global _VOICE_BUNDLE
+    if _VOICE_BUNDLE is not None:
+        return _VOICE_BUNDLE
+    with _VOICE_BUNDLE_LOCK:
+        if _VOICE_BUNDLE is None:
+            _VOICE_BUNDLE = _build_bundle()
+        return _VOICE_BUNDLE
+
+
+# ---------------------------------------------------------------------------
+# Hook implementations
+# ---------------------------------------------------------------------------
 
 
 def on_pre_llm_call(**kwargs: Any) -> dict | None:
@@ -106,6 +233,60 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         return {"context": block}
     except Exception:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-voice: pre_llm_call failed", exc_info=True)
+        return None
+
+
+def on_transform_llm_output(**kwargs: Any) -> str | None:
+    """Structurally reshape the model's response to match the customer's voice.
+
+    Expected kwargs per run_agent.py:15882 (transform_llm_output):
+
+        response_text, session_id, model, platform
+
+    This is Layer 2 of the voice stack. Layer 1 (pre_llm_call) sets the
+    register by injecting style examples; Layer 2 reshapes whatever the model
+    produced so the structural signature (sentence length distribution,
+    paragraph density, greeting/signoff style) matches the customer's authored
+    voice profile.
+
+    Returns the reshaped text when ``TransformStatus.TRANSFORMED``; returns
+    ``None`` (Hermes leaves the response unchanged) for every passthrough case:
+
+    - No samples / insufficient profile (< MIN_PROFILE_SAMPLE_COUNT=5)
+    - Draft already matches profile within tolerance
+    - Empty response
+    - Fabrication guard fired (transform proposed an illegal token)
+    - Any exception
+
+    Exception-safe per AGENTS.md hard rule #3.
+    """
+    try:
+        if _R2_READER is None or not _CUSTOMER_SLUG:
+            return None
+
+        response_text = kwargs.get("response_text") or ""
+        if not response_text.strip():
+            return None
+
+        bundle = _get_cached_bundle()
+        if bundle is None:
+            return None
+
+        result = transform_draft(draft=response_text, profile=bundle)
+
+        logger.info(
+            "voice.transform status=%s changes=%s profile_n=%d session=%s",
+            result.status.value,
+            result.changes_applied,
+            result.profile_sample_count,
+            kwargs.get("session_id", ""),
+        )
+
+        if result.status == TransformStatus.TRANSFORMED:
+            return result.transformed_draft
+        return None
+    except Exception:  # noqa: BLE001 — never raise out of a hook
+        logger.warning("hermes-smd-voice: transform_llm_output failed", exc_info=True)
         return None
 
 
@@ -154,7 +335,7 @@ def on_post_llm_call(**kwargs: Any) -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point. Wires both hooks AND binds the runtime.
+    """Plugin entry point. Wires all three hooks AND binds the runtime.
 
     Self-sufficient binding: register resolves ``SMD_CUSTOMER_SLUG`` and
     constructs the R2 voice-sample reader from the Machine's R2 env
@@ -175,6 +356,7 @@ def register(ctx) -> None:
     slug = os.environ.get("SMD_CUSTOMER_SLUG") or None
 
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    ctx.register_hook("transform_llm_output", on_transform_llm_output)
     ctx.register_hook("post_llm_call", on_post_llm_call)
 
     reader = samples.reader_from_env()
@@ -204,5 +386,6 @@ __all__ = [
     "bind_runtime",
     "on_post_llm_call",
     "on_pre_llm_call",
+    "on_transform_llm_output",
     "register",
 ]
