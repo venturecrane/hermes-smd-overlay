@@ -106,9 +106,7 @@ def test_unmapped_tool_blocked_under_autonomous_ceiling():
 def test_unmapped_tool_blocked_end_to_end():
     """Full chain through evaluate_tool_call: an unknown tool is blocked."""
     enforce = _enforce()
-    block = enforce.evaluate_tool_call(
-        "totally_made_up_tool", {}, "smd", session_id="sess"
-    )
+    block = enforce.evaluate_tool_call("totally_made_up_tool", {}, "smd", session_id="sess")
     assert block is not None
     assert block["action"] == "block"
 
