@@ -125,7 +125,14 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
 _FENCED_READ_TOOLS: frozenset[str] = frozenset(
     {
         # Managed mailbox + generic email — the primary untrusted channel (OP-P0-4).
-        "workspace_gmail_search",
+        # NOTE: workspace_gmail_search is NOT fenced — it returns only Gmail
+        # message {id, threadId} metadata (messages.list contract), no body or
+        # sender-authored text, so it carries no injection surface. It is listed
+        # in UNFENCED_READ_BY_DESIGN (see test_inbound_fence_completeness) with the
+        # same rationale as workspace_drive_list. Fencing it would break the
+        # inherent list->get read pattern (the agent cannot reuse a fenced id as
+        # the message_id for the body read) for no security gain. The BODY read
+        # below stays fenced — that is where attacker-influenceable content lives.
         "workspace_gmail_get",
         "email_list_messages",
         "email_get_message",
