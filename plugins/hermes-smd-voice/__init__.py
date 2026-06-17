@@ -120,9 +120,7 @@ def _dicts_to_structural_diffs(raw_dicts: list[dict]) -> list[StructuralDiff]:
                     paragraph_count=int(raw.get("paragraph_count", 0)),
                     subject_word_count=int(raw.get("subject_word_count", 0)),
                     avg_sentence_length=float(raw.get("avg_sentence_length", 0.0)),
-                    sentence_length_distribution=dict(
-                        raw.get("sentence_length_distribution", {})
-                    ),
+                    sentence_length_distribution=dict(raw.get("sentence_length_distribution", {})),
                     greeting_style=str(raw.get("greeting_style", "unknown")),
                     signoff_style=str(raw.get("signoff_style", "unknown")),
                     opener_template=str(raw.get("opener_template", "")),

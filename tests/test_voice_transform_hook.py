@@ -43,7 +43,13 @@ def _make_sample(
         "paragraph_count": 2,
         "subject_word_count": 3,
         "avg_sentence_length": avg_sentence_length,
-        "sentence_length_distribution": {"lt_5": 0, "lt_10": 3, "lt_20": 2, "lt_35": 0, "gte_35": 0},
+        "sentence_length_distribution": {
+            "lt_5": 0,
+            "lt_10": 3,
+            "lt_20": 2,
+            "lt_35": 0,
+            "gte_35": 0,
+        },
         "greeting_style": greeting_style,
         "signoff_style": signoff_style,
         "opener_template": "",
@@ -70,8 +76,7 @@ def _make_reader_with_samples(slug: str, count: int = 6) -> _FakeR2Reader:
     """Build a fake reader with ``count`` homogeneous samples (enough for MIN_PROFILE_SAMPLE_COUNT=5)."""
     sample = _make_sample()
     objects = {
-        f"{slug}/voice/cohort/general/s{i}.json": json.dumps(sample).encode()
-        for i in range(count)
+        f"{slug}/voice/cohort/general/s{i}.json": json.dumps(sample).encode() for i in range(count)
     }
     return _FakeR2Reader(objects)
 
@@ -96,8 +101,13 @@ def voice():
 
 def test_register_attaches_transform_hook(voice, fake_ctx, monkeypatch):
     """register() must attach transform_llm_output so Hermes can fire it."""
-    for k in ("SMD_CUSTOMER_SLUG", "R2_ENDPOINT_URL", "R2_ACCESS_KEY_ID",
-              "R2_SECRET_ACCESS_KEY", "R2_BUCKET_CONFIG"):
+    for k in (
+        "SMD_CUSTOMER_SLUG",
+        "R2_ENDPOINT_URL",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_CONFIG",
+    ):
         monkeypatch.delenv(k, raising=False)
     voice.register(fake_ctx)
     assert "transform_llm_output" in fake_ctx.registered
@@ -160,10 +170,9 @@ def test_transform_returns_string_when_transformed(voice, monkeypatch):
     """With >=5 samples and a draft that needs reshaping, the hook returns a string."""
     # Build a profile with 'first_name' greeting style
     sample = _make_sample(greeting_style="first_name", signoff_style="thanks")
-    reader = _FakeR2Reader({
-        f"acme/voice/cohort/general/s{i}.json": json.dumps(sample).encode()
-        for i in range(6)
-    })
+    reader = _FakeR2Reader(
+        {f"acme/voice/cohort/general/s{i}.json": json.dumps(sample).encode() for i in range(6)}
+    )
     voice.bind_runtime(customer_slug="acme", r2_reader=reader)
 
     # Draft uses formal greeting — transform should swap to first_name
@@ -180,10 +189,9 @@ def test_transform_returns_none_on_passthrough(voice):
     """When the draft already matches the profile, the hook returns None (no change)."""
     # Profile: first_name greeting, thanks signoff
     sample = _make_sample(greeting_style="first_name", signoff_style="thanks")
-    reader = _FakeR2Reader({
-        f"acme/voice/cohort/general/s{i}.json": json.dumps(sample).encode()
-        for i in range(6)
-    })
+    reader = _FakeR2Reader(
+        {f"acme/voice/cohort/general/s{i}.json": json.dumps(sample).encode() for i in range(6)}
+    )
     voice.bind_runtime(customer_slug="acme", r2_reader=reader)
 
     # Draft already in voice (first_name greeting, thanks signoff)
