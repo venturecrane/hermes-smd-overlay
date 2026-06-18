@@ -1069,26 +1069,71 @@ def translate_customer_yaml(
             logger.debug("translate: profile %s already up to date", slug)
         written_slugs.append(slug)
 
-    # ADR 0047 — materialize personas[].cron[] into Hermes-native cron jobs.
-    # The authored schedule used to be validated and then silently dropped here;
-    # now it is registered into the cron store before the gateway/scheduler
-    # starts. Only touch the store (and only import Hermes' cron.jobs) when cron
-    # entries actually exist, so translate stays importable/usable in CI envs
-    # without Hermes installed. Fail-closed: a bad/unsupported entry raises
-    # TranslateError and aborts bootstrap, never a silent drop.
-    if any(persona.get("cron") for persona in personas):
+    # ADR 0047 — reconcile personas[].cron[] into Hermes-native cron jobs.
+    # Converge EVERY authored persona's cron store to exactly its authored set
+    # (including the empty set): a persona that dropped ALL its cron must have its
+    # orphaned managed job removed, not left to keep firing across reboots. So we
+    # reconcile the full persona-slug set, not only personas that currently author
+    # cron. The real Hermes ``cron.jobs`` import happens lazily inside the store
+    # factory (per persona), so CI — which injects ``cron_store_for`` — never
+    # imports Hermes regardless of this set. Fail-closed: a bad/unsupported entry
+    # or an unreadable store raises TranslateError and aborts bootstrap.
+    reconcile_slugs: list[str] = []
+    for persona in personas:
+        pslug = str(persona.get("slug") or persona.get("name") or "").strip()
+        if pslug:
+            reconcile_slugs.append(pslug)
+    reconcile_slugs = sorted(set(reconcile_slugs))
+    # Reconcile the real cron store only when there IS a store to reach: a test
+    # injected one, or Hermes' ``cron`` package is importable (always true on a
+    # Machine, false in CI/unit envs without Hermes — where there are no real
+    # stores to reconcile anyway, so skipping is correct, not a silent drop).
+    if reconcile_slugs and (cron_store_for is not None or _hermes_cron_importable()):
         store_for = (
             cron_store_for if cron_store_for is not None else _real_cron_store_for(profiles_root)
         )
+        # ``_real_cron_store_for`` mutates the process-global ``HERMES_HOME`` (and
+        # reloads ``cron.jobs``) per persona; snapshot/restore it so reconciling
+        # the broadened set cannot leak the last-visited persona home into the
+        # rest of bootstrap.
+        _prev_hermes_home = os.environ.get("HERMES_HOME")
         try:
-            registered = materialize_cron(customer, store_for, _real_script_stager(profiles_root))
+            registered = materialize_cron(
+                customer,
+                store_for,
+                _real_script_stager(profiles_root),
+                reconcile_slugs=reconcile_slugs,
+            )
         except CronMaterializeError as exc:
             raise TranslateError(str(exc)) from exc
+        finally:
+            if _prev_hermes_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = _prev_hermes_home
         logger.info(
-            "translate: materialized %d cron job(s): %s", len(registered), ", ".join(registered)
+            "translate: reconciled cron for %d persona(s); %d job(s) registered: %s",
+            len(reconcile_slugs),
+            len(registered),
+            ", ".join(registered) or "(none)",
         )
 
     return written_slugs
+
+
+def _hermes_cron_importable() -> bool:
+    """True when Hermes' ``cron`` package is importable.
+
+    Always true on a Machine (Hermes is installed); false in CI/unit envs without
+    Hermes. Used to gate cron reconciliation on the real (non-injected) path so a
+    no-cron customer never triggers a Hermes import where there is no Hermes — and
+    no real cron store to reconcile — to begin with."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("cron") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _real_cron_store_for(profiles_root: Path) -> Callable[[str], CronStore]:

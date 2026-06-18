@@ -111,9 +111,8 @@ def test_changed_schedule_replaces_not_duplicates() -> None:
 
 def test_dropping_one_of_several_entries_is_cleaned() -> None:
     """Dropping ONE of a persona's cron entries (persona still authors cron)
-    removes the dropped job and keeps the rest. (Dropping ALL cron from a persona
-    is a documented limitation — see materialize_cron — since a cron-less persona
-    is no longer reconciled.)"""
+    removes the dropped job and keeps the rest. (Dropping ALL of a persona's cron
+    is also reconciled now — see test_dropping_all_cron_removes_orphaned_job.)"""
     f = FakeFactory()
     materialize_cron(
         {
@@ -295,3 +294,103 @@ def test_bad_entry_raises_before_mutating_store() -> None:
             f,
         )
     assert store.removed == []
+
+
+# --- drop-ALL reconciliation: the orphan-firing bug -------------------------
+
+
+def test_dropping_all_cron_removes_orphaned_job() -> None:
+    """Dropping ALL of a persona's cron: with the persona in ``reconcile_slugs``,
+    its previously-registered managed job is removed. This is the live defect —
+    a cron commented out of customer.yaml whose job kept firing across reboots."""
+    store = FakeCronStore(
+        jobs=[{"id": "m-1", "name": "op-managed:crane:health-monitor", "schedule": "*/30 * * * *"}]
+    )
+    f = FakeFactory(preset={"crane": store})
+    registered = materialize_cron(_customer([]), f, reconcile_slugs=["crane"])
+    assert registered == []
+    assert [j for j in store.jobs if str(j["name"]).startswith("op-managed:")] == ([]), (
+        "orphaned managed job must be removed when all cron is dropped"
+    )
+    assert "m-1" in store.removed
+
+
+def test_dropping_all_cron_is_idempotent() -> None:
+    """Reconciling a now-cron-less persona twice stays empty (no error, no churn)."""
+    store = FakeCronStore(
+        jobs=[{"id": "m-1", "name": "op-managed:crane:health-monitor", "schedule": "*/30 * * * *"}]
+    )
+    f = FakeFactory(preset={"crane": store})
+    materialize_cron(_customer([]), f, reconcile_slugs=["crane"])
+    materialize_cron(_customer([]), f, reconcile_slugs=["crane"])
+    assert [j for j in store.jobs if str(j["name"]).startswith("op-managed:")] == []
+
+
+def test_mixed_persona_keeps_one_drops_another() -> None:
+    """One persona keeps its cron; another dropped all. Both reconciled: the
+    keeper gets its authored job, the dropper's orphan is removed."""
+    keeper = FakeCronStore()
+    dropper = FakeCronStore(
+        jobs=[
+            {
+                "id": "m-9",
+                "name": "op-managed:avery:deadline-miss-escalator",
+                "schedule": "0 8 * * *",
+            }
+        ]
+    )
+    f = FakeFactory(preset={"crane": keeper, "avery": dropper})
+    customer = {
+        "personas": [
+            {"slug": "crane", "cron": [{"skill": "inbox-triage", "schedule": "0 7 * * *"}]},
+            {"slug": "avery", "cron": []},
+        ]
+    }
+    registered = materialize_cron(customer, f, reconcile_slugs=["crane", "avery"])
+    assert registered == [managed_name("crane", "inbox-triage")]
+    assert [c["name"] for c in keeper.creates] == ["op-managed:crane:inbox-triage"]
+    assert [j for j in dropper.jobs if str(j["name"]).startswith("op-managed:")] == []
+    assert "m-9" in dropper.removed
+
+
+def test_reconcile_slugs_none_preserves_legacy_no_removal() -> None:
+    """Back-compat: with ``reconcile_slugs=None`` (the default) a persona that
+    authors no cron is NOT visited — the legacy behavior existing callers rely on.
+    translate.py always passes the full persona-slug set, so live boots reconcile;
+    this guards the default for any other caller/test."""
+    store = FakeCronStore(
+        jobs=[{"id": "m-1", "name": "op-managed:crane:health-monitor", "schedule": "*/30 * * * *"}]
+    )
+    f = FakeFactory(preset={"crane": store})
+    materialize_cron(_customer([]), f)  # no reconcile_slugs
+    assert f.asked == [], "no authored cron + no reconcile_slugs ⇒ no store touched"
+    assert store.removed == []
+    assert any(j["id"] == "m-1" for j in store.jobs)
+
+
+def test_store_acquire_failure_aborts_before_any_mutation() -> None:
+    """Fail-closed across the WHOLE reconcile set: if acquiring/listing one
+    reconciled persona's store fails, NO store is mutated (no half-applied boot)."""
+    good = FakeCronStore(
+        jobs=[{"id": "m-1", "name": "op-managed:crane:inbox-triage", "schedule": "0 7 * * *"}]
+    )
+
+    class _FailingFactory:
+        def __init__(self) -> None:
+            self.asked: list[str] = []
+
+        def __call__(self, slug: str):
+            self.asked.append(slug)
+            if slug == "bad":
+                raise RuntimeError("cannot open cron store")
+            return good
+
+    f = _FailingFactory()
+    with pytest.raises(CronMaterializeError, match="could not acquire/list cron store"):
+        materialize_cron(
+            _customer([{"skill": "inbox-triage", "schedule": "0 9 * * *"}]),
+            f,
+            reconcile_slugs=["crane", "bad"],
+        )
+    assert good.removed == [], "no removal may happen if any store acquisition fails"
+    assert good.creates == [], "no creation may happen if any store acquisition fails"

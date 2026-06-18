@@ -43,7 +43,7 @@ Scope:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -148,10 +148,15 @@ def materialize_cron(
     customer: dict[str, Any],
     store_for: Callable[[str], CronStore],
     stage_script_for: Callable[[str, str, str], str] | None = None,
+    reconcile_slugs: Iterable[str] | None = None,
 ) -> list[str]:
     """Reconcile Hermes cron jobs from customer.yaml into each persona's profile
-    home. ``store_for(persona_slug)`` returns a CronStore scoped to that
-    persona's Hermes home, so jobs land where ``hermes -p <slug>`` reads them.
+    home, converging every reconciled persona's store to EXACTLY its authored
+    cron set — **including the empty set**. Dropping ALL of a persona's cron now
+    removes its last managed job rather than orphaning it.
+
+    ``store_for(persona_slug)`` returns a CronStore scoped to that persona's
+    Hermes home, so jobs land where ``hermes -p <slug>`` reads them.
 
     ``stage_script_for(persona_slug, skill, pre_run_basename) -> script_ref``
     stages a ``pre_run_decides`` entry's pre-run script into the persona
@@ -161,25 +166,27 @@ def materialize_cron(
     lives in ``translate.py``. Required only when a ``pre_run_decides`` entry is
     present — a NULL stager with such an entry fails loud.
 
-    Idempotent per persona: for every persona that currently authors ≥1 cron
-    entry, removes that persona's managed jobs and recreates the authored set —
-    so adding, changing, or dropping ONE of a persona's entries reconciles
-    cleanly. Returns the managed names now registered. Fail-closed: a bad or
-    unsupported entry, or a pre-run script that cannot be staged, raises BEFORE
-    any store mutation (validate and stage everything first).
+    Reconcile set = personas that author cron (``by_persona``) ∪ ``reconcile_slugs``.
+    Callers pass ``reconcile_slugs`` = every persona that could hold a managed job
+    (in practice, every persona in customer.yaml) so a persona that dropped ALL
+    its cron is still visited and its orphaned managed job removed. A provided
+    ``reconcile_slugs`` is expected to be a SUPERSET of ``by_persona`` keys; the
+    union exists only so the ``None`` default preserves the legacy
+    "reconcile authored personas only" behavior for existing callers/tests.
 
-    Known limitation (acceptable for Phase 1, where cron is being ADDED): a
-    persona that drops ALL its cron entries is no longer reconciled here, so its
-    last managed job is not auto-removed on the next reprovision. Removing every
-    cron from a persona therefore needs a manual ``hermes -p <slug> cron remove``
-    (or re-authoring then removing). The common add/change/drop-one paths are
-    handled."""
+    Idempotent and fail-closed: BOTH validation (bad/unsupported entry, an
+    unstageable pre-run script) AND store acquisition/listing happen in a first
+    pass, before ANY store mutation — so a failure (bad entry, missing script, or
+    an unreadable store) leaves every store untouched. The second pass removes
+    each reconciled persona's managed jobs, then recreates only the authored set.
+    Returns the managed names now registered."""
     by_persona = _desired_by_persona(customer)  # raises before any mutation on bad input
 
-    # Pre-stage every pre-run script BEFORE touching any cron store, so the
-    # "validate (and stage) all before any mutation" fail-closed property holds:
-    # a missing/unstageable script aborts with the store untouched. Keyed by
-    # (persona_slug, managed_name) → resolved script ref.
+    reconcile = sorted(set(by_persona) | {s for s in (reconcile_slugs or []) if s})
+
+    # ---- Pass A: validate + stage + acquire every store. NO store mutation. ----
+    # Pre-stage every pre-run script first, so a missing/unstageable script aborts
+    # with the store untouched. Keyed by (persona_slug, managed_name) → ref.
     staged_refs: dict[tuple[str, str], str] = {}
     for pslug, desired in by_persona.items():
         for job in desired:
@@ -198,13 +205,30 @@ def materialize_cron(
                     f"script {job.pre_run!r}: {exc}"
                 ) from exc
 
+    # Acquire each reconciled persona's store and snapshot its managed jobs. Any
+    # store-acquisition/list failure raises HERE, before the first remove/create,
+    # so an unreadable store can never leave a half-applied reconcile across the
+    # broadened set.
+    stores: dict[str, CronStore] = {}
+    managed_to_remove: dict[str, list[str]] = {}
+    for pslug in reconcile:
+        try:
+            store = store_for(pslug)
+            existing = store.list_jobs(include_disabled=True)
+        except Exception as exc:  # noqa: BLE001 — fail-closed before any mutation
+            raise CronMaterializeError(
+                f"persona {pslug!r}: could not acquire/list cron store: {exc}"
+            ) from exc
+        stores[pslug] = store
+        managed_to_remove[pslug] = [job["id"] for job in existing if _is_managed(job)]
+
+    # ---- Pass B: mutate. Remove managed jobs, then create the authored set. ----
     registered: list[str] = []
-    for pslug, desired in by_persona.items():
-        store = store_for(pslug)
-        for job in store.list_jobs(include_disabled=True):
-            if _is_managed(job):
-                store.remove_job(job["id"])
-        for job in desired:
+    for pslug in reconcile:
+        store = stores[pslug]
+        for job_id in managed_to_remove[pslug]:
+            store.remove_job(job_id)
+        for job in by_persona.get(pslug, []):
             kwargs: dict[str, Any] = {
                 "prompt": "",
                 "schedule": job.schedule,
