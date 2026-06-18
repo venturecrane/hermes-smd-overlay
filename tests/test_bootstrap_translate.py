@@ -155,6 +155,12 @@ def test_translate_writes_persona_identity_into_soul_md(tmp_path):
     # Tone bullets render
     assert "- plainspoken" in soul
     assert "- concise" in soul
+    # Standing agency + honesty directive: the worker must attempt with its real
+    # tools before claiming it can't, and never invent a limitation it hasn't hit.
+    # Targets the observed confabulation ("schemas come through empty in the MCP
+    # channel") that falsely told the user the operator couldn't read mail it can.
+    assert "## How you operate" in soul
+    assert "never claim a limitation you have not actually hit" in soul
 
 
 _USERS_BLOCK = dedent(
