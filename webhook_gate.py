@@ -776,7 +776,6 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json(status, body)
 
-
     def _handle_handoff(self) -> None:
         """Console → Machine async task handoff endpoint (/webhooks/handoff, Phase 2 ADR 0043).
 
@@ -800,7 +799,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not auth.startswith("Bearer "):
             self._json(401, {"error": "bearer token required"})
             return
-        bearer = auth[len("Bearer "):]
+        bearer = auth[len("Bearer ") :]
         if not hmac.compare_digest(bearer, secret):
             logger.warning("gate: handoff: invalid bearer (length %d)", len(bearer))
             self._json(401, {"error": "invalid bearer"})
