@@ -249,6 +249,8 @@ def _stamp_source(body: bytes, route: str) -> bytes:
 # from ss-console src/lib/operator/mcp/token-validation.ts.
 
 MCP_ROUTE = "mcp"  # webhook route name; session id == webhook:mcp:<correlation_id>
+HANDOFF_ROUTE = "handoff"  # console→Machine async task handoff (Phase 2, ADR 0043)
+
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SERVER_INFO = {
     "name": "smd-operator-connector",
@@ -774,9 +776,90 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json(status, body)
 
+
+    def _handle_handoff(self) -> None:
+        """Console → Machine async task handoff endpoint (/webhooks/handoff, Phase 2 ADR 0043).
+
+        AUTH: Bearer WEBHOOK_SECRET_MCP (per-customer HMAC-derived key, set at provision).
+        Fail-closed: missing env var → 503 (handoff route not configured).
+
+        Body: HandoffEnvelope JSON (see ss-console/src/lib/operator/mcp/webhook-transport.ts).
+        Dispatches to the Hermes agent loop via the same internal loopback the Svix routes
+        use (X-Webhook-Signature = hex-HMAC(body, WEBHOOK_SECRET_MCP) so the adapter
+        re-verifies). WEBHOOK_SECRET_HANDOFF == WEBHOOK_SECRET_MCP so the adapter
+        satisfies its secret lookup. Returns 202 + {accepted, handoff_id} synchronously;
+        the agent works the task async and reports via its authored output channels.
+        """
+        secret = os.environ.get("WEBHOOK_SECRET_MCP")
+        if not secret:
+            logger.warning("gate: WEBHOOK_SECRET_MCP not set — handoff route not configured")
+            self._json(503, {"error": "handoff route not configured"})
+            return
+
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            self._json(401, {"error": "bearer token required"})
+            return
+        bearer = auth[len("Bearer "):]
+        if not hmac.compare_digest(bearer, secret):
+            logger.warning("gate: handoff: invalid bearer (length %d)", len(bearer))
+            self._json(401, {"error": "invalid bearer"})
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > _MAX_BODY_BYTES:
+            self._json(413, {"error": "payload too large"})
+            return
+        raw = self.rfile.read(length) if length else b""
+        try:
+            envelope = json.loads(raw)
+        except json.JSONDecodeError:
+            self._json(400, {"error": "invalid JSON"})
+            return
+        if (
+            not isinstance(envelope, dict)
+            or not isinstance(envelope.get("handoff_id"), str)
+            or not isinstance(envelope.get("task"), str)
+            or not envelope.get("handoff_id")
+            or not envelope.get("task")
+        ):
+            self._json(400, {"error": "invalid envelope: handoff_id and task are required"})
+            return
+
+        handoff_id = envelope["handoff_id"]
+
+        # Stamp provenance (source = handoff) and forward to Hermes adapter.
+        body = _stamp_source(raw, HANDOFF_ROUTE)
+        fwd_sig = _hex_hmac_sha256(body, secret)
+        headers = {
+            "Content-Type": "application/json",
+            "X-Webhook-Signature": fwd_sig,
+            "X-Request-ID": handoff_id[:64],
+        }
+        conn = http.client.HTTPConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=30)
+        try:
+            conn.request("POST", f"/webhooks/{HANDOFF_ROUTE}", body=body, headers=headers)
+            resp = conn.getresponse()
+            resp.read()  # drain; we do not proxy the body
+            if resp.status >= 500:
+                logger.error("gate: handoff forward returned %d", resp.status)
+                self._json(503, {"error": "gateway error", "retry": True})
+                return
+        except Exception as exc:
+            logger.error("gate: handoff forward failed: %s", exc)
+            self._json(503, {"error": "gateway unavailable", "retry": True})
+            return
+        finally:
+            conn.close()
+
+        self._json(202, {"accepted": True, "handoff_id": handoff_id})
+
     def do_POST(self) -> None:  # noqa: N802
         if urlsplit(self.path).path.rstrip("/") == "/mcp":
             self._handle_mcp()
+            return
+        if urlsplit(self.path).path.rstrip("/") == f"/webhooks/{HANDOFF_ROUTE}":
+            self._handle_handoff()
             return
         if not self.path.startswith("/webhooks/"):
             self._json(404, {"error": "unknown path"})
