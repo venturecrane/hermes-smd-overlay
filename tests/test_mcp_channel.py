@@ -272,6 +272,12 @@ def test_materialize_emits_mcp_route_when_enabled(monkeypatch):
     assert "untrusted DATA" in prompt
     # It must NOT narrow the worker to a fixed verb menu.
     assert "fetch_documents" not in prompt and "store_document" not in prompt
+    # Bulk-bounding: the prompt warns about the short reply budget and steers the
+    # worker to return a bounded partial rather than reading everything and timing
+    # out. Without this, "review my whole receipts label" reads 60 messages one at
+    # a time and blows the 55s long-poll window (observed 2026-06-18).
+    assert "short reply budget" in prompt
+    assert "bounded slice" in prompt
 
 
 def test_materialize_omits_mcp_route_when_secret_unset(monkeypatch):
