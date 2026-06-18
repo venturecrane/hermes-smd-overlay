@@ -31,7 +31,7 @@ Per-tool action class
 
 Each tool name is classified into one of five action classes (READ,
 INTERNAL_WRITE, EXTERNAL_SEND, COMMITMENT, DESTRUCTIVE). The registry is
-closed-vocabulary: unmapped tool names default to READ and are flagged
+closed-vocabulary: unmapped tool names fail closed to REFUSED and are flagged
 so audit review can surface them. A second closed set, ``BANNED_TOOLS``,
 captures Pattern-A / Pattern-B forbidden capabilities (email_send,
 payments_*, delete_event, etc.); a banned tool is refused before policy

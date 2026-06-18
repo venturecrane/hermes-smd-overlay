@@ -1,16 +1,12 @@
 """Completeness gate for tool-action-class classification (EFF-07).
 
-THE FINDING. ``shared.action_classes.classify_tool()`` maps an unknown tool
-name to ``ActionClass.READ`` with ``unmapped=True`` (the conservative
-fallback). ``plugins/hermes-smd-trust/enforce.py`` then ALWAYS allows READ
-under any non-REFUSED ceiling (``enforce.py`` ~L296) and the taint-gate gates
-only EXTERNAL_SEND / DESTRUCTIVE / COMMITMENT / CODE_EXECUTION — never READ.
-Net effect: a write-capable tool that nobody added to ``TOOL_ACTION_CLASS_MAP``
-classifies as READ and executes AUTONOMOUSLY, even on a turn tainted by
-injected inbound content. The known surfaces are mapped, but the convention
-"every tool MUST appear in TOOL_ACTION_CLASS_MAP or BANNED_TOOLS" (a comment
-in action_classes.py) was enforced by NO test. A forgotten or newly-vendored
-write verb shipped a fail-open hole silently.
+THE FINDING. ``shared.action_classes.classify_tool()`` used to map an unknown
+tool name to ``ActionClass.READ`` with ``unmapped=True``. That let a
+write-capable tool missing from ``TOOL_ACTION_CLASS_MAP`` execute
+autonomously, even on a turn tainted by injected inbound content. Unknown
+tools now fail closed to ``ActionClass.REFUSED``, and this gate keeps every
+repo-enumerable surface DECIDED so legitimate reads do not become unreachable
+and newly surfaced tools do not sit in the unknown bucket.
 
 THE GATE. This module forces every tool the overlay's connectors can register
 to be a DECIDED tool — present in ``TOOL_ACTION_CLASS_MAP`` or ``BANNED_TOOLS``
@@ -63,9 +59,10 @@ def _mcp_prefix(server_name: str) -> str:
 def _is_decided(tool_name: str) -> bool:
     """A tool is DECIDED iff it is mapped or explicitly banned.
 
-    Both forms keep the tool off the unmapped->READ fallback: a mapped tool
+    Both forms keep the tool off the fail-closed unknown bucket: a mapped tool
     carries its real action class; a banned tool raises ``BannedToolError``
-    before enforcement. Anything else is an undecided fail-open surface.
+    before enforcement. Anything else is an undecided surface that will be
+    unreachable until policy classifies it.
     """
     return tool_name in TOOL_ACTION_CLASS_MAP or tool_name in BANNED_TOOLS
 
@@ -261,8 +258,8 @@ def test_every_registered_mcp_connector_has_a_classified_surface() -> None:
     dormant-by-design carve-out.
 
     A server with zero classified tools and no carve-out is the EFF-07
-    fail-open hole: bind it to a customer and every write verb runs
-    autonomously. This forces the per-connector decision.
+    policy gap: bind it to a customer and every verb is unreachable until
+    classified. This forces the per-connector decision before deploy trust.
     """
     undecided: list[str] = []
     for server_name in MCP_CONNECTOR_REGISTRY:
@@ -279,7 +276,7 @@ def test_every_registered_mcp_connector_has_a_classified_surface() -> None:
         f"Every wireable server must have its mcp_<server>_<tool> verbs in "
         f"TOOL_ACTION_CLASS_MAP/BANNED_TOOLS, or be declared dormant in "
         f"UNCLASSIFIED_CONNECTORS_BY_DESIGN with a rationale. Leaving a write-capable "
-        f"connector unclassified ships an unmapped->READ->autonomous fail-open hole (EFF-07)."
+        f"connector unclassified ships an undecided live tool surface (EFF-07)."
     )
 
 
@@ -336,7 +333,7 @@ def test_pinned_connector_surfaces_are_fully_classified() -> None:
             if not _is_decided(tool_name):
                 undecided.append(tool_name)
     assert undecided == [], (
-        f"Pinned connector tool(s) not classified (unmapped->READ fail-open): "
+        f"Pinned connector tool(s) not classified: "
         f"{sorted(undecided)}. Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
     )
 
@@ -358,11 +355,11 @@ def test_pinned_surface_tools_match_their_prefix() -> None:
 
 def test_every_workspace_tool_is_classified() -> None:
     """Every tool the hermes-smd-workspace plugin registers in-process must be
-    decided (mapped or banned). An unclassified workspace tool falls to the
-    unmapped->READ default — the same fail-open shape. (Reinforces the inbound
-    fence's action-class guard from the classification side.)"""
+    decided (mapped or banned). An unclassified workspace tool is unreachable
+    until policy maps or bans it. (Reinforces the inbound fence's action-class
+    guard from the classification side.)"""
     undecided = sorted(t for t in _workspace_tools() if not _is_decided(t))
     assert undecided == [], (
-        f"workspace tool(s) not classified (unmapped->READ fail-open): {undecided}. "
+        f"workspace tool(s) not classified: {undecided}. "
         f"Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
     )
