@@ -1109,3 +1109,100 @@ def test_translate_stages_pre_run_script_and_registers_ref(tmp_path):
     assert create["script"] == "deadline-miss-escalator/pre_run.py"
     assert create["no_agent"] is False
     assert create["skills"] == ["deadline-miss-escalator"]
+
+
+# ---------------------------------------------------------------------------
+# Cron reconciliation: drop-all orphan removal at the translate layer
+# ---------------------------------------------------------------------------
+
+
+class _RecordingReconcileStore:
+    """A cron store that records removes and accepts preset jobs — enough to
+    prove translate reconciles a persona's store even with NO authored cron."""
+
+    def __init__(self, jobs: list[dict] | None = None) -> None:
+        self.jobs: list[dict] = list(jobs or [])
+        self.removed: list[str] = []
+
+    def list_jobs(self, include_disabled: bool = False) -> list[dict]:
+        return list(self.jobs)
+
+    def create_job(self, **kwargs):
+        job = {"id": "new", **kwargs}
+        self.jobs.append(job)
+        return job
+
+    def remove_job(self, job_id: str) -> bool:
+        before = len(self.jobs)
+        self.jobs = [j for j in self.jobs if j["id"] != job_id]
+        self.removed.append(job_id)
+        return len(self.jobs) < before
+
+
+def test_translate_reconciles_cron_for_persona_with_no_authored_cron(tmp_path):
+    """The drop-all fix at the translate layer: even when a persona authors NO
+    cron, translate still visits its store (reconcile_slugs = all persona slugs),
+    so an orphaned managed job from a previous config is removed — not left to
+    keep firing across reboots (the live customer-zero defect)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML: marcus, no cron
+    stores: dict[str, _RecordingReconcileStore] = {
+        "marcus": _RecordingReconcileStore(
+            [
+                {
+                    "id": "orphan-1",
+                    "name": "op-managed:marcus:health-monitor",
+                    "schedule": "*/30 * * * *",
+                }
+            ]
+        )
+    }
+    asked: list[str] = []
+
+    def store_for(slug: str) -> _RecordingReconcileStore:
+        asked.append(slug)
+        return stores.setdefault(slug, _RecordingReconcileStore())
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+        cron_store_for=store_for,
+    )
+    assert "marcus" in asked, "translate must reconcile the persona even with no authored cron"
+    assert "orphan-1" in stores["marcus"].removed, "orphaned managed job must be removed"
+
+
+def test_translate_restores_hermes_home_after_cron_reconcile(tmp_path, monkeypatch):
+    """translate snapshots/restores the process-global HERMES_HOME around cron
+    reconcile, so a store factory that mutates it (the REAL one does, per
+    profile) cannot leak the last-visited persona home into the rest of the
+    process. The fakes elsewhere never mutate the env, so this is the only place
+    that behavior is exercised."""
+    import os
+
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", "/sentinel/original")
+
+    class _EnvMutatingStore:
+        def list_jobs(self, include_disabled: bool = False) -> list[dict]:
+            os.environ["HERMES_HOME"] = "/leaked/marcus"
+            return []
+
+        def create_job(self, **kwargs):
+            return {"id": "x", **kwargs}
+
+        def remove_job(self, job_id: str) -> bool:
+            return False
+
+    def store_for(slug: str) -> _EnvMutatingStore:
+        return _EnvMutatingStore()
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+        cron_store_for=store_for,
+    )
+    assert os.environ["HERMES_HOME"] == "/sentinel/original", (
+        "HERMES_HOME must be restored after cron reconcile"
+    )
