@@ -78,6 +78,63 @@ def test_classify_tool_known_commitment_tool() -> None:
     assert classification.unmapped is False
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "read_file",
+        "search_files",
+        "skills_list",
+        "skill_view",
+        "session_search",
+        "memory_search",
+        "memory_get_rule",
+        "memory_list_rules",
+        "vision_analyze",
+    ],
+)
+def test_mission_critical_native_reads_are_reachable(tool_name) -> None:
+    enforce = _load_trust_module("enforce")
+    classification = enforce.classify_tool(tool_name)
+    assert classification.action_class == enforce.ActionClass.READ
+    assert classification.unmapped is False
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "todo",
+        "record_peer_preference",
+        "clarify",
+        "write_file",
+        "patch",
+    ],
+)
+def test_native_internal_writes_are_not_unmapped(tool_name) -> None:
+    enforce = _load_trust_module("enforce")
+    classification = enforce.classify_tool(tool_name)
+    assert classification.action_class == enforce.ActionClass.INTERNAL_WRITE
+    assert classification.unmapped is False
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "execute_code",
+        "terminal",
+        "process",
+        "delegate_task",
+        "computer_use",
+        "cronjob",
+        "skill_manage",
+    ],
+)
+def test_high_power_native_tools_remain_code_execution(tool_name) -> None:
+    enforce = _load_trust_module("enforce")
+    classification = enforce.classify_tool(tool_name)
+    assert classification.action_class == enforce.ActionClass.CODE_EXECUTION
+    assert classification.unmapped is False
+
+
 def test_classify_tool_unknown_fails_closed_to_refused_unmapped() -> None:
     """Unknown tool fails closed to REFUSED, not READ (issue #1327). The
     ``unmapped=True`` flag is preserved as audit telemetry."""

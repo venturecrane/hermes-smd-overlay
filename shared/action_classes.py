@@ -121,9 +121,10 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # Smokeball trust-account writes — IOLTA fund movement. The law wedge is
         # trust-funds-read-only (vertical floor); these are a HARD BAN, never a
         # configurable ceiling. Runtime names are mcp_smokeball_<tool> (server key
-        # "smokeball"). Without these explicit bans they would hit the unmapped
-        # READ fallback and slip every ceiling — the Risk-3 footgun the threat
-        # model named.
+        # "smokeball"). Without these explicit bans they would hit the
+        # fail-closed unmapped path; before issue #1327 that path defaulted to
+        # READ and slipped every ceiling — the Risk-3 footgun the threat model
+        # named.
         "mcp_smokeball_create_transaction",
         "mcp_smokeball_protect_funds",
         "mcp_smokeball_unprotect_funds",
@@ -296,7 +297,7 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # file delete DESTRUCTIVE. Trust-account writes (create_transaction /
     # protect_funds / unprotect_funds) are NOT here — they are hard-BANNED above.
     # Every Smokeball tool the server exposes MUST appear here or in BANNED_TOOLS;
-    # an omission hits the unmapped READ fallback and slips the ceiling.
+    # an omission is unreachable until policy classifies it.
     "mcp_smokeball_auth_status": ActionClass.READ,
     "mcp_smokeball_list_matters": ActionClass.READ,
     "mcp_smokeball_get_matter": ActionClass.READ,
@@ -382,9 +383,19 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "memory_search": ActionClass.READ,
     "memory_get_rule": ActionClass.READ,
     "memory_list_rules": ActionClass.READ,
+    # Native Hermes orientation reads. These must stay reachable under the
+    # default non-REFUSED ceiling so the Operator can inspect authored files,
+    # search local context, load skills, recall prior sessions, and inspect
+    # images without reaching for code or terminal.
+    "read_file": ActionClass.READ,
+    "search_files": ActionClass.READ,
+    "skills_list": ActionClass.READ,
+    "skill_view": ActionClass.READ,
+    "session_search": ActionClass.READ,
     # Voice gate — read-only against the voice corpus.
     "voice_score_draft": ActionClass.READ,
     "voice_list_judge_history": ActionClass.READ,
+    "vision_analyze": ActionClass.READ,
     # Connector lifecycle — read-only here.
     "connector_get_status": ActionClass.READ,
     "connector_list_bindings": ActionClass.READ,
@@ -437,6 +448,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "computer_use": ActionClass.CODE_EXECUTION,
     "cronjob": ActionClass.CODE_EXECUTION,
     "skill_manage": ActionClass.CODE_EXECUTION,
+    # In-band session state / prompts. `clarify` asks the current operator
+    # through the active session callback; it is not arbitrary external send.
+    "todo": ActionClass.INTERNAL_WRITE,
+    "record_peer_preference": ActionClass.INTERNAL_WRITE,
+    "clarify": ActionClass.INTERNAL_WRITE,
     # File mutation — internal write (not code-exec, but not read either).
     "write_file": ActionClass.INTERNAL_WRITE,
     "patch": ActionClass.INTERNAL_WRITE,
