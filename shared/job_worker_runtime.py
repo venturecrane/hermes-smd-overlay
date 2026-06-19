@@ -118,11 +118,19 @@ def hermes_segment_cost(agent: Any) -> int:
         model = getattr(agent, "model", "") or ""
         cost = estimate_usage_cost(
             model,
-            type("U", (), {
-                "input_tokens": in_tok, "output_tokens": out_tok,
-                "cache_read_tokens": cache_r, "cache_write_tokens": cache_w,
-                "reasoning_tokens": 0, "prompt_tokens": in_tok, "total_tokens": in_tok + out_tok,
-            })(),
+            type(
+                "U",
+                (),
+                {
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "cache_read_tokens": cache_r,
+                    "cache_write_tokens": cache_w,
+                    "reasoning_tokens": 0,
+                    "prompt_tokens": in_tok,
+                    "total_tokens": in_tok + out_tok,
+                },
+            )(),
         )
         # estimate_usage_cost returns a dollar figure or a dict; coerce to cents.
         dollars = cost.get("total") if isinstance(cost, dict) else float(cost)
@@ -270,13 +278,9 @@ def put_result(
             up(bucket, key, body)
             return f"r2://{bucket}/{key}"
         except Exception as exc:  # never lose the result on an R2 miss
-            logger.warning(
-                "job %s: R2 put failed (%s); falling back to volume", job.get("id"), exc
-            )
+            logger.warning("job %s: R2 put failed (%s); falling back to volume", job.get("id"), exc)
     else:
-        logger.info(
-            "job %s: R2 results env unset; persisting result to volume", job.get("id")
-        )
+        logger.info("job %s: R2 results env unset; persisting result to volume", job.get("id"))
 
     home = os.environ.get("HERMES_HOME") or "/opt/data"
     results_dir = os.path.join(home, "job_results")
@@ -322,7 +326,9 @@ def _worker_loop() -> None:
             break
         time.sleep(2.0)
     else:
-        logger.error("smd-job-worker: broker not ready within %ss; worker idle", WORKER_READINESS_TIMEOUT_S)
+        logger.error(
+            "smd-job-worker: broker not ready within %ss; worker idle", WORKER_READINESS_TIMEOUT_S
+        )
         return
 
     from hermes_state import SessionDB  # lazy: Hermes-only
@@ -344,7 +350,11 @@ def _worker_loop() -> None:
         deliver=deliver_result,
         put_result=put_result,
     )
-    logger.info("smd-job-worker: ready (worker_id=%s); sweeping every %ss", worker_id, WORKER_SWEEP_INTERVAL_S)
+    logger.info(
+        "smd-job-worker: ready (worker_id=%s); sweeping every %ss",
+        worker_id,
+        WORKER_SWEEP_INTERVAL_S,
+    )
     while True:
         try:
             worker.sweep()

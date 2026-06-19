@@ -137,8 +137,14 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         "runs to completion and delivers the result. Returns a tracking ticket.",
         _schema(
             {
-                "brief": {"type": "string", "description": "The full task to perform in the background."},
-                "deliver_to": {"type": "string", "description": "Authored channel to deliver the result to (e.g. an email or chat target). Validated against the engagement's allowlist at delivery."},
+                "brief": {
+                    "type": "string",
+                    "description": "The full task to perform in the background.",
+                },
+                "deliver_to": {
+                    "type": "string",
+                    "description": "Authored channel to deliver the result to (e.g. an email or chat target). Validated against the engagement's allowlist at delivery.",
+                },
             },
             ["brief"],
         ),
@@ -157,7 +163,15 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "job_record_sideeffect": (
         "Idempotency guard: call BEFORE a side-effecting step inside a "
         "background job. Returns proceed | skip | review.",
-        _schema({"step_key": {"type": "string", "description": "Stable logical-effect key (action+target+content id), NOT a regenerated payload."}}, ["step_key"]),
+        _schema(
+            {
+                "step_key": {
+                    "type": "string",
+                    "description": "Stable logical-effect key (action+target+content id), NOT a regenerated payload.",
+                }
+            },
+            ["step_key"],
+        ),
         _job_record_sideeffect,
     ),
 }

@@ -26,10 +26,19 @@ class FakeClient:
 
     def add(self, job_id: str, **overrides) -> None:
         self.jobs[job_id] = {
-            "id": job_id, "status": "queued", "spent_cents": 0, "budget_cents": 1000,
-            "model": "claude-sonnet-4-6", "attempts": 0, "cancel_requested": 0,
-            "current_tip_session_id": "", "result_ref": None, "error": None,
-            "deliver_to": "telegram:1", "lease_epoch": 0, "root_session_id": "root",
+            "id": job_id,
+            "status": "queued",
+            "spent_cents": 0,
+            "budget_cents": 1000,
+            "model": "claude-sonnet-4-6",
+            "attempts": 0,
+            "cancel_requested": 0,
+            "current_tip_session_id": "",
+            "result_ref": None,
+            "error": None,
+            "deliver_to": "telegram:1",
+            "lease_epoch": 0,
+            "root_session_id": "root",
             **overrides,
         }
 
@@ -74,7 +83,9 @@ def test_happy_path_completes_delivers_done():
     delivered = {}
     w = _worker(
         c,
-        lambda job, ep: SegmentOutcome(completed=True, spent_cents_delta=12, tip_session_id="tip1", result_text="the answer"),
+        lambda job, ep: SegmentOutcome(
+            completed=True, spent_cents_delta=12, tip_session_id="tip1", result_text="the answer"
+        ),
         deliver=lambda job, ref: delivered.setdefault("ref", ref) or True,
         put_result=lambda job, text: "r2://" + job["id"],
     )
@@ -90,10 +101,14 @@ def test_happy_path_completes_delivers_done():
 def test_multi_segment_then_complete_accumulates_spend():
     c = FakeClient()
     c.add("J")
-    seq = iter([
-        SegmentOutcome(completed=False, spent_cents_delta=10, tip_session_id="t1"),
-        SegmentOutcome(completed=True, spent_cents_delta=20, tip_session_id="t2", result_text="done"),
-    ])
+    seq = iter(
+        [
+            SegmentOutcome(completed=False, spent_cents_delta=10, tip_session_id="t1"),
+            SegmentOutcome(
+                completed=True, spent_cents_delta=20, tip_session_id="t2", result_text="done"
+            ),
+        ]
+    )
     w = _worker(c, lambda job, ep: next(seq))
     assert w.run_one("J") == "done"
     assert c.read("J")["spent_cents"] == 30
@@ -111,7 +126,9 @@ def test_pre_spend_refusal_dead_letters():
 def test_mid_segment_budget_breach_dead_letters():
     c = FakeClient()
     c.add("J", budget_cents=50)
-    w = _worker(c, lambda job, ep: SegmentOutcome(completed=False, spent_cents_delta=60, tip_session_id="t"))
+    w = _worker(
+        c, lambda job, ep: SegmentOutcome(completed=False, spent_cents_delta=60, tip_session_id="t")
+    )
     assert w.run_one("J") == "needs_review"
     assert "budget exceeded mid-segment" in c.read("J")["error"]
 
@@ -202,14 +219,20 @@ def test_missing_model_parks_for_review():
 def test_max_attempts_exceeded_parks_for_review():
     c = FakeClient()
     c.add("J", attempts=5)  # claim bumps to 6 > max_attempts=5
-    assert _worker(c, lambda job, ep: SegmentOutcome(completed=True), max_attempts=5).run_one("J") == "needs_review"
+    assert (
+        _worker(c, lambda job, ep: SegmentOutcome(completed=True), max_attempts=5).run_one("J")
+        == "needs_review"
+    )
     assert "max attempts" in c.read("J")["error"]
 
 
 def test_first_claim_mints_and_records_root_session():
     c = FakeClient()
     c.add("J", root_session_id="", current_tip_session_id="")
-    assert _worker(c, lambda job, ep: SegmentOutcome(completed=True, result_text="x")).run_one("J") == "done"
+    assert (
+        _worker(c, lambda job, ep: SegmentOutcome(completed=True, result_text="x")).run_one("J")
+        == "done"
+    )
     row = c.read("J")
     assert row["root_session_id"] == "job_J"
     # current_tip starts at root (the segment fake doesn't rotate it here).
@@ -219,7 +242,9 @@ def test_first_claim_mints_and_records_root_session():
 def test_terminal_job_not_claimable():
     c = FakeClient()
     c.add("J", status="done")
-    assert _worker(c, lambda job, ep: SegmentOutcome(completed=True)).run_one("J") == "not_claimable"
+    assert (
+        _worker(c, lambda job, ep: SegmentOutcome(completed=True)).run_one("J") == "not_claimable"
+    )
 
 
 def test_sweep_runs_all_claimable_and_survives_a_crash():

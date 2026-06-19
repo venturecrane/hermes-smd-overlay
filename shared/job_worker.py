@@ -156,7 +156,9 @@ class JobWorker:
             if seg.refused_budget:
                 # Pre-flight: the next request's input cost alone would exceed
                 # the remaining budget — don't fire it.
-                self._dead_letter(job_id, epoch, "needs_review", "segment would exceed budget (pre-spend)")
+                self._dead_letter(
+                    job_id, epoch, "needs_review", "segment would exceed budget (pre-spend)"
+                )
                 return "needs_review"
             if seg.error:
                 # Non-fatal: record and stop; the lease expires and the job is

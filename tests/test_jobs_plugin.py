@@ -25,8 +25,13 @@ class _FakeClient:
     def read(self, job_id):
         self.calls.append(("read", job_id))
         return {
-            "id": job_id, "status": "running", "spent_cents": 10, "budget_cents": 500,
-            "result_ref": None, "error": None, "attempts": 1,
+            "id": job_id,
+            "status": "running",
+            "spent_cents": 10,
+            "budget_cents": 500,
+            "result_ref": None,
+            "error": None,
+            "attempts": 1,
         }
 
     def cancel(self, job_id):
@@ -50,7 +55,9 @@ def test_start_background_job_records_intent(jobs, monkeypatch):
     plugin, fake = jobs
     monkeypatch.setenv("CUSTOMER_SLUG", "demo-law")
     monkeypatch.setenv("HERMES_MODEL", "claude-sonnet-4-6")
-    out = json.loads(plugin._start_background_job({"brief": "review docs", "deliver_to": "telegram:1"}))
+    out = json.loads(
+        plugin._start_background_job({"brief": "review docs", "deliver_to": "telegram:1"})
+    )
     assert out["job_id"] == "JOB1"
     assert out["status"] == "queued"
     action, row = fake.calls[-1]

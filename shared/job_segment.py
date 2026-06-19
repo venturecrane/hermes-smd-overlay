@@ -77,7 +77,9 @@ def make_run_segment(
 
     def run_segment(job: dict, lease_epoch: int) -> SegmentOutcome:
         model = job["model"]
-        tip = job.get("current_tip_session_id") or job.get("root_session_id") or ("job_" + job["id"])
+        tip = (
+            job.get("current_tip_session_id") or job.get("root_session_id") or ("job_" + job["id"])
+        )
 
         # Taint the worker session BEFORE the agent runs (ADR 0051 Decision 7a).
         # A background job is untrusted-by-default: nothing else taint-marks the

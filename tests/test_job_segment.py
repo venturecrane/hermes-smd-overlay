@@ -20,7 +20,10 @@ def test_repair_noop_on_empty():
 
 
 def test_repair_noop_when_last_is_tool_result():
-    h = [{"role": "assistant", "tool_calls": [{"id": "c1"}]}, {"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+    h = [
+        {"role": "assistant", "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+    ]
     assert repair_trailing_tool_call(h) == h
 
 
@@ -66,8 +69,16 @@ class _FakeAgent:
 
 
 def _job(**over):
-    return {"id": "J", "model": "m", "brief": "do the thing", "budget_cents": 1000,
-            "spent_cents": 0, "root_session_id": "", "current_tip_session_id": "", **over}
+    return {
+        "id": "J",
+        "model": "m",
+        "brief": "do the thing",
+        "budget_cents": 1000,
+        "spent_cents": 0,
+        "root_session_id": "",
+        "current_tip_session_id": "",
+        **over,
+    }
 
 
 def _make(agent, history, *, preflight=1, seg_cost=5):
@@ -171,4 +182,7 @@ def test_worker_session_taint_uses_derived_tip_when_no_recorded_tip():
     agent = _FakeAgent({"completed": True, "final_response": "x"})
     rs, _ = _make(agent, history=[])
     rs(_job(id="J-b0-derived", current_tip_session_id="", root_session_id=""), 1)
-    assert inbound.SESSION_TAINT.trust_class("job_J-b0-derived") == inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
+    assert (
+        inbound.SESSION_TAINT.trust_class("job_J-b0-derived")
+        == inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
+    )

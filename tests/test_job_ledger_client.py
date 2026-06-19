@@ -88,7 +88,10 @@ def broker():
 
 def test_create_returns_id_and_sends_row(broker):
     b, client = broker
-    assert client.create({"customer_slug": "demo", "brief": "x", "budget_cents": 1, "persona_id": "p"}) == "JOB123"
+    assert (
+        client.create({"customer_slug": "demo", "brief": "x", "budget_cents": 1, "persona_id": "p"})
+        == "JOB123"
+    )
     assert b.requests[-1]["action"] == "job_create"
     assert b.requests[-1]["row"]["customer_slug"] == "demo"
 

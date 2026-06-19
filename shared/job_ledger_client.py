@@ -68,9 +68,7 @@ class BrokerJobClient:
     def claim(self, job_id: str, worker_id: str) -> int | None:
         """Atomically claim the job. Returns the new ``lease_epoch`` the worker
         must carry on every privileged write, or ``None`` if not claimable."""
-        resp = self._request(
-            {"action": "job_claim", "job_id": job_id, "worker_id": worker_id}
-        )
+        resp = self._request({"action": "job_claim", "job_id": job_id, "worker_id": worker_id})
         epoch = resp.get("lease_epoch")
         return int(epoch) if epoch is not None else None
 

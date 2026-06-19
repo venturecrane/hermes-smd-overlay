@@ -39,11 +39,21 @@ class FakeLedger:
 
     def add(self, job_id: str, **overrides) -> None:
         self.jobs[job_id] = {
-            "id": job_id, "status": "queued", "spent_cents": 0, "budget_cents": 1000,
-            "model": "claude-sonnet-4-6", "persona_id": "intake-coordinator",
-            "attempts": 0, "cancel_requested": 0, "brief": "do the long thing",
-            "current_tip_session_id": "", "result_ref": None, "error": None,
-            "deliver_to": "telegram:1", "lease_epoch": 0, "root_session_id": "",
+            "id": job_id,
+            "status": "queued",
+            "spent_cents": 0,
+            "budget_cents": 1000,
+            "model": "claude-sonnet-4-6",
+            "persona_id": "intake-coordinator",
+            "attempts": 0,
+            "cancel_requested": 0,
+            "brief": "do the long thing",
+            "current_tip_session_id": "",
+            "result_ref": None,
+            "error": None,
+            "deliver_to": "telegram:1",
+            "lease_epoch": 0,
+            "root_session_id": "",
             **overrides,
         }
 
@@ -155,6 +165,7 @@ def test_crash_then_reclaim_resumes_to_completion_exactly_once():
     def build_agent(**kw):
         # Two distinct agents across the two runs; the second completes.
         if completions["n"] == 0:
+
             class _Boom:
                 session_id = "s"
 
@@ -165,8 +176,10 @@ def test_crash_then_reclaim_resumes_to_completion_exactly_once():
         return ScriptedAgent([{"completed": True, "final_response": "ok"}])
 
     run_segment = make_run_segment(
-        session_db=session_db, build_agent=build_agent,
-        preflight_cost=lambda m, h: 1, segment_cost=lambda a: 3,
+        session_db=session_db,
+        build_agent=build_agent,
+        preflight_cost=lambda m, h: 1,
+        segment_cost=lambda a: 3,
     )
     w = _worker(led, run_segment)
 
@@ -207,8 +220,10 @@ def test_preflight_refuses_segment_that_would_exceed_budget():
         return ScriptedAgent([{"completed": True, "final_response": "x"}])
 
     run_segment = make_run_segment(
-        session_db=FakeSessionDB(), build_agent=build_agent,
-        preflight_cost=lambda m, h: 10_000, segment_cost=lambda a: 1,
+        session_db=FakeSessionDB(),
+        build_agent=build_agent,
+        preflight_cost=lambda m, h: 10_000,
+        segment_cost=lambda a: 1,
     )
     assert _worker(led, run_segment).run_one("J") == "needs_review"
     assert "pre-spend" in led.read("J")["error"]
@@ -258,8 +273,10 @@ def test_worker_runs_under_row_model_and_persona():
         return ScriptedAgent([{"completed": True, "final_response": "x"}])
 
     run_segment = make_run_segment(
-        session_db=FakeSessionDB(), build_agent=build_agent,
-        preflight_cost=lambda m, h: 1, segment_cost=lambda a: 1,
+        session_db=FakeSessionDB(),
+        build_agent=build_agent,
+        preflight_cost=lambda m, h: 1,
+        segment_cost=lambda a: 1,
     )
     assert _worker(led, run_segment).run_one("J") == "done"
     assert seen["model"] == "claude-opus-4-8"
@@ -311,13 +328,16 @@ def test_run_segment_calls_build_agent_with_seam_kwarg_names():
         return ScriptedAgent([{"completed": True, "final_response": "x"}])
 
     run_segment = make_run_segment(
-        session_db=FakeSessionDB(), build_agent=build_agent,
-        preflight_cost=lambda m, h: 1, segment_cost=lambda a: 1,
+        session_db=FakeSessionDB(),
+        build_agent=build_agent,
+        preflight_cost=lambda m, h: 1,
+        segment_cost=lambda a: 1,
     )
     _worker(led, run_segment).run_one("J")
 
     seam_kwargs = {
-        n for n, p in inspect.signature(build_hermes_agent).parameters.items()
+        n
+        for n, p in inspect.signature(build_hermes_agent).parameters.items()
         if p.kind == inspect.Parameter.KEYWORD_ONLY
     }
     assert set(seen) == seam_kwargs
