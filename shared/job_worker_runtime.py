@@ -19,7 +19,8 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,8 @@ def build_hermes_agent(*, model: str, session_id: str, max_iterations: int, sess
     STAGING: a behavioral-equivalence smoke against run_job's construction is the
     follow-up conformance test; this is the minimal faithful subset.
     """
-    from run_agent import AIAgent  # lazy: Hermes-only
     from hermes_cli.runtime_provider import resolve_runtime_provider
+    from run_agent import AIAgent  # lazy: Hermes-only
 
     runtime = resolve_runtime_provider(requested=None)
     return AIAgent(
@@ -105,8 +106,10 @@ def hermes_segment_cost(agent: Any) -> int:
     STAGING: confirm estimate_usage_cost's exact signature against the Machine.
     """
     try:
-        from agent.usage_pricing import estimate_usage_cost
-        from agent.usage_pricing import normalize_usage  # noqa: F401  (presence check)
+        from agent.usage_pricing import (
+            estimate_usage_cost,
+            normalize_usage,  # noqa: F401  (presence check)
+        )
 
         in_tok = int(getattr(agent, "session_input_tokens", 0) or 0)
         out_tok = int(getattr(agent, "session_output_tokens", 0) or 0)

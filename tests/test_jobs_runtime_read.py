@@ -26,7 +26,7 @@ import pytest
 
 import webhook_gate as gate
 from shared import runtime_read
-from shared.job_ledger_client import SOCKET_ENV, BrokerJobClient, JobLedgerError
+from shared.job_ledger_client import SOCKET_ENV, BrokerJobClient
 
 
 class _StubBroker:

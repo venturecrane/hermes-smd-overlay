@@ -25,10 +25,8 @@ ledger is covered there (``workspace_broker/tests/test_job_durability_scenarios`
 
 from __future__ import annotations
 
-import pytest
-
 from shared.job_segment import make_run_segment
-from shared.job_worker import TERMINAL, JobWorker, SegmentOutcome
+from shared.job_worker import TERMINAL, JobWorker
 
 
 class FakeLedger:
