@@ -1,0 +1,5 @@
+name: hermes-smd-jobs
+version: "0.1.0"
+description: "Durable task-execution (B1, ADR 0051): agent-facing background-job tools (start_background_job / job_status / job_cancel / job_record_sideeffect) plus the in-gateway worker thread that drives jobs to completion via the broker-owned job ledger. Registers tools only; wires no gateway hooks."
+requires_env:
+  - SMD_WORKSPACE_BROKER_SOCKET
