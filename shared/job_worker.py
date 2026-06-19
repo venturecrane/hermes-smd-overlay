@@ -128,6 +128,16 @@ class JobWorker:
             self._dead_letter(job_id, epoch, "needs_review", "max attempts exceeded")
             return "needs_review"
 
+        # First claim: establish the durable root session the lineage hangs from.
+        # The tip starts at the root; the adapter resumes from
+        # current_tip_session_id thereafter (it rotates on compaction).
+        if not job.get("root_session_id"):
+            root = "job_" + job_id
+            if not self.client.record(
+                job_id, epoch, {"root_session_id": root, "current_tip_session_id": root}
+            ):
+                return "fenced"
+
         # Segment loop: cost/cancel checked between bounded segments.
         while True:
             job = self.client.read(job_id)  # refresh cancel flag + spend

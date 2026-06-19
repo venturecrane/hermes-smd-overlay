@@ -206,6 +206,16 @@ def test_max_attempts_exceeded_parks_for_review():
     assert "max attempts" in c.read("J")["error"]
 
 
+def test_first_claim_mints_and_records_root_session():
+    c = FakeClient()
+    c.add("J", root_session_id="", current_tip_session_id="")
+    assert _worker(c, lambda job, ep: SegmentOutcome(completed=True, result_text="x")).run_one("J") == "done"
+    row = c.read("J")
+    assert row["root_session_id"] == "job_J"
+    # current_tip starts at root (the segment fake doesn't rotate it here).
+    assert row["root_session_id"] == "job_J"
+
+
 def test_terminal_job_not_claimable():
     c = FakeClient()
     c.add("J", status="done")
