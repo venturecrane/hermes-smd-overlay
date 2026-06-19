@@ -176,3 +176,12 @@ def register(ctx: Any) -> None:
             emoji="",
         )
     logger.info("hermes-smd-jobs registered %d durable-job tools", len(TOOLS))
+    # Launch the in-gateway durable-job worker as a daemon THREAD (the cron
+    # model, off the asyncio loop — V4). Idempotent; a no-op without the broker
+    # socket (e.g. in unit tests). Hermes imports inside it are lazy.
+    try:
+        from shared.job_worker_runtime import start_worker_thread
+
+        start_worker_thread()
+    except Exception as exc:  # never let worker launch break plugin registration
+        logger.warning("hermes-smd-jobs: worker thread launch failed: %s", exc)
