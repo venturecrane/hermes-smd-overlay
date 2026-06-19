@@ -141,3 +141,34 @@ def test_run_conversation_error_becomes_segment_error():
     out = rs(_job(current_tip_session_id="root"), 1)
     assert out.error is not None and "kaboom" in out.error
     assert out.completed is False
+
+
+# -- worker-session taint (B0, ADR 0051 Decision 7a) ---------------------------
+def test_worker_session_is_tainted_unknown_external():
+    """The worker's session is taint-marked unknown_external before the agent
+    runs, so the trust gate withholds autonomous sensitive actions for the whole
+    job (a background job is untrusted-by-default, fail-closed). Nothing else
+    marks it — the inbound chokepoints only fire on inbound turns."""
+    from shared import inbound
+
+    agent = _FakeAgent({"completed": True, "final_response": "x"}, new_session_id="rotated")
+    rs, _ = _make(agent, history=[])
+    tip = "job-tip-b0"
+    # Clean before: the session is not yet tainted (reads as internal).
+    assert inbound.SESSION_TAINT.trust_class(tip) == inbound.TRUST_CLASS_INTERNAL
+    rs(_job(current_tip_session_id=tip), 1)
+    # After the segment, the worker's session is tainted at the untrusted class.
+    assert inbound.SESSION_TAINT.trust_class(tip) == inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
+    assert inbound.SESSION_TAINT.is_tainted(tip) is True
+
+
+def test_worker_session_taint_uses_derived_tip_when_no_recorded_tip():
+    """When no tip/root is recorded, run_segment derives ``job_<id>`` and that
+    derived session is the one taint-marked — so the fail-closed default holds on
+    a brand-new job's first segment too."""
+    from shared import inbound
+
+    agent = _FakeAgent({"completed": True, "final_response": "x"})
+    rs, _ = _make(agent, history=[])
+    rs(_job(id="J-b0-derived", current_tip_session_id="", root_session_id=""), 1)
+    assert inbound.SESSION_TAINT.trust_class("job_J-b0-derived") == inbound.TRUST_CLASS_UNKNOWN_EXTERNAL

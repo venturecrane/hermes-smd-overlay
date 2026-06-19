@@ -181,19 +181,106 @@ def deliver_result(job: dict, result_ref: str) -> bool:
         return False
 
 
-def put_result(job: dict, result_text: str) -> str:
+def _r2_results_config_from_env() -> tuple[str, str, str, str, str] | None:
+    """Resolve the per-customer R2 results target from the Machine env, or None
+    when any required var is missing (local/test/misconfigured box → caller falls
+    back to the volume).
+
+    Reuses the SAME env contract the ADR-0044 config applier reads
+    (``config_applier/__main__.py``): ``R2_ENDPOINT_URL`` / ``R2_ACCESS_KEY_ID``
+    / ``R2_SECRET_ACCESS_KEY`` / ``R2_BUCKET_CONFIG`` / ``CUSTOMER_SLUG``. Per
+    ADR 0007/0022 each customer has its own R2 bucket; ``R2_BUCKET_CONFIG`` IS
+    that per-customer bucket (the voice vault already shares it under a prefix),
+    so job results land under a ``jobs/<slug>/`` prefix beside ``vaults/<slug>/``.
+
+    Returns ``(endpoint_url, access_key_id, secret_access_key, bucket, slug)``.
+    """
+    endpoint = os.environ.get("R2_ENDPOINT_URL")
+    access_key = os.environ.get("R2_ACCESS_KEY_ID")
+    secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+    bucket = os.environ.get("R2_BUCKET_CONFIG")
+    slug = os.environ.get("CUSTOMER_SLUG") or os.environ.get("SMD_CUSTOMER_SLUG")
+    if not (endpoint and access_key and secret_key and bucket and slug):
+        return None
+    return endpoint, access_key, secret_key, bucket, slug
+
+
+def _build_r2_uploader() -> Callable[[str, str, bytes], None] | None:
+    """Construct the default R2 uploader from env, or None when R2 is unconfigured.
+
+    Mirrors ``config_applier.__main__._build_s3_client`` (lazy boto3 import,
+    env-resolved credentials). The returned callable PUTs ``(bucket, key, body)``
+    to R2 over the S3-compatible API; it is injectable so the unit test exercises
+    the R2 path without a live bucket.
+    """
+    cfg = _r2_results_config_from_env()
+    if cfg is None:
+        return None
+    endpoint, access_key, secret_key, _bucket, _slug = cfg
+
+    def _upload(bucket: str, key: str, body: bytes) -> None:
+        import boto3  # lazy: tests inject a fake uploader and never reach here
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+        )
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=body,
+            ContentType="text/markdown; charset=utf-8",
+        )
+
+    return _upload
+
+
+def put_result(
+    job: dict,
+    result_text: str,
+    *,
+    uploader: Callable[[str, str, bytes], None] | None = None,
+) -> str:
     """Persist the result and return a retrievable ref.
 
-    STAGING: the durable target is per-customer R2 (survives host reschedule).
-    The first cycle writes to the Fly volume under the data home and returns a
-    file ref; the R2 swap is the hardening follow-up before send-capable jobs.
+    The durable target is per-customer R2 (survives a host reschedule that would
+    orphan a Fly-volume file — ADR 0051 Decision 8). The result is written to
+    ``jobs/<customer_slug>/<job_id>.md`` in the per-customer bucket and an
+    ``r2://`` ref is returned.
+
+    ``uploader`` is injectable ``(bucket, key, body) -> None`` for the unit test;
+    when omitted it is built from env (lazy boto3). If R2 env is unset (local /
+    CI / misconfigured Machine) OR the R2 PUT raises, fall back to the Fly volume
+    and return a ``file://`` ref with a clear log — best-effort-safe so the job
+    still produces a retrievable artifact rather than crashing.
     """
+    body = (result_text or "").encode("utf-8")
+    cfg = _r2_results_config_from_env()
+    up = uploader if uploader is not None else _build_r2_uploader()
+
+    if cfg is not None and up is not None:
+        _endpoint, _ak, _sk, bucket, slug = cfg
+        key = f"jobs/{slug}/{job['id']}.md"
+        try:
+            up(bucket, key, body)
+            return f"r2://{bucket}/{key}"
+        except Exception as exc:  # never lose the result on an R2 miss
+            logger.warning(
+                "job %s: R2 put failed (%s); falling back to volume", job.get("id"), exc
+            )
+    else:
+        logger.info(
+            "job %s: R2 results env unset; persisting result to volume", job.get("id")
+        )
+
     home = os.environ.get("HERMES_HOME") or "/opt/data"
     results_dir = os.path.join(home, "job_results")
     os.makedirs(results_dir, exist_ok=True)
     path = os.path.join(results_dir, f"{job['id']}.md")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(result_text or "")
+    with open(path, "wb") as f:
+        f.write(body)
     return f"file://{path}"
 
 

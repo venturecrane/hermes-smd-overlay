@@ -78,6 +78,23 @@ def make_run_segment(
         model = job["model"]
         tip = job.get("current_tip_session_id") or job.get("root_session_id") or ("job_" + job["id"])
 
+        # Taint the worker session BEFORE the agent runs (ADR 0051 Decision 7a).
+        # A background job is untrusted-by-default: nothing else taint-marks the
+        # worker's session (the inbound chokepoints only mark inbound turns), so
+        # without this a job that reads untrusted content would run as INTERNAL
+        # and the trust gate would permit autonomous EXTERNAL_SEND / DESTRUCTIVE /
+        # CODE_EXECUTION. Marking unknown_external here makes the gate withhold
+        # those sensitive actions for the whole job (fail-closed); the gate still
+        # allows READ and INTERNAL_WRITE (drafts). SESSION_TAINT is a pure
+        # in-process register, so this runs in unit tests too. Guarded so a
+        # missing shared.inbound never crashes a segment (the gate is the wall).
+        try:
+            from shared import inbound
+
+            inbound.SESSION_TAINT.mark(tip, inbound.TRUST_CLASS_UNKNOWN_EXTERNAL)
+        except Exception as exc:  # noqa: BLE001 — never fail a job on the taint mark
+            logger.warning("job %s: worker-session taint-mark failed: %s", job["id"], exc)
+
         # Reload the lineage from the recorded tip; first run has no messages yet.
         history = session_db.get_messages_as_conversation(tip, include_ancestors=True) or []
         if history:

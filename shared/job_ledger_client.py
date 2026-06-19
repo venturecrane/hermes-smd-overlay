@@ -58,6 +58,12 @@ class BrokerJobClient:
     def list_claimable(self) -> list[dict[str, Any]]:
         return list(self._request({"action": "job_list_claimable"}).get("jobs") or [])
 
+    def list_all(self) -> list[dict[str, Any]]:
+        """Every job row, newest-created first (terminal + live). Backs the
+        observability seam (the ``jobs`` runtime-read kind); unlike
+        ``list_claimable`` it applies no lease/terminal filter."""
+        return list(self._request({"action": "job_list"}).get("jobs") or [])
+
     # -- lease / fencing ---------------------------------------------------
     def claim(self, job_id: str, worker_id: str) -> int | None:
         """Atomically claim the job. Returns the new ``lease_epoch`` the worker

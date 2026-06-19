@@ -586,6 +586,78 @@ def _mcp_tools_call(req: dict, *, principal_subject: str) -> tuple[int, dict]:
     return 200, _rpc_ok(req_id, {"content": [{"type": "text", "text": text}]})
 
 
+# Job-status projection: the operator-visible control facts a caller needs to
+# verify a background job, drawn straight from the ledger row. No agent turn, no
+# DB file — these verbs read the broker-owned ledger over its socket, exactly
+# like the ``jobs`` runtime-read kind, so they stay read-only and synchronous.
+_JOB_STATUS_FIELDS: tuple[str, ...] = (
+    "status",
+    "spent_cents",
+    "budget_cents",
+    "result_ref",
+    "error",
+    "attempts",
+)
+
+
+def _job_id_arg(req: dict) -> tuple[str | None, dict | None]:
+    """Extract + validate a required ``job_id`` arg from a JSON-RPC job verb.
+
+    Returns ``(job_id, None)`` on success or ``(None, error_response)`` so the
+    caller can early-return the JSON-RPC error. ``job_id`` may be passed under
+    ``params`` (JSON-RPC) for symmetry with ``tools/call``."""
+    req_id = req.get("id")
+    params = req.get("params")
+    if not isinstance(params, dict):
+        return None, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "params object required")
+    job_id = params.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return None, _rpc_err(req_id, _JSON_RPC_INVALID_PARAMS, "job_id (string) required")
+    return job_id, None
+
+
+def _mcp_job_status(req: dict) -> tuple[int, dict]:
+    """Synchronous, read-only ``job_status`` — project the broker-owned ledger
+    row to the operator-visible control facts. No agent turn. A missing job or
+    an unreachable/unconfigured broker returns an explicit not-found result
+    rather than a transport error, mirroring the runtime-read fail-safe."""
+    from shared.job_ledger_client import BrokerJobClient, JobLedgerError
+
+    req_id = req.get("id")
+    job_id, err = _job_id_arg(req)
+    if err is not None:
+        return 200, err
+    try:
+        job = BrokerJobClient().read(job_id)
+    except JobLedgerError as exc:
+        logger.warning("mcp: job_status broker error: %s", exc)
+        return 200, _rpc_ok(req_id, {"found": False, "job_id": job_id})
+    if job is None:
+        return 200, _rpc_ok(req_id, {"found": False, "job_id": job_id})
+    projected = {field: job.get(field) for field in _JOB_STATUS_FIELDS}
+    return 200, _rpc_ok(req_id, {"found": True, "job_id": job_id, **projected})
+
+
+def _mcp_job_cancel(req: dict) -> tuple[int, dict]:
+    """Synchronous ``job_cancel`` — set the ledger cancel flag (the worker
+    observes it at its next per-iteration check and dead-letters). No agent
+    turn. ``cancelled`` is the ledger's boolean outcome (False == the job was
+    already terminal or unknown); an unreachable broker surfaces as a JSON-RPC
+    internal error so the caller can retry."""
+    from shared.job_ledger_client import BrokerJobClient, JobLedgerError
+
+    req_id = req.get("id")
+    job_id, err = _job_id_arg(req)
+    if err is not None:
+        return 200, err
+    try:
+        cancelled = BrokerJobClient().cancel(job_id)
+    except JobLedgerError as exc:
+        logger.warning("mcp: job_cancel broker error: %s", exc)
+        return 200, _rpc_err(req_id, _JSON_RPC_INTERNAL_ERROR, "job ledger unavailable")
+    return 200, _rpc_ok(req_id, {"job_id": job_id, "cancelled": cancelled})
+
+
 def _mcp_dispatch(req: dict, *, principal_subject: str = "") -> tuple[int, dict | None]:
     """Dispatch one already-authorized JSON-RPC MCP request.
 
@@ -616,6 +688,10 @@ def _mcp_dispatch(req: dict, *, principal_subject: str = "") -> tuple[int, dict 
         return 200, _rpc_ok(req_id, {"tools": _MCP_TOOLS})
     if method == "tools/call":
         return _mcp_tools_call(req, principal_subject=principal_subject)
+    if method == "job_status":
+        return _mcp_job_status(req)
+    if method == "job_cancel":
+        return _mcp_job_cancel(req)
     return 200, _rpc_err(req_id, _JSON_RPC_METHOD_NOT_FOUND, f"method not found: {method}")
 
 
