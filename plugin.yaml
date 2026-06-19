@@ -14,3 +14,4 @@ plugins:
   - plugins/hermes-smd-demo-relay
   - plugins/hermes-smd-peer-memory
   - plugins/hermes-smd-mcp-result-sink
+  - plugins/hermes-smd-jobs
