@@ -177,6 +177,29 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
 )
 
 
+# Code-execution ingestion channel (ADR 0050 B0). These tools run arbitrary
+# code / shell / OS / screen control and can pull external, attacker-
+# influenceable content into the turn UNCONTROLLED — no tool-name allowlist can
+# fence arbitrary code. A turn that ran one of these is therefore treated as
+# having handled untrusted content: the trust gate withholds autonomous
+# sensitive actions (the agent can still compute and DRAFT). This closes the
+# confirmed bypass where reading injected content via ``execute_code`` (the B2
+# "process the mailbox in code" path) left the session untainted and an
+# autonomous send ALLOWED. ``delegate_task`` is a CODE_EXECUTION tool but is
+# DELIBERATELY EXCLUDED here (see _CODE_NO_INGEST_BY_DESIGN in
+# tests/test_code_execution_taint.py): it is already taint-GATED, and tainting a
+# parent on every delegation return would break legitimate multi-delegation
+# orchestration — the child-result-laundering variant needs separate design.
+_CODE_INGESTION_TOOLS: frozenset[str] = frozenset(
+    {
+        "execute_code",
+        "terminal",
+        "process",
+        "computer_use",
+    }
+)
+
+
 def _surface_for(tool_name: str) -> str:
     """Map a fenced read tool to an inbound surface label (closed vocabulary)."""
     if tool_name in ("web_search", "web_extract"):
@@ -207,12 +230,21 @@ def on_transform_tool_result(**kwargs: Any) -> str | None:
     """
     try:
         tool_name = kwargs.get("tool_name") or ""
+        session_id = kwargs.get("session_id") or ""
+        # Code-execution ingestion channel (ADR 0050 B0). Arbitrary code may have
+        # pulled untrusted external content into the turn — taint the session so
+        # the trust gate withholds autonomous sensitive actions. No nonce-fence
+        # (code output is structural; the agent needs it intact); taint is the
+        # enforcing wall. Fail-closed: taint regardless of output content (a run
+        # that exfiltrated or returned nothing still ran uncontrolled code).
+        if tool_name in _CODE_INGESTION_TOOLS:
+            inbound.SESSION_TAINT.mark(session_id, inbound.TRUST_CLASS_UNKNOWN_EXTERNAL)
+            return None
         if tool_name not in _FENCED_READ_TOOLS:
             return None
         result = kwargs.get("result")
         if not isinstance(result, str) or not result:
             return None
-        session_id = kwargs.get("session_id") or ""
         # Taint first (enforcing), then fence (defense-in-depth).
         inbound.SESSION_TAINT.mark(session_id, inbound.TRUST_CLASS_UNKNOWN_EXTERNAL)
         envelope = inbound.make_envelope(
