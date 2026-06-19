@@ -280,6 +280,38 @@ vars:
     consumed_by: [memory-mirror]
     note: Honcho API key; inert in Phase 1
 
+  # ---- B1 durable task-execution substrate (ADR 0051; consumed_by: jobs) ----
+  HERMES_MODEL:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [jobs]
+    note: Hermes-native active model; start_background_job records it on the job row at intake (worker resolves/validates authoritatively at claim time)
+  HERMES_PERSONA_SLUG:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [jobs]
+    note: advisory persona slug for the job row at intake; worker resolves the authoritative persona
+  SMD_JOB_DEFAULT_BUDGET_CENTS:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [jobs]
+    note: authored default per-job budget (materialized from customer.yaml); conservative fallback applies when unset
+  HERMES_JOB_ID:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [jobs]
+    note: set by the worker around a background segment; read by job_record_sideeffect to scope the idempotency journal. Unset outside a background job (no-op proceed)
+  HERMES_JOB_LEASE_EPOCH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [jobs]
+    note: set by the worker around a background segment; the lease epoch idempotency writes are fenced on. Unset outside a background job
+
 # Names CONSTRUCTED or INDIRECTED at runtime — no single literal name, so they
 # cannot be a `vars` key. Documented here so a NEW such site is a reviewable
 # diff, and so the conformance scan can legitimately ignore the indirection

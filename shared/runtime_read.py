@@ -61,10 +61,11 @@ SUPPORTED_KINDS: frozenset[str] = frozenset(
         "audit_export",
         "memory_export",
         "config_export",
+        "jobs",
     }
 )
 _REAL_KINDS: frozenset[str] = frozenset(
-    {"audit_log", "audit_export", "memory_export", "config_export"}
+    {"audit_log", "audit_export", "memory_export", "config_export", "jobs"}
 )
 
 # config_export section allow-list (ADR 0048). Unlike ``config`` (a
@@ -97,6 +98,34 @@ _AGENT_STATE_TABLES: frozenset[str] = frozenset(
         "agent_skills_inventory",
         "peer_preferences",
     }
+)
+
+# jobs columns served by the ``jobs`` observability kind, in a stable order.
+# The B1 durable-job control plane lives in the broker-owned job ledger, NOT in
+# a sqlite file the gate can open mode=ro (the ledger is broker-uid-owned; only
+# the gateway-PID-gated broker verbs read it). So ``jobs`` is served over the
+# broker socket via BrokerJobClient.list_all(), not a direct DB read. The
+# projection drops nothing material — it is the operator-visible control facts
+# (status / cost / lease / result / error) the console surface needs to verify a
+# job end-to-end. (Secrets never live in the jobs row, so no allow-list trim is
+# needed; the brief itself is authored task text, surfaced as-is.)
+_JOBS_COLUMNS: tuple[str, ...] = (
+    "id",
+    "created_at",
+    "updated_at",
+    "customer_slug",
+    "persona_id",
+    "model",
+    "status",
+    "deliver_to",
+    "lease_owner",
+    "lease_epoch",
+    "attempts",
+    "budget_cents",
+    "spent_cents",
+    "cancel_requested",
+    "result_ref",
+    "error",
 )
 
 # audit_log columns, in canonical schema order, for the export kind. Must stay
@@ -227,6 +256,14 @@ def read_runtime(
             return {"entries": [], "cursor": None, "error": "unknown section"}
         return _read_config_export(section, customer_yaml_path)
 
+    if kind == "jobs":
+        # The job ledger is broker-owned (gateway-PID-gated verbs), not a
+        # sqlite file the gate can open mode=ro — so this read goes over the
+        # broker socket, not ``db_path``. Fail-safe: a broker that is down or
+        # has no job ledger configured returns an honest empty page (same
+        # posture as a missing audit DB), never a 500.
+        return _read_jobs()
+
     if kind == "memory_export":
         if table not in MEMORY_EXPORT_TABLES:
             # Unknown table is a caller error, not a degraded read — refuse
@@ -280,6 +317,27 @@ def _read_config_export(section: str, customer_yaml_path: str | None) -> dict[st
         except CustomerConfigError:
             return {"entries": [], "cursor": None}
     return {"entries": [], "cursor": None}
+
+
+def _read_jobs() -> dict[str, Any]:
+    """Serve the B1 job ledger as the ``jobs`` observability kind.
+
+    Reads over the broker socket (``BrokerJobClient.list_all`` →
+    ``job_list``), projects each row to the stable ``_JOBS_COLUMNS`` set, and
+    returns a single unpaginated page (the job count per Machine is small).
+    Fail-safe: an unreachable / unconfigured broker (socket env unset, broker
+    down, or no job ledger) returns an honest empty page rather than a 500 —
+    same posture as the audit reads on a missing DB. Imported lazily so the hot
+    audit_log read path carries no extra import cost.
+    """
+    from shared.job_ledger_client import BrokerJobClient, JobLedgerError
+
+    try:
+        rows = BrokerJobClient().list_all()
+    except JobLedgerError:
+        return {"entries": [], "cursor": None}
+    entries = [{col: row.get(col) for col in _JOBS_COLUMNS} for row in rows]
+    return {"entries": entries, "cursor": None}
 
 
 # audit_log columns (per-customer D1) → the console wire shape consumed by
