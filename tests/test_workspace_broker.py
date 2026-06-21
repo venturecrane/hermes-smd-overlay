@@ -66,9 +66,7 @@ def test_gmail_tools_expose_managed_mailbox_targeting() -> None:
         "workspace_gmail_archive",
     ):
         params = ctx.tools[name]["schema"]["parameters"]
-        assert "mailbox" in params["properties"], (
-            f"{name} should accept a managed mailbox target"
-        )
+        assert "mailbox" in params["properties"], f"{name} should accept a managed mailbox target"
     # send-as From is offered only where a draft is composed; mailbox stays optional.
     draft_params = ctx.tools["workspace_gmail_create_draft"]["schema"]["parameters"]
     assert "from" in draft_params["properties"]
