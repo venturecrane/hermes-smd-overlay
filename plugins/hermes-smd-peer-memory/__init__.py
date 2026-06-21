@@ -40,6 +40,7 @@ from typing import Any
 
 from shared.d1_client import D1Client
 from shared.inbound import SESSION_TAINT
+from shared.tool_registration import register_wrapped_tool
 
 from . import schemas, store  # noqa: F401 — surface module imports for tests
 
@@ -264,7 +265,8 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("on_session_end", on_session_end)
-    ctx.register_tool(
+    register_wrapped_tool(
+        ctx,
         name=TOOL_NAME,
         toolset="relationship",
         schema=TOOL_SCHEMA,

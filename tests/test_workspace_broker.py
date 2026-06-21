@@ -65,13 +65,15 @@ def test_gmail_tools_expose_managed_mailbox_targeting() -> None:
         "workspace_gmail_modify",
         "workspace_gmail_archive",
     ):
-        props = ctx.tools[name]["schema"]["properties"]
-        assert "mailbox" in props, f"{name} should accept a managed mailbox target"
+        params = ctx.tools[name]["schema"]["parameters"]
+        assert "mailbox" in params["properties"], (
+            f"{name} should accept a managed mailbox target"
+        )
     # send-as From is offered only where a draft is composed; mailbox stays optional.
-    draft_props = ctx.tools["workspace_gmail_create_draft"]["schema"]["properties"]
-    assert "from" in draft_props
-    assert "mailbox" not in ctx.tools["workspace_gmail_create_draft"]["schema"]["required"]
-    assert "from" not in ctx.tools["workspace_gmail_create_draft"]["schema"]["required"]
+    draft_params = ctx.tools["workspace_gmail_create_draft"]["schema"]["parameters"]
+    assert "from" in draft_params["properties"]
+    assert "mailbox" not in draft_params["required"]
+    assert "from" not in draft_params["required"]
 
 
 def test_handler_forwards_managed_mailbox_payload(monkeypatch) -> None:
