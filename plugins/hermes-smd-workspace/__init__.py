@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from shared.broker_audit import write_execution
+from shared.tool_registration import register_wrapped_tool
 from shared.workspace_broker import GRANT_ARG, execute
 
 logger = logging.getLogger(__name__)
@@ -199,7 +200,8 @@ def _handler(operation: str):
 def register(ctx: Any) -> None:
     """Register every reviewed Workspace operation as its own Hermes tool."""
     for name, (description, schema) in TOOLS.items():
-        ctx.register_tool(
+        register_wrapped_tool(
+            ctx,
             name=name,
             toolset="workspace",
             schema=schema,

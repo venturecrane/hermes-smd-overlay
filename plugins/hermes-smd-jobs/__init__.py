@@ -30,6 +30,7 @@ import os
 from typing import Any
 
 from shared.job_ledger_client import BrokerJobClient
+from shared.tool_registration import register_wrapped_tool
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +181,8 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
 def register(ctx: Any) -> None:
     """Register the durable-job tools. All require the broker socket."""
     for name, (description, schema, handler) in TOOLS.items():
-        ctx.register_tool(
+        register_wrapped_tool(
+            ctx,
             name=name,
             toolset="jobs",
             schema=schema,
