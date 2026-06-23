@@ -159,6 +159,31 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         env_secrets=(("REFERENCE_API_KEY", "REFERENCE_API_KEY"),),
         blocked_tools=(),
     ),
+    # Smokeball (mcp:smokeball) — the law wedge's practice-management system of
+    # record, and the FIRST real author-built connector on the ADR 0053 platform
+    # (ss-console operator/connectors/smokeball; built + live-verified against the
+    # US staging tenant 2026-06-23). A local stdio MCP server launched by the
+    # ABSOLUTE path to its own venv console-script. auth_model=client_credentials:
+    # the server mints its own Bearer from client_id/secret (Cognito), so the
+    # subprocess needs only the three env secrets below + region/env — no
+    # token-on-volume custody. The mcp_smokeball_<tool> action classes are already
+    # hand-authored in shared/action_classes.py (the EFF-07 surface); the
+    # trust-account fund-movement verbs are in BANNED_TOOLS and the connector never
+    # exposes them. The source secret names are the Machine-staged names; the
+    # staging→generic mapping from /ss SMOKEBALL_STAGING_* happens at provisioning.
+    "smokeball": McpConnectorSpec(
+        name="smokeball",
+        auth_model="client_credentials",
+        command="/opt/connectors/smokeball/.venv/bin/smokeball-mcp",
+        args=(),
+        env_static=(("SMOKEBALL_REGION", "us"), ("SMOKEBALL_ENVIRONMENT", "staging")),
+        env_secrets=(
+            ("SMOKEBALL_CLIENT_ID", "SMOKEBALL_CLIENT_ID"),
+            ("SMOKEBALL_CLIENT_SECRET", "SMOKEBALL_CLIENT_SECRET"),
+            ("SMOKEBALL_API_KEY", "SMOKEBALL_API_KEY"),
+        ),
+        blocked_tools=(),
+    ),
 }
 
 
