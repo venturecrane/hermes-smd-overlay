@@ -65,6 +65,14 @@ class McpConnectorSpec:
     """
 
     name: str
+    # How the platform provisions this connector's credentials (mirrors the
+    # author-built connector manifest's auth_model; ADR 0053). One of
+    # "static" | "client_credentials" | "authorization_code", or None for
+    # vendor entries that predate the field. Additive and informational at the
+    # translate layer (static/client_credentials already flow via env_secrets;
+    # authorization_code via the existing token-on-volume custody); ss-console
+    # provisioning routes secret staging on it (PR-3).
+    auth_model: str | None = None
     # hosted-HTTP transport (e.g. AgentMail): a URL + optional API-key header
     url: str | None = None
     auth_header: str | None = None
@@ -101,6 +109,7 @@ class McpConnectorSpec:
 MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
     "agentmail": McpConnectorSpec(
         name="agentmail",
+        auth_model="static",
         url="https://mcp.agentmail.to/mcp",
         auth_header="x-api-key",
         secret_env="AGENTMAIL_API_KEY",
@@ -118,6 +127,7 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
     # the capability from the layer meant to govern it (same rationale as AgentMail).
     "clio-oktopeak": McpConnectorSpec(
         name="clio-oktopeak",
+        auth_model="authorization_code",
         command="clio-mcp",
         args=(),
         # clio-mcp defaults to HTTP mode and fatals ("MCP_BASE_URL is required
@@ -129,6 +139,24 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             ("CLIO_CLIENT_SECRET", "CLIO_CLIENT_SECRET"),
             ("ENCRYPTION_KEY", "CLIO_ENCRYPTION_KEY"),  # remap: subprocess reads ENCRYPTION_KEY
         ),
+        blocked_tools=(),
+    ),
+    # Reference connector (mcp:reference) — the SYNTHETIC author-built connector
+    # platform self-test fixture (ss-console operator/connectors/_reference;
+    # ADR 0053). NOT a vendor integration. It is a local stdio MCP server
+    # launched by the ABSOLUTE path to its own venv console-script — the install
+    # posture every author-built connector uses (Dockerfile installs each
+    # connector into /opt/connectors/<dir>/.venv; the dir is `_reference`). Inert
+    # unless a customer.yaml binds it (only a test seat does); its `surprise`
+    # tool is deliberately unclassified so binding it proves fail-closed REFUSED.
+    # auth_model=static exercises the env-secret staging path with a dummy key.
+    "reference": McpConnectorSpec(
+        name="reference",
+        auth_model="static",
+        command="/opt/connectors/_reference/.venv/bin/reference-mcp",
+        args=(),
+        env_static=(("REFERENCE_MODE", "selftest"),),
+        env_secrets=(("REFERENCE_API_KEY", "REFERENCE_API_KEY"),),
         blocked_tools=(),
     ),
 }
