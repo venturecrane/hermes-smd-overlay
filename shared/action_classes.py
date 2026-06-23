@@ -379,6 +379,16 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_clio_oktopeak_create_calendar_entry": ActionClass.COMMITMENT,
     "mcp_clio_oktopeak_log_time_entry": ActionClass.COMMITMENT,
     "mcp_clio_oktopeak_create_activity": ActionClass.COMMITMENT,
+    # Reference connector (mcp:reference) — the SYNTHETIC author-built connector
+    # platform self-test fixture (ss-console operator/connectors/_reference;
+    # ADR 0053). echo is a pure read, record an internal write. `surprise` is
+    # DELIBERATELY absent here (and from PINNED_CONNECTOR_SURFACES): it is the
+    # platform's fail-closed proof — bound on a test seat, mcp_reference_surprise
+    # must classify REFUSED and never execute. Runtime prefix mcp_reference_
+    # (no dash to fold). These two lines ARE the trust copy; the connector's
+    # manifest.toml tool_classes is only the oracle checked against this map.
+    "mcp_reference_echo": ActionClass.READ,
+    "mcp_reference_record": ActionClass.INTERNAL_WRITE,
     # Memory — read-only via this registry.
     "memory_search": ActionClass.READ,
     "memory_get_rule": ActionClass.READ,

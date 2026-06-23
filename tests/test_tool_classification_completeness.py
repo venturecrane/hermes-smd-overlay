@@ -209,6 +209,18 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
     # note/task/doc writes → INTERNAL_WRITE, and create_matter /
     # create_calendar_entry / log_time_entry / create_activity → COMMITMENT
     # (never autonomous). A new Clio verb that misses classification fails here.
+    # Reference connector (mcp:reference) — the SYNTHETIC platform self-test
+    # (ss-console operator/connectors/_reference; ADR 0053). The pinned surface
+    # is exactly the CLASSIFIED tools; `mcp_reference_surprise` is deliberately
+    # NOT pinned and NOT mapped, so it stays REFUSED — that is the fixture's
+    # whole point. A new classified verb on the reference connector that misses
+    # the map fails here.
+    "reference": frozenset(
+        {
+            "mcp_reference_echo",
+            "mcp_reference_record",
+        }
+    ),
     "clio-oktopeak": frozenset(
         {
             # reads
