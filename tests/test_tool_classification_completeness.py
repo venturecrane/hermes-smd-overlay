@@ -26,10 +26,11 @@ register", plus one external surface that the overlay does not vendor:
      Workspace tools the overlay itself registers in-process. Every one must
      be classified.
 
-  The Smokeball wedge backend (``mcp_smokeball_*``) is classified in
-  action_classes.py but is NOT in MCP_CONNECTOR_REGISTRY — it is a ``build:``
-  adapter wired by another path. Its documented surface is pinned below so a
-  newly-added Smokeball verb that misses classification fails here too.
+  The Smokeball wedge backend (``mcp_smokeball_*``) is now a registered
+  author-built ``mcp:`` connector (ADR 0053; ss-console
+  operator/connectors/smokeball), so Layer A enforces its surface like any other
+  registry entry. Its documented surface is also pinned below so a newly-added
+  Smokeball verb that misses classification fails here too.
 
 WHAT THIS TEST IS NOT. It does not assert the COMPLETE external tool list of
 a vendored MCP package the overlay does not ship (e.g. @oktopeak/clio-mcp):
@@ -143,13 +144,16 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_agentmail_auth_me",
         }
     ),
-    # Smokeball (mcp:smokeball) — the law wedge's system of record. NOT in
-    # MCP_CONNECTOR_REGISTRY (a build: adapter wired by another path), but its
-    # surface is authored by us, so we pin it. Source: law-firm
+    # Smokeball (mcp:smokeball) — the law wedge's system of record, now a
+    # registered author-built mcp: connector (ADR 0053). Its surface is authored
+    # by us, so we pin the full classified surface here. Source: law-firm
     # smokeball-surface.md. Trust-account writes (create_transaction /
     # protect_funds / unprotect_funds) are in BANNED_TOOLS, not mapped — both
-    # forms count as decided. A new Smokeball verb added to the adapter must
-    # be classified or it fails here.
+    # forms count as decided. A new Smokeball verb must be classified or it fails
+    # here. (The phase-1 connector exposes a SUBSET — reads + create_memo; the
+    # pin is the full surface for drift defense, which is fine: Layer A only
+    # requires the connector to have a classified surface, not to expose all of
+    # the pinned tools.)
     "smokeball": frozenset(
         {
             # reads
