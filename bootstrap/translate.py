@@ -351,6 +351,15 @@ def _materialize_mcp_servers(connectors: dict[str, Any]) -> dict[str, Any]:
                     break
             if missing_secret:
                 continue
+            # Optional per-seat env: staged when the source is set, SKIPPED when
+            # unset — a missing one never unwires the server (the connector falls
+            # back to its own default for that var). Used for per-seat runtime
+            # selections like Smokeball's auth_mode / refresh_token / account_id.
+            for target_var, source_secret in spec.env_secrets_optional:
+                try:
+                    env_map[target_var] = get_secret(source_secret)
+                except KeyError:
+                    pass
             if env_map:
                 entry["env"] = env_map
         else:

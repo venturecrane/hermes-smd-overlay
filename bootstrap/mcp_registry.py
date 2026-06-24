@@ -83,6 +83,15 @@ class McpConnectorSpec:
     command: str | None = None
     args: tuple[str, ...] = field(default=())
     env_secrets: tuple[tuple[str, str], ...] = field(default=())
+    # OPTIONAL per-seat env, same ``(subprocess_env_var, source_secret_env)``
+    # shape as ``env_secrets`` but with the opposite missing-source policy: a
+    # source that is unset is SKIPPED (the var is left out of the env block) and
+    # the server is still wired. For per-seat runtime selections the connector
+    # treats as optional (e.g. Smokeball's auth_mode / refresh_token / account_id
+    # — present only on an authorization_code or multi-account seat). NEVER use
+    # this for a credential the connector requires to function; those belong in
+    # ``env_secrets`` so a missing one fail-closes the server.
+    env_secrets_optional: tuple[tuple[str, str], ...] = field(default=())
     # Static (non-secret) env for a stdio subprocess: ``(var, literal_value)``
     # pairs written verbatim into the server's ``env`` block. For CLI-mode
     # switches the binary needs but that aren't secrets — e.g. clio-mcp's
@@ -163,24 +172,42 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
     # record, and the FIRST real author-built connector on the ADR 0053 platform
     # (ss-console operator/connectors/smokeball; built + live-verified against the
     # US staging tenant 2026-06-23). A local stdio MCP server launched by the
-    # ABSOLUTE path to its own venv console-script. auth_model=client_credentials:
-    # the server mints its own Bearer from client_id/secret (Cognito), so the
-    # subprocess needs only the three env secrets below + region/env — no
-    # token-on-volume custody. The mcp_smokeball_<tool> action classes are already
-    # hand-authored in shared/action_classes.py (the EFF-07 surface); the
-    # trust-account fund-movement verbs are in BANNED_TOOLS and the connector never
-    # exposes them. The source secret names are the Machine-staged names; the
-    # staging→generic mapping from /ss SMOKEBALL_STAGING_* happens at provisioning.
+    # ABSOLUTE path to its own venv console-script.
+    #
+    # Two auth modes (ADR 0053): client_credentials (default — the server mints its
+    # own Bearer from client_id/secret for our own staging tenant) and
+    # authorization_code (the firm-delegated grant for a real firm's seat — the
+    # connect flow obtains the refresh_token, which is staged per-seat). The
+    # mcp_smokeball_<tool> action classes are hand-authored in
+    # shared/action_classes.py; trust-account fund-movement verbs are in
+    # BANNED_TOOLS and never exposed.
+    #
+    # SMOKEBALL_ENVIRONMENT is a REQUIRED per-seat secret (staging|production) —
+    # NOT a hardcoded static default — so a production seat can never silently
+    # default to the staging hosts. Region defaults to "us" in the connector and
+    # is an optional per-seat override. auth_mode/refresh_token/account_id are
+    # optional per-seat runtime selections (present only on an authorization_code
+    # or multi-account seat). The staging/prod → generic secret mapping from /ss
+    # SMOKEBALL_STAGING_* / SMOKEBALL_PROD_* happens at provisioning.
     "smokeball": McpConnectorSpec(
         name="smokeball",
         auth_model="client_credentials",
         command="/opt/connectors/smokeball/.venv/bin/smokeball-mcp",
         args=(),
-        env_static=(("SMOKEBALL_REGION", "us"), ("SMOKEBALL_ENVIRONMENT", "staging")),
+        env_static=(),
         env_secrets=(
             ("SMOKEBALL_CLIENT_ID", "SMOKEBALL_CLIENT_ID"),
             ("SMOKEBALL_CLIENT_SECRET", "SMOKEBALL_CLIENT_SECRET"),
             ("SMOKEBALL_API_KEY", "SMOKEBALL_API_KEY"),
+            # Required per-seat: no safe default — a missing value fail-closes the
+            # server rather than risk a prod seat pointing at staging hosts.
+            ("SMOKEBALL_ENVIRONMENT", "SMOKEBALL_ENVIRONMENT"),
+        ),
+        env_secrets_optional=(
+            ("SMOKEBALL_REGION", "SMOKEBALL_REGION"),  # connector defaults to "us"
+            ("SMOKEBALL_AUTH_MODE", "SMOKEBALL_AUTH_MODE"),  # default client_credentials
+            ("SMOKEBALL_REFRESH_TOKEN", "SMOKEBALL_REFRESH_TOKEN"),  # authorization_code seats
+            ("SMOKEBALL_ACCOUNT_ID", "SMOKEBALL_ACCOUNT_ID"),  # multi-account seats
         ),
         blocked_tools=(),
     ),

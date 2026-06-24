@@ -874,6 +874,74 @@ def test_translate_skips_clio_when_required_secret_unset(tmp_path, monkeypatch):
     assert "clio-oktopeak" not in config.get("mcp_servers", {})
 
 
+# Smokeball — author-built stdio connector with required per-seat ENVIRONMENT and
+# OPTIONAL per-seat auth_mode/refresh_token/account_id (the authorization_code path).
+# ---------------------------------------------------------------------------
+
+SMOKEBALL_YAML = VALID_YAML.replace("backend: mcp:gmail", "backend: mcp:smokeball")
+
+
+def _smokeball_env(tmp_path, monkeypatch) -> dict:
+    """Translate a smokeball seat and return its mcp_servers env block."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=SMOKEBALL_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    return config.get("mcp_servers", {})
+
+
+def test_translate_materializes_smokeball_client_credentials_seat(tmp_path, monkeypatch):
+    """A CC seat wires with the three creds + the required ENVIRONMENT; the optional
+    auth_mode/refresh_token/account_id are absent (not in the env block)."""
+    monkeypatch.setenv("SMOKEBALL_CLIENT_ID", "cid")
+    monkeypatch.setenv("SMOKEBALL_CLIENT_SECRET", "sec")
+    monkeypatch.setenv("SMOKEBALL_API_KEY", "key")
+    monkeypatch.setenv("SMOKEBALL_ENVIRONMENT", "staging")
+    for v in ("SMOKEBALL_AUTH_MODE", "SMOKEBALL_REFRESH_TOKEN", "SMOKEBALL_ACCOUNT_ID"):
+        monkeypatch.delenv(v, raising=False)
+    servers = _smokeball_env(tmp_path, monkeypatch)
+    assert "smokeball" in servers
+    env = servers["smokeball"]["env"]
+    assert env["SMOKEBALL_CLIENT_ID"] == "cid"
+    assert env["SMOKEBALL_ENVIRONMENT"] == "staging"
+    # The staging default is no longer hardcoded static — it comes from the seat.
+    assert "SMOKEBALL_AUTH_MODE" not in env
+    assert "SMOKEBALL_REFRESH_TOKEN" not in env
+    assert "SMOKEBALL_ACCOUNT_ID" not in env
+
+
+def test_translate_materializes_smokeball_authorization_code_seat(tmp_path, monkeypatch):
+    """An authorization_code seat carries auth_mode + refresh_token (+ optional
+    account_id) in the env block; ENVIRONMENT=production is honored per-seat."""
+    monkeypatch.setenv("SMOKEBALL_CLIENT_ID", "cid")
+    monkeypatch.setenv("SMOKEBALL_CLIENT_SECRET", "sec")
+    monkeypatch.setenv("SMOKEBALL_API_KEY", "key")
+    monkeypatch.setenv("SMOKEBALL_ENVIRONMENT", "production")
+    monkeypatch.setenv("SMOKEBALL_AUTH_MODE", "authorization_code")
+    monkeypatch.setenv("SMOKEBALL_REFRESH_TOKEN", "rt-123")
+    monkeypatch.delenv("SMOKEBALL_ACCOUNT_ID", raising=False)
+    servers = _smokeball_env(tmp_path, monkeypatch)
+    env = servers["smokeball"]["env"]
+    assert env["SMOKEBALL_ENVIRONMENT"] == "production"
+    assert env["SMOKEBALL_AUTH_MODE"] == "authorization_code"
+    assert env["SMOKEBALL_REFRESH_TOKEN"] == "rt-123"
+    assert "SMOKEBALL_ACCOUNT_ID" not in env  # optional, unset
+
+
+def test_translate_skips_smokeball_when_environment_unset(tmp_path, monkeypatch):
+    """ENVIRONMENT is REQUIRED — a seat without it is unwired (fail-closed), so a
+    prod seat can never silently fall back to staging hosts."""
+    monkeypatch.setenv("SMOKEBALL_CLIENT_ID", "cid")
+    monkeypatch.setenv("SMOKEBALL_CLIENT_SECRET", "sec")
+    monkeypatch.setenv("SMOKEBALL_API_KEY", "key")
+    monkeypatch.delenv("SMOKEBALL_ENVIRONMENT", raising=False)  # required, absent
+    servers = _smokeball_env(tmp_path, monkeypatch)
+    assert "smokeball" not in servers
+
+
 def test_agentmail_sends_are_external_send_not_banned():
     """ADR 0025: agentmail sends are reclassified, not banned.
 
