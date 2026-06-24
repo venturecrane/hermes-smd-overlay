@@ -42,7 +42,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
-from shared import mcp_result_store, mcp_thread_store, runtime_read
+from shared import mcp_result_store, mcp_thread_store, oauth_callback, runtime_read
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
 # to build the forward URL, so the only dynamic part of the urllib call is a
@@ -731,11 +731,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _html(self, status: int, body: str) -> None:
+        data = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:  # noqa: N802 (stdlib signature)
         split = urlsplit(self.path)
         path = split.path
         if path.rstrip("/") == "/health":
             self._json(200, {"status": "ok", "platform": "webhook-gate"})
+        elif path.rstrip("/") == "/oauth/smokeball/callback":
+            # Machine-hosted firm-delegated OAuth consent landing (ADR 0054).
+            # Public, authorized solely by the signed per-customer state; the
+            # firm's browser lands here after Allow. No agent work is triggered.
+            status, html = oauth_callback.handle_smokeball_callback(
+                split.query, self.headers.get("Host"), os.environ
+            )
+            self._html(status, html)
         elif path.startswith("/.well-known/oauth-protected-resource"):
             # RFC 9728 discovery for the Machine-hosted MCP connector. Public,
             # unauthenticated, carries no secret. One Machine == one resource, so

@@ -38,6 +38,15 @@
 # literal and forget to declare it, CI goes red on the author, not the Captain.
 
 vars:
+  SMOKEBALL_REFRESH_TOKEN_FILE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: >-
+      ADR 0054. Override for where the Machine-hosted Smokeball OAuth callback
+      writes the firm-delegated refresh token (and the connector reads it).
+      Defaults to /opt/data/.smokeball-mcp/refresh_token when unset.
   # ---- Required: the overlay genuinely needs these (no graceful degradation) ----
   SMD_CUSTOMER_SLUG:
     discovery: static
