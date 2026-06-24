@@ -116,7 +116,9 @@ def _env(slug="pilot-smokeball", token_file=None):
 
 
 def test_handle_missing_params_returns_failed_page():
-    status, html = oauth_callback.handle_smokeball_callback("", "hermes-pilot-smokeball.fly.dev", _env())
+    status, html = oauth_callback.handle_smokeball_callback(
+        "", "hermes-pilot-smokeball.fly.dev", _env()
+    )
     assert status == 400
     assert "missing_params" in html
 
@@ -147,7 +149,10 @@ def test_handle_success_writes_token_and_renders_connected(tmp_path, monkeypatch
     assert status == 200
     assert "Smokeball connected" in html
     # The exchange used this Machine's own callback URL as redirect_uri.
-    assert captured["redirect_uri"] == "https://hermes-pilot-smokeball.fly.dev/oauth/smokeball/callback"
+    assert (
+        captured["redirect_uri"]
+        == "https://hermes-pilot-smokeball.fly.dev/oauth/smokeball/callback"
+    )
     assert captured["code"] == "the-code"
     # The token landed on disk, never in the HTML.
     assert open(token_file).read() == "rt-from-exchange"

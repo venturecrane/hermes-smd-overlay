@@ -183,13 +183,13 @@ def write_token_file(refresh_token: str, *, path: str | None = None) -> None:
 # ---- HTML pages ------------------------------------------------------------
 def _page(title: str, badge: str, heading: str, body: str) -> str:
     return (
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{title}</title><style>"
         "body{font-family:system-ui,-apple-system,sans-serif;max-width:32rem;"
         "margin:4rem auto;padding:0 1.5rem;color:#1a1a2e;line-height:1.5}"
         ".badge{font-size:2.5rem}h1{font-size:1.4rem;margin:.5rem 0}p{color:#444}"
-        f"</style></head><body><div class=\"badge\">{badge}</div>"
+        f'</style></head><body><div class="badge">{badge}</div>'
         f"<h1>{heading}</h1><p>{body}</p></body></html>"
     )
 
