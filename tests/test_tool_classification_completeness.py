@@ -183,6 +183,8 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_smokeball_get_expenses",
             "mcp_smokeball_get_webhook_subscriptions",
             "mcp_smokeball_get_event_types",
+            "mcp_smokeball_list_events",
+            "mcp_smokeball_list_folders",
             # writes (mapped)
             "mcp_smokeball_create_memo",
             "mcp_smokeball_patch_matter",
@@ -192,6 +194,10 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_smokeball_add_file",
             "mcp_smokeball_get_upload_url",
             "mcp_smokeball_create_webhook_subscription",
+            "mcp_smokeball_create_event",
+            "mcp_smokeball_update_event",
+            "mcp_smokeball_create_event_reminder",
+            "mcp_smokeball_create_folder",
             "mcp_smokeball_create_matter",
             "mcp_smokeball_delete_file",
             # trust-account writes (BANNED — never autonomous, never configurable)

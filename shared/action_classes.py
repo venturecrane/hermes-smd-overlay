@@ -293,7 +293,8 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # so Hermes registers every tool as mcp_smokeball_<tool>. Native surface from
     # operator/verticals/law-firm/smokeball-surface.md. Reads → READ; the one
     # wedge write is create_memo (INTERNAL_WRITE); create_matter is COMMITMENT
-    # (never autonomous — gated draft); contact/task/file writes INTERNAL_WRITE;
+    # (never autonomous — gated draft); contact/task/file/calendar-event/folder
+    # writes INTERNAL_WRITE;
     # file delete DESTRUCTIVE. Trust-account writes (create_transaction /
     # protect_funds / unprotect_funds) are NOT here — they are hard-BANNED above.
     # Every Smokeball tool the server exposes MUST appear here or in BANNED_TOOLS;
@@ -324,6 +325,8 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_get_expenses": ActionClass.READ,
     "mcp_smokeball_get_webhook_subscriptions": ActionClass.READ,
     "mcp_smokeball_get_event_types": ActionClass.READ,
+    "mcp_smokeball_list_events": ActionClass.READ,
+    "mcp_smokeball_list_folders": ActionClass.READ,
     "mcp_smokeball_create_memo": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_patch_matter": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_contact": ActionClass.INTERNAL_WRITE,
@@ -332,6 +335,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_add_file": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_get_upload_url": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_create_event": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_update_event": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_create_event_reminder": ActionClass.INTERNAL_WRITE,
+    "mcp_smokeball_create_folder": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_matter": ActionClass.COMMITMENT,
     "mcp_smokeball_delete_file": ActionClass.DESTRUCTIVE,
     # ----------------------------------------------------------------------
