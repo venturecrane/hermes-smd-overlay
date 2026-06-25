@@ -383,8 +383,8 @@ class InboundOrigin:
     """The verified sender of the untrusted inbound that OPENED a session.
 
     ``SessionTaint`` records that a session ingested untrusted content and at
-    what trust class; it does NOT record WHO sent it. The demo reply relay
-    (``hermes-smd-demo-relay``) needs that: a reply may go back ONLY to the
+    what trust class; it does NOT record WHO sent it. The reply channel
+    (``hermes-smd-reply``) needs that: a reply may go back ONLY to the
     address that emailed in, keyed on the original message id (recipient-lock).
     This carries attribution only — never the body — mirroring
     :class:`InboundEnvelope`.

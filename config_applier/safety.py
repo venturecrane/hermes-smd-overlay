@@ -227,9 +227,12 @@ def floor_preserving(old_cfg: object, new_cfg: object) -> bool:
 _LIVE_WRITABLE_PREFIXES: tuple[str, ...] = (
     "scope.trust_ceiling",
     "scope.action_ceilings",
+    # The organization roster — re-read live by hermes-smd-reply on every draft
+    # (ADR 0055 / ADR 0044), so authoring who the Operator may autonomously reply
+    # to takes effect on the next message with no restart.
+    "scope.inbound_allow_from",
     "escalation",
     "webhook_triggers",
-    "demo",
     # Persona skill enablement + per-skill trust ceiling are live-writable. The
     # array index segment (``personas.0.skills.3.enabled``) is normalized to a
     # wildcard before this prefix match — see ``_normalize_path``.

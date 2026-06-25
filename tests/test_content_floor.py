@@ -58,7 +58,7 @@ def test_sensitive_categories_trip_floor(text, category) -> None:
 # ---------------------------------------------------------------------------
 # Disclaimer carve-out (2026-06-14) — standard not-legal-advice / attorney-
 # client boilerplate must NOT trip the legal category. Regression for the
-# demo-law live test where ``DEMO_RELAY_BLOCKED reason=content_sensitive``
+# reply-channel test where ``REPLY_HELD reason=content_sensitive``
 # fired on a benign "this is not legal advice" disclaimer.
 # ---------------------------------------------------------------------------
 

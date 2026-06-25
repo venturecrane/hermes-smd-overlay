@@ -1,4 +1,10 @@
-"""hermes-smd-demo-relay — autonomous demo reply WITHOUT weakening any floor.
+"""hermes-smd-reply — the Operator replies to a colleague WITHOUT weakening any floor.
+
+The Operator is an employee (ADR 0055). When someone on the organization roster
+emails its inbox, the employee reads, drafts a governed reply, and — because the
+sender is a colleague on the roster — actually sends it. This plugin is that
+last step: it relays the agent's already-governed draft back to the verified
+inbound sender, OUTSIDE the model's governed tool path, with fixed behavior.
 
 Attaches to one hook at the pinned Hermes ref (v2026.5.16):
 
@@ -7,33 +13,31 @@ Attaches to one hook at the pinned Hermes ref (v2026.5.16):
   reaches the hook under its live Hermes MCP runtime name
   ``mcp_agentmail_create_draft`` (``mcp_<server>_<tool>``).
 
-What it does (design: ``docs/security/demo-reply-relay-design.md``, ss-console):
-the tangible law demo needs the Operator's intake result emailed back to the
-prospect who emailed in. Under the law external-send-draft floor
-(``enforce.py``) and the taint-gate, the agent on an inbound-tainted turn
-DRAFTS the reply — exactly the safe behavior — but cannot autonomously send it.
-This relay sends that already-governed draft back to the verified inbound
-sender, OUTSIDE the model's governed tool path, with fixed demo-scoped behavior:
+What it does:
 
-  1. **Fail-closed flag, read live.** Acts only when the customer authored
-     ``demo.reply_relay: enabled``, re-read from customer.yaml on every call
-     (ADR 0044 WS2) so authoring it on/off takes effect on the next draft with
-     no restart. Absent / unreadable ⇒ the hook no-ops. A real customer can
-     never be regressed: the flag is checked live and they never author it.
+  1. **Roster authorization, read live.** Sends only when the verified inbound
+     sender is on the organization roster (``scope.inbound_allow_from``), re-read
+     from customer.yaml on every call (ADR 0044) so authoring the roster takes
+     effect on the next draft with no restart. Empty / unauthored roster ⇒ the
+     hook no-ops (fail-closed: the employee drafts, does not autonomously reply
+     to a stranger).
   2. **Recipient-lock.** Sends only to the recorded inbound sender
      (``SESSION_INBOUND_ORIGIN``, first-inbound-wins), keyed on the recorded
      inbox + message id — an injected/substituted recipient cannot redirect it.
+     Roster membership authorizes; the recipient-lock structurally bounds.
   3. **Re-applied floors.** Re-runs ``content_floor.classify`` +
      ``outbound_gate.evaluate`` on the draft body before sending (the same
      content/fabrication floors the autonomous-send path would have applied).
   4. **Rate-limit.** Per-sender + global rolling-window bound.
-  5. **Audit.** Emits ``DEMO_RELAY_SENT`` on send, ``DEMO_RELAY_BLOCKED`` on a
-     refused relay (reason only — never the body), ``DEMO_RELAY_FAILED`` on a
-     send error. Digest + recipient + message id only; never the content.
+  5. **Audit.** Emits ``REPLY_SENT`` on send, ``REPLY_HELD`` on a reply held
+     back to draft (reason only — never the body), ``REPLY_FAILED`` on a send
+     error. Digest + recipient + message id only; never the content.
 
 It defeats NO agent floor — the trust gate, taint-gate, content floor, and
-fabrication gate are byte-for-byte unchanged. "Autonomous send" lives in this
-trusted, demo-scoped code, not in a loosened model capability.
+fabrication gate are byte-for-byte unchanged. "Autonomous reply" lives in this
+trusted code, not in a loosened model capability. Reaching anyone OUTSIDE the
+roster is not this plugin's job; that requires explicit authorization and goes
+through the model's governed (drafting) path (ADR 0055 §3).
 
 Hook callbacks are exception-safe per AGENTS.md hard rule #3.
 """
@@ -64,9 +68,7 @@ logger = logging.getLogger(__name__)
 # Hermes registers MCP tools as ``mcp_<server>_<tool>``, so the live runtime
 # name is ``mcp_agentmail_create_draft`` — the ONLY form the agent emits. The
 # colon spelling is retained as an accepted alias (capability-contract / tests);
-# matching a set keeps the hook firing regardless of which form reaches it. The
-# earlier code matched only the colon form, so the hook never fired in
-# production and the relay was dead on demo-law (2026-06-12 live test).
+# matching a set keeps the hook firing regardless of which form reaches it.
 _CREATE_DRAFT_TOOLS = frozenset({"mcp_agentmail_create_draft", "agentmail:create_draft"})
 
 _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
@@ -74,12 +76,12 @@ _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
 
 # Module-level state — populated by ``register()``. ``_INFRA_READY`` is the
 # register-time gate: True only when the relay CAN send (AgentMail key resolved
-# and the rate-limiter built). It does NOT mean the relay is authorized — that
-# is the live ``demo.reply_relay`` flag, re-read from customer.yaml on every
-# call (ADR 0044 WS2). Splitting "can send" (infra, register-bound: env secrets
-# + process objects that only change on a restart) from "should send" (flag,
-# live) is what lets authoring the flag on/off take effect without a restart
-# while keeping the send credential off the hot path.
+# and the rate-limiter built). It does NOT mean a given reply is authorized —
+# that is the live roster check, re-read from customer.yaml on every call
+# (ADR 0044). Splitting "can send" (infra, register-bound: env secrets + process
+# objects that only change on a restart) from "may reply" (roster, live) is what
+# lets authoring the roster take effect without a restart while keeping the send
+# credential off the hot path.
 _INFRA_READY: bool = False
 _API_KEY: str | None = None
 _CUSTOMER_SLUG: str | None = None
@@ -88,28 +90,28 @@ _LIMITER: relay.RateLimiter | None = None
 _YAML_PATH: Path = Path(_DEFAULT_CUSTOMER_YAML_PATH)
 
 
-def _emit_relay_event(*, action_type: str, metadata: dict) -> None:
-    """Write one demo-relay audit row directly via D1Client (mirror-don't-gate).
+def _emit_reply_event(*, action_type: str, metadata: dict) -> None:
+    """Write one reply-channel audit row directly via D1Client (mirror-don't-gate).
 
     Shares the ``shared.audit_contract`` row shape with the audit plugin so the
     two can never desync. Metadata carries digest + recipient + message id +
     reason ONLY — never the draft body. Best-effort: a failed emission is logged
-    and swallowed (the relay's send decision already happened)."""
+    and swallowed (the reply decision already happened)."""
     if _D1_CLIENT is None or _CUSTOMER_SLUG is None:
         return
     try:
         params = agent_event_params(
             action_type=action_type,
-            metadata={"customer": _CUSTOMER_SLUG, "per_demo_relay": True, **metadata},
+            metadata={"customer": _CUSTOMER_SLUG, "reply_channel": True, **metadata},
         )
         _D1_CLIENT.execute(_INSERT_SQL, *params)
     except Exception as exc:  # noqa: BLE001 — audit must never break the hook
-        logger.warning("hermes-smd-demo-relay: %s emission failed (%s)", action_type, exc)
+        logger.warning("hermes-smd-reply: %s emission failed (%s)", action_type, exc)
 
 
-def _blocked(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
-    _emit_relay_event(
-        action_type="DEMO_RELAY_BLOCKED",
+def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
+    _emit_reply_event(
+        action_type="REPLY_HELD",
         metadata={
             "reason": reason,
             "recipient": origin.sender_address,
@@ -120,7 +122,7 @@ def _blocked(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
 
 
 def on_post_tool_call(**kwargs: Any) -> None:
-    """Relay the agent's governed draft back to the verified inbound sender.
+    """Relay the agent's governed draft back to a verified, rostered inbound sender.
 
     Returns ``None`` always — ``post_tool_call`` cannot block (the draft is
     already created); the relay performs an out-of-band send and never alters
@@ -132,21 +134,16 @@ def on_post_tool_call(**kwargs: Any) -> None:
         if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
             return
 
-        # Authorization is read LIVE (ADR 0044 WS2): demo.reply_relay can be
-        # authored on/off without a restart, so the relay re-reads it here and
-        # acts only if the customer currently authors it. Fail closed if
-        # customer.yaml is unreadable — a relay that cannot confirm it is
-        # authored never sends.
+        # Config is read LIVE (ADR 0044): the roster can be authored without a
+        # restart, so the relay re-reads it here. Fail closed if customer.yaml is
+        # unreadable — a relay that cannot confirm the roster never sends.
         try:
             cfg = CustomerConfig.from_volume(str(_YAML_PATH))
         except (CustomerConfigError, OSError) as exc:
             logger.warning(
-                "hermes-smd-demo-relay: customer.yaml live-read failed (%s); "
-                "not relaying this call",
+                "hermes-smd-reply: customer.yaml live-read failed (%s); not replying this call",
                 exc,
             )
-            return
-        if not cfg.demo_reply_relay_enabled:
             return
         vertical = cfg.vertical or None
 
@@ -169,7 +166,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
             )
             if recovered is not None:
                 logger.info(
-                    "hermes-smd-demo-relay: session-keyed origin missed (session=%r); "
+                    "hermes-smd-reply: session-keyed origin missed (session=%r); "
                     "recovered verified inbound origin by recipient address",
                     session_id,
                 )
@@ -180,14 +177,22 @@ def on_post_tool_call(**kwargs: Any) -> None:
             # originate from an inbound email never relays.
             return
 
+        # (a) Roster authorization — the Operator replies autonomously only to a
+        # colleague on the organization roster (ADR 0055). A verified inbound
+        # sender NOT on the roster gets a drafted (not sent) reply: reaching
+        # outside the roster needs explicit authorization. Held, not an error.
+        if not cfg.sender_on_roster(origin.sender_address):
+            _held("sender_not_on_roster", origin)
+            return
+
         # (b) Recipient-lock — the reply can go ONLY to the address that emailed
         # in. An injected extra/substituted recipient fails the lock here.
         if not relay.recipient_locked(args, origin.sender_address):
-            _blocked("recipient_mismatch", origin, draft_to=sorted(relay.draft_recipients(args)))
+            _held("recipient_mismatch", origin, draft_to=sorted(relay.draft_recipients(args)))
             return
         if not origin.inbox_id:
             # No inbox to thread the reply into — fail closed.
-            _blocked("no_inbox_id", origin)
+            _held("no_inbox_id", origin)
             return
 
         scan_text, send_text, send_html = relay.draft_body(args)
@@ -195,18 +200,18 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # (c) Re-apply the content + fabrication floors to the draft body.
         gate = relay.gate_body(scan_text, vertical=vertical, cohort=_CUSTOMER_SLUG)
         if not gate.allowed:
-            _blocked(gate.reason, origin, categories=list(gate.categories))
+            _held(gate.reason, origin, categories=list(gate.categories))
             return
 
         if not (send_text or send_html):
             # Subject-only draft — nothing to relay (the gate scans the subject,
             # but a reply transmits only the body). Fail closed.
-            _blocked("empty_body", origin)
+            _held("empty_body", origin)
             return
 
         # (d) Rate-limit (per-sender + global).
         if _LIMITER is None or not _LIMITER.allow(origin.sender_address):
-            _blocked("rate_limited", origin)
+            _held("rate_limited", origin)
             return
 
         # (e) Send the threaded reply via the AgentMail REST API, keyed on the
@@ -220,8 +225,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 html=send_html,
             )
         except relay.RelaySendError as exc:
-            _emit_relay_event(
-                action_type="DEMO_RELAY_FAILED",
+            _emit_reply_event(
+                action_type="REPLY_FAILED",
                 metadata={
                     "reason": str(exc),
                     "recipient": origin.sender_address,
@@ -231,8 +236,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
             return
 
         # (f) Audit the send — digest + recipient + message ids, never the body.
-        _emit_relay_event(
-            action_type="DEMO_RELAY_SENT",
+        _emit_reply_event(
+            action_type="REPLY_SENT",
             metadata={
                 "recipient": origin.sender_address,
                 "in_reply_to": origin.message_id,
@@ -242,7 +247,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
             },
         )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
-        logger.warning("hermes-smd-demo-relay: post_tool_call handler error: %s", exc)
+        logger.warning("hermes-smd-reply: post_tool_call handler error: %s", exc)
 
 
 def register(ctx) -> None:
@@ -250,28 +255,28 @@ def register(ctx) -> None:
 
     Resolves the send infrastructure at register time — the AgentMail API key,
     the customer slug, the audit binding, the rate-limiter — and sets
-    ``_INFRA_READY`` accordingly. The ``demo.reply_relay`` authorization flag is
-    deliberately NOT bound here: it is re-read from customer.yaml on every call
-    (``on_post_tool_call``) so authoring it on/off takes effect on the next
-    draft with no restart (ADR 0044 WS2). The hook is registered unconditionally
-    so the plugin set is uniform across customers; it no-ops whenever the relay
-    is not infra-ready or the live flag is off.
+    ``_INFRA_READY`` accordingly. The roster authorization is deliberately NOT
+    bound here: it is re-read from customer.yaml on every call
+    (``on_post_tool_call``) so authoring the roster takes effect on the next
+    draft with no restart (ADR 0044). The hook is registered unconditionally so
+    the plugin set is uniform across customers; it no-ops whenever the relay is
+    not infra-ready or the sender is not on the live roster.
     """
     global _INFRA_READY, _API_KEY, _CUSTOMER_SLUG, _D1_CLIENT, _LIMITER, _YAML_PATH
 
     _INFRA_READY = False  # fail closed until the send infra resolves
     _YAML_PATH = Path(os.environ.get("SMD_CUSTOMER_YAML_PATH") or _DEFAULT_CUSTOMER_YAML_PATH)
 
-    # Resolve the send credential UNCONDITIONALLY — do not gate it on the flag.
-    # Because the flag is now read live, the relay must be ready to act the
-    # instant a customer authors demo.reply_relay on, with no reprovision. A
-    # customer without the AgentMail key simply never becomes infra-ready and
-    # never relays (the live flag is moot without a credential to send with).
+    # Resolve the send credential UNCONDITIONALLY — do not gate it on the roster.
+    # Because the roster is read live, the relay must be ready to act the instant
+    # a colleague on the roster emails in, with no reprovision. A customer without
+    # the AgentMail key simply never becomes infra-ready and never replies (the
+    # live roster is moot without a credential to send with).
     try:
         _API_KEY = get_secret("AGENTMAIL_API_KEY")
     except KeyError:
         logger.info(
-            "hermes-smd-demo-relay: AGENTMAIL_API_KEY unset; relay cannot send "
+            "hermes-smd-reply: AGENTMAIL_API_KEY unset; reply channel cannot send "
             "(infra not ready). Hook registered; it no-ops every call."
         )
         ctx.register_hook("post_tool_call", on_post_tool_call)
@@ -286,11 +291,11 @@ def register(ctx) -> None:
         _D1_CLIENT = audit_client_from_env(customer_slug=_CUSTOMER_SLUG)
     except KeyError as exc:
         # Audit is observability, not a gate — the relay can still send. Run
-        # without it rather than disabling a working demo for a missing binding.
+        # without it rather than disabling a working channel for a missing binding.
         _CUSTOMER_SLUG = None
         _D1_CLIENT = None
         logger.warning(
-            "hermes-smd-demo-relay: audit binding unconfigured (%s); relay will "
+            "hermes-smd-reply: audit binding unconfigured (%s); reply channel will "
             "send without emitting audit rows",
             exc,
         )
@@ -299,7 +304,7 @@ def register(ctx) -> None:
     _INFRA_READY = True
     ctx.register_hook("post_tool_call", on_post_tool_call)
     logger.info(
-        "hermes-smd-demo-relay registered (infra_ready=True, customer=%s); "
-        "relay gated on the live demo.reply_relay flag",
+        "hermes-smd-reply registered (infra_ready=True, customer=%s); "
+        "replies gated on the live organization roster (scope.inbound_allow_from)",
         _CUSTOMER_SLUG,
     )

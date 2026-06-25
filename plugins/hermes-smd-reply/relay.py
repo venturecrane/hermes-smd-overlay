@@ -1,16 +1,16 @@
-"""Pure logic + AgentMail send for the demo reply relay.
+"""Pure logic + AgentMail send for the Operator reply channel.
 
 Kept out of ``__init__.py`` so the hook callback stays a thin, exception-safe
 wrapper (AGENTS.md: heavier logic lives in module files imported by register).
 No module-level state here — the plugin owns the rate-limiter instance and the
 API key; this module is a library of pure decisions plus one network call.
 
-Design: ``docs/security/demo-reply-relay-design.md`` (ss-console). The relay
-sends the agent's OWN governed draft (produced under the law external-send
-floor + taint-gate + content/fabrication floors) back to the verified inbound
-sender. It defeats no agent floor; it implements "autonomous reply" OUTSIDE the
-model's governed tool path, with fixed, demo-scoped behavior and a structural
-recipient-lock.
+Design: ADR 0055 (the Operator is an employee). The reply channel sends the
+agent's OWN governed draft (produced under the taint-gate + content/fabrication
+floors) back to the verified inbound sender when that sender is on the
+organization roster. It defeats no agent floor; it implements the employee's
+"reply to a colleague" OUTSIDE the model's governed tool path, with a structural
+recipient-lock and roster-membership authorization.
 """
 
 from __future__ import annotations
@@ -38,10 +38,10 @@ AGENTMAIL_API_BASE = "https://api.agentmail.to/v0"
 _SEND_TIMEOUT_S = 10.0
 
 
-# Rate-limit defaults (demo-scoped). A demo prospect sends one intake and gets
-# one reply; these bound a runaway/abusive loop without constraining the happy
-# path. Per-sender is the tight bound (one address cannot be replied to more
-# than _PER_SENDER_MAX times in the window); global bounds total relay volume.
+# Rate-limit defaults. A colleague sends a message and gets one reply; these
+# bound a runaway/abusive loop without constraining the happy path. Per-sender is
+# the tight bound (one address cannot be replied to more than _PER_SENDER_MAX
+# times in the window); global bounds total reply volume.
 _PER_SENDER_MAX = 3
 _PER_SENDER_WINDOW_S = 600.0  # 10 min
 _GLOBAL_MAX = 20
@@ -152,7 +152,7 @@ def gate_body(scan_text: str, *, vertical: str | None, cohort: str | None) -> Ga
     try:
         floor = content_floor.classify(scan_text)
     except Exception:  # noqa: BLE001 — uncertifiable body must not relay
-        logger.exception("demo-relay: content floor raised; refusing to relay")
+        logger.exception("reply-channel: content floor raised; refusing to reply")
         return GateResult(allowed=False, reason="content_floor_error")
     if floor.sensitive:
         return GateResult(allowed=False, reason="content_sensitive", categories=floor.categories)
@@ -160,7 +160,7 @@ def gate_body(scan_text: str, *, vertical: str | None, cohort: str | None) -> Ga
     try:
         decision = outbound_gate.evaluate(scan_text, cohort, vertical)
     except Exception:  # noqa: BLE001 — fail closed on a raising gate
-        logger.exception("demo-relay: outbound gate raised; refusing to relay")
+        logger.exception("reply-channel: outbound gate raised; refusing to reply")
         return GateResult(allowed=False, reason="outbound_gate_error")
     if not decision.allowed:
         return GateResult(allowed=False, reason=f"fabrication:{decision.tier or 'blocked'}")

@@ -134,7 +134,7 @@ _CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
 # legal-domain language there is — a law-vertical operator's auto-reply should
 # always be able to carry it — yet it contains the words "legal" / "attorney"
 # that the LEGAL patterns above match, so a benign disclaimer was forcing the
-# whole reply to draft (demo-law live test 2026-06-14, ``DEMO_RELAY_BLOCKED
+# whole reply to draft (reply-channel test 2026-06-14, ``REPLY_HELD
 # reason=content_sensitive`` on "Nothing in this note should be read as legal
 # advice").
 #
