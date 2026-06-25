@@ -244,39 +244,58 @@ class CustomerConfig:
         return dict(raw)
 
     # ------------------------------------------------------------------
-    # Demo-only switches
+    # Roster — the organization's people (scope.inbound_allow_from)
     # ------------------------------------------------------------------
 
     @property
-    def demo(self) -> dict[str, Any]:
-        """Return the ``demo`` mapping (demo-only switches).
+    def inbound_roster(self) -> list[str]:
+        """Return the organization roster — ``scope.inbound_allow_from`` — normalized.
 
-        Demo switches enable behavior that exists ONLY to drive a tangible
-        prospect demo and must never be authored for a real customer holding
-        real client data. Absent ⇒ ``{}`` (every demo switch reads False/off).
+        The roster is the set of correspondents the Operator converses with as a
+        colleague (ADR 0055): exact addresses and/or ``@domain`` entries. Entries
+        are lowercased + stripped; non-string / empty entries are dropped. Absent
+        or empty ⇒ ``[]`` — fail-closed: the Operator reads and drafts but never
+        autonomously replies to anyone until a roster is authored.
         """
-        raw = self._data.get("demo") or {}
-        if not isinstance(raw, dict):
+        raw = self.scope.get("inbound_allow_from") or []
+        if not isinstance(raw, list):
             raise CustomerConfigError(
-                f"customer.yaml: demo must be a mapping; got {type(raw).__name__}"
+                f"customer.yaml: scope.inbound_allow_from must be a list; got {type(raw).__name__}"
             )
-        return dict(raw)
+        out: list[str] = []
+        for entry in raw:
+            if isinstance(entry, str):
+                norm = entry.strip().lower()
+                if norm:
+                    out.append(norm)
+        return out
 
-    @property
-    def demo_reply_relay_enabled(self) -> bool:
-        """True iff ``demo.reply_relay`` is authored enabled (fail-closed).
+    def sender_on_roster(self, sender_address: object) -> bool:
+        """True iff ``sender_address`` is on the organization roster (ADR 0055).
 
-        Gates the ``hermes-smd-demo-relay`` plugin. Absent / non-true ⇒ False,
-        so the relay no-ops for every customer that has not explicitly authored
-        it — a real customer can never be regressed into autonomous send by the
-        relay. Accepts ``enabled``, ``true``, or boolean ``True`` (case- and
-        type-tolerant) as the only positive values; anything else is off.
+        A sender matches when their full address (normalized lowercase) equals a
+        roster entry exactly, OR a roster entry begins with ``@`` and the
+        sender's domain matches it exactly. Mirrors the email-reply skill's
+        allow-list matching. Fail-closed: an empty roster matches no one, so the
+        Operator drafts rather than autonomously replying. Roster membership is
+        the authorization to respond; the reply path still recipient-locks to the
+        verified inbound sender independently.
         """
-        value = self.demo.get("reply_relay")
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {"enabled", "true", "on", "yes"}
+        if not isinstance(sender_address, str):
+            return False
+        addr = sender_address.strip().lower()
+        if not addr:
+            return False
+        roster = self.inbound_roster
+        if not roster:
+            return False
+        domain = addr.rsplit("@", 1)[-1] if "@" in addr else ""
+        for entry in roster:
+            if entry.startswith("@"):
+                if domain and entry == f"@{domain}":
+                    return True
+            elif entry == addr:
+                return True
         return False
 
     # ------------------------------------------------------------------

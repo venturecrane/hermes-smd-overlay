@@ -481,15 +481,16 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         inbound.PENDING.enqueue(
             inbound.InboundItem(session_id=session_id, content=content, envelope=envelope)
         )
-        # Recipient-lock anchor (hermes-smd-demo-relay). Record WHO opened this
+        # Recipient-lock anchor (hermes-smd-reply). Record WHO opened this
         # session — the verified inbound sender + the inbox/message to reply
-        # into — so the demo relay can only send a governed draft back to the
+        # into — so the reply channel can only send a governed draft back to the
         # address that emailed in. FIRST inbound wins (SessionInboundOrigin), so
         # a later injected "inbound" cannot move the lock. Recording the origin
-        # grants NO send capability on its own; the relay is fail-closed on the
-        # demo.reply_relay flag and re-checks the content/fabrication floors. A
-        # payload without a resolvable sender/message-id records nothing (the
-        # relay then finds no origin and refuses to send). Never breaks routing.
+        # grants NO send capability on its own; the reply is fail-closed on the
+        # organization roster (scope.inbound_allow_from) and re-checks the
+        # content/fabrication floors. A payload without a resolvable
+        # sender/message-id records nothing (the relay then finds no origin and
+        # refuses to send). Never breaks routing.
         origin = _inbound_origin_from(payload, content=content)
         if origin is not None:
             inbound.SESSION_INBOUND_ORIGIN.record(session_id, origin)

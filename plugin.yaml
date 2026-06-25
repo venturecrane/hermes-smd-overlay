@@ -11,7 +11,7 @@ plugins:
   - plugins/hermes-smd-inbound
   - plugins/hermes-smd-hook-probe
   - plugins/hermes-smd-workspace
-  - plugins/hermes-smd-demo-relay
+  - plugins/hermes-smd-reply
   - plugins/hermes-smd-peer-memory
   - plugins/hermes-smd-mcp-result-sink
   - plugins/hermes-smd-jobs

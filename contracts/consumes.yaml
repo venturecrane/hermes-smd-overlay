@@ -88,8 +88,8 @@ vars:
     discovery: static
     stage: agent
     requirement: optional
-    consumed_by: [demo-relay]
-    note: "AgentMail REST credential (Bearer) for the demo reply relay's threaded send; read only when demo.reply_relay is authored. Absent => relay disables (no send). Also the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py)."
+    consumed_by: [reply]
+    note: "AgentMail REST credential (Bearer) for the reply channel's threaded send; used when the inbound sender is on the organization roster (scope.inbound_allow_from). Absent => reply channel disables (no send). Also the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py)."
   SMD_MCP_STORE_DIR:
     discovery: static
     stage: agent

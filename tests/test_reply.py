@@ -1,16 +1,18 @@
-"""Tests for the hermes-smd-demo-relay plugin.
+"""Tests for the hermes-smd-reply plugin (the Operator reply channel).
 
-The relay sends the agent's GOVERNED draft back to the verified inbound sender,
-OUTSIDE the model's tool path, without weakening any agent floor. The security
-crux is the recipient-lock + the fail-closed flag; these tests pin both, plus
-the re-applied content/fabrication floors, the rate-limit, and the guarantee
-that a real (non-demo) customer is byte-for-byte unaffected.
+The reply channel sends the agent's GOVERNED draft back to the verified inbound
+sender, OUTSIDE the model's tool path, without weakening any agent floor — and
+only when that sender is on the organization roster (``scope.inbound_allow_from``,
+ADR 0055). The security crux is the recipient-lock + the roster authorization;
+these tests pin both, plus the re-applied content/fabrication floors, the
+rate-limit, and the guarantee that an unauthored roster never sends.
 
-Covers (design checklist, docs/security/demo-reply-relay-design.md):
+Covers:
   1. recipient-lock cannot be redirected by an injected/substituted recipient;
-  2. fail-closed without the flag (and a real customer is never relayed);
-  3. the content floor re-check blocks a sensitive body before send;
-  4. the fabrication gate re-check blocks a body with a fabricated citation;
+  2. roster authorization: empty/unauthored roster holds; a sender not on the
+     roster is held; authoring the roster enables the reply live (no restart);
+  3. the content floor re-check holds a sensitive body before send;
+  4. the fabrication gate re-check holds a body with a fabricated citation;
   5. the rate-limit bounds per-sender + global volume;
   6. the happy path sends keyed on the RECORDED inbox+message (structural lock)
      and audits without persisting the body.
@@ -47,6 +49,19 @@ class _FakeD1Client:
         return out
 
 
+# A customer.yaml that authors the test sender onto the organization roster.
+_ROSTERED_YAML = (
+    "customer_id: acme\n"
+    "vertical: law-firm\n"
+    "scope:\n"
+    "  inbound_allow_from:\n"
+    "    - greg@whitfield.example\n"
+)
+# Same customer with NO roster authored — fail-closed: the Operator drafts but
+# never autonomously replies.
+_NO_ROSTER_YAML = "customer_id: acme\nvertical: law-firm\n"
+
+
 @pytest.fixture(autouse=True)
 def _clear_origin():
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
@@ -58,19 +73,19 @@ def _clear_origin():
 
 @pytest.fixture
 def relay_mod(monkeypatch, tmp_path):
-    """Load the plugin and put it in the infra-ready + authored demo state.
+    """Load the plugin and put it in the infra-ready + rostered state.
 
     Infra readiness (``_INFRA_READY`` + key + limiter + audit) is register-time
-    state, monkeypatched directly. Authorization is read LIVE per call (ADR 0044
-    WS2), so the relay is enabled by pointing ``_YAML_PATH`` at a customer.yaml
-    that authors ``demo.reply_relay: enabled`` (and ``vertical: law-firm``, which
-    drives the content floor). Tests that want the disabled path rewrite that
-    file to drop the flag, proving the live-read disables mid-flight with no
-    restart. ``send_reply`` is replaced (via monkeypatch so it auto-restores —
-    ``load_plugin`` returns the process-cached module) with a capturing stub so
-    no network call happens.
+    state, monkeypatched directly. Authorization is read LIVE per call (ADR 0044),
+    so the relay is enabled by pointing ``_YAML_PATH`` at a customer.yaml that
+    authors the test sender onto ``scope.inbound_allow_from`` (and
+    ``vertical: law-firm``, which drives the content floor). Tests that want the
+    held path rewrite that file to drop the roster, proving the live-read holds
+    mid-flight with no restart. ``send_reply`` is replaced (via monkeypatch so it
+    auto-restores — ``load_plugin`` returns the process-cached module) with a
+    capturing stub so no network call happens.
     """
-    mod = load_plugin("hermes-smd-demo-relay")
+    mod = load_plugin("hermes-smd-reply")
     fake_d1 = _FakeD1Client()
     sent: list[dict] = []
 
@@ -87,13 +102,11 @@ def relay_mod(monkeypatch, tmp_path):
         return "msg_sent_1"
 
     yaml_path = tmp_path / "customer.yaml"
-    yaml_path.write_text(
-        "customer_id: demo-law\nvertical: law-firm\ndemo:\n  reply_relay: enabled\n"
-    )
+    yaml_path.write_text(_ROSTERED_YAML)
 
     monkeypatch.setattr(mod, "_INFRA_READY", True, raising=False)
     monkeypatch.setattr(mod, "_API_KEY", "test-key", raising=False)
-    monkeypatch.setattr(mod, "_CUSTOMER_SLUG", "demo-law", raising=False)
+    monkeypatch.setattr(mod, "_CUSTOMER_SLUG", "acme", raising=False)
     monkeypatch.setattr(mod, "_D1_CLIENT", fake_d1, raising=False)
     monkeypatch.setattr(mod, "_LIMITER", mod.relay.RateLimiter(), raising=False)
     monkeypatch.setattr(mod, "_YAML_PATH", yaml_path, raising=False)
@@ -125,9 +138,9 @@ def _draft(
 
 
 def test_registers_post_tool_call(fake_ctx, monkeypatch, tmp_path) -> None:
-    # No customer.yaml on the default path ⇒ disabled, but the hook still wires.
+    # No customer.yaml on the default path ⇒ no roster, but the hook still wires.
     monkeypatch.setenv("SMD_CUSTOMER_YAML_PATH", str(tmp_path / "absent.yaml"))
-    mod = load_plugin("hermes-smd-demo-relay")
+    mod = load_plugin("hermes-smd-reply")
     mod.register(fake_ctx)
     assert "post_tool_call" in fake_ctx.registered
 
@@ -152,15 +165,15 @@ def test_happy_path_sends_to_recorded_inbox_and_message(relay_mod) -> None:
     assert sent[0]["message_id"] == "msg_in"
     # Audit row carries digest + recipient, never the body.
     events = d1.events()
-    assert any(a == "DEMO_RELAY_SENT" for a, _ in events)
-    _, meta = next((a, m) for a, m in events if a == "DEMO_RELAY_SENT")
+    assert any(a == "REPLY_SENT" for a, _ in events)
+    _, meta = next((a, m) for a, m in events if a == "REPLY_SENT")
     assert meta["recipient"] == "greg@whitfield.example"
     assert "body_digest" in meta
     assert "Thanks for reaching out" not in json.dumps(meta)
 
 
 def test_runtime_mcp_tool_name_fires_relay(relay_mod) -> None:
-    """Regression for the 2026-06-12 demo-law live test: the relay hooked the
+    """Regression for the 2026-06-12 inbound live test: the relay hooked the
     colon spelling ``agentmail:create_draft``, but Hermes emits the MCP runtime
     name ``mcp_agentmail_create_draft`` — so the hook never fired in production
     and the relay was dead. The live runtime name MUST trigger the send."""
@@ -178,9 +191,9 @@ def test_runtime_mcp_tool_name_fires_relay(relay_mod) -> None:
 
 def test_recovers_origin_when_session_id_mismatches(relay_mod) -> None:
     """The router records the origin under the DISPATCH session_id (often empty);
-    the relay reads under the AGENT session_id. When they differ (the demo-law
-    2026-06-12 live bug — draft created, no reply sent), the relay recovers the
-    verified origin by matching the draft's recipient against the address index."""
+    the relay reads under the AGENT session_id. When they differ (the 2026-06-12
+    live bug — draft created, no reply sent), the relay recovers the verified
+    origin by matching the draft's recipient against the address index."""
     mod, _d1, sent = relay_mod
     # Recorded under an empty dispatch session id ...
     _record_origin(
@@ -233,9 +246,7 @@ def test_injected_extra_recipient_fails_lock(relay_mod) -> None:
         session_id="s1",
     )
     assert sent == []
-    assert any(
-        a == "DEMO_RELAY_BLOCKED" and m["reason"] == "recipient_mismatch" for a, m in d1.events()
-    )
+    assert any(a == "REPLY_HELD" and m["reason"] == "recipient_mismatch" for a, m in d1.events())
 
 
 def test_substituted_recipient_fails_lock(relay_mod) -> None:
@@ -282,20 +293,21 @@ def test_missing_inbox_id_does_not_send(relay_mod) -> None:
         session_id="s1",
     )
     assert sent == []
-    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "no_inbox_id" for a, m in d1.events())
+    assert any(a == "REPLY_HELD" and m["reason"] == "no_inbox_id" for a, m in d1.events())
 
 
 # ---------------------------------------------------------------------------
-# 2. Fail-closed flag — a real (non-demo) customer is never relayed
+# 2. Roster authorization — the org roster is what permits an autonomous reply
 # ---------------------------------------------------------------------------
 
 
-def test_disabled_flag_never_sends(relay_mod) -> None:
+def test_empty_roster_holds(relay_mod) -> None:
     mod, d1, sent = relay_mod
-    # Real customer: demo.reply_relay unauthored. The flag is read LIVE, so
-    # rewriting the authored customer.yaml to drop it disables the relay on the
-    # very next call — no restart, no re-register (ADR 0044 WS2).
-    mod._YAML_PATH.write_text("customer_id: demo-law\nvertical: law-firm\n")
+    # Unauthored roster: scope.inbound_allow_from absent. Read LIVE, so rewriting
+    # the customer.yaml to drop it holds the reply on the very next call — no
+    # restart (ADR 0044). A verified sender still gets a HELD audit row (the
+    # employee drafted, did not send), reason=sender_not_on_roster.
+    mod._YAML_PATH.write_text(_NO_ROSTER_YAML)
     _record_origin(sender="greg@whitfield.example")
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
@@ -303,15 +315,45 @@ def test_disabled_flag_never_sends(relay_mod) -> None:
         session_id="s1",
     )
     assert sent == []
-    assert d1.events() == []  # not even an audit row — byte-for-byte unaffected
+    assert any(a == "REPLY_HELD" and m["reason"] == "sender_not_on_roster" for a, m in d1.events())
 
 
-def test_live_flag_enables_mid_flight(relay_mod) -> None:
-    """The positive WS2 guarantee: authoring demo.reply_relay ON applies on the
-    next call with no restart. Start with it OFF (no send), flip the authored
-    customer.yaml ON, and the very next identical call relays."""
+def test_sender_not_on_roster_holds(relay_mod) -> None:
+    mod, d1, sent = relay_mod
+    # The roster authors greg; a DIFFERENT verified inbound sender is held —
+    # reaching/replying outside the roster needs explicit authorization.
+    _record_origin(sender="stranger@elsewhere.test", message_id="msg_in", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["stranger@elsewhere.test"]),
+        session_id="s1",
+    )
+    assert sent == []
+    assert any(a == "REPLY_HELD" and m["reason"] == "sender_not_on_roster" for a, m in d1.events())
+
+
+def test_domain_roster_entry_matches(relay_mod) -> None:
     mod, _d1, sent = relay_mod
-    mod._YAML_PATH.write_text("customer_id: demo-law\nvertical: law-firm\n")  # off
+    # An "@domain" roster entry authorizes any sender at that domain.
+    mod._YAML_PATH.write_text(
+        "customer_id: acme\nvertical: law-firm\nscope:\n"
+        "  inbound_allow_from:\n    - '@whitfield.example'\n"
+    )
+    _record_origin(sender="anyone@whitfield.example", message_id="msg_in", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="mcp_agentmail_create_draft",
+        args=_draft(["anyone@whitfield.example"]),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+
+
+def test_live_roster_enables_mid_flight(relay_mod) -> None:
+    """The positive ADR 0044 guarantee: adding a sender to the roster applies on
+    the next call with no restart. Start with NO roster (held), author the sender
+    onto scope.inbound_allow_from, and the very next identical call replies."""
+    mod, _d1, sent = relay_mod
+    mod._YAML_PATH.write_text(_NO_ROSTER_YAML)  # no roster
     _record_origin(sender="greg@whitfield.example", message_id="msg_in", inbox_id="inbox_x")
     mod.on_post_tool_call(
         tool_name="mcp_agentmail_create_draft",
@@ -319,10 +361,8 @@ def test_live_flag_enables_mid_flight(relay_mod) -> None:
         session_id="s1",
     )
     assert sent == []
-    # Author it ON — no re-register, no restart.
-    mod._YAML_PATH.write_text(
-        "customer_id: demo-law\nvertical: law-firm\ndemo:\n  reply_relay: enabled\n"
-    )
+    # Author the sender onto the roster — no re-register, no restart.
+    mod._YAML_PATH.write_text(_ROSTERED_YAML)
     mod.on_post_tool_call(
         tool_name="mcp_agentmail_create_draft",
         args=_draft(["greg@whitfield.example"]),
@@ -333,7 +373,7 @@ def test_live_flag_enables_mid_flight(relay_mod) -> None:
 
 def test_unreadable_yaml_fails_closed(relay_mod) -> None:
     """If customer.yaml is missing/unreadable at decision time, the relay cannot
-    confirm it is authored, so it fails closed and never sends."""
+    confirm the roster, so it fails closed and never sends."""
     mod, _d1, sent = relay_mod
     mod._YAML_PATH.unlink()  # remove the authored file out from under the live read
     _record_origin(sender="greg@whitfield.example")
@@ -361,10 +401,10 @@ def test_non_create_draft_tool_ignored(relay_mod) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sensitive_body_blocked(relay_mod) -> None:
+def test_sensitive_body_held(relay_mod) -> None:
     mod, d1, sent = relay_mod
     _record_origin(sender="greg@whitfield.example")
-    # A money/contract body trips the content floor — refuse to relay.
+    # A money/contract body trips the content floor — hold (do not relay).
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args=_draft(
@@ -374,16 +414,14 @@ def test_sensitive_body_blocked(relay_mod) -> None:
         session_id="s1",
     )
     assert sent == []
-    assert any(
-        a == "DEMO_RELAY_BLOCKED" and m["reason"] == "content_sensitive" for a, m in d1.events()
-    )
+    assert any(a == "REPLY_HELD" and m["reason"] == "content_sensitive" for a, m in d1.events())
 
 
-def test_empty_body_blocked(relay_mod) -> None:
+def test_empty_body_held(relay_mod) -> None:
     mod, d1, sent = relay_mod
     _record_origin(sender="greg@whitfield.example")
-    # Subject-only draft: nothing to transmit ⇒ blocked (content floor fails
-    # closed on a bodyless send; the empty-body guard backstops it too).
+    # Subject-only draft: nothing to transmit ⇒ held (content floor fails closed
+    # on a bodyless send; the empty-body guard backstops it too).
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args={
@@ -420,11 +458,11 @@ def test_per_sender_rate_limit(relay_mod) -> None:
             session_id=sid,
         )
     assert len(sent) == 2  # only the first two cleared the per-sender window
-    assert any(a == "DEMO_RELAY_BLOCKED" and m["reason"] == "rate_limited" for a, m in d1.events())
+    assert any(a == "REPLY_HELD" and m["reason"] == "rate_limited" for a, m in d1.events())
 
 
 def test_rate_limiter_window_eviction() -> None:
-    mod = load_plugin("hermes-smd-demo-relay")
+    mod = load_plugin("hermes-smd-reply")
     clock = {"t": 0.0}
     limiter = mod.relay.RateLimiter(
         per_sender_max=1,
@@ -439,7 +477,7 @@ def test_rate_limiter_window_eviction() -> None:
 
 
 def test_global_rate_limit() -> None:
-    mod = load_plugin("hermes-smd-demo-relay")
+    mod = load_plugin("hermes-smd-reply")
     limiter = mod.relay.RateLimiter(per_sender_max=100, global_max=2)
     assert limiter.allow("a@x.test") is True
     assert limiter.allow("b@x.test") is True
@@ -464,7 +502,7 @@ def test_send_failure_audits_failed(relay_mod, monkeypatch) -> None:
         args=_draft(["greg@whitfield.example"]),
         session_id="s1",
     )
-    assert any(a == "DEMO_RELAY_FAILED" for a, _ in d1.events())
+    assert any(a == "REPLY_FAILED" for a, _ in d1.events())
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +511,7 @@ def test_send_failure_audits_failed(relay_mod, monkeypatch) -> None:
 
 
 def test_recipient_locked_pure() -> None:
-    mod = load_plugin("hermes-smd-demo-relay")
+    mod = load_plugin("hermes-smd-reply")
     r = mod.relay
     assert r.recipient_locked({"to": ["a@x.test"]}, "a@x.test") is True
     assert r.recipient_locked({"to": ["A@X.test"]}, "a@x.test") is True
@@ -485,7 +523,7 @@ def test_recipient_locked_pure() -> None:
 
 
 def test_send_reply_builds_request() -> None:
-    mod = load_plugin("hermes-smd-demo-relay")
+    mod = load_plugin("hermes-smd-reply")
     captured = {}
 
     class _Resp:
