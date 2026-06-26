@@ -136,26 +136,23 @@ vars:
     discovery: static
     stage: agent
     requirement: optional
-    consumed_by: [audit, peer-memory]
-    note: active persona slug (Hermes-native); first in the persona-resolution chain
+    consumed_by: [audit, peer-memory, trust]
+    note: active persona slug (Hermes-native); first in the persona-resolution chain. Trust reads it to resolve the active persona's authored exposure (ADR 0056).
   SMD_ACTIVE_PERSONA:
     discovery: static
     stage: agent
     requirement: optional
-    consumed_by: [audit, peer-memory]
+    consumed_by: [audit, peer-memory, trust]
     note: persona-slug fallback when HERMES_ACTIVE_PROFILE is unset
-  SMD_TRUST_CEILING:
-    discovery: static
-    stage: agent
-    requirement: optional
-    consumed_by: [trust]
-    note: content-class entitlement ceiling; a conservative default applies when unset
+  # SMD_TRUST_CEILING retired (ADR 0056): autonomy is no longer a process-env
+  # scalar — exposure is authored per persona in customer.yaml and read from the
+  # trusted volume. No env override remains.
   SMD_VERTICAL:
     discovery: static
     stage: agent
     requirement: optional
     consumed_by: [trust]
-    note: vertical/pack identifier used in the provenance gate
+    note: vertical/pack identifier; selects the non-raisable vertical floor and the provenance gate's law tier
   SMD_COHORT:
     discovery: static
     stage: agent

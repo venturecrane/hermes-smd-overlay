@@ -59,11 +59,9 @@ def _read_via(tool_name: str, session_id: str) -> str:
 def _autonomous_send_allowed(session_id: str) -> bool:
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
         action=ActionClass.EXTERNAL_SEND,
-        skill_name="s",
+        exposure={ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS},
         tool_name="agentmail:send_message",
-        action_ceilings={ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS},
         inbound_trust_class=inbound.SESSION_TAINT.trust_class(session_id),
     )
     return d.allowed

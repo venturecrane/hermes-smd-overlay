@@ -66,9 +66,11 @@ class FakeAudit:
 
 
 def _valid_doc(*, vertical: str = "law-firm", external_send: str | None = None) -> dict:
-    scope: dict = {"email_folders_visible": ["Inbox"]}
+    # ADR 0056: exposure is authored per persona; external_send drives the
+    # persona's entitlements.exposure (replacing the retired scope.action_ceilings).
+    exposure: dict = {"internal_write": "autonomous"}
     if external_send is not None:
-        scope["action_ceilings"] = {"external_send": external_send}
+        exposure["external_send"] = external_send
     return {
         "schema_version": 1,
         "customer_id": "acme",
@@ -82,13 +84,18 @@ def _valid_doc(*, vertical: str = "law-firm", external_send: str | None = None) 
                 "slug": "marcus",
                 "status": "active",
                 "name": "Marcus",
+                "entitlements": {"exposure": exposure},
                 "skills": [
-                    {"name": "inbox-triage", "trust_ceiling": "draft_for_review", "enabled": True}
+                    {
+                        "name": "inbox-triage",
+                        "enabled": True,
+                        "initiation": {"manual": True, "scheduled": False, "webhook": False},
+                    }
                 ],
             }
         ],
         "connectors": {"Email": {"adapter": "gmail", "backend": "mcp:gmail", "enabled": True}},
-        "scope": scope,
+        "scope": {"email_folders_visible": ["Inbox"]},
         "memory": {
             "d1_namespace": "acme",
             "r2_vault_path": "vaults/acme/",
@@ -347,7 +354,8 @@ def test_apply_rejects_invalid_config_without_writing(tmp_path):
 def test_apply_rejects_floor_widening(tmp_path):
     # Current volume: law-firm with external_send at the floor (draft_for_review).
     volume = tmp_path / "customer.yaml"
-    volume.write_bytes(_valid_yaml(external_send="draft_for_review").encode())
+    before = _valid_yaml(external_send="draft_for_review").encode()
+    volume.write_bytes(before)
     # New config tries to widen external_send to autonomous on a law Machine.
     new = _valid_yaml(external_send="autonomous").encode()
 
@@ -360,8 +368,8 @@ def test_apply_rejects_floor_widening(tmp_path):
     )
     assert result.outcome is ApplyOutcome.REJECTED
     assert any("vertical floor" in r for r in result.reasons)
-    # Volume keeps the floor-preserving config.
-    assert b"autonomous" not in volume.read_bytes()
+    # Volume keeps the floor-preserving config — the widening was not written.
+    assert volume.read_bytes() == before
 
 
 def test_apply_rejects_rebuild_class_path_on_live_path(tmp_path):
@@ -408,13 +416,14 @@ def test_apply_defers_rebuild_class_when_allowed(tmp_path):
 
 
 def test_apply_applies_live_writable_ceiling_change(tmp_path):
-    # Tightening scope.trust_ceiling is live-writable — it should APPLY.
+    # ADR 0056: persona exposure is live-writable. Tightening internal_write
+    # (no vertical floor) from autonomous → draft_for_review should APPLY.
     volume = tmp_path / "customer.yaml"
     current_doc = _valid_doc()
-    current_doc["scope"]["trust_ceiling"] = "autonomous"
+    current_doc["personas"][0]["entitlements"]["exposure"]["internal_write"] = "autonomous"
     volume.write_bytes(yaml.safe_dump(current_doc, sort_keys=False).encode())
     new_doc = _valid_doc()
-    new_doc["scope"]["trust_ceiling"] = "draft_for_review"
+    new_doc["personas"][0]["entitlements"]["exposure"]["internal_write"] = "draft_for_review"
     new = yaml.safe_dump(new_doc, sort_keys=False).encode()
 
     result = apply(
@@ -425,7 +434,7 @@ def test_apply_applies_live_writable_ceiling_change(tmp_path):
         audit_client=FakeAudit(),
     )
     assert result.outcome is ApplyOutcome.APPLIED, result.reasons
-    assert "scope.trust_ceiling" in result.changed
+    assert "personas.0.entitlements.exposure.internal_write" in result.changed
     assert volume.read_bytes() == new
 
 

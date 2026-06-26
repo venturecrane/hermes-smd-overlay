@@ -43,7 +43,7 @@ def test_discovery_has_teeth() -> None:
         "SMD_CUSTOMER_SLUG",
         "SMD_VOICE_VAULT_DIR",
         "SMD_D1_AUDIT_BINDING",
-        "SMD_TRUST_CEILING",
+        "SMD_VERTICAL",
     ):
         assert known in read, f"expected discovery to find {known}; scanner regressed"
 

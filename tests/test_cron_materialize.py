@@ -56,8 +56,26 @@ class FakeFactory:
         return self.stores.setdefault(slug, FakeCronStore())
 
 
+def _scheduled_skills(cron_entries: list[dict]) -> list[dict]:
+    """Synthesize the skills block a cron entry now requires (ADR 0056): each
+    referenced skill must be enabled and grant initiation.scheduled."""
+    names = {e["skill"] for e in cron_entries if e.get("skill")}
+    return [
+        {
+            "name": name,
+            "enabled": True,
+            "initiation": {"manual": False, "scheduled": True, "webhook": False},
+        }
+        for name in sorted(names)
+    ]
+
+
+def _persona(slug: str, cron_entries: list[dict]) -> dict:
+    return {"slug": slug, "cron": cron_entries, "skills": _scheduled_skills(cron_entries)}
+
+
 def _customer(cron_entries: list[dict], slug: str = "crane") -> dict:
-    return {"personas": [{"slug": slug, "cron": cron_entries}]}
+    return {"personas": [_persona(slug, cron_entries)]}
 
 
 def test_registers_one_job_per_authored_entry() -> None:
@@ -79,8 +97,8 @@ def test_registers_into_each_personas_own_store() -> None:
     persona's job lands in THAT persona's store — never a shared/data home."""
     customer = {
         "personas": [
-            {"slug": "crane", "cron": [{"skill": "inbox-triage", "schedule": "0 7 * * *"}]},
-            {"slug": "scribe", "cron": [{"skill": "digest", "schedule": "0 18 * * *"}]},
+            _persona("crane", [{"skill": "inbox-triage", "schedule": "0 7 * * *"}]),
+            _persona("scribe", [{"skill": "digest", "schedule": "0 18 * * *"}]),
         ]
     }
     f = FakeFactory()
@@ -117,13 +135,13 @@ def test_dropping_one_of_several_entries_is_cleaned() -> None:
     materialize_cron(
         {
             "personas": [
-                {
-                    "slug": "crane",
-                    "cron": [
+                _persona(
+                    "crane",
+                    [
                         {"skill": "inbox-triage", "schedule": "0 7 * * *"},
                         {"skill": "digest", "schedule": "0 18 * * *"},
                     ],
-                }
+                )
             ]
         },
         f,
@@ -342,8 +360,8 @@ def test_mixed_persona_keeps_one_drops_another() -> None:
     f = FakeFactory(preset={"crane": keeper, "avery": dropper})
     customer = {
         "personas": [
-            {"slug": "crane", "cron": [{"skill": "inbox-triage", "schedule": "0 7 * * *"}]},
-            {"slug": "avery", "cron": []},
+            _persona("crane", [{"skill": "inbox-triage", "schedule": "0 7 * * *"}]),
+            _persona("avery", []),
         ]
     }
     registered = materialize_cron(customer, f, reconcile_slugs=["crane", "avery"])

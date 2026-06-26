@@ -85,19 +85,17 @@ def test_unmapped_tool_classified_refused_not_read(tool):
 
 
 def test_unmapped_tool_blocked_under_autonomous_ceiling():
-    """Even with the most permissive scalar ceiling and an authored autonomous
-    grant for every other class, an unknown tool is refused — REFUSED is a
-    terminal class that no authored ceiling can widen."""
+    """Even with an authored autonomous exposure for every other class, an unknown
+    tool is refused — REFUSED is a terminal class that no authored exposure can
+    widen."""
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
         action=ActionClass.REFUSED,
-        skill_name="s",
-        tool_name="totally_made_up_tool",
-        action_ceilings={
+        exposure={
             ActionClass.CODE_EXECUTION: enforce.Ceiling.AUTONOMOUS,
             ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS,
         },
+        tool_name="totally_made_up_tool",
     )
     assert d.allowed is False
     assert d.audit_action == "refuse"
@@ -112,12 +110,11 @@ def test_unmapped_tool_blocked_end_to_end():
 
 
 def test_code_execution_unauthored_is_refused():
-    """No authored code_execution ceiling → fail-closed (ADR 0035)."""
+    """No authored code_execution exposure → fail-closed (ADR 0056)."""
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
         action=ActionClass.CODE_EXECUTION,
-        skill_name="some-skill",
+        exposure={},
         tool_name="execute_code",
     )
     assert d.allowed is False
@@ -125,27 +122,24 @@ def test_code_execution_unauthored_is_refused():
 
 
 def test_code_execution_authored_autonomous_is_allowed():
-    """An engagement that authors code_execution: autonomous gets it — even on a
-    draft_for_review skill (code-exec is a mechanism, not an output class)."""
+    """A persona that authors code_execution: autonomous gets it."""
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.DRAFT_FOR_REVIEW,  # ar-chaser's output ceiling
         action=ActionClass.CODE_EXECUTION,
-        skill_name="ar-chaser",
+        exposure={ActionClass.CODE_EXECUTION: enforce.Ceiling.AUTONOMOUS},
         tool_name="execute_code",
-        action_ceilings={ActionClass.CODE_EXECUTION: enforce.Ceiling.AUTONOMOUS},
     )
     assert d.allowed is True
 
 
-def test_code_execution_refused_under_refused_scalar():
+def test_code_execution_authored_refused_is_refused():
+    """An explicitly authored code_execution: refused blocks (and is the
+    fail-closed default when unauthored)."""
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.REFUSED,
         action=ActionClass.CODE_EXECUTION,
-        skill_name="s",
+        exposure={ActionClass.CODE_EXECUTION: enforce.Ceiling.REFUSED},
         tool_name="execute_code",
-        action_ceilings={ActionClass.CODE_EXECUTION: enforce.Ceiling.AUTONOMOUS},
     )
     assert d.allowed is False
 
@@ -163,9 +157,8 @@ def test_gmail_mutation_is_destructive(tool):
 def test_destructive_refused_under_draft_for_review():
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.DRAFT_FOR_REVIEW,
         action=ActionClass.DESTRUCTIVE,
-        skill_name="inbox-triage",
+        exposure={ActionClass.DESTRUCTIVE: enforce.Ceiling.DRAFT_FOR_REVIEW},
         tool_name="workspace_gmail_archive",
     )
     assert d.allowed is False
@@ -188,12 +181,10 @@ def test_destructive_refused_under_draft_for_review():
 def test_taint_gate_refuses_sensitive_actions_on_tainted_turn(action):
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
         action=action,
-        skill_name="s",
+        # even with an authored autonomous exposure, taint withholds the action
+        exposure={action: enforce.Ceiling.AUTONOMOUS},
         tool_name="t",
-        # even with an authored autonomous ceiling, taint withholds the action
-        action_ceilings={action: enforce.Ceiling.AUTONOMOUS},
         inbound_trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
     )
     assert d.allowed is False
@@ -205,9 +196,8 @@ def test_taint_gate_allows_read_and_draft_on_tainted_turn(action):
     """The EA can still READ untrusted mail and DRAFT a reply — that is the job."""
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
         action=action,
-        skill_name="s",
+        exposure={ActionClass.INTERNAL_WRITE: enforce.Ceiling.AUTONOMOUS},
         tool_name="t",
         inbound_trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
     )
@@ -219,11 +209,9 @@ def test_untainted_turn_allows_authored_autonomous_send():
     on tainted turns. A clean turn with authored autonomous send proceeds."""
     enforce = _enforce()
     d = enforce.enforce(
-        ceiling=enforce.Ceiling.AUTONOMOUS,
         action=ActionClass.EXTERNAL_SEND,
-        skill_name="s",
+        exposure={ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS},
         tool_name="agentmail:send_message",
-        action_ceilings={ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS},
         inbound_trust_class=inbound.TRUST_CLASS_INTERNAL,
     )
     assert d.allowed is True
@@ -330,11 +318,18 @@ def test_pre_llm_call_marks_taint_on_drain():
 # ---------------------------------------------------------------------------
 
 
-def test_evaluate_blocks_send_after_untrusted_read():
+def test_evaluate_blocks_send_after_untrusted_read(monkeypatch):
     """The full chain: an untrusted Gmail read taints the session, then an
-    autonomous AgentMail send in the same session is blocked."""
+    AUTONOMOUS-authored AgentMail send in the same session is blocked — proving
+    the block is the taint-gate, not the fail-closed unauthored default."""
     inbound_mod = load_plugin("hermes-smd-inbound")
     enforce = _enforce()
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "marcus")
+    monkeypatch.setattr(
+        enforce,
+        "_resolve_persona_exposure",
+        lambda slug="": {ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS},
+    )
     inbound_mod.on_transform_tool_result(
         tool_name="workspace_gmail_get", result='{"body":"x"}', session_id="sess"
     )

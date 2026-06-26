@@ -587,6 +587,46 @@ def _materialize_telegram_platform(customer: dict[str, Any]) -> dict[str, Any]:
     return block
 
 
+_AUTHORED_EXPOSURE_ACTION_CLASSES = (
+    "internal_write",
+    "external_send",
+    "commitment",
+    "destructive",
+    "code_execution",
+)
+
+
+def _initiation_block(raw: Any) -> dict[str, bool]:
+    """Normalize a skill's ``initiation`` to the three-flag boolean shape.
+
+    Validation has already run by the time translate executes (translation
+    refuses to run against an invalid file), so a present block is well-formed;
+    this defensively coerces and defaults any missing flag to ``False``
+    (fail-closed — an unstated initiation path is not granted)."""
+    out = {"manual": False, "scheduled": False, "webhook": False}
+    if isinstance(raw, dict):
+        for flag in out:
+            out[flag] = raw.get(flag) is True
+    return out
+
+
+def _entitlements_block(raw: Any) -> dict[str, Any]:
+    """Build the per-profile ``entitlements`` block (ADR 0056).
+
+    Carries only the sparse ``exposure`` map (authored action class → ceiling).
+    ``read`` is never present (enforcement always allows reads). A missing /
+    malformed entitlements block yields an empty exposure map — fail-closed at
+    runtime (every non-read class refused until authored)."""
+    exposure: dict[str, str] = {}
+    if isinstance(raw, dict):
+        raw_exposure = raw.get("exposure")
+        if isinstance(raw_exposure, dict):
+            for key, value in raw_exposure.items():
+                if key in _AUTHORED_EXPOSURE_ACTION_CLASSES and isinstance(value, str):
+                    exposure[key] = value
+    return {"exposure": exposure}
+
+
 def _persona_config(
     persona: dict[str, Any],
     customer: dict[str, Any],
@@ -604,7 +644,10 @@ def _persona_config(
             {
                 "name": name,
                 "version": resolved_pins.get(key, str(skill.get("version", "pending"))),
-                "trust_ceiling": skill.get("trust_ceiling"),
+                # ADR 0056: a skill carries its initiation grants (how it may
+                # START), not a scalar trust_ceiling. trust_ceiling is retired
+                # with no shim and is no longer emitted into profile config.
+                "initiation": _initiation_block(skill.get("initiation")),
             }
         )
 
@@ -621,6 +664,12 @@ def _persona_config(
             "status": persona.get("status"),
             "tone": list(persona.get("tone", []) or []),
         },
+        # ADR 0056: persona-level exposure (per-action-class ceiling). Sparse —
+        # a missing class fails closed at runtime. Emitted here so the profile
+        # config is the runtime-readable shape; the live trust DECISION still
+        # reads exposure from the root-owned trusted customer.yaml (the keystone
+        # seam), never from this agent-side profile copy.
+        "entitlements": _entitlements_block(persona.get("entitlements")),
         "skills": skills,
         "connectors": customer.get("connectors") or {},
         "scope": customer.get("scope") or {},

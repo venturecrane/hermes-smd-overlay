@@ -1,54 +1,47 @@
-"""Trust-ceiling enforcement — the safety floor under every tool call.
+"""Trust enforcement — the safety floor under every tool call (ADR 0056).
 
-Ported from ``ss-console/operator/adapter/trust_ceiling.py`` (the policy
-core). The per-tool classification vocabulary (``ActionClass``,
-``BANNED_TOOLS``, ``TOOL_ACTION_CLASS_MAP``, ``BannedToolError``,
-``ToolClassification``, ``classify_tool``) lives in
-``shared.action_classes`` so the audit and trust plugins share one source
-of truth (consolidation: task #33). This module imports those names and
+The per-tool classification vocabulary (``ActionClass``, ``BANNED_TOOLS``,
+``TOOL_ACTION_CLASS_MAP``, ``BannedToolError``, ``ToolClassification``,
+``classify_tool``) lives in ``shared.action_classes`` so the audit and trust
+plugins share one source of truth. This module imports those names and
 re-exports them via ``__all__`` so downstream trust consumers keep working.
 
-Per-customer ceiling resolution
--------------------------------
+Entitlement model (ADR 0056)
+----------------------------
 
-The ceiling for a given tool call is the lower of two values:
+Autonomy is authored as **persona-level exposure**: a sparse per-action-class
+map (``personas[].entitlements.exposure``) of ceiling values. There is no skill
+trust_ceiling scalar and no per-skill / scope / mailbox ``action_ceilings`` —
+those are retired with no shim. The ceiling for one action class is resolved as:
 
-  1. ``customer.yaml.scope.trust_ceiling`` — the customer-authored cap.
-  2. The SKILL.md frontmatter ``trust_ceiling`` for the current skill —
-     the skill-author cap.
+  base = exposure[action] if authored else REFUSED        (ADR 0056 fail-closed)
+  effective = most_restrictive(base, vertical_floor[action])
 
-``customer.yaml`` cannot raise above the SKILL.md declaration; the SKILL.md
-is the authoritative content-class ceiling for that skill. The customer
-ceiling can only narrow.
+``read`` is never authored — enforcement always allows reads. Every other
+(non-read) class with no authored exposure is REFUSED. A vertical-pack floor can
+only narrow, never raise (ADR 0022 / ADR 0025). The current-turn approval floor
+for COMMITMENT and DESTRUCTIVE is a hard runtime floor on top of exposure.
 
-The customer-yaml read is deferred to ``shared.customer_config`` (agent E
-owns that port). Until that lands, this module reads the ceiling from a
-process-environment override (``SMD_TRUST_CEILING``) so tests and dev
-runtimes can exercise enforcement without a populated volume.
+Trusted source
+--------------
 
-Per-tool action class
----------------------
+Exposure is read from the **trusted** ``customer.yaml`` via
+``shared.customer_config`` — the keystone seam relocates that file to a
+root-owned path (``SMD_CUSTOMER_YAML_PATH``) read-only to the hermes uid, so the
+agent cannot rewrite its own exposure. The decision NEVER trusts tool args for
+an entitlement: there is no ``_skill_trust_ceiling`` / ``_action_ceilings``
+arg handling. The active persona is resolved from the runtime profile env
+(``HERMES_ACTIVE_PROFILE`` / ``SMD_ACTIVE_PERSONA``), the same channel the audit
+plugin uses, and its exposure is read from the trusted file.
 
-Each tool name is classified into one of five action classes (READ,
-INTERNAL_WRITE, EXTERNAL_SEND, COMMITMENT, DESTRUCTIVE). The registry is
-closed-vocabulary: unmapped tool names fail closed to REFUSED and are flagged
-so audit review can surface them. A second closed set, ``BANNED_TOOLS``,
-captures Pattern-A / Pattern-B forbidden capabilities (email_send,
-payments_*, delete_event, etc.); a banned tool is refused before policy
-even runs.
+Decision audit
+--------------
 
-Refusal shape
--------------
-
-The plugin's ``pre_tool_call`` hook expects either ``None`` (allow) or a
-block directive:
-
-    {"action": "block", "message": "Refused: <reason>"}
-
-This module's ``evaluate_tool_call`` returns exactly that shape. The audit
-plugin observes the refusal via its own ``post_tool_call`` hook on the
-error-result path — trust does not call into audit directly (loose
-coupling, per AGENTS.md).
+Every decision is logged with the action class, the authored ceiling, the
+vertical floor, the effective ceiling, the decision, and the reason — the trust
+trail the audit review reads. The plugin's ``pre_tool_call`` hook expects either
+``None`` (allow) or ``{"action": "block", "message": "Refused: <reason>"}``;
+``evaluate_tool_call`` returns exactly that shape.
 """
 
 import enum
@@ -90,41 +83,20 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Trust-ceiling enum
+# Ceiling enum + restrictiveness ordering
 #
-# String values match the ss-console adapter exactly so the two enforcement
-# surfaces (TS validators on the authoring side, Python enforcement here)
-# round-trip through their string representations.
+# String values match the ss-console ACCEPTED_EXPOSURE_CEILINGS exactly so the
+# authoring side (TS validators) and this enforcement side round-trip through
+# their string representations.
 # ---------------------------------------------------------------------------
 
 
 class Ceiling(str, enum.Enum):
-    """Three content classes per ADR 0035."""
+    """The three content classes per ADR 0035 / ADR 0056."""
 
     AUTONOMOUS = "autonomous"
     DRAFT_FOR_REVIEW = "draft_for_review"
     REFUSED = "refused"
-
-
-# NOTE: ceiling comparison lives in ``_most_restrictive`` below. A second
-# implementation (``_min_ceiling`` over an ordered tuple) coexisted here
-# until the 2026-06-12 code review — two copies of the same comparison that
-# had to agree on any future ceiling tier. One survives.
-
-
-# ---------------------------------------------------------------------------
-# Per-action-class ceiling resolution (ADR 0025)
-#
-# Mirrors the canonical policy core in
-# ``ss-console/operator/adapter/trust_ceiling.py`` (the boot-invariant
-# imports that one; this overlay copy runs live in the gateway pre_tool_call
-# hook — the two must agree). Autonomy is configured per ActionClass, not by
-# one skill scalar. Per ADR 0035 there is NO imposed default: ``external_send``
-# (and any unrecognized entitled class) is fail-closed (``refused`` — no send,
-# no draft) when no ``action_ceilings`` entry is authored. ``draft_for_review``
-# is a value an engagement authors explicitly, never a
-# fallback; a vertical-pack floor can only narrow, never widen.
-# ---------------------------------------------------------------------------
 
 
 # Restrictiveness ordering: higher number == more restrictive. Used to combine a
@@ -140,58 +112,28 @@ def _most_restrictive(a: Ceiling, b: Ceiling) -> Ceiling:
     return a if _RESTRICTIVENESS[a] >= _RESTRICTIVENESS[b] else b
 
 
-def _unauthored_resolution(action: ActionClass, skill_ceiling: Ceiling) -> Ceiling:
-    """How an action class resolves when the engagement authored NO ceiling for
-    it. There is no imposed posture (ADR 0035): an unauthored entitled action is
-    fail-closed (``refused``) — it does not execute, and no draft is produced.
-    ``draft_for_review`` is a value an engagement authors
-    explicitly, never a fallback.
-
-    ``READ`` resolves to ``autonomous`` at this layer because read *breadth* is
-    governed by the authored scope envelope one layer over. ``INTERNAL_WRITE``
-    follows the skill's authored scalar ceiling. Every other entitled class with
-    no authored ceiling is ``refused``."""
-    if action == ActionClass.READ:
-        return Ceiling.AUTONOMOUS
-    if action == ActionClass.INTERNAL_WRITE:
-        return skill_ceiling
-    # EXTERNAL_SEND and any unrecognized entitled class: no authored grant means
-    # no action (ADR 0035 fail-closed). COMMITMENT / DESTRUCTIVE additionally
-    # carry their own current-turn-approval reversibility floors in enforce().
-    return Ceiling.REFUSED
-
-
 def resolve_ceiling(
     action: ActionClass,
-    skill_ceiling: Ceiling,
-    action_ceilings: Mapping[ActionClass, Ceiling] | None = None,
+    exposure: Mapping[ActionClass, Ceiling] | None,
     vertical_floors: Mapping[ActionClass, Ceiling] | None = None,
 ) -> Ceiling:
-    """Resolve the effective ceiling for one action class.
+    """Resolve the effective ceiling for one (non-read) action class.
 
-    Effective = most restrictive of:
-      - the customer's explicit per-action override (if present), else the
-        unauthored resolution (fail-closed for entitled classes, ADR 0035); and
-      - the vertical-pack floor for that class (if present).
-
-    A vertical floor can only make the result *more* restrictive — customer
-    config can never raise above it (ADR 0025 / ADR 0022 compliance floors).
+    base = the persona's authored exposure for the class, or REFUSED when
+    unauthored (ADR 0056 fail-closed — there is no imposed posture). effective =
+    most restrictive of base and the vertical-pack floor for that class (a floor
+    can only narrow, never raise). ``read`` is handled by the caller (always
+    allowed) and never routed here.
     """
-    explicit = action_ceilings.get(action) if action_ceilings else None
-    base = explicit if explicit is not None else _unauthored_resolution(action, skill_ceiling)
+    base = exposure.get(action) if exposure else None
+    if base is None:
+        base = Ceiling.REFUSED
     floor = vertical_floors.get(action) if vertical_floors else None
     return _most_restrictive(base, floor) if floor is not None else base
 
 
 # ---------------------------------------------------------------------------
 # Banned-tool refusal messages
-#
-# ``shared.action_classes.BANNED_REASON`` carries the closed-vocabulary
-# category code (``"banned_tool_pattern_a"`` / ``"banned_tool_destructive"``)
-# that the audit plugin persists in ``metadata.banned_reason``. Trust renders
-# its own user-visible refusal sentence at the policy boundary so the
-# operator-facing block message stays readable; the categorical code stays
-# the source of truth on the audit side.
 # ---------------------------------------------------------------------------
 
 
@@ -225,13 +167,23 @@ _BANNED_REFUSAL_MESSAGE: Mapping[str, str] = MappingProxyType(
 
 @dataclass(frozen=True)
 class EnforcementDecision:
-    """Internal decision shape. ``audit_action`` is the hint for the audit
-    plugin's downstream classification of this row.
+    """Internal decision shape + the structured audit fields (ADR 0056).
+
+    ``audit_action`` is the hint for the audit plugin's downstream
+    classification of this row (``allow`` | ``draft`` | ``refuse``). The four
+    ceiling fields carry the full trust trail: ``authored_ceiling`` is what the
+    persona authored for this class (``None`` = unauthored / fail-closed),
+    ``vertical_floor`` is the pack floor for this class (``None`` = no floor),
+    ``effective_ceiling`` is the most-restrictive combination actually applied.
     """
 
     allowed: bool
     reason: str
     audit_action: str  # "allow" | "draft" | "refuse"
+    action_class: ActionClass
+    authored_ceiling: Ceiling | None = None
+    vertical_floor: Ceiling | None = None
+    effective_ceiling: Ceiling | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -241,66 +193,50 @@ class EnforcementDecision:
 
 def enforce(
     *,
-    ceiling: Ceiling,
     action: ActionClass,
-    skill_name: str,
+    exposure: Mapping[ActionClass, Ceiling] | None,
     tool_name: str,
+    persona_slug: str = "",
     current_turn_approval: bool = False,
-    action_ceilings: Mapping[ActionClass, Ceiling] | None = None,
     vertical_floors: Mapping[ActionClass, Ceiling] | None = None,
     inbound_trust_class: str = TRUST_CLASS_INTERNAL,
 ) -> EnforcementDecision:
-    """Return whether this tool call is allowed under the configured ceilings.
+    """Return whether this tool call is allowed under the persona's exposure.
 
-    ``ceiling`` is the skill-level scalar (governs ``internal_write`` and acts
-    as the REFUSED cap). ``action_ceilings`` are the customer's explicit
-    per-action-class overrides; ``vertical_floors`` are non-raisable per-class
-    floors from the vertical pack. Both optional — when omitted, the unauthored
-    resolution applies (ADR 0035): entitled classes such as ``external_send``
-    are fail-closed (``refused`` — no send, no draft) until the engagement
-    authors a ceiling. ``draft_for_review`` is an authored
-    value, not a fallback posture.
+    ``exposure`` is the active persona's authored per-action-class ceiling map
+    (read from the trusted customer.yaml). ``vertical_floors`` are non-raisable
+    per-class floors from the vertical pack. Per ADR 0056 every non-read class
+    with no authored exposure is REFUSED (fail-closed — no send, no draft, no
+    write). ``read`` is always allowed.
 
-    ``current_turn_approval`` is True iff the operator explicitly approved
-    THIS specific action in the CURRENT invocation. Approvals from prior
-    turns or prior sessions are NOT valid (safety invariant #1). It gates the
-    REVERSIBILITY classes (COMMITMENT, DESTRUCTIVE) only; ``external_send``
-    autonomy is governed by the configured ceiling, NOT by an in-turn approval
-    (ADR 0025 — the hardcoded "always require approval" send refusal is gone).
-
-    Logic:
-      - REFUSED scalar refuses everything (including READ).
-      - READ is always allowed under non-REFUSED ceilings.
-      - COMMITMENT requires AUTONOMOUS + current-turn approval (invariant #3).
-      - DESTRUCTIVE requires AUTONOMOUS + current-turn approval (invariant #1).
-      - EXTERNAL_SEND: resolved per-action ceiling — autonomous → send;
-        authored draft_for_review → draft; refused (incl. unauthored,
-        fail-closed per ADR 0035) → block.
-      - INTERNAL_WRITE: resolved per-action ceiling — autonomous → write;
-        draft_for_review → route to draft folder; refused → block.
+    ``current_turn_approval`` is True iff the operator explicitly approved THIS
+    action in the CURRENT invocation. It is the hard runtime floor for the
+    REVERSIBILITY classes (COMMITMENT, DESTRUCTIVE) — required on top of an
+    autonomous exposure. EXTERNAL_SEND autonomy is governed by exposure, not by
+    an in-turn approval.
 
     The content-sensitivity floor (``shared.content_floor``) is applied a layer
-    up, in ``evaluate_tool_call``, where the tool ``args`` (and thus the message
-    body) are available — it can only narrow an autonomous send to a draft.
+    up, in ``evaluate_tool_call``, where the message body is available — it can
+    only narrow an autonomous send to a draft.
     """
-    # REFUSED ceiling: nothing executes
-    if ceiling == Ceiling.REFUSED:
+    floor = vertical_floors.get(action) if vertical_floors else None
+
+    # READ — always allowed regardless of exposure. Reading more untrusted
+    # content is harmless; taint applies to ACTIONS, not reads. Not authored.
+    if action == ActionClass.READ:
         return EnforcementDecision(
-            allowed=False,
-            reason=(f"skill {skill_name} has trust_ceiling=refused; tool {tool_name} blocked"),
-            audit_action="refuse",
+            allowed=True,
+            reason="read action",
+            audit_action="allow",
+            action_class=action,
+            authored_ceiling=None,
+            vertical_floor=floor,
+            effective_ceiling=Ceiling.AUTONOMOUS,
         )
 
-    # READ always allowed regardless of ceiling (non-REFUSED). Reading more
-    # untrusted content is harmless; taint applies to ACTIONS, not reads.
-    if action == ActionClass.READ:
-        return EnforcementDecision(allowed=True, reason="read action", audit_action="allow")
-
-    # REFUSED action class — an UNKNOWN/unmapped tool (issue #1327). This is a
-    # terminal fail-closed class, NOT routed through resolve_ceiling: no authored
-    # ceiling can widen it. Refused on every turn, tainted or not, before any
-    # other action handling. The agent surfaces the gap; the registry gets the
-    # name added (that is the remediation), versus the old silent READ allow.
+    # REFUSED action class — an UNKNOWN/unmapped tool (issue #1327). Terminal
+    # fail-closed class, NOT routed through resolve_ceiling: no authored exposure
+    # can widen it. Refused on every turn, tainted or not.
     if action == ActionClass.REFUSED:
         return EnforcementDecision(
             allowed=False,
@@ -310,16 +246,19 @@ def enforce(
                 f"TOOL_ACTION_CLASS_MAP or BANNED_TOOLS to govern it"
             ),
             audit_action="refuse",
+            action_class=action,
+            effective_ceiling=Ceiling.REFUSED,
         )
 
+    authored = exposure.get(action) if exposure else None
+    effective = resolve_ceiling(action, exposure, vertical_floors)
+
     # TAINT-GATE (OP-P0-4 / OP-P0-5 / OP-P1-1). This turn's session ingested
-    # untrusted inbound content (an email body, a connector record, a fetched
-    # page). A sensitive action on such a turn cannot be autonomous — an injected
-    # "send/archive/run this" must never execute BECAUSE of untrusted content.
-    # The action is refused here (the agent may still READ and DRAFT). This is
-    # the structural tie between injection-ingress and action-egress; it does not
-    # remove an authored autonomous capability, it withholds it for the tainted
-    # turn only.
+    # untrusted inbound content. A sensitive action on such a turn cannot be
+    # autonomous — an injected "send/archive/run this" must never execute BECAUSE
+    # of untrusted content. The action is refused here (the agent may still READ
+    # and DRAFT). It does not remove an authored capability, it withholds it for
+    # the tainted turn only.
     if inbound_trust_class != TRUST_CLASS_INTERNAL and action in _TAINT_GATED_CLASSES:
         return EnforcementDecision(
             allowed=False,
@@ -329,256 +268,165 @@ def enforce(
                 f"cannot fire autonomously on a tainted turn — read and draft only"
             ),
             audit_action="refuse",
+            action_class=action,
+            authored_ceiling=authored,
+            vertical_floor=floor,
+            effective_ceiling=effective,
         )
 
-    # COMMITMENT — never autonomous without approval (invariant #3).
+    decision = _enforce_resolved(
+        action=action,
+        effective=effective,
+        tool_name=tool_name,
+        current_turn_approval=current_turn_approval,
+    )
+    # Splice the audit ceiling trail onto the class-specific decision.
+    return EnforcementDecision(
+        allowed=decision.allowed,
+        reason=decision.reason,
+        audit_action=decision.audit_action,
+        action_class=action,
+        authored_ceiling=authored,
+        vertical_floor=floor,
+        effective_ceiling=effective,
+    )
+
+
+def _enforce_resolved(
+    *,
+    action: ActionClass,
+    effective: Ceiling,
+    tool_name: str,
+    current_turn_approval: bool,
+) -> EnforcementDecision:
+    """Decide allow/draft/refuse for one non-read class at its effective ceiling.
+
+    The returned decision's ceiling-trail fields are filled by the caller; only
+    ``allowed`` / ``reason`` / ``audit_action`` are meaningful here.
+    """
     if action == ActionClass.COMMITMENT:
-        if ceiling == Ceiling.DRAFT_FOR_REVIEW:
-            return EnforcementDecision(
-                allowed=False,
-                reason=(
-                    "draft_for_review skills do not originate commitments; produce draft instead"
-                ),
-                audit_action="draft",
-            )
-        if not current_turn_approval:
-            return EnforcementDecision(
-                allowed=False,
-                reason="commitment action requires explicit current-turn approval",
-                audit_action="refuse",
-            )
-        return EnforcementDecision(
-            allowed=True,
-            reason="commitment with current-turn approval",
-            audit_action="allow",
+        return _decide_approval_class(
+            effective=effective,
+            approved=current_turn_approval,
+            label="commitment",
+            draft_reason="draft_for_review skills do not originate commitments; produce draft instead",
+            draft_audit="draft",
         )
-
-    # DESTRUCTIVE — never autonomous without approval (invariant #1).
     if action == ActionClass.DESTRUCTIVE:
-        if ceiling == Ceiling.DRAFT_FOR_REVIEW:
-            return EnforcementDecision(
-                allowed=False,
-                reason=(
-                    "draft_for_review skills do not originate destructive actions; report instead"
-                ),
-                audit_action="refuse",
-            )
-        if not current_turn_approval:
-            return EnforcementDecision(
-                allowed=False,
-                reason="destructive action requires explicit current-turn approval",
-                audit_action="refuse",
-            )
-        return EnforcementDecision(
-            allowed=True,
-            reason="destructive with current-turn approval",
-            audit_action="allow",
+        return _decide_approval_class(
+            effective=effective,
+            approved=current_turn_approval,
+            label="destructive",
+            draft_reason="draft_for_review skills do not originate destructive actions; report instead",
+            draft_audit="refuse",
         )
-
-    # EXTERNAL_SEND — governed by the resolved per-action ceiling (ADR 0025/0035).
-    # autonomous → send; authored draft_for_review → draft; refused → block.
-    # Unauthored external_send is fail-closed (refused), not draft (ADR 0035 —
-    # no imposed default). No in-turn-approval escape: exposure autonomy is
-    # configured, not approved per message. The content-sensitivity floor
-    # (evaluate_tool_call) can still narrow an autonomous send to a draft.
     if action == ActionClass.EXTERNAL_SEND:
-        eff = resolve_ceiling(action, ceiling, action_ceilings, vertical_floors)
-        if eff == Ceiling.AUTONOMOUS:
-            return EnforcementDecision(
-                allowed=True,
-                reason="external_send permitted: configured ceiling is autonomous",
-                audit_action="allow",
+        if effective == Ceiling.AUTONOMOUS:
+            return _allow("external_send permitted: authored exposure is autonomous", action)
+        if effective == Ceiling.DRAFT_FOR_REVIEW:
+            return _draft(
+                "external_send at authored draft_for_review ceiling; routing to draft", action
             )
-        if eff == Ceiling.REFUSED:
-            return EnforcementDecision(
-                allowed=False,
-                reason="external_send refused: configured ceiling (or vertical floor) is refused",
-                audit_action="refuse",
-            )
-        # draft_for_review — an AUTHORED ceiling (not a default).
-        return EnforcementDecision(
-            allowed=False,
-            reason="external_send at authored draft_for_review ceiling; routing to draft",
-            audit_action="draft",
+        return _refuse(
+            "external_send refused: no authored exposure (fail-closed, ADR 0056) "
+            "or a vertical floor refuses it",
+            action,
         )
-
-    # CODE_EXECUTION — arbitrary code / shell / subagent / OS control. Governed
-    # by its OWN resolved per-action ceiling (ADR 0035): unauthored is fail-closed
-    # (refused — the agent's back door is shut unless the engagement opens a
-    # ``code_execution`` ceiling). autonomous → allow; anything else → refuse
-    # (there is no "draft" of a code execution).
-    #
-    # Deliberately NOT gated by the skill's output trust_ceiling scalar: code
-    # execution is an internal MECHANISM, not an output class. A draft-for-review
-    # skill (e.g. ar-chaser, whose OUTPUT is drafts) still runs its authored
-    # ADR-0021 fetch loop. The skill scalar only blocks everything via the
-    # REFUSED check at the top; the taint-gate above already withheld code
-    # execution on any untrusted-fed turn.
     if action == ActionClass.CODE_EXECUTION:
-        eff = resolve_ceiling(action, ceiling, action_ceilings, vertical_floors)
-        if eff == Ceiling.AUTONOMOUS:
-            return EnforcementDecision(
-                allowed=True,
-                reason="code_execution permitted: authored code_execution ceiling is autonomous",
-                audit_action="allow",
-            )
-        return EnforcementDecision(
-            allowed=False,
-            reason=(
-                "code_execution refused: no authored code_execution ceiling "
-                "(fail-closed, ADR 0035) or a vertical floor narrows it"
-            ),
-            audit_action="refuse",
+        if effective == Ceiling.AUTONOMOUS:
+            return _allow("code_execution permitted: authored exposure is autonomous", action)
+        return _refuse(
+            "code_execution refused: no authored exposure (fail-closed, ADR 0056) "
+            "or a vertical floor narrows it",
+            action,
         )
-
-    # INTERNAL_WRITE — governed by the resolved per-action ceiling (defaults to
-    # the skill scalar). autonomous → write; draft_for_review → route to draft
-    # folder; refused (only if explicitly set) → block.
     if action == ActionClass.INTERNAL_WRITE:
-        eff = resolve_ceiling(action, ceiling, action_ceilings, vertical_floors)
-        if eff == Ceiling.AUTONOMOUS:
+        if effective == Ceiling.AUTONOMOUS:
+            return _allow("autonomous internal write", action)
+        if effective == Ceiling.DRAFT_FOR_REVIEW:
+            # The write proceeds, but routed to the draft/notes folder — unlike an
+            # external_send draft (withheld), an internal write at draft is allowed.
             return EnforcementDecision(
                 allowed=True,
-                reason="autonomous internal write",
-                audit_action="allow",
+                reason="internal write routed to draft folder",
+                audit_action="draft",
+                action_class=action,
             )
-        if eff == Ceiling.REFUSED:
-            return EnforcementDecision(
-                allowed=False,
-                reason="internal_write refused by configured ceiling",
-                audit_action="refuse",
-            )
-        # draft_for_review: allow write but route to notes folder.
-        return EnforcementDecision(
-            allowed=True,
-            reason="internal write routed to draft folder",
-            audit_action="draft",
+        return _refuse(
+            "internal_write refused: no authored exposure (fail-closed, ADR 0056)", action
         )
 
     # Unknown action class — fail closed.
+    return _refuse(f"unknown action class {action}; defaulting to refuse", action)
+
+
+def _decide_approval_class(
+    *,
+    effective: Ceiling,
+    approved: bool,
+    label: str,
+    draft_reason: str,
+    draft_audit: str,
+) -> EnforcementDecision:
+    """COMMITMENT / DESTRUCTIVE: an exposure that does not reach autonomous never
+    originates the action; an autonomous exposure still needs current-turn
+    approval (the hard runtime floor, ADR 0056)."""
+    action = ActionClass(label)  # "commitment" / "destructive" — both valid; caller re-stamps it
+    if effective == Ceiling.REFUSED:
+        return _refuse(
+            f"{label} refused: no authored exposure (fail-closed, ADR 0056) or a floor refuses it",
+            action,
+        )
+    if effective == Ceiling.DRAFT_FOR_REVIEW:
+        return EnforcementDecision(
+            allowed=False, reason=draft_reason, audit_action=draft_audit, action_class=action
+        )
+    if not approved:
+        return _refuse(f"{label} action requires explicit current-turn approval", action)
+    return _allow(f"{label} with current-turn approval", action)
+
+
+def _allow(reason: str, action: ActionClass) -> EnforcementDecision:
     return EnforcementDecision(
-        allowed=False,
-        reason=f"unknown action class {action}; defaulting to refuse",
-        audit_action="refuse",
+        allowed=True, reason=reason, audit_action="allow", action_class=action
+    )
+
+
+def _draft(reason: str, action: ActionClass) -> EnforcementDecision:
+    return EnforcementDecision(
+        allowed=False, reason=reason, audit_action="draft", action_class=action
+    )
+
+
+def _refuse(reason: str, action: ActionClass) -> EnforcementDecision:
+    return EnforcementDecision(
+        allowed=False, reason=reason, audit_action="refuse", action_class=action
     )
 
 
 # ---------------------------------------------------------------------------
-# Ceiling resolution
-#
-# Customer ceiling source order:
-#   1. ``customer.yaml.scope.trust_ceiling`` (via shared.customer_config).
-#   2. ``SMD_TRUST_CEILING`` env var (override for dev / test).
-#   3. Default: DRAFT_FOR_REVIEW (the most restrictive non-refused ceiling).
-#
-# SKILL.md source order:
-#   1. ``args["_skill_trust_ceiling"]`` if the runtime stamps it onto the
-#      tool args (Hermes plugin contract — the active skill is observable
-#      to the pre-hook through tool args).
-#   2. Default: AUTONOMOUS (matches Hermes-skill authoring default; the
-#      customer-cap will narrow it).
+# Active-persona exposure resolution (trusted source)
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_CUSTOMER_CEILING = Ceiling.DRAFT_FOR_REVIEW
-_DEFAULT_SKILL_CEILING = Ceiling.AUTONOMOUS
+def _resolve_active_persona() -> str:
+    """Resolve the active persona (profile) slug from the runtime env.
+
+    Hermes runs each persona as its own profile (``hermes -p <slug>``) and
+    exposes the active profile via ``HERMES_ACTIVE_PROFILE``; the
+    ``SMD_ACTIVE_PERSONA`` secret is the fallback. Same channel the audit plugin
+    uses. Empty when neither is set — the caller then resolves an empty exposure
+    (fail-closed for every non-read class)."""
+    return os.environ.get("HERMES_ACTIVE_PROFILE") or os.environ.get("SMD_ACTIVE_PERSONA") or ""
 
 
-def _parse_ceiling(value: str | None, fallback: Ceiling) -> Ceiling:
-    if not value:
-        return fallback
-    try:
-        return Ceiling(value)
-    except ValueError:
-        logger.warning(
-            "trust ceiling value %r is not one of %s; using fallback %s",
-            value,
-            sorted(c.value for c in Ceiling),
-            fallback.value,
-        )
-        return fallback
+def _parse_exposure_map(raw: object) -> dict[ActionClass, Ceiling]:
+    """Parse a ``{action_class_str: ceiling_str}`` exposure map to typed enums.
 
-
-def _resolve_customer_ceiling() -> Ceiling:
-    """Resolve the customer-authored ceiling.
-
-    Reads from ``shared.customer_config.CustomerConfig.from_volume()`` when
-    available; falls back to the ``SMD_TRUST_CEILING`` env var; finally
-    defaults to ``DRAFT_FOR_REVIEW``.
-
-    Only two read outcomes fall through to the env path: the stub state
-    (``NotImplementedError``) and a genuinely absent file
-    (``CustomerConfigMissingError`` — dev / test boxes with no provisioned
-    volume). Any OTHER failure (unreadable file, YAML parse error,
-    attribute miss) propagates so ``evaluate_tool_call``'s outer handler
-    fails CLOSED for sensitive actions. Before the 2026-06-12 code review
-    this caught broad ``Exception``, which silently downgraded an authored
-    ``refused`` ceiling to the DRAFT_FOR_REVIEW default on any I/O fault —
-    a fail-open relative to the authored posture (ADR 0035).
-    """
-    # Try the shared loader first.
-    try:
-        from shared.customer_config import CustomerConfig  # local import
-
-        cfg = CustomerConfig.from_volume()
-        scope = getattr(cfg, "scope", None) or {}
-        value = scope.get("trust_ceiling") if isinstance(scope, dict) else None
-        if value:
-            return _parse_ceiling(value, _DEFAULT_CUSTOMER_CEILING)
-    except NotImplementedError:
-        # Stub state — customer_config not yet ported. Fall through to env.
-        pass
-    except CustomerConfigMissingError:
-        # No customer.yaml on the volume (dev / test). Fall through to env.
-        logger.debug(
-            "no customer.yaml on volume for ceiling resolution; falling back to env",
-            exc_info=True,
-        )
-
-    env_value = os.environ.get("SMD_TRUST_CEILING")
-    return _parse_ceiling(env_value, _DEFAULT_CUSTOMER_CEILING)
-
-
-def _resolve_skill_ceiling(args: dict | None) -> Ceiling:
-    """Resolve the SKILL.md-declared ceiling for the active skill.
-
-    The runtime is expected to stamp ``_skill_trust_ceiling`` onto the tool
-    args before the pre-hook runs. Absent that, fall back to AUTONOMOUS so
-    the customer cap dominates.
-    """
-    if not isinstance(args, dict):
-        return _DEFAULT_SKILL_CEILING
-    value = args.get("_skill_trust_ceiling")
-    return _parse_ceiling(value, _DEFAULT_SKILL_CEILING)
-
-
-def _resolve_skill_name(args: dict | None) -> str:
-    """Best-effort skill-name resolution for the audit reason string."""
-    if isinstance(args, dict):
-        name = args.get("_skill_name")
-        if isinstance(name, str) and name:
-            return name
-    return "(unknown)"
-
-
-def _resolve_current_turn_approval(args: dict | None) -> bool:
-    """Whether the operator approved THIS action in THIS turn.
-
-    The runtime stamps ``_current_turn_approval`` onto the tool args when
-    an approval has been registered for this exact call. Approvals from
-    prior turns/sessions never carry over.
-    """
-    if isinstance(args, dict):
-        return bool(args.get("_current_turn_approval"))
-    return False
-
-
-def _parse_action_ceiling_map(raw: object) -> dict[ActionClass, Ceiling]:
-    """Parse a ``{action_class_str: ceiling_str}`` map into typed enums.
-
-    Unparseable keys/values are DROPPED with a warning, never coerced — a
-    garbled ``external_send`` entry must fall back to the safe class default
-    (draft), not silently grant autonomy.
+    ``read`` and unknown action classes are DROPPED (read is never authored;
+    enforcement always allows it). An invalid ceiling string is DROPPED with a
+    warning, never coerced — a garbled entry must fall back to the fail-closed
+    REFUSED default for that class, never silently grant autonomy.
     """
     out: dict[ActionClass, Ceiling] = {}
     if not isinstance(raw, dict):
@@ -587,13 +435,16 @@ def _parse_action_ceiling_map(raw: object) -> dict[ActionClass, Ceiling]:
         try:
             action = ActionClass(str(k))
         except ValueError:
-            logger.warning("action_ceilings: unknown action class %r; dropping", k)
+            logger.warning("exposure: unknown action class %r; dropping", k)
+            continue
+        if action == ActionClass.READ:
+            # read is never authored; enforcement always allows it.
             continue
         try:
             ceiling = Ceiling(str(v))
         except ValueError:
             logger.warning(
-                "action_ceilings: invalid ceiling %r for %s; dropping (safe default applies)",
+                "exposure: invalid ceiling %r for %s; dropping (fail-closed default applies)",
                 v,
                 k,
             )
@@ -602,75 +453,91 @@ def _parse_action_ceiling_map(raw: object) -> dict[ActionClass, Ceiling]:
     return out
 
 
-def _resolve_action_ceilings(args: dict | None) -> dict[ActionClass, Ceiling]:
-    """Resolve the explicit per-action-class ceiling overrides (ADR 0025).
+def _resolve_persona_exposure(persona_slug: str) -> dict[ActionClass, Ceiling]:
+    """Resolve the active persona's authored exposure from the trusted config.
 
-    Source order (later overrides earlier — the active skill is most specific):
-      1. ``customer.yaml.scope.action_ceilings`` — a customer-wide override.
-      2. ``args["_action_ceilings"]`` — the active skill's per-action map,
-         stamped onto the tool args by the runtime (the same channel as
-         ``_skill_trust_ceiling``).
+    Reads ``customer.yaml`` via ``shared.customer_config`` (the keystone seam
+    relocates it to a root-owned path) and returns the named persona's
+    ``entitlements.exposure`` parsed to typed enums. Returns ``{}`` (fail-closed
+    for every non-read class) when:
 
-    Absent both, returns ``{}`` so the safe class defaults apply (notably
-    ``external_send`` → draft_for_review). The agent can never raise its own
-    ceiling — these come from authored config, never from model output.
+      * no active persona is resolvable from the env;
+      * there is no customer.yaml on the volume (dev / test — stub or absent);
+      * the named persona is not present.
+
+    Any OTHER read fault (unreadable / unparseable file, malformed personas on a
+    provisioned Machine) PROPAGATES so ``evaluate_tool_call``'s outer handler
+    fails CLOSED for sensitive actions rather than silently resolving an empty
+    map. An empty map is itself fail-closed (every non-read class REFUSED), so a
+    propagated fault and an empty map land on the same safe side — the propagate
+    path exists only to surface the fault loudly.
     """
-    merged: dict[ActionClass, Ceiling] = {}
-    # 1. Customer-wide override from customer.yaml scope.
+    if not persona_slug:
+        return {}
     try:
-        from shared.customer_config import CustomerConfig
+        from shared.customer_config import CustomerConfig  # local import
 
-        cfg = CustomerConfig.from_volume()
-        scope = getattr(cfg, "scope", None) or {}
-        if isinstance(scope, dict):
-            merged.update(_parse_action_ceiling_map(scope.get("action_ceilings")))
+        personas = CustomerConfig.from_volume().personas
     except NotImplementedError:
-        pass
+        return {}
     except CustomerConfigMissingError:
-        # No customer.yaml on the volume (dev / test): args / defaults apply.
-        # Any other read fault propagates — evaluate_tool_call fails closed
-        # rather than silently dropping authored per-class overrides.
         logger.debug(
-            "action_ceilings: no customer.yaml on volume; using args / defaults",
+            "no customer.yaml on volume for exposure resolution; empty exposure",
             exc_info=True,
         )
-    # 2. Active-skill override from args (wins over customer-wide).
+        return {}
+    for persona in personas:
+        if isinstance(persona, dict) and persona.get("slug") == persona_slug:
+            entitlements = persona.get("entitlements")
+            raw = entitlements.get("exposure") if isinstance(entitlements, dict) else None
+            return _parse_exposure_map(raw)
+    logger.warning(
+        "trust: active persona %r not found in customer.yaml; empty exposure (fail-closed)",
+        persona_slug,
+    )
+    return {}
+
+
+def _resolve_current_turn_approval(args: dict | None) -> bool:
+    """Whether the operator approved THIS action in THIS turn.
+
+    The runtime stamps ``_current_turn_approval`` onto the tool args when an
+    approval has been registered for this exact call. Approvals from prior
+    turns/sessions never carry over. This is an approval SIGNAL, not an
+    entitlement — entitlements are resolved only from the trusted config.
+    """
     if isinstance(args, dict):
-        merged.update(_parse_action_ceiling_map(args.get("_action_ceilings")))
-    return merged
+        return bool(args.get("_current_turn_approval"))
+    return False
+
+
+def _resolve_skill_name(args: dict | None) -> str:
+    """Best-effort skill-name for the audit reason string only (never an
+    entitlement input)."""
+    if isinstance(args, dict):
+        name = args.get("_skill_name")
+        if isinstance(name, str) and name:
+            return name
+    return "(unknown)"
 
 
 # ---------------------------------------------------------------------------
 # Vertical-pack safety floors (ADR 0022 / ADR 0037 Tenet 3)
 #
-# A vertical pack declares non-raisable safety floors in its manifest
-# (``operator/verticals/<vertical>/vertical.yaml`` -> ``compliance:``). A floor
-# can only *narrow* a customer's authored ceiling, never raise it
-# (``resolve_ceiling``). The Machine reads the customer's ``vertical`` field
-# (cheap, always present), not the full pack manifest.
-#
 # DERIVED, NOT DUPLICATED: the source of truth is the string-keyed
 # ``shared.action_classes.VERTICAL_FLOORS``, which ``config_applier.safety`` also
 # consumes for the apply-time floor check. This module builds the enum-keyed
 # runtime map from it so the live ceiling resolver and the apply-time gate can
-# never disagree about which floors are in force (a hand-copy here drifted from
-# the applier on any new floor — 2026-06-15 review of overlay PR #81).
-#
-#   law-firm / ``external-send-draft-floor`` -> EXTERNAL_SEND pinned to
-#     draft_for_review: client- and tribunal-bound mail ships under a human
-#     reviewer's identity (ADR 0005), non-raisable. See
-#     ``operator/verticals/law-firm/{vertical.yaml,compliance-floor.md}``.
+# never disagree about which floors are in force.
 # ---------------------------------------------------------------------------
 
 
 def _derive_vertical_floors() -> Mapping[str, Mapping[ActionClass, Ceiling]]:
     """Build the enum-keyed runtime floor map from the shared string source.
 
-    Converts each ``{vertical: {action_class_str: ceiling_str}}`` entry in
-    ``shared.action_classes.VERTICAL_FLOORS`` into the ``ActionClass`` / ``Ceiling``
-    enums this module enforces with. A malformed entry (unknown action class or
-    ceiling string) raises at import — a floor that cannot be enforced is a
-    fail-closed boot error, never silently dropped.
+    A malformed entry (unknown action class or ceiling string) raises at import
+    — a floor that cannot be enforced is a fail-closed boot error, never silently
+    dropped.
     """
     out: dict[str, Mapping[ActionClass, Ceiling]] = {}
     for vertical, floors in _SHARED_VERTICAL_FLOORS.items():
@@ -687,13 +554,10 @@ def _resolve_vertical() -> str:
     """Resolve the customer's vertical slug.
 
     Source order: ``customer.yaml`` (via ``shared.customer_config``) ->
-    ``SMD_VERTICAL`` env override (dev / test) -> ``""`` (no vertical).
-    Stub state and a genuinely absent file fall through to the env path;
-    any other read fault (unreadable / unparseable file on a provisioned
-    Machine) propagates so the outer ``evaluate_tool_call`` handler fails
-    closed. A floor must never be silently dropped on an I/O fault — a law
-    customer who authored ``external_send: autonomous`` relies on the pack
-    floor to narrow it back to draft (2026-06-12 code review).
+    ``SMD_VERTICAL`` env override (dev / test) -> ``""`` (no vertical). Stub
+    state and a genuinely absent file fall through to the env path; any other
+    read fault propagates so the outer ``evaluate_tool_call`` handler fails
+    closed — a floor must never be silently dropped on an I/O fault.
     """
     try:
         from shared.customer_config import CustomerConfig  # local import
@@ -714,24 +578,19 @@ def _resolve_vertical() -> str:
 def _resolve_vertical_floors() -> dict[ActionClass, Ceiling]:
     """Resolve non-raisable per-action-class floors from the vertical pack.
 
-    The law-firm pack's ``external-send-draft-floor`` pins ``external_send`` to
-    ``draft_for_review`` — a floor a customer's authored ceiling can only narrow,
-    never raise (ADR 0025 / ADR 0022). Returns ``{}`` for verticals with no
-    declared floor (e.g. customer-zero ``mixed``).
-
-    Closes the prior HONEST GAP: a law customer who forgets to author the
-    ``external_send`` ceiling now still gets the floor from the pack, so a
-    client/tribunal-bound send can never go out autonomously on a law Machine.
+    The law-firm pack pins ``external_send`` to ``draft_for_review`` — a floor a
+    persona's authored exposure can only narrow, never raise (ADR 0025 / ADR
+    0022). Returns ``{}`` for verticals with no declared floor.
     """
     floors = _VERTICAL_FLOORS.get(_resolve_vertical())
     return dict(floors) if floors else {}
 
 
-# Body-bearing arg keys on AgentMail / generic send tools. ``subject`` is
-# included so a sensitive subject line alone (e.g. "Invoice #1200") trips the
-# floor. ``send_draft`` (sends a pre-composed draft by id) and a bodyless
-# forward carry NO inspectable content here — ``_extract_send_body`` returns
-# ``None`` and ``content_floor.classify(None)`` fails toward draft.
+# ---------------------------------------------------------------------------
+# Content-sensitivity floor (ADR 0031)
+# ---------------------------------------------------------------------------
+
+
 _SEND_BODY_ARG_KEYS: tuple[str, ...] = (
     "subject",
     "text",
@@ -803,6 +662,40 @@ def _apply_content_floor(tool_name: str, args: dict | None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Decision audit
+# ---------------------------------------------------------------------------
+
+
+def _ceiling_str(value: Ceiling | None) -> str:
+    return value.value if isinstance(value, Ceiling) else "unauthored"
+
+
+def _audit_decision(tool_name: str, persona_slug: str, decision: EnforcementDecision) -> None:
+    """Emit the structured trust-decision audit line (ADR 0056).
+
+    Carries the six fields the audit review reads: action class, authored
+    ceiling, vertical floor, effective ceiling, decision (audit_action), and the
+    reason. Best-effort and never raises — observability must not perturb the
+    tool path.
+    """
+    try:
+        logger.info(
+            "trust-decision tool=%s persona=%s action_class=%s authored_ceiling=%s "
+            "vertical_floor=%s effective_ceiling=%s decision=%s reason=%s",
+            tool_name,
+            persona_slug or "(none)",
+            decision.action_class.value,
+            _ceiling_str(decision.authored_ceiling),
+            _ceiling_str(decision.vertical_floor),
+            _ceiling_str(decision.effective_ceiling),
+            decision.audit_action,
+            decision.reason,
+        )
+    except Exception:  # noqa: BLE001 — audit logging must never break the path
+        logger.debug("trust: decision audit log failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Hook entry point
 # ---------------------------------------------------------------------------
 
@@ -815,78 +708,71 @@ def evaluate_tool_call(
 ) -> dict | None:
     """Decide whether a tool call may proceed.
 
-    Returns:
-        ``None`` to allow the call.
-        ``{"action": "block", "message": "Refused: <reason>"}`` to block.
+    Returns ``None`` to allow the call, or
+    ``{"action": "block", "message": "Refused: <reason>"}`` to block.
 
     Block precedence (first match wins):
-      1. Tool name is in ``BANNED_TOOLS`` — refused regardless of ceiling.
-      2. Resolved ceiling refuses the action class via ``enforce()``. The
-         per-session taint (``SESSION_TAINT``, set by the inbound chokepoints
-         when untrusted content is ingested) is read by ``session_id`` and
+      1. Tool name is in ``BANNED_TOOLS`` — refused regardless of exposure.
+      2. The active persona's exposure refuses the action class via ``enforce()``.
+         The per-session taint (``SESSION_TAINT``) is read by ``session_id`` and
          passed to ``enforce()`` as the taint-gate input.
 
-    Exception safety: any exception in this function is caught at the
-    hook boundary; this function may raise internally and the caller's
-    try/except in ``__init__.py`` translates raises into a None (allow)
-    return so a misbehaving policy module cannot break the agent loop.
+    Exception safety: any exception here is caught at the hook boundary; this
+    function may raise internally and the caller's try/except in ``__init__.py``
+    translates a raise into a fail-closed block.
     """
     if not tool_name:
         # Defensive: an empty tool name is a malformed pre-hook kwarg, not a
         # genuine refusal. Allow and let downstream surfaces complain.
         return None
 
-    # 1. Banned tools — refuse before policy runs. ``err.reason`` is the
-    # categorical code from ``shared.action_classes.BANNED_REASON`` (e.g.
-    # ``"banned_tool_pattern_a"``); render the user-visible message from
-    # ``_BANNED_REFUSAL_MESSAGE`` keyed by tool name, falling back to the
-    # categorical code when an unknown banned tool slips through.
+    # 1. Banned tools — refuse before policy runs.
     try:
         classification = classify_tool(tool_name)
     except BannedToolError as err:
         message = _BANNED_REFUSAL_MESSAGE.get(err.tool_name, err.reason)
-        return {
-            "action": "block",
-            "message": f"Refused: {message}",
-        }
+        logger.info(
+            "trust-decision tool=%s persona=%s action_class=banned decision=refuse reason=%s",
+            tool_name,
+            _resolve_active_persona() or "(none)",
+            message,
+        )
+        return {"action": "block", "message": f"Refused: {message}"}
 
-    # 2. Resolve customer + skill ceilings; take the more restrictive.
+    # 2. Resolve the active persona's exposure from the TRUSTED config + the
+    # vertical floors, then enforce.
     #
-    # FAIL CLOSED on resolution failure (issue #12). A raise here — a
-    # customer.yaml parse error, a garbled/missing secret, an unexpected
-    # None — must NOT silently allow a sensitive action. READ is the one
-    # exception: it is always permitted under any non-refused ceiling and
-    # carries no external blast radius, so a transient config error must
-    # not brick read-only tooling. Every other action class refuses when
-    # the ceiling is indeterminate.
+    # FAIL CLOSED on resolution failure (issue #12). A raise here — a customer.yaml
+    # parse error, malformed personas, an unexpected None — must NOT silently allow
+    # a sensitive action. READ is the one exception: it is always permitted and
+    # carries no external blast radius, so a transient config error must not brick
+    # read-only tooling. Every other action class refuses when exposure is
+    # indeterminate.
+    persona_slug = _resolve_active_persona()
     try:
-        customer_ceiling = _resolve_customer_ceiling()
-        skill_ceiling = _resolve_skill_ceiling(args)
-        effective_ceiling = _most_restrictive(customer_ceiling, skill_ceiling)
-        action_ceilings = _resolve_action_ceilings(args)
+        exposure = _resolve_persona_exposure(persona_slug)
         vertical_floors = _resolve_vertical_floors()
 
         decision = enforce(
-            ceiling=effective_ceiling,
             action=classification.action_class,
-            skill_name=_resolve_skill_name(args),
+            exposure=exposure,
             tool_name=tool_name,
+            persona_slug=persona_slug,
             current_turn_approval=_resolve_current_turn_approval(args),
-            action_ceilings=action_ceilings,
             vertical_floors=vertical_floors,
             inbound_trust_class=SESSION_TAINT.trust_class(session_id),
         )
     except Exception:  # noqa: BLE001
         if classification.action_class == ActionClass.READ:
             logger.warning(
-                "trust: ceiling resolution failed for READ tool %r; allowing "
-                "(read is low-risk and always permitted under non-refused ceilings)",
+                "trust: exposure resolution failed for READ tool %r; allowing "
+                "(read is low-risk and always permitted)",
                 tool_name,
                 exc_info=True,
             )
             return None
         logger.exception(
-            "trust: ceiling resolution failed for sensitive tool %r (action=%s); "
+            "trust: exposure resolution failed for sensitive tool %r (action=%s); "
             "FAILING CLOSED — refusing the call",
             tool_name,
             classification.action_class,
@@ -894,15 +780,17 @@ def evaluate_tool_call(
         return {
             "action": "block",
             "message": (
-                f"Refused: trust-ceiling decision unavailable for this "
+                f"Refused: trust decision unavailable for this "
                 f"{classification.action_class} action; failing closed"
             ),
         }
 
-    # Content-sensitivity floor (ADR 0031). Only an EXTERNAL_SEND the ceiling
-    # would ALLOW (i.e. resolved to autonomous send) is subject to the floor —
-    # a draft/refuse decision already withholds the send. A money / contract /
-    # scope / legal body is downgraded to a draft even under autonomous.
+    _audit_decision(tool_name, persona_slug, decision)
+
+    # Content-sensitivity floor (ADR 0031). Only an EXTERNAL_SEND the exposure
+    # would ALLOW (resolved to autonomous send) is subject to the floor — a
+    # draft/refuse decision already withholds the send. Money / contract / scope /
+    # legal content is downgraded to a draft even under an autonomous exposure.
     if decision.allowed and classification.action_class == ActionClass.EXTERNAL_SEND:
         floor_block = _apply_content_floor(tool_name, args)
         if floor_block is not None:
@@ -911,10 +799,7 @@ def evaluate_tool_call(
     if decision.allowed:
         return None
 
-    return {
-        "action": "block",
-        "message": f"Refused: {decision.reason}",
-    }
+    return {"action": "block", "message": f"Refused: {decision.reason}"}
 
 
 __all__ = [

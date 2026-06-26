@@ -86,6 +86,25 @@ def _is_managed(job: dict[str, Any]) -> bool:
     return str(job.get("name", "")).startswith(MANAGED_PREFIX + ":")
 
 
+def _scheduled_initiation_skills(persona: dict[str, Any]) -> set[str]:
+    """Names of the persona's ENABLED skills that grant ``initiation.scheduled``
+    (ADR 0056). A cron entry may only target one of these."""
+    out: set[str] = set()
+    for skill in persona.get("skills") or []:
+        if not isinstance(skill, dict) or not skill.get("enabled"):
+            continue
+        name = skill.get("name")
+        initiation = skill.get("initiation")
+        if (
+            isinstance(name, str)
+            and name
+            and isinstance(initiation, dict)
+            and initiation.get("scheduled") is True
+        ):
+            out.add(name)
+    return out
+
+
 def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]]:
     """Return {persona_slug: [_DesiredJob, ...]} for every authored cron entry,
     grouped by persona.
@@ -103,6 +122,7 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
     by_persona: dict[str, list[_DesiredJob]] = {}
     for persona in customer.get("personas") or []:
         pslug = str(persona.get("slug") or persona.get("name") or "").strip()
+        scheduled_skills = _scheduled_initiation_skills(persona)
         entries: list[_DesiredJob] = []
         for entry in persona.get("cron") or []:
             if not isinstance(entry, dict):
@@ -116,6 +136,17 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
             if not skill or not schedule:
                 raise CronMaterializeError(
                     f"persona {pslug!r}: cron entry missing skill/schedule: {entry!r}"
+                )
+            # ADR 0056: a scheduled (cron) firing requires the skill to grant
+            # initiation.scheduled. The validator already gates this at authoring
+            # / re-validation time; this is the defense-in-depth runtime gate so a
+            # cron job is never registered for a skill that did not grant the
+            # scheduled initiation path — fail-closed, never silently registered.
+            if skill not in scheduled_skills:
+                raise CronMaterializeError(
+                    f"persona {pslug!r} skill {skill!r}: cron entry references a skill "
+                    "that does not grant initiation.scheduled (ADR 0056). Author "
+                    "initiation.scheduled: true on the skill or drop the cron entry."
                 )
             if wake not in _SUPPORTED_WAKE_POLICIES:
                 raise CronMaterializeError(

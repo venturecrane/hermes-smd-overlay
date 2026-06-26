@@ -45,10 +45,17 @@ VALID_YAML = dedent(
         tone:
           - plainspoken
           - concise
+        entitlements:
+          exposure:
+            internal_write: autonomous
+            external_send: draft_for_review
         skills:
           - name: inbox-triage
             version: pending
-            trust_ceiling: draft_for_review
+            initiation:
+              manual: true
+              scheduled: false
+              webhook: false
             enabled: true
 
     connectors:
@@ -261,11 +268,23 @@ def test_validate_rejects_duplicate_persona_slugs(tmp_path):
     assert any("duplicate slug" in e for e in errors)
 
 
-def test_validate_rejects_invalid_trust_ceiling(tmp_path):
-    bad = VALID_YAML.replace("trust_ceiling: draft_for_review", "trust_ceiling: yolo")
+def test_validate_rejects_invalid_exposure_ceiling(tmp_path):
+    bad = VALID_YAML.replace("internal_write: autonomous", "internal_write: yolo")
     path = _write(tmp_path, bad)
     errors = validate_customer_yaml(path)
-    assert any("trust_ceiling must be one of" in e for e in errors)
+    assert any("must be one of" in e and "exposure" in e for e in errors)
+
+
+def test_validate_rejects_legacy_skill_trust_ceiling(tmp_path):
+    """ADR 0056: a retired skill trust_ceiling is rejected with no shim."""
+    bad = VALID_YAML.replace(
+        "        version: pending\n",
+        "        version: pending\n        trust_ceiling: draft_for_review\n",
+    )
+    assert "trust_ceiling: draft_for_review" in bad  # guard: the replace landed
+    path = _write(tmp_path, bad)
+    errors = validate_customer_yaml(path)
+    assert any("trust_ceiling" in e and "retired" in e for e in errors)
 
 
 def test_validate_rejects_invalid_connector_backend(tmp_path):

@@ -62,8 +62,28 @@ ACCEPTED_VERTICALS = {
     "mixed",
 }
 
-# SOURCE OF TRUTH: ss-console ACCEPTED_TRUST_CEILINGS (types.ts). Already aligned.
+# SOURCE OF TRUTH: ss-console ACCEPTED_EXPOSURE_CEILINGS (types.ts). The three
+# content classes per ADR 0035 — the only legal values for a persona exposure
+# entry. Already aligned with the console.
 ACCEPTED_CEILINGS = {"autonomous", "draft_for_review", "refused"}
+
+# SOURCE OF TRUTH: ss-console ACCEPTED_ACTION_CLASSES (types.ts), minus ``read``.
+# ADR 0056: exposure is authored PER action class; ``read`` is never customer-
+# authored (enforcement always allows reads), so it must not appear in an
+# exposure map. The console rejects a ``read`` exposure key explicitly.
+AUTHORED_EXPOSURE_ACTION_CLASSES = {
+    "internal_write",
+    "external_send",
+    "commitment",
+    "destructive",
+    "code_execution",
+}
+
+# Legacy entitlement fields retired by ADR 0056 with NO compatibility shim. The
+# console rejects each as ``LegacyEntitlementField``; the on-box validator must
+# reject them too or a config the console would block could land on the volume
+# through a bypassed authoring path.
+LEGACY_ENTITLEMENT_FIELDS = ("trust_ceiling", "action_ceilings")
 
 ACCEPTED_BACKEND_PREFIXES = ("mcp:", "build:", "synthetic:")
 
@@ -127,6 +147,9 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
 
     _validate_top_level(cfg, errors)
     _validate_personas(cfg, errors)
+    _validate_webhook_triggers(cfg, errors)
+    _validate_scope_entitlements(cfg, errors)
+    _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
     _validate_memory(cfg, errors)
     _validate_voice_library(cfg, errors)
@@ -178,42 +201,231 @@ def _validate_personas(cfg: dict[str, Any], errors: list[str]) -> None:
 
     seen_slugs: set[str] = set()
     for i, persona in enumerate(personas):
-        prefix = f"personas[{i}]"
-        if not isinstance(persona, dict):
+        _validate_one_persona(persona, i, seen_slugs, errors)
+
+
+def _validate_one_persona(persona: Any, i: int, seen_slugs: set[str], errors: list[str]) -> None:
+    prefix = f"personas[{i}]"
+    if not isinstance(persona, dict):
+        _err(f"{prefix}: must be a mapping", errors)
+        return
+    slug = persona.get("slug")
+    if not slug:
+        _err(f"{prefix}: missing slug", errors)
+    elif slug in seen_slugs:
+        _err(f"{prefix}: duplicate slug {slug!r}", errors)
+    else:
+        seen_slugs.add(slug)
+    for field in ("name", "status"):
+        if field not in persona:
+            _err(f"{prefix}({slug}): missing field {field}", errors)
+    _validate_entitlements(persona.get("entitlements"), f"{prefix}({slug}).entitlements", errors)
+    skills = persona.get("skills", []) or []
+    for j, skill in enumerate(skills):
+        _validate_skill(skill, f"{prefix}({slug}).skills[{j}]", errors)
+    _validate_persona_cron(persona.get("cron"), skills, f"{prefix}({slug}).cron", errors)
+
+
+def _validate_skill(skill: Any, sk_prefix: str, errors: list[str]) -> None:
+    """Validate one persona skill under the ADR 0056 model.
+
+    Required: name + initiation (an object carrying boolean manual/scheduled/
+    webhook). version/enabled are OPTIONAL — the translator defaults them
+    (version→"pending", enabled→falsy) and the console treats them as
+    optional-but-typed. The retired entitlement fields (trust_ceiling,
+    action_ceilings) are rejected with no shim, mirroring the console's
+    LegacyEntitlementField.
+    """
+    if not isinstance(skill, dict):
+        _err(f"{sk_prefix}: must be a mapping", errors)
+        return
+    if "name" not in skill:
+        _err(f"{sk_prefix}: missing field name", errors)
+    for legacy in LEGACY_ENTITLEMENT_FIELDS:
+        if legacy in skill:
+            _err(
+                f"{sk_prefix}.{legacy}: retired (ADR 0056); use "
+                "personas[].entitlements.exposure and skills[].initiation",
+                errors,
+            )
+    _validate_initiation(skill.get("initiation"), f"{sk_prefix}.initiation", errors)
+    if "version" in skill and not isinstance(skill["version"], str):
+        _err(f"{sk_prefix}: version must be a string when present", errors)
+    if "enabled" in skill and not isinstance(skill["enabled"], bool):
+        _err(f"{sk_prefix}: enabled must be a boolean when present", errors)
+
+
+def _validate_initiation(raw: Any, path: str, errors: list[str]) -> None:
+    """Every skill declares how it may START (ADR 0056). The three flags are
+    required and must be booleans; the console errors when initiation is absent
+    on a skill, so the on-box validator does too."""
+    if raw is None:
+        _err(f"{path}: required (manual/scheduled/webhook booleans)", errors)
+        return
+    if not isinstance(raw, dict):
+        _err(f"{path}: must be a mapping", errors)
+        return
+    for flag in ("manual", "scheduled", "webhook"):
+        if flag not in raw:
+            _err(f"{path}.{flag}: required boolean", errors)
+        elif not isinstance(raw[flag], bool):
+            _err(f"{path}.{flag}: must be a boolean", errors)
+
+
+def _validate_entitlements(raw: Any, path: str, errors: list[str]) -> None:
+    """Validate persona-level ``entitlements.exposure`` (ADR 0056).
+
+    Absent ⇒ valid (sparse, fail-closed at runtime). Rejects the retired
+    scalar fields, and validates each exposure entry: key in the authored
+    action-class set (``read`` is never authored), value a legal ceiling.
+    """
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        _err(f"{path}: must be a mapping when present", errors)
+        return
+    for legacy in LEGACY_ENTITLEMENT_FIELDS:
+        if legacy in raw:
+            _err(f"{path}.{legacy}: retired (ADR 0056); use exposure", errors)
+    exposure = raw.get("exposure")
+    if exposure is None:
+        return
+    if not isinstance(exposure, dict):
+        _err(f"{path}.exposure: must be a mapping when present", errors)
+        return
+    for key, value in exposure.items():
+        ep = f"{path}.exposure.{key}"
+        if key == "read":
+            _err(f"{ep}: read is always allowed and must not be authored as exposure", errors)
+        elif key not in AUTHORED_EXPOSURE_ACTION_CLASSES:
+            _err(
+                f"{ep}: exposure key must be one of {sorted(AUTHORED_EXPOSURE_ACTION_CLASSES)}",
+                errors,
+            )
+        elif value not in ACCEPTED_CEILINGS:
+            _err(f"{ep}: must be one of {sorted(ACCEPTED_CEILINGS)}", errors)
+
+
+def _validate_persona_cron(raw: Any, skills: Any, path: str, errors: list[str]) -> None:
+    """A cron entry may only target a skill that grants ``initiation.scheduled``
+    (ADR 0056). Mirrors the console's checkCronSkill so a cron the console would
+    reject cannot land on the volume through a bypassed authoring path."""
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        _err(f"{path}: must be a list when present", errors)
+        return
+    scheduled_skills = _skills_granting(skills, "scheduled")
+    for k, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            _err(f"{path}[{k}]: must be a mapping", errors)
+            continue
+        skill = entry.get("skill")
+        if isinstance(skill, str) and skill and skill not in scheduled_skills:
+            _err(
+                f"{path}[{k}].skill: cron references {skill!r} but that enabled skill "
+                "does not grant initiation.scheduled",
+                errors,
+            )
+
+
+def _skills_granting(skills: Any, flag: str) -> set[str]:
+    """Names of ENABLED skills whose ``initiation.<flag>`` is true."""
+    out: set[str] = set()
+    if not isinstance(skills, list):
+        return out
+    for skill in skills:
+        if not isinstance(skill, dict) or not skill.get("enabled"):
+            continue
+        name = skill.get("name")
+        initiation = skill.get("initiation")
+        if (
+            isinstance(name, str)
+            and name
+            and isinstance(initiation, dict)
+            and initiation.get(flag) is True
+        ):
+            out.add(name)
+    return out
+
+
+def _validate_webhook_triggers(cfg: dict[str, Any], errors: list[str]) -> None:
+    """A webhook_trigger may only target an enabled skill that grants
+    ``initiation.webhook`` on the named persona (ADR 0056). Mirrors the
+    console's checkWebhookTriggers initiation gate (the security-relevant
+    field); the source↔connector connectivity check is left to the console's
+    authoring UX, so the on-box validator is never stricter than the console
+    on the fields the console blessed."""
+    triggers = cfg.get("webhook_triggers")
+    if triggers is None:
+        return
+    if not isinstance(triggers, list):
+        _err(f"webhook_triggers must be a list; got {type(triggers).__name__}", errors)
+        return
+    webhook_skills = _webhook_skills_by_persona(cfg.get("personas"))
+    for i, trig in enumerate(triggers):
+        prefix = f"webhook_triggers[{i}]"
+        if not isinstance(trig, dict):
             _err(f"{prefix}: must be a mapping", errors)
             continue
+        persona = trig.get("persona")
+        skill = trig.get("skill")
+        if not isinstance(persona, str) or not isinstance(skill, str):
+            continue  # missing-field shape is the console's authoring concern
+        granted = webhook_skills.get(persona)
+        if granted is None:
+            _err(f"{prefix}.persona: {persona!r} is not a declared persona slug", errors)
+        elif skill not in granted:
+            _err(
+                f"{prefix}.skill: {skill!r} is not an enabled skill granting "
+                f"initiation.webhook on persona {persona!r}",
+                errors,
+            )
+
+
+def _webhook_skills_by_persona(personas: Any) -> dict[str, set[str]]:
+    """Map persona slug → names of enabled skills granting initiation.webhook."""
+    out: dict[str, set[str]] = {}
+    if not isinstance(personas, list):
+        return out
+    for persona in personas:
+        if not isinstance(persona, dict):
+            continue
         slug = persona.get("slug")
-        if not slug:
-            _err(f"{prefix}: missing slug", errors)
-        elif slug in seen_slugs:
-            _err(f"{prefix}: duplicate slug {slug!r}", errors)
-        else:
-            seen_slugs.add(slug)
-        for field in ("name", "status"):
-            if field not in persona:
-                _err(f"{prefix}({slug}): missing field {field}", errors)
-        for j, skill in enumerate(persona.get("skills", []) or []):
-            sk_prefix = f"{prefix}({slug}).skills[{j}]"
-            if not isinstance(skill, dict):
-                _err(f"{sk_prefix}: must be a mapping", errors)
-                continue
-            # Required: name + trust_ceiling. version/enabled are OPTIONAL — the
-            # translator defaults them (version→"pending", enabled→falsy), and
-            # the console validator (source of truth, sections-personas.ts) treats
-            # them as optional-but-typed. Requiring them here false-rejected
-            # console-valid configs on apply (ADR 0044 parity).
-            for field in ("name", "trust_ceiling"):
-                if field not in skill:
-                    _err(f"{sk_prefix}: missing field {field}", errors)
-            if "trust_ceiling" in skill and skill["trust_ceiling"] not in ACCEPTED_CEILINGS:
-                _err(
-                    f"{sk_prefix}: trust_ceiling must be one of {sorted(ACCEPTED_CEILINGS)}",
-                    errors,
-                )
-            if "version" in skill and not isinstance(skill["version"], str):
-                _err(f"{sk_prefix}: version must be a string when present", errors)
-            if "enabled" in skill and not isinstance(skill["enabled"], bool):
-                _err(f"{sk_prefix}: enabled must be a boolean when present", errors)
+        if isinstance(slug, str) and slug:
+            out[slug] = _skills_granting(persona.get("skills"), "webhook")
+    return out
+
+
+def _validate_scope_entitlements(cfg: dict[str, Any], errors: list[str]) -> None:
+    """Reject the retired scope-level entitlement fields (ADR 0056)."""
+    scope = cfg.get("scope")
+    if not isinstance(scope, dict):
+        return
+    for legacy in LEGACY_ENTITLEMENT_FIELDS:
+        if legacy in scope:
+            _err(
+                f"scope.{legacy}: retired (ADR 0056); exposure is authored per "
+                "persona at personas[].entitlements.exposure",
+                errors,
+            )
+
+
+def _validate_google_auth_entitlements(cfg: dict[str, Any], errors: list[str]) -> None:
+    """Reject the retired managed-mailbox action_ceilings (ADR 0056)."""
+    google_auth = cfg.get("google_auth")
+    if not isinstance(google_auth, dict):
+        return
+    mailboxes = google_auth.get("managed_mailboxes")
+    if not isinstance(mailboxes, list):
+        return
+    for i, mailbox in enumerate(mailboxes):
+        if isinstance(mailbox, dict) and "action_ceilings" in mailbox:
+            _err(
+                f"google_auth.managed_mailboxes[{i}].action_ceilings: retired "
+                "(ADR 0056); exposure is authored per persona",
+                errors,
+            )
 
 
 def _validate_connectors(cfg: dict[str, Any], errors: list[str]) -> None:
@@ -292,6 +504,8 @@ __all__ = [
     "ACCEPTED_BACKEND_PREFIXES",
     "ACCEPTED_CEILINGS",
     "ACCEPTED_VERTICALS",
+    "AUTHORED_EXPOSURE_ACTION_CLASSES",
+    "LEGACY_ENTITLEMENT_FIELDS",
     "REQUIRED_TOP_LEVEL_FIELDS",
     "validate_customer_yaml",
 ]
