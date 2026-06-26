@@ -53,10 +53,17 @@ VALID_YAML = dedent(
         tone:
           - plainspoken
           - concise
+        entitlements:
+          exposure:
+            internal_write: autonomous
+            external_send: draft_for_review
         skills:
           - name: inbox-triage
             version: pending
-            trust_ceiling: draft_for_review
+            initiation:
+              manual: true
+              scheduled: false
+              webhook: false
             enabled: true
 
     connectors:
@@ -1107,10 +1114,16 @@ _ESCALATOR_YAML = dedent(
         tone:
           - plainspoken
           - concise
+        entitlements:
+          exposure:
+            internal_write: autonomous
         skills:
           - name: deadline-miss-escalator
             version: pending
-            trust_ceiling: draft_for_review
+            initiation:
+              manual: true
+              scheduled: true
+              webhook: false
             enabled: true
         cron:
           - skill: deadline-miss-escalator

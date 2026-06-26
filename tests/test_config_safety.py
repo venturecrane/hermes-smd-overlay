@@ -89,16 +89,36 @@ def test_vertical_floors_non_string_is_empty():
 
 
 def _law_cfg(external_send: str | None) -> dict:
-    cfg: dict = {"vertical": "law-firm", "scope": {}}
+    # ADR 0056: exposure is authored PER persona at entitlements.exposure.
+    exposure: dict = {}
     if external_send is not None:
-        cfg["scope"]["action_ceilings"] = {"external_send": external_send}
-    return cfg
+        exposure["external_send"] = external_send
+    return {
+        "vertical": "law-firm",
+        "personas": [{"slug": "marcus", "entitlements": {"exposure": exposure}}],
+    }
 
 
 def test_floor_preserving_no_vertical_floor_always_true():
-    # mixed has no declared floor — any authored ceiling is fine.
-    cfg = {"vertical": "mixed", "scope": {"action_ceilings": {"external_send": "autonomous"}}}
+    # mixed has no declared floor — any authored exposure is fine.
+    cfg = {
+        "vertical": "mixed",
+        "personas": [{"slug": "m", "entitlements": {"exposure": {"external_send": "autonomous"}}}],
+    }
     assert floor_preserving({}, cfg) is True
+
+
+def test_floor_preserving_rejects_when_any_persona_exceeds_floor():
+    # A multi-persona law config where ONE persona raises external_send above the
+    # floor is rejected even though the other is clean (exposure is per-persona).
+    cfg = {
+        "vertical": "law-firm",
+        "personas": [
+            {"slug": "clean", "entitlements": {"exposure": {"external_send": "draft_for_review"}}},
+            {"slug": "loud", "entitlements": {"exposure": {"external_send": "autonomous"}}},
+        ],
+    }
+    assert floor_preserving({}, cfg) is False
 
 
 def test_floor_preserving_authored_at_floor_is_ok():
@@ -142,9 +162,8 @@ def test_floor_preserving_garbled_ceiling_fails_closed():
 @pytest.mark.parametrize(
     "path",
     [
-        "scope.trust_ceiling",
-        "scope.action_ceilings",
-        "scope.action_ceilings.external_send",
+        "personas.0.entitlements.exposure",
+        "personas.0.entitlements.exposure.external_send",
         "escalation",
         "escalation.red_flag_recipients",
         "webhook_triggers",
@@ -152,11 +171,27 @@ def test_floor_preserving_garbled_ceiling_fails_closed():
         "scope.inbound_allow_from",
         "scope.inbound_allow_from.0",
         "personas.0.skills.2.enabled",
-        "personas.1.skills.0.trust_ceiling",
+        "personas.1.skills.0.initiation",
+        "personas.1.skills.0.initiation.scheduled",
     ],
 )
 def test_live_writable_allows_allow_list(path):
     assert live_writable(path) is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        # The retired entitlement paths are NOT live-writable (ADR 0056): a diff
+        # touching them forces a re-provision / is rejected by the applier.
+        "scope.trust_ceiling",
+        "scope.action_ceilings",
+        "scope.action_ceilings.external_send",
+        "personas.1.skills.0.trust_ceiling",
+    ],
+)
+def test_live_writable_rejects_legacy_entitlement_paths(path):
+    assert live_writable(path) is False
 
 
 @pytest.mark.parametrize(
@@ -260,15 +295,27 @@ def test_changed_paths_root_type_change_reports_dot():
 
 
 def test_non_live_writable_changes_empty_when_all_writable():
-    old = {"scope": {"trust_ceiling": "autonomous"}, "escalation": {"to": ["a@x"]}}
-    new = {"scope": {"trust_ceiling": "draft_for_review"}, "escalation": {"to": ["b@x"]}}
+    old = {
+        "personas": [{"entitlements": {"exposure": {"external_send": "autonomous"}}}],
+        "escalation": {"to": ["a@x"]},
+    }
+    new = {
+        "personas": [{"entitlements": {"exposure": {"external_send": "draft_for_review"}}}],
+        "escalation": {"to": ["b@x"]},
+    }
     assert non_live_writable_changes(old, new) == []
 
 
 def test_non_live_writable_changes_flags_rebuild_class():
-    old = {"model": "claude-opus-4-7", "scope": {"trust_ceiling": "autonomous"}}
-    new = {"model": "claude-opus-4-8", "scope": {"trust_ceiling": "refused"}}
-    # model is rebuild-class; scope.trust_ceiling is live-writable.
+    old = {
+        "model": "claude-opus-4-7",
+        "personas": [{"entitlements": {"exposure": {"external_send": "autonomous"}}}],
+    }
+    new = {
+        "model": "claude-opus-4-8",
+        "personas": [{"entitlements": {"exposure": {"external_send": "refused"}}}],
+    }
+    # model is rebuild-class; personas.*.entitlements.exposure is live-writable.
     assert non_live_writable_changes(old, new) == ["model"]
 
 

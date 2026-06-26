@@ -65,10 +65,13 @@ class FakeAudit:
 # ---------------------------------------------------------------------------
 
 
-def _doc(*, model: str = "claude-opus-4-7", trust_ceiling: str | None = None) -> dict:
-    scope: dict = {"email_folders_visible": ["Inbox"]}
-    if trust_ceiling is not None:
-        scope["trust_ceiling"] = trust_ceiling
+def _doc(*, model: str = "claude-opus-4-7", internal_write: str | None = None) -> dict:
+    # ADR 0056: a live-writable ceiling change is a persona exposure edit.
+    # internal_write carries no vertical floor, so it is the clean knob for the
+    # tighten/widen live-apply tests.
+    exposure: dict = {}
+    if internal_write is not None:
+        exposure["internal_write"] = internal_write
     return {
         "schema_version": 1,
         "customer_id": "acme",
@@ -77,9 +80,16 @@ def _doc(*, model: str = "claude-opus-4-7", trust_ceiling: str | None = None) ->
         "fly_region": "iad",
         "model": model,
         "hermes_ref": "v2026.5.16-smd.0",
-        "personas": [{"slug": "marcus", "status": "active", "name": "Marcus"}],
+        "personas": [
+            {
+                "slug": "marcus",
+                "status": "active",
+                "name": "Marcus",
+                "entitlements": {"exposure": exposure},
+            }
+        ],
         "connectors": {"Email": {"adapter": "gmail", "backend": "mcp:gmail", "enabled": True}},
-        "scope": scope,
+        "scope": {"email_folders_visible": ["Inbox"]},
         "memory": {
             "d1_namespace": "acme",
             "r2_vault_path": "vaults/acme/",
@@ -169,7 +179,7 @@ def test_run_once_changed_etag_applies_and_persists_epoch(tmp_path):
     # First tick: seeds (records e1), unchanged → None.
     assert loop.run_once() is None
     # Push a live-writable change (tighten the ceiling) with a NEW etag.
-    s3.set_object(_yaml(trust_ceiling="draft_for_review"), etag="e2")
+    s3.set_object(_yaml(internal_write="draft_for_review"), etag="e2")
     outcome = loop.run_once()
     assert outcome is ApplyOutcome.APPLIED
     assert loop._last_etag == "e2"
@@ -183,10 +193,10 @@ def test_run_once_epoch_increments_across_two_applies(tmp_path):
     s3 = FakeS3(body, etag="e1")
     loop = _loop(tmp_path, s3, FakeAudit(), volume_body=body)
     loop.run_once()  # seed
-    s3.set_object(_yaml(trust_ceiling="draft_for_review"), etag="e2")
+    s3.set_object(_yaml(internal_write="draft_for_review"), etag="e2")
     loop.run_once()
     assert read_epoch(loop.epoch_file) == 1
-    s3.set_object(_yaml(trust_ceiling="refused"), etag="e3")
+    s3.set_object(_yaml(internal_write="refused"), etag="e3")
     loop.run_once()
     assert read_epoch(loop.epoch_file) == 2
 

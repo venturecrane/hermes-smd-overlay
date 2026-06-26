@@ -145,38 +145,49 @@ def vertical_floors(vertical: object) -> dict[str, str]:
     return dict(floors) if floors else {}
 
 
-def _action_ceilings(cfg: object) -> dict[str, str]:
-    """Extract the per-action-class ceiling map from ``scope.action_ceilings``.
+def _persona_exposures(cfg: object) -> list[dict[str, str]]:
+    """Extract each persona's ``entitlements.exposure`` map (ADR 0056).
 
-    Parsed defensively: a missing / non-mapping ``scope`` or ``action_ceilings``
-    yields ``{}``. Keys/values are coerced to stripped lower-case strings so the
-    floor comparison is vocabulary-aligned. Non-string entries are dropped (they
-    cannot name a real action class or ceiling).
+    Exposure is authored PER persona (``personas[].entitlements.exposure``),
+    so a floor must be checked against every persona's map — a single persona
+    that raises ``external_send`` above the law-firm floor is a violation even
+    if the others are clean. Parsed defensively: a missing / non-mapping
+    personas list, entitlements, or exposure yields no entry. Keys/values are
+    coerced to stripped lower-case strings; non-string entries are dropped.
     """
     if not isinstance(cfg, Mapping):
-        return {}
-    scope = cfg.get("scope")
-    if not isinstance(scope, Mapping):
-        return {}
-    raw = scope.get("action_ceilings")
-    if not isinstance(raw, Mapping):
-        return {}
-    out: dict[str, str] = {}
-    for key, value in raw.items():
-        if isinstance(key, str) and isinstance(value, str):
-            out[key.strip().lower()] = value.strip().lower()
+        return []
+    personas = cfg.get("personas")
+    if not isinstance(personas, list):
+        return []
+    out: list[dict[str, str]] = []
+    for persona in personas:
+        if not isinstance(persona, Mapping):
+            continue
+        entitlements = persona.get("entitlements")
+        if not isinstance(entitlements, Mapping):
+            out.append({})
+            continue
+        raw = entitlements.get("exposure")
+        exposure: dict[str, str] = {}
+        if isinstance(raw, Mapping):
+            for key, value in raw.items():
+                if isinstance(key, str) and isinstance(value, str):
+                    exposure[key.strip().lower()] = value.strip().lower()
+        out.append(exposure)
     return out
 
 
 def floor_preserving(old_cfg: object, new_cfg: object) -> bool:
-    """True iff ``new_cfg`` does not raise any effective ceiling above its floor.
+    """True iff ``new_cfg`` does not raise any persona's exposure above its floor.
 
     The vertical is read from ``new_cfg`` (the config being applied governs which
-    floors are in force). For each action class with a declared floor, the new
-    config's authored per-action ceiling must be at or below the floor's
-    permissiveness — i.e. ``rank(authored) <= rank(floor)``. A config that
-    authors ``external_send: autonomous`` on a law-firm Machine is *not*
-    floor-preserving and must be rejected on the live path.
+    floors are in force). For each action class with a declared floor, EVERY
+    persona's authored exposure for that class must be at or below the floor's
+    permissiveness — i.e. ``rank(authored) <= rank(floor)``. A config where any
+    persona authors ``external_send: autonomous`` on a law-firm Machine is *not*
+    floor-preserving and must be rejected on the live path (ADR 0056 moved
+    exposure from a customer-wide scope scalar to a per-persona map).
 
     ``old_cfg`` is accepted for symmetry and future cross-config invariants; the
     floor check itself only needs the config being applied. Fails CLOSED: any
@@ -191,19 +202,20 @@ def floor_preserving(old_cfg: object, new_cfg: object) -> bool:
         # No declared floor for this vertical — nothing to preserve.
         return True
 
-    authored = _action_ceilings(new_cfg)
+    exposures = _persona_exposures(new_cfg)
     for action_class, floor in floors.items():
         floor_rank = _rank(floor)
-        authored_value = authored.get(action_class)
-        if authored_value is None:
-            # Unauthored: the runtime applies the floor itself (the pack floor is
-            # the effective ceiling). That is floor-preserving by construction —
-            # the customer never raised above it.
-            continue
-        if _rank(authored_value) > floor_rank:
-            # Authored ABOVE the floor — a live apply would widen past a
-            # compliance floor. Reject.
-            return False
+        for exposure in exposures:
+            authored_value = exposure.get(action_class)
+            if authored_value is None:
+                # Unauthored for this persona: the runtime applies the floor
+                # itself (and unauthored is fail-closed regardless). Floor-
+                # preserving by construction — the persona never raised above it.
+                continue
+            if _rank(authored_value) > floor_rank:
+                # Authored ABOVE the floor — a live apply would widen past a
+                # compliance floor. Reject.
+                return False
     return True
 
 
@@ -219,25 +231,32 @@ def floor_preserving(old_cfg: object, new_cfg: object) -> bool:
 # from its provisioned image.
 #
 # An entry is a dotted path PREFIX. ``persona`` writability is expressed at the
-# leaf grain (``personas[].skills[].enabled`` / ``.trust_ceiling``) because a
-# persona's OAuth and identity are NOT live-writable; see
-# ``_NEVER_LIVE_WRITABLE`` for the rebuild-class persona leaves.
+# leaf grain (``personas[].entitlements.exposure`` / ``personas[].skills[].enabled``
+# / ``personas[].skills[].initiation``) because a persona's OAuth and identity are
+# NOT live-writable; see ``_NEVER_LIVE_WRITABLE`` for the rebuild-class persona
+# leaves.
 # ---------------------------------------------------------------------------
 
 _LIVE_WRITABLE_PREFIXES: tuple[str, ...] = (
-    "scope.trust_ceiling",
-    "scope.action_ceilings",
+    # ADR 0056 entitlement model. Persona exposure (the per-action-class ceiling
+    # map) and per-skill initiation are live-writable — re-authoring what a
+    # persona may expose, or how a skill may start, takes effect on apply without
+    # a rebuild. The retired scope.trust_ceiling / scope.action_ceilings /
+    # personas.*.skills.*.trust_ceiling paths are deliberately ABSENT: a diff
+    # touching them is not live-writable and the apply is rejected (the validator
+    # also rejects the authored file outright).
+    "personas.*.entitlements.exposure",
+    "personas.*.skills.*.initiation",
     # The organization roster — re-read live by hermes-smd-reply on every draft
     # (ADR 0055 / ADR 0044), so authoring who the Operator may autonomously reply
     # to takes effect on the next message with no restart.
     "scope.inbound_allow_from",
     "escalation",
     "webhook_triggers",
-    # Persona skill enablement + per-skill trust ceiling are live-writable. The
-    # array index segment (``personas.0.skills.3.enabled``) is normalized to a
-    # wildcard before this prefix match — see ``_normalize_path``.
+    # Persona skill enablement is live-writable. The array index segment
+    # (``personas.0.skills.3.enabled``) is normalized to a wildcard before this
+    # prefix match — see ``_normalize_path``.
     "personas.*.skills.*.enabled",
-    "personas.*.skills.*.trust_ceiling",
 )
 
 # Rebuild-class paths that must NEVER apply live, even if a future allow-list

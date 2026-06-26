@@ -214,9 +214,18 @@ def trust_plugin():
 
 
 @pytest.fixture
-def env_autonomous(monkeypatch):
-    """Ceiling = autonomous so the trust-ceiling layer allows INTERNAL_WRITE."""
-    monkeypatch.setenv("SMD_TRUST_CEILING", "autonomous")
+def env_autonomous(trust_plugin, monkeypatch):
+    """Grant the active persona autonomous internal_write exposure so the trust
+    layer allows the draft (INTERNAL_WRITE) and the outbound provenance gate runs.
+    Patches the SAME plugin module object the test drives (fixture caching gives
+    both this fixture and the test one trust_plugin instance)."""
+    enforce = trust_plugin.enforce
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "marcus")
+    monkeypatch.setattr(
+        enforce,
+        "_resolve_persona_exposure",
+        lambda slug="": {enforce.ActionClass.INTERNAL_WRITE: enforce.Ceiling.AUTONOMOUS},
+    )
     yield
 
 
@@ -495,8 +504,11 @@ def test_audit_write_failure_still_blocks(trust_plugin, env_autonomous, monkeypa
 
 
 def test_ceiling_refusal_short_circuits_before_gate(trust_plugin, monkeypatch) -> None:
-    """A REFUSED ceiling blocks first; the outbound gate is never consulted."""
-    monkeypatch.setenv("SMD_TRUST_CEILING", "refused")
+    """A fail-closed exposure (no internal_write authored) blocks first; the
+    outbound gate is never consulted."""
+    enforce = trust_plugin.enforce
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "marcus")
+    monkeypatch.setattr(enforce, "_resolve_persona_exposure", lambda slug="": {})
     # Spy on the gate to confirm it is not reached.
     called = {"v": False}
     ob = trust_plugin.outbound
