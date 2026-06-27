@@ -2,13 +2,15 @@
 
 Why this exists (read first): Hermes' native webhook adapter verifies only
 GitHub / GitLab / Generic(``X-Webhook-Signature`` = hex HMAC-SHA256 of the body)
-signatures. AgentMail delivers via **Svix** (``svix-id`` / ``svix-timestamp`` /
-``svix-signature`` headers, ``whsec_`` secret, base64 v1 scheme) — a different
-verification entirely. The overlay must not modify Hermes core, so this thin
-front-door is the single HTTP-edge verifier and scheme bridge:
+signatures. Real vendors sign differently — AgentMail via **Svix** (``svix-id`` /
+``svix-timestamp`` / ``svix-signature`` headers, ``whsec_`` secret, base64 v1
+scheme); Smokeball via a ``Signature`` header (raw-key hex HMAC over
+``{Timestamp}|{RequestId}|{ClientId}``, body unsigned). The overlay must not
+modify Hermes core, so this thin front-door is the single HTTP-edge verifier and
+scheme bridge, dispatching per route slug (``_VERIFIERS``):
 
-  public POST (AgentMail/Svix)  ->  this gate (verify Svix signature)
-                                ->  localhost:8644 (Hermes adapter, Generic verify)
+  public POST (vendor scheme)  ->  this gate (per-vendor verify)
+                               ->  localhost:8644 (Hermes adapter, Generic verify)
 
 On the forward hop the gate sets ``X-Webhook-Signature`` (hex HMAC-SHA256 over the
 exact forwarded bytes, same secret string) so the adapter re-verifies, and sets
@@ -37,9 +39,11 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from shared import mcp_result_store, mcp_thread_store, oauth_callback, runtime_read
@@ -118,6 +122,95 @@ def verify_svix_signature(
     return False
 
 
+# Smokeball webhook verification. Smokeball signs each delivery with HMAC-SHA256
+# (lowercase hex) in a ``Signature`` header over the pipe-joined string
+# ``f"{Timestamp}|{RequestId}|{ClientId}"`` — confirmed against
+# https://docs.smokeball.com/docs/api-docs/wivbkstcwngb5-webhooks and the
+# published golden vector. Three properties differ from Svix and are easy to get
+# wrong by cloning the Svix path:
+#   * the secret is the subscription ``key`` used as RAW UTF-8 bytes — NOT
+#     base64-decoded, NOT ``whsec_``-stripped;
+#   * the signed content is metadata only — the HTTP BODY IS NOT SIGNED;
+#   * ``ClientId`` is OUR Smokeball API client id (configured, never present in
+#     the delivery), supplied from ``WEBHOOK_SMOKEBALL_CLIENT_ID``.
+# ``Timestamp`` is .NET ticks (100ns since 0001-01-01 UTC).
+SMOKEBALL_TIMESTAMP_TOLERANCE_SECONDS = 300
+_DOTNET_TICKS_PER_SECOND = 10_000_000
+# Seconds between .NET epoch (0001-01-01) and Unix epoch (1970-01-01).
+_DOTNET_EPOCH_OFFSET_SECONDS = 62_135_596_800
+
+
+def verify_smokeball_signature(
+    body: bytes,
+    timestamp: str,
+    request_id: str,
+    client_id: str,
+    signature_header: str,
+    secret: str,
+    now: float | None = None,
+) -> bool:
+    """Smokeball webhook verification.
+
+    ``body`` is accepted for call-site symmetry with the Svix verifier and a
+    future body-binding upgrade, but is INTENTIONALLY UNUSED in the HMAC:
+    Smokeball signs metadata only ({Timestamp}|{RequestId}|{ClientId}), by
+    design — not a dropped check. Payload integrity is enforced downstream (the
+    forwarded body is treated as untrusted data and the handler re-fetches
+    authoritative state from the Smokeball API rather than trusting the body).
+
+    Fail-closed on any missing field. ``Timestamp`` is parsed as .NET ticks and
+    must be within ``SMOKEBALL_TIMESTAMP_TOLERANCE_SECONDS`` of ``now`` (signed,
+    so this bounds replay). The key is the subscription secret used as raw
+    UTF-8 bytes; the comparison is constant-time over the lowercase hex digest.
+    """
+    if not (timestamp and request_id and client_id and signature_header and secret):
+        return False
+    # Normalize the timestamp ONCE and use the normalized value for both the
+    # freshness parse and the signed string, so they can never diverge. Ticks
+    # are pure digits, so this is a no-op in the normal case (HTTP parsers
+    # already OWS-trim header values) and only recovers a match if a proxy pads
+    # the header after Smokeball signed the clean value.
+    ts = timestamp.strip()
+    try:
+        ticks = int(ts)
+    except (ValueError, AttributeError):
+        return False
+    ts_unix = ticks // _DOTNET_TICKS_PER_SECOND - _DOTNET_EPOCH_OFFSET_SECONDS
+    reference = time.time() if now is None else now
+    if abs(reference - ts_unix) > SMOKEBALL_TIMESTAMP_TOLERANCE_SECONDS:
+        return False
+    signed = f"{ts}|{request_id}|{client_id}".encode()
+    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature_header.strip().lower(), expected)
+
+
+# Gate-level replay guard for metadata-only schemes. ``RequestId`` is inside the
+# signed string, so only a signature-valid delivery reaches here; rejecting a
+# duplicate RequestId at the edge (before any forward / agent work) is
+# defense-in-depth atop the downstream adapter's X-Request-ID idempotency. This
+# does NOT close first-arrival body forgery (the body is unsigned) — that is
+# bounded by the untrusted-body posture + the re-fetch handler.
+_REPLAY_TTL_SECONDS = SMOKEBALL_TIMESTAMP_TOLERANCE_SECONDS + 60
+_replay_lock = threading.Lock()
+_replay_seen: dict[str, float] = {}
+
+
+def _replay_check_and_record(request_id: str, now: float | None = None) -> bool:
+    """Return True if ``request_id`` is fresh (record it); False if seen within
+    the TTL. An empty id is treated as fresh (nothing to dedupe on — the
+    signature already validated)."""
+    if not request_id:
+        return True
+    reference = time.time() if now is None else now
+    with _replay_lock:
+        for k in [k for k, exp in _replay_seen.items() if exp <= reference]:
+            del _replay_seen[k]
+        if request_id in _replay_seen:
+            return False
+        _replay_seen[request_id] = reference + _REPLAY_TTL_SECONDS
+        return True
+
+
 def _route_secret(route: str) -> str | None:
     """Per-vendor secret env: ``WEBHOOK_SECRET_<ROUTE>`` (route == adapter slug)."""
     env = f"WEBHOOK_SECRET_{route.upper().replace('-', '_')}"
@@ -193,16 +286,26 @@ def _stamp_source(body: bytes, route: str) -> bytes:
     so the re-signed bytes and the stamped bytes are the same — the downstream
     Generic verify still passes. Fail-safe: a non-JSON or non-object body is
     forwarded UNCHANGED (it would not route anyway, and a parse error must not
-    break the forward); an existing ``source``/``event_type`` is never overwritten.
+    break the forward).
+
+    SOURCE (authoritative): the ingress provenance ``source = route`` is the
+    verified vendor and OVERRIDES any body-supplied ``source``. Smokeball's event
+    body carries its own top-level ``source`` (``"API"``/``"UI"`` — the change's
+    origin inside Smokeball), which is a different semantic and collides on the
+    same key the router matches on; without the override a verified
+    ``matter.updated`` would look up ``("API", …)`` and silently no-op. The
+    vendor's original ``source`` is preserved under ``origin_source`` so the
+    handler can still read it.
 
     EVENT TYPE (2026-06-13): the original contract assumed vendor payloads carry
     a top-level ``event_type``. AgentMail delivers over Svix, whose envelope puts
     the event name under ``type`` (``{"type":"message.received","data":{...}}``),
-    so the router's ``(source, event_type)`` match never fired — the route was
-    silently skipped and the demo relay's recipient-lock origin was never
-    recorded (the agent ran the skill autonomously, masking it). We now also
-    stamp ``event_type`` from the vendor's native ``type``/``event`` field so the
-    router contract is satisfied regardless of the vendor's envelope spelling."""
+    and Smokeball likewise carries ``type`` (``{"type":"matter.updated",…}``), so
+    the router's ``(source, event_type)`` match never fired on a bare ``type`` —
+    the route was silently skipped and the demo relay's recipient-lock origin was
+    never recorded (the agent ran the skill autonomously, masking it). We stamp
+    ``event_type`` from the vendor's native ``type``/``event`` field so the router
+    contract is satisfied regardless of the vendor's envelope spelling."""
     try:
         payload = json.loads(body)
     except Exception:
@@ -219,7 +322,12 @@ def _stamp_source(body: bytes, route: str) -> bytes:
         isinstance(payload.get("message"), dict),
     )
     changed = False
-    if not payload.get("source"):
+    existing_source = payload.get("source")
+    if existing_source != route:
+        if isinstance(existing_source, str) and existing_source:
+            # Preserve the vendor's own ``source`` semantic (e.g. Smokeball's
+            # "API"/"UI") before the authoritative provenance overrides it.
+            payload.setdefault("origin_source", existing_source)
         payload["source"] = route
         changed = True
     if not payload.get("event_type"):
@@ -232,6 +340,49 @@ def _stamp_source(body: bytes, route: str) -> bytes:
     if not changed:
         return body
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+# ---- PER-VENDOR VERIFICATION DISPATCH ----------------------------------------
+# Each route adapter pulls ITS OWN headers, runs the vendor's verifier, and
+# returns ``(ok, request_id)`` — the request_id (the vendor's delivery id) flows
+# to ``X-Request-ID`` for the downstream adapter's idempotency dedupe. The
+# pure crypto fns stay header-agnostic (unit-testable in isolation). A route with
+# no registered verifier is rejected (fail-closed) by the handler, which closes
+# the prior hole where any secret-bearing route fell through to Svix.
+
+
+def _agentmail_route_verify(headers: Any, body: bytes, secret: str) -> tuple[bool, str]:
+    """AgentMail/Svix route. Unchanged behavior from the pre-dispatch handler."""
+    svix_id = headers.get("svix-id", "")
+    svix_ts = headers.get("svix-timestamp", "")
+    svix_sig = headers.get("svix-signature", "")
+    ok = verify_svix_signature(body, svix_id, svix_ts, svix_sig, secret)
+    request_id = svix_id or (_message_id(body) or "")[:64]
+    return ok, request_id
+
+
+def _smokeball_route_verify(headers: Any, body: bytes, secret: str) -> tuple[bool, str]:
+    """Smokeball route. Headers ``Timestamp`` / ``RequestId`` / ``Signature``;
+    ``ClientId`` is OUR configured Smokeball API client id (never delivered),
+    read from ``WEBHOOK_SMOKEBALL_CLIENT_ID`` and fed into the HMAC. Fail-closed
+    when that env is unset (the signed string can't be reconstructed). A valid
+    signature is additionally checked against the gate replay guard."""
+    client_id = os.environ.get("WEBHOOK_SMOKEBALL_CLIENT_ID", "")
+    timestamp = headers.get("Timestamp", "")
+    request_id = headers.get("RequestId", "")
+    signature = headers.get("Signature", "")
+    ok = verify_smokeball_signature(body, timestamp, request_id, client_id, signature, secret)
+    if ok and not _replay_check_and_record(request_id):
+        logger.warning("gate: smokeball replay rejected (RequestId already seen)")
+        ok = False
+    return ok, request_id
+
+
+# route slug -> verifier. Unknown route => fail-closed at the handler.
+_VERIFIERS: dict[str, Any] = {
+    "agentmail": _agentmail_route_verify,
+    "smokeball": _smokeball_route_verify,
+}
 
 
 # ---- MCP CHANNEL (Claude as an inbound channel) ------------------------------
@@ -972,10 +1123,17 @@ class _Handler(BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length) if length else b""
 
-        svix_id = self.headers.get("svix-id", "")
-        svix_ts = self.headers.get("svix-timestamp", "")
-        svix_sig = self.headers.get("svix-signature", "")
-        if not verify_svix_signature(body, svix_id, svix_ts, svix_sig, secret):
+        # Per-vendor verification dispatch (fail-closed): a route with a secret
+        # but no registered verifier is rejected, rather than falling through to
+        # the Svix scheme. The adapter returns the vendor delivery id used for
+        # downstream idempotency.
+        verifier = _VERIFIERS.get(route)
+        if verifier is None:
+            logger.warning("gate: no verifier registered for route %r — rejecting", route)
+            self._json(401, {"error": "unconfigured route"})
+            return
+        ok, request_id = verifier(self.headers, body, secret)
+        if not ok:
             # Diagnostic: header NAMES only (never values/secrets) so a future
             # provider scheme change is debuggable without a leak.
             logger.warning(
@@ -987,11 +1145,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         # Stamp the verified ingress provenance (source == route) so the
-        # downstream router can route on (source, event_type). Done after Svix
-        # verify and before the forward HMAC, so the re-signed bytes ARE the
-        # forwarded bytes. _message_id is read from the ORIGINAL body (the stamp
-        # never touches the message block).
-        request_id = svix_id or (_message_id(body) or "")[:64]
+        # downstream router can route on (source, event_type). Done after
+        # verification and before the forward HMAC, so the re-signed bytes ARE the
+        # forwarded bytes.
         body = _stamp_source(body, route)
 
         # Forward to the Hermes adapter with the Generic header it understands
@@ -1042,6 +1198,24 @@ def svix_self_check() -> bool:
     return verify_svix_signature(b"probe", "id1", probe_ts, f"v1,{sig}", whsec)
 
 
+def smokeball_self_check() -> bool:
+    """Boot self-check: round-trip a Smokeball-signed probe through the REAL
+    verifier so a crypto/encoding bug (raw-bytes key, ticks math, hex digest)
+    surfaces at boot, not as phantom 401s on live traffic.
+
+    Like the Svix self-check, the probe timestamp MUST be current — the
+    freshness window rejects a fixed epoch and a stale probe would crash-loop
+    the gate on boot. Builds current .NET ticks from now()."""
+    secret = "selfcheckkey"
+    client_id = "selfcheckclient"
+    request_id = "00000000-0000-0000-0000-000000000000"
+    ticks = (int(time.time()) + _DOTNET_EPOCH_OFFSET_SECONDS) * _DOTNET_TICKS_PER_SECOND
+    timestamp = str(ticks)
+    signed = f"{timestamp}|{request_id}|{client_id}".encode()
+    sig = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return verify_smokeball_signature(b"probe", timestamp, request_id, client_id, sig, secret)
+
+
 def main() -> int:
     logging.basicConfig(
         level=os.environ.get("WEBHOOK_GATE_LOG_LEVEL", "INFO"),
@@ -1049,6 +1223,7 @@ def main() -> int:
     )
     port = int(os.environ.get("WEBHOOK_GATE_PORT", DEFAULT_GATE_PORT))
     assert svix_self_check(), "webhook-gate Svix self-check failed"
+    assert smokeball_self_check(), "webhook-gate Smokeball self-check failed"
     httpd = ThreadingHTTPServer(("0.0.0.0", port), _Handler)
     logger.info(
         "webhook-gate listening on 0.0.0.0:%d -> %s:%d (HMAC self-check ok)",
