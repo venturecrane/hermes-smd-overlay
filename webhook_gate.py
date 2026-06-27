@@ -351,9 +351,7 @@ def _stamp_source(body: bytes, route: str) -> bytes:
 # the prior hole where any secret-bearing route fell through to Svix.
 
 
-def _agentmail_route_verify(
-    headers: Any, body: bytes, secret: str
-) -> tuple[bool, str]:
+def _agentmail_route_verify(headers: Any, body: bytes, secret: str) -> tuple[bool, str]:
     """AgentMail/Svix route. Unchanged behavior from the pre-dispatch handler."""
     svix_id = headers.get("svix-id", "")
     svix_ts = headers.get("svix-timestamp", "")
@@ -363,9 +361,7 @@ def _agentmail_route_verify(
     return ok, request_id
 
 
-def _smokeball_route_verify(
-    headers: Any, body: bytes, secret: str
-) -> tuple[bool, str]:
+def _smokeball_route_verify(headers: Any, body: bytes, secret: str) -> tuple[bool, str]:
     """Smokeball route. Headers ``Timestamp`` / ``RequestId`` / ``Signature``;
     ``ClientId`` is OUR configured Smokeball API client id (never delivered),
     read from ``WEBHOOK_SMOKEBALL_CLIENT_ID`` and fed into the HMAC. Fail-closed
@@ -375,9 +371,7 @@ def _smokeball_route_verify(
     timestamp = headers.get("Timestamp", "")
     request_id = headers.get("RequestId", "")
     signature = headers.get("Signature", "")
-    ok = verify_smokeball_signature(
-        body, timestamp, request_id, client_id, signature, secret
-    )
+    ok = verify_smokeball_signature(body, timestamp, request_id, client_id, signature, secret)
     if ok and not _replay_check_and_record(request_id):
         logger.warning("gate: smokeball replay rejected (RequestId already seen)")
         ok = False
@@ -1219,9 +1213,7 @@ def smokeball_self_check() -> bool:
     timestamp = str(ticks)
     signed = f"{timestamp}|{request_id}|{client_id}".encode()
     sig = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
-    return verify_smokeball_signature(
-        b"probe", timestamp, request_id, client_id, sig, secret
-    )
+    return verify_smokeball_signature(b"probe", timestamp, request_id, client_id, sig, secret)
 
 
 def main() -> int:
