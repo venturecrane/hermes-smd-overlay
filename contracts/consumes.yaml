@@ -261,6 +261,12 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: upstream Hermes gateway port; defaults to 8644
+  WEBHOOK_SMOKEBALL_CLIENT_ID:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "our Smokeball API ClientId — fed into the Smokeball webhook HMAC ({Timestamp}|{RequestId}|{ClientId}); it is NOT delivered by Smokeball. Required when the smokeball webhook route is enabled; the route fail-closes (401) when unset. The route HMAC secret rides the WEBHOOK_SECRET_<ROUTE> family (WEBHOOK_SECRET_SMOKEBALL)."
   SKILLS_DIR:
     discovery: static
     stage: boot-helper

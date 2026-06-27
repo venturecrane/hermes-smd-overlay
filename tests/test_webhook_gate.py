@@ -121,8 +121,23 @@ def test_stamp_source_adds_route_as_source():
     assert out["message"]["message_id"] == "m1"  # message block untouched
 
 
-def test_stamp_source_never_overwrites_existing_source():
-    body = b'{"source":"already","event_type":"x"}'
+def test_stamp_source_overrides_body_source_with_authoritative_route():
+    # The ingress provenance is authoritative and OVERRIDES a body-supplied
+    # source. Smokeball's event body carries its own top-level source ("API"/
+    # "UI" — the change's origin inside Smokeball), a different semantic that
+    # collides on the key the router matches on. Without the override a verified
+    # matter.updated would look up ("API", …) and silently no-op. The vendor's
+    # original value is preserved under origin_source.
+    body = b'{"source":"API","type":"matter.updated","payload":{"id":"m1"}}'
+    out = json.loads(gate._stamp_source(body, "smokeball"))
+    assert out["source"] == "smokeball"
+    assert out["origin_source"] == "API"
+    assert out["event_type"] == "matter.updated"
+    assert out["payload"]["id"] == "m1"  # payload block untouched
+
+
+def test_stamp_source_noop_when_source_already_equals_route():
+    body = b'{"source":"agentmail","event_type":"x"}'
     assert gate._stamp_source(body, "agentmail") == body  # unchanged bytes
 
 
@@ -182,3 +197,179 @@ def test_boot_self_check_passes_under_freshness_window() -> None:
     from webhook_gate import svix_self_check
 
     assert svix_self_check() is True
+
+
+# --------------------------------------------------------------------------- #
+# Smokeball webhook verification                                              #
+# --------------------------------------------------------------------------- #
+
+# The PUBLISHED golden vector from Smokeball's webhook docs — locks the wire
+# format (raw-UTF-8 key, pipe-joined string, lowercase-hex HMAC-SHA256).
+_GV_KEY = "ei7641529ue420n8b9aa"
+_GV_TS = "638609288928990639"
+_GV_RID = "e56f2c3f-b6de-4310-a7a2-c139d62f9711"
+_GV_CID = "lou1qnn0llav95f"
+_GV_SIG = "58817681863148b0e624c00f3094f99e1af31cd7b99a3c2e0655d64a2764d650"
+# The instant the golden timestamp encodes (.NET ticks -> unix), used to inject
+# `now` so the freshness window passes deterministically for the fixed vector.
+_GV_UNIX = int(_GV_TS) // 10_000_000 - 62_135_596_800
+
+_SB_SECRET = "raw-smokeball-key"  # raw UTF-8, NOT whsec_/base64
+_SB_CID = "test-client-id"
+_SB_TS = str((1700000000 + 62_135_596_800) * 10_000_000)  # 1700000000 as .NET ticks
+_SB_RID = "11111111-1111-1111-1111-111111111111"
+
+
+def _sb_sig(ts: str, rid: str, cid: str, secret: str) -> str:
+    signed = f"{ts}|{rid}|{cid}".encode()
+    return hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+
+
+def test_smokeball_accepts_published_golden_vector():
+    # Byte-for-byte against Smokeball's documented example. If this fails, our
+    # wire format diverged from theirs (the highest-value guard).
+    assert gate.verify_smokeball_signature(
+        b"any-body-ignored", _GV_TS, _GV_RID, _GV_CID, _GV_SIG, _GV_KEY, now=_GV_UNIX
+    )
+
+
+def test_smokeball_key_is_raw_bytes_not_base64_or_whsec():
+    # The golden vector only verifies if the key is used as raw UTF-8 bytes.
+    # Guards against cloning the Svix path (whsec_ strip + base64 decode).
+    assert _sb_sig(_GV_TS, _GV_RID, _GV_CID, _GV_KEY) == _GV_SIG
+
+
+def test_smokeball_body_is_not_part_of_signature():
+    # Smokeball signs metadata only; the body must not affect verification.
+    sig = _sb_sig(_SB_TS, _SB_RID, _SB_CID, _SB_SECRET)
+    ok_a = gate.verify_smokeball_signature(
+        b'{"a":1}', _SB_TS, _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000
+    )
+    ok_b = gate.verify_smokeball_signature(
+        b'{"b":2}', _SB_TS, _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000
+    )
+    assert ok_a and ok_b
+
+
+def test_smokeball_accepts_within_tolerance_both_directions():
+    sig = _sb_sig(_SB_TS, _SB_RID, _SB_CID, _SB_SECRET)
+    inside = gate.SMOKEBALL_TIMESTAMP_TOLERANCE_SECONDS - 1
+    assert gate.verify_smokeball_signature(
+        b"", _SB_TS, _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000 + inside
+    )
+    assert gate.verify_smokeball_signature(
+        b"", _SB_TS, _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000 - inside
+    )
+
+
+def test_smokeball_rejects_stale_and_future_skew():
+    sig = _sb_sig(_SB_TS, _SB_RID, _SB_CID, _SB_SECRET)
+    past = gate.SMOKEBALL_TIMESTAMP_TOLERANCE_SECONDS + 1
+    assert not gate.verify_smokeball_signature(
+        b"", _SB_TS, _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000 + past
+    )
+    assert not gate.verify_smokeball_signature(
+        b"", _SB_TS, _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000 - past
+    )
+
+
+def test_smokeball_rejects_wrong_secret_clientid_sig_and_missing_fields():
+    sig = _sb_sig(_SB_TS, _SB_RID, _SB_CID, _SB_SECRET)
+    v = gate.verify_smokeball_signature
+    # wrong secret
+    assert not v(b"", _SB_TS, _SB_RID, _SB_CID, sig, "other-key", now=1700000000)
+    # wrong client id (tenant binding — a different configured ClientId fails)
+    assert not v(b"", _SB_TS, _SB_RID, "wrong-client", sig, _SB_SECRET, now=1700000000)
+    # tampered signature
+    assert not v(b"", _SB_TS, _SB_RID, _SB_CID, "00" + sig[2:], _SB_SECRET, now=1700000000)
+    # each missing field is fail-closed
+    assert not v(b"", "", _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000)
+    assert not v(b"", _SB_TS, "", _SB_CID, sig, _SB_SECRET, now=1700000000)
+    assert not v(b"", _SB_TS, _SB_RID, "", sig, _SB_SECRET, now=1700000000)
+    assert not v(b"", _SB_TS, _SB_RID, _SB_CID, "", _SB_SECRET, now=1700000000)
+    assert not v(b"", _SB_TS, _SB_RID, _SB_CID, sig, "", now=1700000000)
+
+
+def test_smokeball_rejects_non_numeric_ticks_and_strips_whitespace():
+    # Garbage ticks -> fail-closed. Surrounding whitespace on the (already
+    # OWS-trimmed) header must not break the integer parse.
+    assert not gate.verify_smokeball_signature(
+        b"", "not-ticks", _SB_RID, _SB_CID, "x", _SB_SECRET, now=1700000000
+    )
+    sig = _sb_sig(_SB_TS, _SB_RID, _SB_CID, _SB_SECRET)
+    assert gate.verify_smokeball_signature(
+        b"", f"  {_SB_TS}  ", _SB_RID, _SB_CID, sig, _SB_SECRET, now=1700000000
+    )
+
+
+def test_smokeball_signature_is_case_insensitive_hex():
+    sig = _sb_sig(_SB_TS, _SB_RID, _SB_CID, _SB_SECRET)
+    assert gate.verify_smokeball_signature(
+        b"", _SB_TS, _SB_RID, _SB_CID, sig.upper(), _SB_SECRET, now=1700000000
+    )
+
+
+def test_smokeball_replay_cache_rejects_duplicate_request_id():
+    gate._replay_seen.clear()
+    now = 1700000000
+    assert gate._replay_check_and_record("rid-A", now=now) is True
+    assert gate._replay_check_and_record("rid-A", now=now) is False  # dup
+    # A different id is fresh.
+    assert gate._replay_check_and_record("rid-B", now=now) is True
+    # Past the TTL the entry is pruned and the id is fresh again.
+    later = now + gate._REPLAY_TTL_SECONDS + 1
+    assert gate._replay_check_and_record("rid-A", now=later) is True
+    # An empty id is never deduped (signature already validated it).
+    assert gate._replay_check_and_record("", now=now) is True
+    gate._replay_seen.clear()
+
+
+def test_smokeball_route_verify_uses_configured_clientid_and_returns_rid(monkeypatch):
+    gate._replay_seen.clear()
+    monkeypatch.setenv("WEBHOOK_SMOKEBALL_CLIENT_ID", _SB_CID)
+    # The adapter uses the wall clock, so sign with current ticks.
+    now = int(time.time())
+    ticks = str((now + 62_135_596_800) * 10_000_000)
+    rid = "route-rid-1"
+    sig = _sb_sig(ticks, rid, _SB_CID, _SB_SECRET)
+    headers = {"Timestamp": ticks, "RequestId": rid, "Signature": sig}
+    ok, out_rid = gate._smokeball_route_verify(headers, b'{"x":1}', _SB_SECRET)
+    assert ok and out_rid == rid
+    gate._replay_seen.clear()
+
+
+def test_smokeball_route_verify_fails_closed_without_configured_clientid(monkeypatch):
+    monkeypatch.delenv("WEBHOOK_SMOKEBALL_CLIENT_ID", raising=False)
+    now = int(time.time())
+    ticks = str((now + 62_135_596_800) * 10_000_000)
+    sig = _sb_sig(ticks, "rid", _SB_CID, _SB_SECRET)
+    headers = {"Timestamp": ticks, "RequestId": "rid", "Signature": sig}
+    ok, _ = gate._smokeball_route_verify(headers, b"", _SB_SECRET)
+    assert ok is False
+
+
+def test_unknown_route_has_no_verifier_registered():
+    # A route with no registered verifier must be rejected (fail-closed),
+    # closing the prior hole where any secret-bearing route fell through to Svix.
+    assert gate._VERIFIERS.get("agentmail") is not None
+    assert gate._VERIFIERS.get("smokeball") is not None
+    assert gate._VERIFIERS.get("github") is None
+
+
+def test_smokeball_stamp_routes_on_authoritative_source_and_type():
+    # End-to-end stamp on a realistic Smokeball event body: the body's own
+    # source ("API") is overridden by the route, event_type comes from "type",
+    # and the router's (smokeball, matter.updated) lookup will fire.
+    body = (
+        b'{"accountId":"a","subscriptionId":"s","type":"matter.updated",'
+        b'"source":"API","payload":{"id":"68df","status":"Open"}}'
+    )
+    out = json.loads(gate._stamp_source(body, "smokeball"))
+    assert (out["source"], out["event_type"]) == ("smokeball", "matter.updated")
+    assert out["origin_source"] == "API"
+
+
+def test_smokeball_boot_self_check_passes_under_freshness_window():
+    from webhook_gate import smokeball_self_check
+
+    assert smokeball_self_check() is True
