@@ -31,11 +31,37 @@ import http.client
 import json
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
 logger = logging.getLogger("hermes_smd.oauth_callback")
+
+# The egress webhook reconciler orchestrator (ss-console image code at /app), run
+# in the hermes venv. Triggered here — the moment a fresh Smokeball token lands —
+# so a newly-connected firm's webhook subscriptions are ensured NOW, without
+# waiting for a reboot (boot is only the change-hash-gated backstop).
+_RECONCILE_ORCHESTRATOR = "/app/webhook_reconcile.py"
+_HERMES_PY = "/opt/hermes/.venv/bin/python3"
+
+
+def _trigger_webhook_reconcile(env: dict) -> None:
+    """Fire-and-forget the egress webhook reconcile after a successful connect.
+    NON-FATAL and non-blocking: the token is already written and the connect has
+    succeeded — a reconcile hiccup must not fail the connect or stall the user's
+    browser, and the boot backstop retries regardless. Launched detached
+    (``Popen``, no wait); the child inherits stdout/stderr → the Machine logs."""
+    yaml_path = env.get("SMD_CUSTOMER_YAML_PATH") or "/opt/data/customer.yaml"
+    try:
+        subprocess.Popen([_HERMES_PY, _RECONCILE_ORCHESTRATOR, yaml_path, "--trigger", "connect"])
+    except Exception as exc:  # noqa: BLE001 — never fail the connect on reconcile
+        logger.warning(
+            "smokeball oauth: webhook reconcile trigger failed to launch (%s); "
+            "boot backstop will retry",
+            type(exc).__name__,
+        )
+
 
 # (region, environment) -> auth host. MUST match the connector's host table
 # (ss-console operator/connectors/smokeball/.../client.py _HOSTS) and the
@@ -258,4 +284,7 @@ def handle_smokeball_callback(query: str, host: str | None, env: dict) -> tuple[
         return 400, _failed_page("internal_error")
 
     logger.info("smokeball oauth: connected slug=%s (token written, not logged)", own_slug)
+    # Primary egress trigger: ensure the firm's webhook subscriptions now that a
+    # fresh token exists (boot is only the backstop). Non-blocking, non-fatal.
+    _trigger_webhook_reconcile(env)
     return 200, _connected_page()
