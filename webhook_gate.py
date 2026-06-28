@@ -270,7 +270,7 @@ def _message_id(body: bytes) -> str | None:
     return None
 
 
-def _stamp_source(body: bytes, route: str) -> bytes:
+def _stamp_source(body: bytes, route: str, event_id: str = "") -> bytes:
     """Stamp the verified ingress provenance (``source = <route>``) onto the
     forwarded JSON body so the downstream webhook router can route on
     ``(source, event_type)``.
@@ -305,7 +305,16 @@ def _stamp_source(body: bytes, route: str) -> bytes:
     the route was silently skipped and the demo relay's recipient-lock origin was
     never recorded (the agent ran the skill autonomously, masking it). We stamp
     ``event_type`` from the vendor's native ``type``/``event`` field so the router
-    contract is satisfied regardless of the vendor's envelope spelling."""
+    contract is satisfied regardless of the vendor's envelope spelling.
+
+    EVENT ID (2026-06-28): the router runs header-less (the Hermes hook contract),
+    so it can only read the replay-protection event id from the BODY (top-level
+    ``event_id``/``id``). Smokeball's payload carries no such field — its unique
+    per-delivery id is the ``RequestId`` HEADER (which the gate consumed for the
+    signature and sets as ``X-Request-ID``). So the gate, the only place that knows
+    that verified id, stamps it as top-level ``event_id`` when absent. Without it
+    the router refuses to route ("missing event id required for replay protection")
+    and the skill never fires (caught on the first real Smokeball matter.updated)."""
     try:
         payload = json.loads(body)
     except Exception:
@@ -337,6 +346,12 @@ def _stamp_source(body: bytes, route: str) -> bytes:
                 payload["event_type"] = v
                 changed = True
                 break
+    # Stamp the verified per-delivery id as the router's replay key, when the body
+    # carries none of its own (guarded so a vendor that DOES supply one is never
+    # overridden — AgentMail unaffected).
+    if event_id and not payload.get("event_id"):
+        payload["event_id"] = event_id
+        changed = True
     if not changed:
         return body
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -1144,11 +1159,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": "invalid signature"})
             return
 
-        # Stamp the verified ingress provenance (source == route) so the
-        # downstream router can route on (source, event_type). Done after
+        # Stamp the verified ingress provenance (source == route) + the verified
+        # per-delivery id (as event_id, the router's replay key) so the header-less
+        # router can route on (source, event_type) and dedupe. Done after
         # verification and before the forward HMAC, so the re-signed bytes ARE the
         # forwarded bytes.
-        body = _stamp_source(body, route)
+        body = _stamp_source(body, route, event_id=request_id)
 
         # Forward to the Hermes adapter with the Generic header it understands
         # (hex HMAC over the exact bytes, same secret) + the Svix delivery id as

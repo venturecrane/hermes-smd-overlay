@@ -369,6 +369,28 @@ def test_smokeball_stamp_routes_on_authoritative_source_and_type():
     assert out["origin_source"] == "API"
 
 
+def test_stamp_source_stamps_event_id_for_replay_when_absent():
+    # The header-less router reads its replay key from the body; Smokeball carries
+    # no top-level event_id/id, so the gate stamps the verified RequestId.
+    body = b'{"type":"matter.updated","source":"API","payload":{"id":"68df"}}'
+    out = json.loads(gate._stamp_source(body, "smokeball", event_id="req-123"))
+    assert out["event_id"] == "req-123"
+
+
+def test_stamp_source_never_overrides_an_existing_event_id():
+    # A vendor that DOES supply event_id keeps it (AgentMail unaffected).
+    body = b'{"type":"message.received","event_id":"vendor-own","data":{}}'
+    out = json.loads(gate._stamp_source(body, "agentmail", event_id="req-xyz"))
+    assert out["event_id"] == "vendor-own"
+
+
+def test_stamp_source_no_event_id_when_none_provided():
+    # The handoff/legacy path passes no event_id → no event_id key is added.
+    body = b'{"type":"matter.updated","source":"API"}'
+    out = json.loads(gate._stamp_source(body, "smokeball"))
+    assert "event_id" not in out
+
+
 def test_smokeball_boot_self_check_passes_under_freshness_window():
     from webhook_gate import smokeball_self_check
 
