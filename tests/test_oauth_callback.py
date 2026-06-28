@@ -159,6 +159,41 @@ def test_handle_success_writes_token_and_renders_connected(tmp_path, monkeypatch
     assert "rt-from-exchange" not in html
 
 
+def test_handle_success_fires_webhook_reconcile_trigger(tmp_path, monkeypatch):
+    # Connect is the PRIMARY egress trigger: a fresh firm activates without a reboot.
+    monkeypatch.setattr(oauth_callback, "exchange_code", lambda **k: "rt")
+    calls = []
+    monkeypatch.setattr(oauth_callback.subprocess, "Popen", lambda args, **k: calls.append(args))
+    state = _sign_state(_payload(), KEY)
+    status, _ = oauth_callback.handle_smokeball_callback(
+        f"code=c&state={state}",
+        "hermes-pilot-smokeball.fly.dev",
+        _env(token_file=str(tmp_path / "rt")),
+    )
+    assert status == 200
+    assert calls, "connect should fire the webhook reconcile"
+    argv = calls[0]
+    assert argv[1] == "/app/webhook_reconcile.py" and argv[-2:] == ["--trigger", "connect"]
+
+
+def test_reconcile_trigger_failure_does_not_fail_connect(tmp_path, monkeypatch):
+    # The token is already written; a reconcile-launch failure must not fail the
+    # connect (the boot backstop retries).
+    monkeypatch.setattr(oauth_callback, "exchange_code", lambda **k: "rt")
+
+    def boom(*a, **k):
+        raise FileNotFoundError("no python on this host")
+
+    monkeypatch.setattr(oauth_callback.subprocess, "Popen", boom)
+    state = _sign_state(_payload(), KEY)
+    status, html = oauth_callback.handle_smokeball_callback(
+        f"code=c&state={state}",
+        "hermes-pilot-smokeball.fly.dev",
+        _env(token_file=str(tmp_path / "rt")),
+    )
+    assert status == 200 and "Smokeball connected" in html
+
+
 def test_handle_exchange_failure_is_opaque(monkeypatch):
     def boom(**kwargs):
         raise CallbackError("exchange_failed", "HTTP 400")
