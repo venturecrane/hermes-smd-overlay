@@ -299,6 +299,86 @@ def test_mcp_trigger_populates_events_and_skills(monkeypatch):
     assert routes["mcp"]["skills"] == ["drive-fetch"]
 
 
+# --- translate.py: vendor skill-route prompt selection ------------------------
+# A skill-carrying vendor route (e.g. Smokeball matter.updated -> matter-memo-on-
+# update) must NOT serve the email-reply prompt — that shared prompt is the bug
+# that made the first real matter.updated reach for agentmail create_draft. The
+# AgentMail inbox keeps the email prompt; everything else gets a skill-driving one.
+
+
+def _two_connector_customer() -> dict:
+    return {
+        "connectors": {
+            "PracticeManagement": {
+                "adapter": "smokeball",
+                "enabled": True,
+                "webhook_url": "https://x.fly.dev/webhooks/smokeball",
+            },
+            "Email": {
+                "adapter": "agentmail",
+                "enabled": True,
+                "webhook_url": "https://x.fly.dev/webhooks/agentmail",
+            },
+        },
+        "webhook_triggers": [
+            {
+                "source": "smokeball",
+                "event_type": "matter.updated",
+                "skill": "matter-memo-on-update",
+                "persona": "quinn",
+            },
+            {
+                "source": "agentmail",
+                "event_type": "message.received",
+                "skill": "matter-inbox-router",
+                "persona": "quinn",
+            },
+        ],
+    }
+
+
+def test_skill_route_gets_skill_prompt_not_email_prompt(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET_SMOKEBALL", "sb-secret")
+    monkeypatch.setenv("WEBHOOK_SECRET_AGENTMAIL", "am-secret")
+    routes = translate._materialize_webhook_platform(_two_connector_customer())["webhook"]["extra"][
+        "routes"
+    ]
+
+    sb = routes["smokeball"]
+    assert sb["skills"] == ["matter-memo-on-update"]
+    assert sb["events"] == ["matter.updated"]
+    # The Smokeball route must NOT carry the email-reply prompt.
+    assert sb["prompt"] != translate._INBOUND_EMAIL_PROMPT
+    # It names the routed skill, offers the skill_view fallback, presents the
+    # payload as untrusted data, and never instructs an email draft.
+    assert "matter-memo-on-update" in sb["prompt"]
+    assert 'skill_view("matter-memo-on-update")' in sb["prompt"]
+    assert "{__raw__}" in sb["prompt"]
+    assert "untrusted DATA" in sb["prompt"]
+    assert "create_draft" not in sb["prompt"]
+    assert "agentmail" not in sb["prompt"].lower()
+
+
+def test_agentmail_route_keeps_email_prompt(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET_SMOKEBALL", "sb-secret")
+    monkeypatch.setenv("WEBHOOK_SECRET_AGENTMAIL", "am-secret")
+    routes = translate._materialize_webhook_platform(_two_connector_customer())["webhook"]["extra"][
+        "routes"
+    ]
+    # The email-reply channel is unchanged (the hermes-smd-reply path depends on it).
+    assert routes["agentmail"]["prompt"] == translate._INBOUND_EMAIL_PROMPT
+
+
+def test_webhook_skill_prompt_single_and_multi():
+    one = translate._webhook_skill_prompt(["matter-memo-on-update"])
+    assert 'skill_view("matter-memo-on-update")' in one
+    assert "the matter-memo-on-update skill" in one
+    multi = translate._webhook_skill_prompt(["a-skill", "b-skill"])
+    # The first skill anchors skill_view; all are named for the agent.
+    assert 'skill_view("a-skill")' in multi
+    assert "a-skill, b-skill" in multi
+
+
 # --- thread continuity (mcp_thread_store): principal-namespaced -----------------
 
 
