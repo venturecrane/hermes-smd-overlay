@@ -102,6 +102,37 @@ vars:
     requirement: optional
     consumed_by: [bootstrap-translate, webhook-gate]
     note: "the mcp channel's HMAC secret. Read as a literal by translate (route materialization, fail-closed/omitted when unset) and via the WEBHOOK_SECRET_<ROUTE> family by the gate's loopback-forward signing. Also the console-proxy bearer for the console-sole door (ADR 0057 amendment): the gate's /mcp/turn and /webhooks/handoff require Bearer WEBHOOK_SECRET_MCP. Gates the webhook-gate launch in bootstrap.sh (AGENTMAIL or MCP secret)."
+  # ---- ADR 0023 Wave 1: Machine → control-plane heartbeat (shared/heartbeat.py, in the gate) ----
+  MACHINE_HEARTBEAT_KEY:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "shared fleet bearer for POST /api/internal/heartbeat (ADR 0023 #10). Read by the heartbeat emitter in the gate; absent => control-plane POST disabled (admin fleet view stays 'no signal yet'), gate otherwise unaffected. bootstrap.sh STRIPS it from the agent (hermes gateway) env before the exec so a code-executing agent cannot forge heartbeats for another tenant's slug — the gate keeps its inherited copy."
+  HEALTHCHECKS_PING_URL:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "per-customer healthchecks.io ping URL staged at provision (ADR 0023 #8). The gate's emitter pings it each tick; grace expiration fires the console /api/webhooks/healthchecks alert. Absent => external dead-man switch disabled, control-plane POST still runs. Stripped from the agent alongside MACHINE_HEARTBEAT_KEY."
+  HEARTBEAT_INGEST_URL:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "override for the control-plane heartbeat endpoint; defaults to https://smd.services/api/internal/heartbeat (the apex console — NOT the admin subdomain, which would trigger the /admin rewrite). All Machines report to the one console."
+  HEARTBEAT_PERIOD_SECONDS:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "heartbeat tick cadence; defaults to 60 (matches customer.yaml.observability.health.period_seconds). Floored at 5 by the emitter."
+  SMD_OVERLAY_REF:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "baked overlay git ref (Dockerfile ENV SMD_OVERLAY_REF=${OVERLAY_REF}); reported as the heartbeat `version` field so the fleet view shows which overlay each Machine runs. Absent => version omitted."
   HERMES_HOME:
     discovery: static
     stage: agent

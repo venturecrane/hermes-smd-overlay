@@ -46,7 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from shared import mcp_result_store, mcp_thread_store, oauth_callback, runtime_read
+from shared import heartbeat, mcp_result_store, mcp_thread_store, oauth_callback, runtime_read
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
 # to build the forward URL, so the only dynamic part of the urllib call is a
@@ -1140,6 +1140,11 @@ def main() -> int:
         GATEWAY_HOST,
         GATEWAY_PORT,
     )
+    # ADR 0023 Wave 1: control-plane + healthchecks.io heartbeat. Hosted here
+    # because the gate is the one non-agent process on every Machine and holds
+    # the (agent-stripped) MACHINE_HEARTBEAT_KEY. Daemon thread; fail-soft — a
+    # heartbeat failure never perturbs the webhook/MCP surface.
+    heartbeat.emitter_from_env(_audit_db_path).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
