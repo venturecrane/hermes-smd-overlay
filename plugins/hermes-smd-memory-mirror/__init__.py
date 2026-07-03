@@ -34,12 +34,39 @@ Modules:
 """
 
 import logging
+import os
 from typing import Any
 
 from . import archive, dismiss, honcho_client, mirror, schemas, state  # noqa: F401
 from .mirror import mirror_session
 
 logger = logging.getLogger(__name__)
+
+# The complete env contract for the Honcho mirror lane. ADR 0016's 2026-05-30
+# revision deferred the Honcho inference engine to Phase 2 and ADR 0048's lane
+# table marks the inferred lane "deferred until Honcho runs" — so on a
+# correctly provisioned seat today NONE of these are set, and that absence is
+# an AUTHORED state (unconfigured = fail-closed, ADR 0037 tenet 3), not a
+# fault. Registration is gated on this contract so an inactive lane is one
+# quiet boot line instead of a misleading "degraded" WARNING on every session
+# end (ss-console#1643, which mistook that noise for a provisioning gap).
+_MIRROR_ENV = ("SMD_D1_OBSERVATIONS_BINDING", "HONCHO_BASE_URL", "HONCHO_API_KEY")
+
+# Partial-contract error is reported once per process from the callback path
+# (register() also reports at boot); a per-session ERROR would just be new noise.
+_partial_reported = False
+
+
+def _mirror_lane_state() -> tuple[str, list[str]]:
+    """Classify the Honcho-mirror env contract: 'configured' (all set),
+    'inactive' (none set — the authored deferred state), or 'partial'
+    (some set — a real provisioning error that must be loud)."""
+    present = [name for name in _MIRROR_ENV if os.environ.get(name)]
+    if len(present) == len(_MIRROR_ENV):
+        return "configured", present
+    if not present:
+        return "inactive", present
+    return "partial", present
 
 
 def on_session_end(**kwargs: Any) -> None:
@@ -65,6 +92,16 @@ def on_session_end(**kwargs: Any) -> None:
         # Nothing to mirror without a session id. Hermes' dispatcher
         # always provides one, but defend against future changes.
         return
+    state_name, present = _mirror_lane_state()
+    if state_name == "inactive":
+        # The authored deferred state (ADR 0016 Phase 2): silent by design.
+        return
+    if state_name == "partial":
+        global _partial_reported
+        if not _partial_reported:
+            _partial_reported = True
+            _log_partial(present)
+        return
     try:
         result = mirror_session(session_id=session_id)
         logger.debug(
@@ -83,6 +120,39 @@ def on_session_end(**kwargs: Any) -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point. Wires the one hook."""
+    """Plugin entry point. Wires the one hook (always — plugin.yaml parity),
+    and reports the Honcho lane's env-contract state once at boot:
+
+    * configured — all three env vars set: the callback mirrors normally.
+    * inactive — none set (the authored deferred state, ADR 0016 Phase 2 /
+      ADR 0048 lane table): one INFO line here; the callback then returns
+      silently every session end, because a lane that is deliberately off
+      is not "degraded" (ss-console#1643).
+    * partial — some-but-not-all set: a real provisioning error, reported
+      as ERROR here (and once more from the callback if the state changes
+      mid-life) so the conformance sweep catches it.
+    """
     ctx.register_hook("on_session_end", on_session_end)
-    logger.info("hermes-smd-memory-mirror registered (on_session_end)")
+    state_name, present = _mirror_lane_state()
+    if state_name == "configured":
+        logger.info("hermes-smd-memory-mirror registered (on_session_end); lane configured")
+    elif state_name == "inactive":
+        logger.info(
+            "hermes-smd-memory-mirror registered (on_session_end); Honcho lane "
+            "unconfigured — mirror inactive by design (ADR 0016 Phase 2 deferred; "
+            "ADR 0048 lane table)"
+        )
+    else:
+        _log_partial(present)
+
+
+def _log_partial(present: list[str]) -> None:
+    missing = [name for name in _MIRROR_ENV if name not in present]
+    logger.error(
+        "hermes-smd-memory-mirror: PARTIAL env contract — %s set but %s missing. "
+        "This is a provisioning error: set all of %s to activate the mirror, or "
+        "none to leave the lane off.",
+        present,
+        missing,
+        list(_MIRROR_ENV),
+    )

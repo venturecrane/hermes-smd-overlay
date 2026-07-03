@@ -32,8 +32,22 @@ from tests.conftest import load_plugin
 # ---------------------------------------------------------------------------
 
 
-def test_memory_mirror_registers_expected_hooks(fake_ctx) -> None:
-    """hermes-smd-memory-mirror must attach to on_session_end."""
+_MIRROR_ENV = ("SMD_D1_OBSERVATIONS_BINDING", "HONCHO_BASE_URL", "HONCHO_API_KEY")
+
+
+def _set_full_env(monkeypatch) -> None:
+    for name in _MIRROR_ENV:
+        monkeypatch.setenv(name, f"test-{name.lower()}")
+
+
+def _clear_env(monkeypatch) -> None:
+    for name in (*_MIRROR_ENV, "SMD_CUSTOMER_SLUG"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_memory_mirror_registers_when_lane_configured(monkeypatch, fake_ctx) -> None:
+    """With the full env contract set, the plugin attaches to on_session_end."""
+    _set_full_env(monkeypatch)
     mod = load_plugin("hermes-smd-memory-mirror")
     assert callable(mod.register)
 
@@ -43,20 +57,73 @@ def test_memory_mirror_registers_expected_hooks(fake_ctx) -> None:
     assert len(fake_ctx.registered["on_session_end"]) == 1
 
 
-def test_on_session_end_is_exception_safe_when_env_missing(monkeypatch, fake_ctx) -> None:
-    """A missing env var must not propagate from on_session_end."""
-    # Ensure required secrets are missing.
-    for name in (
-        "SMD_CUSTOMER_SLUG",
-        "SMD_D1_OBSERVATIONS_BINDING",
-        "HONCHO_BASE_URL",
-        "HONCHO_API_KEY",
-    ):
-        monkeypatch.delenv(name, raising=False)
+def test_unconfigured_lane_is_silent_by_design(monkeypatch, fake_ctx, caplog) -> None:
+    """No env at all is the AUTHORED deferred state (ADR 0016 Phase 2 /
+    ADR 0048 lane table): the hook is still wired (plugin.yaml parity), boot
+    logs one INFO line, and every session-end callback is SILENT — no
+    'degraded' WARNING per turn (ss-console#1643)."""
+    _clear_env(monkeypatch)
+    mod = load_plugin("hermes-smd-memory-mirror")
 
+    with caplog.at_level("DEBUG"):
+        mod.register(fake_ctx)
+        callback = fake_ctx.registered["on_session_end"][0]
+        caplog.clear()
+        for i in range(3):
+            callback(
+                session_id=f"sess-{i}",
+                completed=True,
+                interrupted=False,
+                model="m",
+                platform="p",
+            )
+
+    assert not caplog.records, "inactive lane must produce zero per-session log noise"
+
+
+def test_register_boot_line_names_inactive_state(monkeypatch, fake_ctx, caplog) -> None:
+    _clear_env(monkeypatch)
+    mod = load_plugin("hermes-smd-memory-mirror")
+    with caplog.at_level("INFO"):
+        mod.register(fake_ctx)
+    assert any("inactive by design" in r.getMessage() for r in caplog.records)
+    assert not any(r.levelname in ("WARNING", "ERROR") for r in caplog.records)
+
+
+def test_partial_env_is_loud_once(monkeypatch, fake_ctx, caplog) -> None:
+    """Some-but-not-all env is a provisioning ERROR: loud at boot, once more
+    from the callback, then quiet — never a per-session error stream."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HONCHO_BASE_URL", "http://localhost:8000")
+    mod = load_plugin("hermes-smd-memory-mirror")
+    mod._partial_reported = False
+
+    with caplog.at_level("ERROR"):
+        mod.register(fake_ctx)
+        callback = fake_ctx.registered["on_session_end"][0]
+        for i in range(3):
+            callback(
+                session_id=f"sess-{i}",
+                completed=True,
+                interrupted=False,
+                model="m",
+                platform="p",
+            )
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 2, "one boot ERROR + one callback ERROR, then quiet"
+    assert "PARTIAL env contract" in errors[0].getMessage()
+    assert "SMD_D1_OBSERVATIONS_BINDING" in errors[0].getMessage()
+
+
+def test_on_session_end_is_exception_safe_when_env_vanishes(monkeypatch, fake_ctx) -> None:
+    """Env present at registration but gone at callback time (process env
+    mutated mid-life) must not propagate from on_session_end."""
+    _set_full_env(monkeypatch)
     mod = load_plugin("hermes-smd-memory-mirror")
     mod.register(fake_ctx)
     callback = fake_ctx.registered["on_session_end"][0]
+    _clear_env(monkeypatch)
 
     # Must NOT raise even though shared.secrets.require will raise KeyError.
     callback(
@@ -68,11 +135,13 @@ def test_on_session_end_is_exception_safe_when_env_missing(monkeypatch, fake_ctx
     )
 
 
-def test_on_session_end_no_op_when_session_id_missing(fake_ctx) -> None:
+def test_on_session_end_no_op_when_session_id_missing(monkeypatch, fake_ctx) -> None:
     """Empty session_id returns early without touching env."""
+    _set_full_env(monkeypatch)
     mod = load_plugin("hermes-smd-memory-mirror")
     mod.register(fake_ctx)
     callback = fake_ctx.registered["on_session_end"][0]
+    _clear_env(monkeypatch)
 
     # No env set; no exception because we return before reading any env.
     callback(session_id="", completed=True, interrupted=False, model="m", platform="p")
