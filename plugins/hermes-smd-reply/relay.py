@@ -115,8 +115,10 @@ def draft_body(args: Any) -> tuple[str, str, str]:
     subject = args.get("subject") if isinstance(args.get("subject"), str) else ""
     text = args.get("text") if isinstance(args.get("text"), str) else ""
     html = args.get("html") if isinstance(args.get("html"), str) else ""
-    parts = [p for p in (subject, text) if p.strip()]
-    scan_text = "\n".join(parts) if parts else html
+    # Scan subject + text + html UNCONDITIONALLY (EFF-01): a fabricated citation
+    # in an html body must not slip past because a benign subject/text is present.
+    parts = [p for p in (subject, text, html) if p.strip()]
+    scan_text = "\n".join(parts)
     return scan_text, text, html
 
 

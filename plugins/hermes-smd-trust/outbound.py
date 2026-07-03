@@ -133,6 +133,7 @@ _BODY_ARG_KEYS: tuple[str, ...] = (
     "body_text",
     "content",
     "html_body",
+    "html",  # AgentMail draft/send bodies use the bare "html" key
     "text",
     "note",
     "message",
@@ -487,7 +488,100 @@ def check_outbound_draft(
     return {"action": "block", "message": decision.reason}
 
 
+# ---------------------------------------------------------------------------
+# EXTERNAL_SEND gate (ADR 0028 / EFF-01)
+#
+# An autonomous EXTERNAL_SEND delivers content to the outside world with NO
+# human review, so it is the highest-stakes fabrication surface — yet the draft
+# gate above only covers INTERNAL_WRITE drafts. This path runs the same
+# provenance gate on the send body so a fabricated marker / legal citation
+# blocks the send. Sends are scanned across ALL scannable fields (a fabricated
+# cite can hide in an html body while the plaintext field is empty), unlike
+# drafts which take the first recognized body key.
+# ---------------------------------------------------------------------------
+
+
+_SEND_SCAN_KEYS: tuple[str, ...] = (
+    "subject",
+    "text",
+    "html",
+    "html_body",
+    "body",
+    "content",
+    "message",
+    "note",
+)
+
+
+def _is_gated_send_tool(tool_name: str) -> bool:
+    """True iff ``tool_name`` delivers content externally (EXTERNAL_SEND)."""
+    if not tool_name:
+        return False
+    return TOOL_ACTION_CLASS_MAP.get(tool_name) is ActionClass.EXTERNAL_SEND
+
+
+def _extract_send_body(args: dict | None) -> str:
+    """Concatenate every scannable field of a send so fabrication in any one of
+    them (e.g. an html-only body) is scanned. Empty string if none present."""
+    if not isinstance(args, dict):
+        return ""
+    parts: list[str] = []
+    for key in _SEND_SCAN_KEYS:
+        value = args.get(key)
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else str(value)
+        if text.strip():
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def check_outbound_send(
+    *,
+    tool_name: str,
+    args: dict | None,
+    session_id: str = "",
+    tool_call_id: str = "",
+) -> dict | None:
+    """Fabrication/citation gate for EXTERNAL_SEND tools (ADR 0028 / EFF-01).
+
+    Called after the trust-ceiling check has allowed an autonomous send. Scans
+    the combined send body through the same provenance gate the draft path uses
+    and returns a block directive on a fabricated marker / legal citation, else
+    ``None``. A send with no scannable content has no fabrication surface and is
+    allowed (the ceiling + content floor already governed whether it may fire).
+    """
+    if not _is_gated_send_tool(tool_name):
+        return None
+    body = _extract_send_body(args)
+    if not body.strip():
+        return None
+    vertical = _resolve_vertical()
+    cohort = _resolve_cohort()
+    decision = evaluate(body, cohort, vertical)
+    if decision.allowed:
+        _report_identifiers(
+            body=body,
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            vertical=vertical,
+            cohort=cohort,
+        )
+        return None
+    _emit_fabrication_audit(
+        tool_name=tool_name,
+        decision=decision,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        vertical=vertical,
+        cohort=cohort,
+    )
+    return {"action": "block", "message": decision.reason}
+
+
 __all__ = [
     "GATED_DRAFT_TOOLS",
     "check_outbound_draft",
+    "check_outbound_send",
 ]

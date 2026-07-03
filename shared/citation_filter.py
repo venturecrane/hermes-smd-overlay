@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -126,16 +127,37 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
+def _normalize_unicode(text: str) -> str:
+    """Strip invisible characters and fold Unicode confusables to ASCII.
+
+    Closes the zero-width / confusable evasion of the citation scan: a cite like
+    "Roe v.<ZWSP>Wade, 410 U.<ZWSP>S.<ZWSP>113" (zero-width spaces) or a
+    one-dot-leader "U<U+2024>S<U+2024>" renders identically to a human but
+    evades the ASCII-only regex. We remove zero-width/format chars and NFKC-fold
+    compatibility confusables (one-dot leader U+2024 -> '.', fullwidth forms) to
+    their ASCII equivalents before the whitespace-collapse pass runs.
+    """
+    # Remove invisible / zero-width format characters (category Cf: ZWSP, ZWNJ,
+    # ZWJ, word joiner, BOM, soft hyphen, etc.).
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    # NFKC folds compatibility confusables (one-dot leader, fullwidth) to ASCII.
+    return unicodedata.normalize("NFKC", text)
+
+
 def _normalize_encoding_bypass(text: str) -> str:
     """Collapse adversarial whitespace inserted to defeat the citation regex.
 
     Examples this catches:
       "Roe v . Wade , 410 U . S . 113" -> "Roe v. Wade, 410 U.S. 113"
+      "Roe v.<ZWSP>Wade, 410 U.<ZWSP>S.<ZWSP>113" -> "Roe v.Wade, 410 U.S. 113"
       "S m i t h" stays "S m i t h" (each char is a single letter, not a token)
-    The heuristic: collapse whitespace that sits between two single-letter
-    tokens (typical abbreviation evasion) or between a token and punctuation.
-    Real prose with multi-letter words is preserved.
+    The heuristic: normalize away invisible/confusable characters, then collapse
+    whitespace that sits between two single-letter tokens (typical abbreviation
+    evasion) or between a token and punctuation. Real prose with multi-letter
+    words is preserved.
     """
+    # Strip zero-width / confusable evasion before the ASCII whitespace pass.
+    text = _normalize_unicode(text)
     # Collapse whitespace adjacent to punctuation: "v . Wade" -> "v. Wade"
     text = re.sub(r"\s+([.,;:])", r"\1", text)
     # Collapse "U . S . " -> "U.S. " — single letters glued by dots and spaces.

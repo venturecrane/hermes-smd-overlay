@@ -71,6 +71,14 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
             except KeyError:
                 customer_slug = ""
 
+        # SEC-36/16: strip any agent-supplied `_current_turn_approval` flag before
+        # the ceiling check. No trusted runtime path stamps it (grep: it is read,
+        # never written), so a value present here is an agent forgery — removing it
+        # prevents the agent from self-approving a DESTRUCTIVE/COMMITMENT action.
+        # A genuine current-turn approval must arrive via a human-tied channel, not
+        # model-composed tool args.
+        args.pop("_current_turn_approval", None)
+
         ceiling_block = enforce.evaluate_tool_call(
             tool_name, args, customer_slug, session_id=kwargs.get("session_id") or ""
         )
@@ -90,6 +98,18 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         )
         if outbound_block is not None:
             return outbound_block
+
+        # EFF-01 (ADR 0028): an autonomous EXTERNAL_SEND delivers content with no
+        # human review — scan its body for fabrication too (the draft gate above
+        # only covers INTERNAL_WRITE drafts).
+        send_block = outbound.check_outbound_send(
+            tool_name=tool_name,
+            args=args,
+            session_id=kwargs.get("session_id") or "",
+            tool_call_id=kwargs.get("tool_call_id") or "",
+        )
+        if send_block is not None:
+            return send_block
 
         if tool_name.startswith("workspace_"):
             broker_payload = {key: value for key, value in args.items() if key != GRANT_ARG}

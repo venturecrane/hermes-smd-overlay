@@ -360,7 +360,15 @@ class SessionTaint:
 
         Returns ``internal`` for a clean (or unknown) session — so an absent
         signal reads as 'not tainted', and the gate only fires on positive
-        evidence of untrusted ingestion."""
+        evidence of untrusted ingestion.
+
+        SEC-12 (deferred): an empty/missing ``session_id`` reads as not-tainted,
+        so a sensitive autonomous action on an untracked turn is not refused by
+        taint. Failing this closed naively breaks the autonomous-clean-send path
+        whenever the gateway omits ``session_id`` (see
+        test_autonomous_clean_send_is_allowed); the correct fix is the
+        session-independent recovery index the audit recommends, tracked as a
+        Captain-call rather than a blunt fail-closed here."""
         if not session_id:
             return TRUST_CLASS_INTERNAL
         return self._tainted.get(session_id, TRUST_CLASS_INTERNAL)
