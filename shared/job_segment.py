@@ -26,6 +26,7 @@ from collections.abc import Callable
 from typing import Any
 
 from shared.job_worker import SegmentOutcome
+from shared.sticky_stop import StickyStopError
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,17 @@ def make_run_segment(
     preflight_cost: PreflightCost,
     segment_cost: SegmentCost,
     segment_max_iterations: int = 8,
+    breaker: Any = None,
 ):
-    """Return a ``run_segment(job, lease_epoch) -> SegmentOutcome`` closure."""
+    """Return a ``run_segment(job, lease_epoch) -> SegmentOutcome`` closure.
+
+    ``breaker`` is an optional ``shared.cost_breaker.CostBreaker`` (ADR 0062,
+    ss-console #1661). When present the segment loop asserts the Machine-wide
+    daily cost ladder before firing a segment (HARD_STOP →
+    ``SegmentOutcome(cost_capped=True)``, dead-lettered by the worker) and
+    records the segment's real cents after it runs. None (tests, breaker
+    construction failure) preserves today's behavior.
+    """
 
     def run_segment(job: dict, lease_epoch: int) -> SegmentOutcome:
         model = job["model"]
@@ -108,6 +118,18 @@ def make_run_segment(
             user_message = job["brief"]
             convo = None
 
+        # Machine-wide cost breaker (ADR 0062): refuse the segment while the
+        # sticky_stop ladder is at HARD_STOP. Checked before the per-job
+        # budget guard because it is the wider scope (the Machine's whole
+        # daily spend, not this job's allowance).
+        if breaker is not None:
+            try:
+                breaker.assert_allowed()
+            except StickyStopError:
+                return SegmentOutcome(cost_capped=True)
+            except Exception as exc:  # noqa: BLE001 — breaker fault ≠ job fault
+                logger.warning("job %s: cost-breaker assert failed open: %s", job["id"], exc)
+
         # Pre-spend guard: refuse a segment whose estimated input cost alone
         # would exceed the remaining budget (don't fire the request).
         remaining = job["budget_cents"] - job["spent_cents"]
@@ -137,6 +159,18 @@ def make_run_segment(
                     os.environ[k] = v
 
         spent = max(0, int(segment_cost(agent)))
+        # Feed the Machine-wide daily ladder with the segment's real cents.
+        # A transition to HARD_STOP here emits AGENT_STOPPED via the breaker's
+        # audit sink; the NEXT segment's assert refuses. Recording failure is
+        # logged loudly but never voids a segment that already ran — the
+        # per-job budget guard still bounds this job regardless.
+        if breaker is not None and spent > 0:
+            try:
+                breaker.record_cost_cents(spent)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "job %s: cost-breaker record failed (spend uncounted): %s", job["id"], exc
+                )
         new_tip = getattr(agent, "session_id", tip) or tip  # rotates on compaction
         completed = bool(result.get("completed"))
         final = result.get("final_response") if completed else None

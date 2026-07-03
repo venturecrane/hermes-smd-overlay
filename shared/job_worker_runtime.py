@@ -314,6 +314,42 @@ def start_worker_thread() -> bool:
     return True
 
 
+def _build_cost_breaker():
+    """Construct the Machine-wide cost breaker (ADR 0062, ss-console #1661).
+
+    Scope key is (customer, "_machine"): the ladder meters the Machine's
+    whole daily spend, not one persona's. Construction failure returns None
+    (the segment loop then behaves as today) but is logged loudly — a
+    Machine without its breaker is running with unbounded spend, which is
+    the pre-#1661 status quo, never a silent regression.
+    """
+    try:
+        from shared.audit_client import audit_client_from_env
+        from shared.cost_breaker import build_breaker
+        from shared.customer_config import CustomerConfig
+
+        slug = os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG")
+        if not slug:
+            logger.error("smd-job-worker: no customer slug; cost breaker NOT armed")
+            return None
+        config = None
+        try:
+            config = CustomerConfig.from_volume()
+        except Exception as exc:  # noqa: BLE001 — defaults still protect
+            logger.warning("smd-job-worker: customer.yaml unreadable; breaker defaults: %s", exc)
+        breaker = build_breaker(
+            customer=slug,
+            persona="_machine",
+            audit_client=audit_client_from_env(customer_slug=slug),
+            config=config,
+        )
+        logger.info("smd-job-worker: cost breaker armed (customer=%s)", slug)
+        return breaker
+    except Exception as exc:  # noqa: BLE001
+        logger.error("smd-job-worker: cost breaker construction failed; NOT armed: %s", exc)
+        return None
+
+
 def _worker_loop() -> None:
     from shared.job_ledger_client import BrokerJobClient
     from shared.job_segment import make_run_segment
@@ -342,6 +378,7 @@ def _worker_loop() -> None:
         preflight_cost=hermes_preflight_cost,
         segment_cost=hermes_segment_cost,
         segment_max_iterations=SEGMENT_MAX_ITERATIONS,
+        breaker=_build_cost_breaker(),
     )
     worker = JobWorker(
         client,

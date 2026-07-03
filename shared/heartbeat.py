@@ -116,6 +116,7 @@ def build_payload(
     last_skill_ts: str | None,
     uptime_seconds: int | None,
     version: str | None,
+    sticky_stop_level: str | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -130,6 +131,8 @@ def build_payload(
         payload["process_uptime_seconds"] = uptime_seconds
     if version:
         payload["version"] = version
+    if sticky_stop_level:
+        payload["sticky_stop_level"] = sticky_stop_level
     return payload
 
 
@@ -264,12 +267,23 @@ class HeartbeatEmitter:
 
     def _post_control_plane(self) -> None:
         last_audit_ts, last_skill_ts = read_audit_timestamps(self._audit_db_path_fn())
+        # ADR 0062: surface the cost-breaker ladder level so the fleet view
+        # can escalate a tripped seat. Read-only; any failure omits the field
+        # (the receiver treats absence as unknown, never as OK).
+        level: str | None = None
+        try:
+            from shared.cost_breaker import read_level
+
+            level = read_level()
+        except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
+            logger.debug("heartbeat: sticky_stop level read failed: %s", exc)
         payload = build_payload(
             heartbeat_ts=_iso_utc_now(),
             last_audit_ts=last_audit_ts,
             last_skill_ts=last_skill_ts,
             uptime_seconds=read_uptime_seconds(),
             version=self._version,
+            sticky_stop_level=level,
         )
         import json
 
