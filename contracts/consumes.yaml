@@ -115,6 +115,19 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: "per-customer healthchecks.io ping URL staged at provision (ADR 0023 #8). The gate's emitter pings it each tick; grace expiration fires the console /api/webhooks/healthchecks alert. Absent => external dead-man switch disabled, control-plane POST still runs. Stripped from the agent alongside MACHINE_HEARTBEAT_KEY."
+  # ---- ADR 0062 (ss-console #1661): cost breaker + inbound wake guard ----
+  SMD_STICKY_STOP_DB_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [job-worker, webhook-gate]
+    note: "test/dev override for the Machine-local sticky_stop state file; defaults to /opt/data/smd/sticky_stop.db (shared/cost_breaker.py). The job worker writes it (record_cost_cents ladder, agent uid); the gate and heartbeat read it read-only (HARD_STOP park + sticky_stop_level field)."
+  SMD_GATE_CAP_DB_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "test/dev override for the gate-owned inbound wake counter; defaults to /opt/data/smd-gate/wake_counter.db (shared/gate_inbound_cap.py). Root-owned; counts verified routed wakes per UTC day against the authored safety.sticky_stop.inbound_daily_cap (platform default 200)."
   HEARTBEAT_INGEST_URL:
     discovery: static
     stage: agent

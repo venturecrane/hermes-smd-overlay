@@ -319,6 +319,28 @@ class CustomerConfig:
         return dict(raw)
 
     @property
+    def sticky_stop(self) -> dict[str, Any]:
+        """Return the ``safety.sticky_stop`` mapping (ADR 0062 cost breaker).
+
+        Authored keys (both optional; platform defaults apply when absent —
+        these are integrity controls per ADR 0035, so unauthored means the
+        default, never fail-open): ``cost_cap_daily_cents`` (job-path daily
+        spend ladder base, default 5000) and ``inbound_daily_cap`` (webhook-
+        gate routed-wake cap, default 200). Absent ⇒ ``{}``.
+        """
+        safety = self._data.get("safety") or {}
+        if not isinstance(safety, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: safety must be a mapping; got {type(safety).__name__}"
+            )
+        raw = safety.get("sticky_stop") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: safety.sticky_stop must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    @property
     def memory(self) -> dict[str, Any]:
         """Return the ``memory`` mapping (d1_namespace, r2_vault_path, index).
 

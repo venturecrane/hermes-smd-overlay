@@ -47,6 +47,11 @@ class SegmentOutcome:
     ``result_text`` — the final result, set when ``completed``.
     ``refused_budget`` — the seam pre-flight-refused: the next request's
         estimated input cost alone would exceed the remaining budget.
+    ``cost_capped`` — the Machine-wide cost breaker is at HARD_STOP
+        (sticky_stop, ADR 0062): the segment was refused before firing.
+        Distinct from ``refused_budget`` (per-job budget) — this ladder
+        covers the whole Machine's daily spend; recovery is Captain
+        ``clear()``, not a bigger job budget.
     ``error`` — a non-fatal segment error; the worker leaves the lease to expire
         and the job is retried (until ``max_attempts``).
     """
@@ -56,6 +61,7 @@ class SegmentOutcome:
     tip_session_id: str = ""
     result_text: str | None = None
     refused_budget: bool = False
+    cost_capped: bool = False
     error: str | None = None
 
 
@@ -158,6 +164,15 @@ class JobWorker:
                 # the remaining budget — don't fire it.
                 self._dead_letter(
                     job_id, epoch, "needs_review", "segment would exceed budget (pre-spend)"
+                )
+                return "needs_review"
+            if seg.cost_capped:
+                # Machine-wide cost breaker at HARD_STOP (sticky_stop, ADR
+                # 0062). Park for Captain review; the AGENT_STOPPED audit row
+                # was emitted by the breaker at the trip transition. Recovery
+                # is Captain clear(), never an automatic resume.
+                self._dead_letter(
+                    job_id, epoch, "needs_review", "cost breaker hard stop (sticky_stop)"
                 )
                 return "needs_review"
             if seg.error:

@@ -273,3 +273,25 @@ def test_emitter_from_env_slug_falls_back_to_customer_slug(monkeypatch):
     monkeypatch.setenv("MACHINE_HEARTBEAT_KEY", "k")
     em = hb.emitter_from_env(lambda: None)
     assert em._slug == "fallback-slug"
+
+
+def test_payload_carries_sticky_stop_level_when_present():
+    p = hb.build_payload(
+        heartbeat_ts="2026-07-03T00:00:00Z",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        sticky_stop_level="HARD_STOP",
+    )
+    assert p["sticky_stop_level"] == "HARD_STOP"
+    # Absent/None omits the field entirely (receiver treats absence as
+    # unknown, never as OK).
+    p2 = hb.build_payload(
+        heartbeat_ts="2026-07-03T00:00:00Z",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+    )
+    assert "sticky_stop_level" not in p2

@@ -46,7 +46,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from shared import heartbeat, mcp_result_store, mcp_thread_store, oauth_callback, runtime_read
+from shared import (
+    gate_inbound_cap,
+    heartbeat,
+    mcp_result_store,
+    mcp_thread_store,
+    oauth_callback,
+    runtime_read,
+)
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
 # to build the forward URL, so the only dynamic part of the urllib call is a
@@ -413,6 +420,25 @@ _VERIFIERS: dict[str, Any] = {
 # unset so a Machine that has not authored it never exposes an open /mcp. Beat 2
 # replaces this with Clerk OAuth (per-customer JWKS / iss / aud / sub), ported
 # from ss-console src/lib/operator/mcp/token-validation.ts.
+
+# ADR 0062 (ss-console #1661): the inbound wake guard — breaker HARD_STOP +
+# authored daily wake cap — armed in main(). None until then (unit tests that
+# drive handlers directly get today's ungated behavior unless they inject one).
+_INBOUND_GUARD: gate_inbound_cap.InboundWakeGuard | None = None
+
+
+def _breaker_hard_stopped() -> bool:
+    """True when the Machine-wide cost breaker is pinned at HARD_STOP.
+    Read-only, fail-toward-False (a broken read must not park the console
+    surface; the vendor-webhook path applies its own guard with park+audit)."""
+    try:
+        from shared.cost_breaker import read_level
+        from shared.sticky_stop import StickyStopLevel
+
+        return read_level() == StickyStopLevel.HARD_STOP.value
+    except Exception:  # noqa: BLE001
+        return False
+
 
 MCP_ROUTE = "mcp"  # webhook route name; session id == webhook:mcp:<correlation_id>
 HANDOFF_ROUTE = "handoff"  # console→Machine async task handoff (Phase 2, ADR 0043)
@@ -906,6 +932,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": "unauthorized"})
             return
 
+        # ADR 0062: while the cost breaker is pinned at HARD_STOP no path
+        # wakes the agent — the console surfaces the pause honestly instead
+        # of burning further spend. Recovery is Captain clear().
+        if _breaker_hard_stopped():
+            self._json(
+                503,
+                {"error": "operator paused", "detail": "cost breaker hard stop (sticky_stop)"},
+            )
+            return
+
         length = int(self.headers.get("Content-Length") or 0)
         if length > _MAX_BODY_BYTES:
             self._json(413, {"error": "payload too large"})
@@ -946,6 +982,15 @@ class _Handler(BaseHTTPRequestHandler):
         if not hmac.compare_digest(bearer, secret):
             logger.warning("gate: handoff: invalid bearer (length %d)", len(bearer))
             self._json(401, {"error": "invalid bearer"})
+            return
+
+        # ADR 0062: HARD_STOP parks async handoffs too (503 so the console
+        # maps it to an honest failure, not a silent queue).
+        if _breaker_hard_stopped():
+            self._json(
+                503,
+                {"error": "operator paused", "detail": "cost breaker hard stop (sticky_stop)"},
+            )
             return
 
         length = int(self.headers.get("Content-Length") or 0)
@@ -1052,6 +1097,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": "invalid signature"})
             return
 
+        # ADR 0062 inbound wake guard: breaker HARD_STOP or the authored daily
+        # wake cap parks the delivery — acknowledged (202, so the vendor does
+        # not retry-storm), audited by the guard, NOT forwarded to the agent.
+        if _INBOUND_GUARD is not None:
+            forward, park_reason = _INBOUND_GUARD.check(route=route, request_id=request_id)
+            if not forward:
+                self._json(202, {"accepted": True, "parked": park_reason})
+                return
+
         # Stamp the verified ingress provenance (source == route) + the verified
         # per-delivery id (as event_id, the router's replay key) so the header-less
         # router can route on (source, event_type) and dedupe. Done after
@@ -1145,6 +1199,24 @@ def main() -> int:
     # the (agent-stripped) MACHINE_HEARTBEAT_KEY. Daemon thread; fail-soft — a
     # heartbeat failure never perturbs the webhook/MCP surface.
     heartbeat.emitter_from_env(_audit_db_path).start()
+    # ADR 0062 (ss-console #1661): arm the inbound wake guard. The park audit
+    # row goes through the broker audit client (best-effort; the park stands
+    # regardless). The cap is live-read from customer.yaml per delivery.
+    global _INBOUND_GUARD
+    try:
+        from shared.audit_client import audit_client_from_env
+
+        _audit_client = audit_client_from_env(
+            customer_slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG")
+        )
+    except Exception as exc:  # noqa: BLE001 — guard still parks, log-only audit
+        logger.warning("gate: no audit client for inbound guard (log-only parks): %s", exc)
+        _audit_client = None
+    _INBOUND_GUARD = gate_inbound_cap.InboundWakeGuard(
+        cap_resolver=gate_inbound_cap.default_cap_resolver,
+        audit_client=_audit_client,
+    )
+    logger.info("gate: inbound wake guard armed (ADR 0062)")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
