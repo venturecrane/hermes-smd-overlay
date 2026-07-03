@@ -117,20 +117,47 @@ def test_sink_write_is_visible_to_store_take():
     assert collected is not None and collected["answer"] == "bridged"
 
 
-# --- gate JSON-RPC dispatch + stub auth ---------------------------------------
+# --- gate console-sole turn endpoint (/mcp/turn, ADR 0057 amendment) ----------
+# The direct public JSON-RPC /mcp door + its stub/Clerk auth are retired; the
+# console is the sole public Claude door and proxies turns here. These exercise
+# the pure turn core (_mcp_turn); the handler is thin bearer-auth + body-read glue.
 
 
-def test_stub_auth_fail_closed_when_unset(monkeypatch):
-    monkeypatch.delenv("SMD_MCP_STUB_TOKEN", raising=False)
-    assert gate._mcp_stub_authorized("Bearer anything") is None
+def test_mcp_turn_drives_a_turn_and_returns_reply(monkeypatch):
+    seen = {}
+
+    def fake_drive(message, *, principal_subject, thread_id):
+        seen.update(message=message, principal_subject=principal_subject, thread_id=thread_id)
+        return {"answer": "done"}
+
+    monkeypatch.setattr(gate, "_drive_agent_turn", fake_drive)
+    status, body = gate._mcp_turn(
+        {"message": "hi", "principal_subject": "user_1", "thread_id": "t1"}
+    )
+    assert status == 200
+    assert body == {"reply": "done", "thread_id": "t1"}
+    assert seen == {"message": "hi", "principal_subject": "user_1", "thread_id": "t1"}
 
 
-def test_stub_auth_accepts_correct_bearer(monkeypatch):
-    monkeypatch.setenv("SMD_MCP_STUB_TOKEN", "s3cr3t")
-    # Success returns the synthetic stub SUBJECT (used to namespace the thread).
-    assert gate._mcp_stub_authorized("Bearer s3cr3t") == gate.STUB_PRINCIPAL_SUBJECT
-    assert gate._mcp_stub_authorized("Bearer wrong") is None
-    assert gate._mcp_stub_authorized(None) is None
+def test_mcp_turn_requires_message(monkeypatch):
+    monkeypatch.setattr(gate, "_drive_agent_turn", lambda *a, **k: {"answer": "x"})
+    for req in ({"principal_subject": "u"}, {"message": "  ", "principal_subject": "u"}):
+        status, body = gate._mcp_turn(req)
+        assert status == 400 and "message" in body["error"]
+
+
+def test_mcp_turn_requires_principal_subject(monkeypatch):
+    # The console asserts identity after its grant check; a turn with no principal
+    # is refused rather than run under an ambiguous namespace.
+    monkeypatch.setattr(gate, "_drive_agent_turn", lambda *a, **k: {"answer": "x"})
+    status, body = gate._mcp_turn({"message": "hi"})
+    assert status == 400 and "principal_subject" in body["error"]
+
+
+def test_mcp_turn_timeout_is_504(monkeypatch):
+    monkeypatch.setattr(gate, "_drive_agent_turn", lambda *a, **k: None)
+    status, body = gate._mcp_turn({"message": "hi", "principal_subject": "u"})
+    assert status == 504 and body["error"] == "turn_timeout"
 
 
 def test_dispatch_initialize_advertises_tools():
@@ -516,88 +543,3 @@ def test_mcp_taint_is_sticky_across_turns(monkeypatch):
     # STILL be tainted (the wall does not reset per turn / per correlation id).
     assert inbound_plugin.on_pre_llm_call(session_id=session, user_message="thanks!") is None
     assert inbound.SESSION_TAINT.is_tainted(session) is True
-
-
-# --- access expansion: clerk_subjects (plural) + clerk_subject (singular) ------
-#
-# Regression for the live IDENTITY_NOT_AUTHORED bug (2026-06-17): the authored
-# customer.yaml uses `clerk_subjects` (plural list); the gate read only the
-# singular `clerk_subject`, so the entry was dropped → empty access → every real
-# token refused. The console's customer-resolution.ts always honoured both.
-
-
-def test_access_entries_expands_plural_subjects():
-    mc = {
-        "access": [
-            {
-                "email": "scott@smd.services",
-                "profile": "crane",
-                "clerk_subjects": ["user_AAA", "user_BBB"],
-            }
-        ]
-    }
-    entries = gate._mcp_access_entries(mc)
-    subjects = {e.clerk_subject for e in entries}
-    assert subjects == {"user_AAA", "user_BBB"}
-    assert all(e.email == "scott@smd.services" and e.profile == "crane" for e in entries)
-
-
-def test_access_entries_honours_singular_subject():
-    mc = {"access": [{"email": "a@b.co", "profile": "crane", "clerk_subject": "user_X"}]}
-    entries = gate._mcp_access_entries(mc)
-    assert [e.clerk_subject for e in entries] == ["user_X"]
-
-
-def test_access_entries_unions_and_dedupes_plural_and_singular():
-    mc = {
-        "access": [
-            {
-                "email": "a@b.co",
-                "profile": "crane",
-                "clerk_subjects": ["user_X", "user_Y"],
-                "clerk_subject": "user_X",  # duplicate of one plural entry
-            }
-        ]
-    }
-    subjects = [e.clerk_subject for e in gate._mcp_access_entries(mc)]
-    assert subjects == ["user_X", "user_Y"]  # deduped, authored order preserved
-
-
-def test_access_entries_drops_entries_without_a_subject_or_identity():
-    mc = {
-        "access": [
-            {"email": "a@b.co", "profile": "crane"},  # no subject at all
-            {"profile": "crane", "clerk_subjects": ["user_Z"]},  # no email
-            {"email": "c@d.co", "clerk_subjects": ["user_W"]},  # no profile
-            {"email": "e@f.co", "profile": "crane", "clerk_subjects": [123, ""]},  # bad subjects
-        ]
-    }
-    assert gate._mcp_access_entries(mc) == ()  # fail-closed
-
-
-def test_load_mcp_binding_authorizes_plural_subjects(tmp_path, monkeypatch):
-    """End to end: a customer.yaml authored with the plural form yields a binding
-    whose access list contains every listed subject (the bug shipped an empty
-    list here)."""
-    yaml_path = tmp_path / "customer.yaml"
-    yaml_path.write_text(
-        "mcp_connector:\n"
-        "  enabled: true\n"
-        "  access:\n"
-        "    - email: scott@smd.services\n"
-        "      profile: crane\n"
-        "      clerk_subjects:\n"
-        "        - user_3EEs0aMBRgu6PRxBa4g5YhHjggD\n"
-        "        - user_3E1RPGrTMxkSqciXMTyybUNSJWu\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("SMD_MCP_CLERK_ISSUER", "https://clerk.smd.services")
-    monkeypatch.setenv("SMD_MCP_RESOURCE_URI", "https://hermes-smd.fly.dev/mcp")
-    monkeypatch.setenv("SMD_CUSTOMER_YAML_PATH", str(yaml_path))
-
-    binding = gate._load_mcp_binding()
-    assert binding is not None and binding.enabled is True
-    assert {e.clerk_subject for e in binding.access} == {
-        "user_3EEs0aMBRgu6PRxBa4g5YhHjggD",
-        "user_3E1RPGrTMxkSqciXMTyybUNSJWu",
-    }
