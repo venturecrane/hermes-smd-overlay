@@ -477,150 +477,17 @@ _MCP_TOOLS = [
 _MCP_TOOL_NAMES = frozenset(t["name"] for t in _MCP_TOOLS)
 
 
-# Stable synthetic subject for the transitional stub-auth path (staging, where
-# Clerk is not configured). There is no real identity behind a shared bearer
-# token, so all stub-authed turns share ONE conversation namespace — which is
-# correct: staging has a single operator. The Clerk path (prod) carries the real
-# per-user subject.
-STUB_PRINCIPAL_SUBJECT = "smd-mcp-stub"
-
-
-def _mcp_stub_authorized(auth_header: str | None) -> str | None:
-    """Beat-1 stub auth: constant-time bearer check against SMD_MCP_STUB_TOKEN.
-
-    Returns the synthetic stub subject on success, else None. Fail-closed: an
-    unset token rejects every request, so a Machine that never authored the stub
-    token can never expose an open /mcp. Used ONLY when Clerk is not configured.
-    """
-    token = os.environ.get("SMD_MCP_STUB_TOKEN")
-    if not token:
-        return None
-    if not auth_header or not auth_header.startswith("Bearer "):
-        return None
-    if hmac.compare_digest(auth_header[len("Bearer ") :], token):
-        return STUB_PRINCIPAL_SUBJECT
-    return None
-
-
-def _mcp_access_entries(mc: dict) -> tuple:
-    """Expand ``mcp_connector.access[]`` into one McpAccessEntry per authorized
-    Clerk subject.
-
-    Mirrors the console's ``customer-resolution.ts``: an access entry may carry
-    ``clerk_subjects`` (plural list) and/or ``clerk_subject`` (singular); every
-    listed subject is authorized for that entry's email+profile. The authored
-    SMD schema uses the plural form, so reading only the singular key (the prior
-    behaviour) silently dropped the entry and refused every real token with
-    ``identity_not_authored``. Entries missing email/profile, or carrying no
-    subject at all, are dropped — fail-closed.
-    """
-    from shared import mcp_auth
-
-    entries = []
-    for e in mc.get("access") or []:
-        if not (isinstance(e, dict) and e.get("email") and e.get("profile")):
-            continue
-        subjects: list[str] = []
-        plural = e.get("clerk_subjects")
-        if isinstance(plural, list):
-            subjects.extend(s for s in plural if isinstance(s, str) and s)
-        singular = e.get("clerk_subject")
-        if isinstance(singular, str) and singular:
-            subjects.append(singular)
-        for subject in dict.fromkeys(subjects):  # dedupe, preserve authored order
-            entries.append(mcp_auth.McpAccessEntry(e["email"], e["profile"], subject))
-    return tuple(entries)
-
-
-def _load_mcp_binding():
-    """Build the Clerk auth binding, or None when Clerk is not configured here.
-
-    issuer + resource_uri are materialized to the Machine env at provision time
-    (issuer from the console's D1 mcp_clerk_bindings; resource_uri is THIS
-    Machine's own /mcp URL). enabled + access are read LIVE from customer.yaml so
-    authoring access on/off takes effect with no restart. None => Clerk not
-    configured (e.g. staging spine tests), which falls back to the transitional
-    stub bearer.
-    """
-    issuer = os.environ.get("SMD_MCP_CLERK_ISSUER")
-    resource_uri = os.environ.get("SMD_MCP_RESOURCE_URI")
-    if not issuer or not resource_uri:
-        return None
-    from shared import mcp_auth  # lazy: keeps jwt off the gate's non-mcp boot path
-
-    path = os.environ.get("SMD_CUSTOMER_YAML_PATH") or "/opt/data/customer.yaml"
-    try:
-        import yaml
-
-        with open(path, encoding="utf-8") as handle:
-            cfg = yaml.safe_load(handle) or {}
-    except (OSError, ValueError) as exc:
-        logger.warning("mcp: customer.yaml read failed (%s); auth fail-closed", exc)
-        return None
-    mc = cfg.get("mcp_connector") if isinstance(cfg, dict) else None
-    if not isinstance(mc, dict):
-        return None
-    return mcp_auth.McpAuthBinding(
-        issuer=issuer,
-        resource_uri=resource_uri,
-        clerk_org_id=os.environ.get("SMD_MCP_CLERK_ORG_ID") or None,
-        enabled=bool(mc.get("enabled")),
-        access=_mcp_access_entries(mc),
-    )
-
-
-def _mcp_authenticate(auth_header: str | None) -> str | None:
-    """Authenticate an /mcp request; return the principal SUBJECT or None.
-
-    Clerk when configured (the production path) — returns the authenticated
-    Clerk subject, which namespaces the caller's conversation thread so no
-    identity can address another's. The transitional stub bearer is used ONLY
-    when Clerk is not configured on this Machine, returning a single synthetic
-    subject. Fail-closed either way (None => reject)."""
-    binding = _load_mcp_binding()
-    if binding is not None:
-        from shared import mcp_auth
-
-        token = mcp_auth.extract_bearer_token(auth_header)
-        result = mcp_auth.validate_mcp_token(token, binding)
-        if isinstance(result, mcp_auth.McpPrincipal):
-            return result.subject
-        # Diagnostic: surface the token's actual aud/iss/sub (identifiers, not
-        # secrets) vs what THIS Machine expects, so an OAuth audience/issuer
-        # mismatch is debuggable without guessing. Temporary.
-        claims_note = ""
-        try:
-            if token:
-                import jwt
-
-                unverified = jwt.decode(token, options={"verify_signature": False})
-                claims_note = (
-                    f" token.aud={unverified.get('aud')!r} token.iss={unverified.get('iss')!r}"
-                    f" token.sub={unverified.get('sub')!r}"
-                    f" | expected resource={binding.resource_uri!r} issuer={binding.issuer!r}"
-                )
-        except Exception:  # noqa: BLE001
-            claims_note = " (token un-decodable)"
-        logger.info(
-            "mcp: Clerk auth refused (%s)%s", getattr(result, "reason", "unknown"), claims_note
-        )
-        return None
-    return _mcp_stub_authorized(auth_header)
-
-
-def _mcp_protected_resource_metadata() -> dict | None:
-    """RFC 9728 protected-resource-metadata for THIS Machine's /mcp, or None when
-    Clerk is not configured. Public + unauthenticated (carries no secret)."""
-    issuer = os.environ.get("SMD_MCP_CLERK_ISSUER")
-    resource_uri = os.environ.get("SMD_MCP_RESOURCE_URI")
-    if not issuer or not resource_uri:
-        return None
-    return {
-        "resource": resource_uri,
-        "authorization_servers": [issuer],
-        "scopes_supported": ["openid", "profile", "email"],
-        "bearer_methods_supported": ["header"],
-    }
+# Console-sole Claude door (ADR 0057 amendment). The Machine no longer exposes a
+# direct public MCP door: the shared-static-token stub auth and the Clerk-direct
+# authorization path (which never consulted the grant table, so it bypassed the
+# ADR 0057 kill switch) are BOTH retired. The console
+# (smd.services/api/operator/<slug>/mcp) is the one public Claude door; it
+# authenticates the caller, enforces the grant kill-switch per request, and then
+# proxies the turn to this Machine's authenticated `/mcp/turn` endpoint over the
+# console-proxy bearer (WEBHOOK_SECRET_MCP). The direct `/mcp` JSON-RPC door now
+# returns 410 Gone. The JSON-RPC dispatch engine below (`_mcp_dispatch` and the
+# job verbs) is retained as the turn-execution core and for future console-proxied
+# re-exposure; it is no longer reachable from an unauthenticated public request.
 
 
 def _rpc_ok(req_id: object, result: dict) -> dict:
@@ -750,6 +617,36 @@ def _mcp_tools_call(req: dict, *, principal_subject: str) -> tuple[int, dict]:
     answer = result.get("answer")
     text = answer if isinstance(answer, str) else json.dumps(answer)
     return 200, _rpc_ok(req_id, {"content": [{"type": "text", "text": text}]})
+
+
+def _mcp_turn(req: dict) -> tuple[int, dict]:
+    """Validate a console-proxied turn request and drive one agent turn.
+
+    Pure of transport/auth — the handler does the console-proxy bearer check and
+    the body read; this takes the already-parsed JSON body and returns
+    ``(http_status, response_body)``. The ``principal_subject`` is asserted by the
+    console (which authenticated the caller and enforced the grant kill-switch),
+    so it is required and namespaces the conversation thread. 400 on a malformed
+    field, 504 on turn timeout, 200 ``{reply, thread_id}`` on success.
+    """
+    if not isinstance(req, dict):
+        return 400, {"error": "invalid body"}
+    message = req.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return 400, {"error": "message (non-empty string) required"}
+    principal_subject = req.get("principal_subject")
+    if not isinstance(principal_subject, str) or not principal_subject:
+        return 400, {"error": "principal_subject required"}
+    thread_id = req.get("thread_id")
+    if thread_id is not None and not isinstance(thread_id, str):
+        return 400, {"error": "thread_id must be a string"}
+
+    result = _drive_agent_turn(message, principal_subject=principal_subject, thread_id=thread_id)
+    if result is None:
+        return 504, {"error": "turn_timeout"}
+    answer = result.get("answer")
+    reply = answer if isinstance(answer, str) else json.dumps(answer)
+    return 200, {"reply": reply, "thread_id": thread_id}
 
 
 # Job-status projection: the operator-visible control facts a caller needs to
@@ -919,12 +816,6 @@ class _Handler(BaseHTTPRequestHandler):
                 split.query, self.headers.get("Host"), os.environ
             )
             self._html(status, html)
-        elif path.startswith("/.well-known/oauth-protected-resource"):
-            # RFC 9728 discovery for the Machine-hosted MCP connector. Public,
-            # unauthenticated, carries no secret. One Machine == one resource, so
-            # the same doc serves every suffix the client may request.
-            meta = _mcp_protected_resource_metadata()
-            self._json(200, meta) if meta else self._json(404, {"error": "not found"})
         elif path.startswith(_RUNTIME_PREFIX):
             self._handle_runtime(path, split.query)
         else:
@@ -985,27 +876,36 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json_nostore(200, result)
 
-    def _handle_mcp(self) -> None:
-        """Terminate a JSON-RPC MCP request on /mcp (Claude-as-a-channel).
+    def _handle_mcp_turn(self) -> None:
+        """Console → Machine synchronous turn endpoint (/mcp/turn, ADR 0057
+        amendment — console-sole door).
 
-        Beat-1 stub auth (bearer) then JSON-RPC dispatch; ``tools/call`` drives
-        one agent turn and returns its answer in-line via the result store.
+        AUTH: Bearer WEBHOOK_SECRET_MCP (the per-customer console-proxy key, same
+        derivation as /webhooks/handoff). The console has already authenticated
+        the caller and enforced the ADR 0057 grant kill-switch per request; this
+        endpoint trusts the console's asserted ``principal_subject`` and never
+        re-derives identity. Fail-closed: unset secret → 503, bad bearer → 401.
+
+        Body: ``{message, thread_id?, principal_subject}``. Drives ONE agent turn
+        through the shared turn spine (``_drive_agent_turn``) and returns
+        ``{reply, thread_id}`` synchronously — a Cloudflare Worker has no
+        wall-clock cap on the awaiting HTTP request. A turn that does not resolve
+        within the poll budget returns 504 so the console maps it to a
+        fail-closed ``delivery_failed`` (the async handoff path remains the
+        fallback for long work).
         """
-        principal_subject = _mcp_authenticate(self.headers.get("Authorization"))
-        if not principal_subject:
-            # RFC 9728 §5.1: on a Clerk-configured Machine, point the client at
-            # the discovery doc so it knows where to authenticate.
-            meta = _mcp_protected_resource_metadata()
-            extra = None
-            if meta:
-                parts = urlsplit(meta["resource"])
-                murl = (
-                    f"{parts.scheme}://{parts.netloc}"
-                    f"/.well-known/oauth-protected-resource{parts.path}"
-                )
-                extra = {"WWW-Authenticate": f'Bearer resource_metadata="{murl}"'}
-            self._json_headers(401, {"error": "unauthorized"}, extra)
+        secret = os.environ.get("WEBHOOK_SECRET_MCP")
+        if not secret:
+            logger.warning("gate: WEBHOOK_SECRET_MCP not set — /mcp/turn not configured")
+            self._json(503, {"error": "mcp turn route not configured"})
             return
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or not hmac.compare_digest(
+            auth[len("Bearer ") :], secret
+        ):
+            self._json(401, {"error": "unauthorized"})
+            return
+
         length = int(self.headers.get("Content-Length") or 0)
         if length > _MAX_BODY_BYTES:
             self._json(413, {"error": "payload too large"})
@@ -1014,25 +914,9 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             req = json.loads(raw)
         except Exception:
-            self._json(200, _rpc_err(None, _JSON_RPC_PARSE_ERROR, "invalid JSON"))
+            self._json(400, {"error": "invalid JSON"})
             return
-        if (
-            not isinstance(req, dict)
-            or req.get("jsonrpc") != "2.0"
-            or not isinstance(req.get("method"), str)
-        ):
-            self._json(200, _rpc_err(None, _JSON_RPC_INVALID_REQUEST, "not a JSON-RPC 2.0 request"))
-            return
-        try:
-            status, body = _mcp_dispatch(req, principal_subject=principal_subject)
-        except Exception as exc:  # never leak detail; fail closed
-            logger.error("mcp: dispatch error: %s", exc)
-            self._json(200, _rpc_err(req.get("id"), _JSON_RPC_INTERNAL_ERROR, "internal error"))
-            return
-        if body is None:
-            self.send_response(status)
-            self.end_headers()
-            return
+        status, body = _mcp_turn(req)
         self._json(status, body)
 
     def _handle_handoff(self) -> None:
@@ -1113,10 +997,19 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(202, {"accepted": True, "handoff_id": handoff_id})
 
     def do_POST(self) -> None:  # noqa: N802
-        if urlsplit(self.path).path.rstrip("/") == "/mcp":
-            self._handle_mcp()
+        post_path = urlsplit(self.path).path.rstrip("/")
+        if post_path == "/mcp/turn":
+            self._handle_mcp_turn()
             return
-        if urlsplit(self.path).path.rstrip("/") == f"/webhooks/{HANDOFF_ROUTE}":
+        if post_path == "/mcp":
+            # Direct public JSON-RPC Claude door retired (ADR 0057 amendment —
+            # console-sole). Claude reaches the Operator only through the console,
+            # which authenticates the caller and enforces the grant kill-switch
+            # per request, then proxies the turn to /mcp/turn. No direct public
+            # Claude door (stub bearer or Clerk) remains on the Machine.
+            self._json(410, {"error": "gone", "detail": "connect via the console MCP endpoint"})
+            return
+        if post_path == f"/webhooks/{HANDOFF_ROUTE}":
             self._handle_handoff()
             return
         if not self.path.startswith("/webhooks/"):
