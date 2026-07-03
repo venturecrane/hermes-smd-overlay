@@ -256,6 +256,56 @@ def test_gated_draft_tools_cover_expected_set() -> None:
     assert "email_list_messages" not in ob.GATED_DRAFT_TOOLS
 
 
+def test_draft_gate_scans_html_key(monkeypatch) -> None:
+    """EFF-01: a draft whose body is under the AgentMail `html` key must be
+    scanned (previously only html_body/text were recognized, so an html-only
+    fabricated citation slipped through)."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    ob = load_plugin("hermes-smd-trust").outbound
+    blocked = ob.check_outbound_draft(
+        tool_name="mcp_agentmail_create_draft",
+        args={"html": "As held in Mata v. Avianca, 925 F.3d 1339, you prevail."},
+    )
+    assert blocked is not None and blocked["action"] == "block"
+
+
+def test_send_gate_blocks_fabricated_citation(monkeypatch) -> None:
+    """EFF-01: an autonomous EXTERNAL_SEND delivers content unreviewed, so a
+    fabricated legal citation in its (html) body must block the send."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    ob = load_plugin("hermes-smd-trust").outbound
+    blocked = ob.check_outbound_send(
+        tool_name="mcp_agentmail_send_message",
+        args={"subject": "Re: your matter", "html": "Per Roe v. Wade, 410 U.S. 113."},
+    )
+    assert blocked is not None and blocked["action"] == "block"
+
+
+def test_send_gate_blocks_tier1_marker_regardless_of_vertical(monkeypatch) -> None:
+    """A Tier-1 fabrication marker blocks a send in any vertical."""
+    monkeypatch.delenv("SMD_VERTICAL", raising=False)
+    ob = load_plugin("hermes-smd-trust").outbound
+    blocked = ob.check_outbound_send(
+        tool_name="mcp_agentmail_send_message",
+        args={"text": "We will reach out — soon."},  # em dash: banned marker
+    )
+    assert blocked is not None and blocked["action"] == "block"
+
+
+def test_send_gate_allows_clean_body(monkeypatch) -> None:
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    ob = load_plugin("hermes-smd-trust").outbound
+    assert (
+        ob.check_outbound_send(
+            tool_name="mcp_agentmail_send_message",
+            args={"subject": "Hi", "text": "Are you free to talk tomorrow?"},
+        )
+        is None
+    )
+    # A read tool is never a gated send.
+    assert ob.check_outbound_send(tool_name="mcp_agentmail_list_messages", args={}) is None
+
+
 def test_pre_tool_call_blocks_draft_with_fabricated_citation(
     trust_plugin, env_autonomous, monkeypatch
 ) -> None:
