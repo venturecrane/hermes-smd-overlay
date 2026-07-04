@@ -217,10 +217,15 @@ def _extract_skill_names(raw: Any) -> list[str] | None:
 
 
 def _read_cron_jobs(jobs_path: Path) -> list[dict[str, Any]] | None:
-    """Read a profile's materialized cron jobs (name + schedule only).
+    """Read a profile's materialized cron jobs (name/schedule/status/next fire).
 
     This is the same ``cron/jobs.json`` the gateway ticks (ADR 0047 / the C1
     profile-home fix), so it is the authoritative materialized cron state.
+    ``next_run_at`` is the PERSISTED first/next fire Hermes computed at
+    create_job/advance_next_run time — exposing it makes timezone-of-computation
+    defects observable from the seam (ss-console#1691: jobs created in a
+    process without HERMES_TIMEZONE stored UTC-interpreted first fires that
+    double-fired against the seat-local gateway).
     Returns None on a parse failure (→ that profile's cron degrades)."""
     try:
         data = json.loads(jobs_path.read_text(encoding="utf-8"))
@@ -239,6 +244,8 @@ def _read_cron_jobs(jobs_path: Path) -> list[dict[str, Any]] | None:
                 "schedule": job.get("schedule") or job.get("cron"),
                 "skill": job.get("skill"),
                 "last_status": job.get("last_status"),
+                "next_run_at": job.get("next_run_at"),
+                "last_run_at": job.get("last_run_at"),
             }
         )
     return out

@@ -121,6 +121,8 @@ def test_read_profiles_reads_config_skills_and_cron(tmp_path) -> None:
                         "schedule": "0 7-19 * * *",
                         "skill": "inbox-triage",
                         "last_status": "ok",
+                        "next_run_at": "2026-07-05T07:00:00-07:00",
+                        "last_run_at": "2026-07-04T07:00:03-07:00",
                     }
                 ]
             }
@@ -138,6 +140,11 @@ def test_read_profiles_reads_config_skills_and_cron(tmp_path) -> None:
     assert p["cron"]["available"] is True
     assert p["cron"]["jobs"][0]["name"] == "op-managed:smd:inbox-triage"
     assert p["cron"]["jobs"][0]["last_status"] == "ok"
+    # ss-console#1691: the persisted next/last fire times pass through so a
+    # wrong-timezone next_run_at is observable from the seam, not only as a
+    # surprise fire in the audit log.
+    assert p["cron"]["jobs"][0]["next_run_at"] == "2026-07-05T07:00:00-07:00"
+    assert p["cron"]["jobs"][0]["last_run_at"] == "2026-07-04T07:00:03-07:00"
     assert degraded == []
 
 
