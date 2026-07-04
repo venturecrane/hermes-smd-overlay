@@ -343,3 +343,47 @@ def test_audit_check_skipped_when_no_binding(monkeypatch, no_real_exit):
     handler = _load_handler()
     monkeypatch.setattr(handler, "_audit_db_path", lambda: None)
     asyncio.run(handler.handle("gateway:startup", {}))  # no _Exit => passed
+
+
+# --- cost-breaker boot self-check (ADR 0062 §6, ss-console #1701) -------------
+# The negative-fire probe that earns sticky_stop_cost_cap its enforced status:
+# every boot proves the breaker actually trips + refuses, in a throwaway db.
+
+
+def test_run_boot_probe_passes_against_the_real_breaker():
+    # The real negative-fire probe: trips HARD_STOP in a throwaway db and
+    # confirms the guard refuses. Returns (True, "").
+    import shared.cost_breaker as cb
+
+    ok, reason = asyncio.run(cb.run_boot_probe())
+    assert ok is True, reason
+
+
+def test_cost_breaker_self_check_fails_closed_when_probe_reports_inert(monkeypatch, no_real_exit):
+    # An inert breaker (probe returns ok=False) must _die (fail-closed) — an
+    # operator whose spend cap cannot fire must not serve.
+    import shared.cost_breaker as cb
+
+    async def _inert():
+        return False, "ladder did not trip HARD_STOP (level=OK)"
+
+    monkeypatch.setattr(cb, "run_boot_probe", _inert)
+    handler = _load_handler()
+    with pytest.raises(_Exit) as ei:
+        asyncio.run(handler._cost_breaker_self_check())
+    assert ei.value.code == 1
+
+
+def test_full_handle_runs_cost_breaker_check(monkeypatch, no_real_exit):
+    # The governed-path boot runs ALL self-checks including the breaker; if the
+    # breaker were inert the whole boot fails closed.
+    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK)
+    import shared.cost_breaker as cb
+
+    async def _inert():
+        return False, "inert"
+
+    monkeypatch.setattr(cb, "run_boot_probe", _inert)
+    handler = _load_handler()
+    with pytest.raises(_Exit):
+        asyncio.run(handler.handle("gateway:startup", {}))
