@@ -140,7 +140,11 @@ def _emit_alarm(audit_client: Any, *, reason: str, model: str, session_id: str) 
     degraded state; log and move on)."""
     key = reason.split(":", 1)[0]
     now = time.monotonic()
-    if now - _last_alarm.get(key, 0.0) < _ALARM_WINDOW_SECONDS:
+    # Absent key => always fire. (Must not default to 0.0: on a fresh process
+    # time.monotonic() can be < the window, which would suppress the very first
+    # alarm — the failure mode this rate-limiter exists to make visible.)
+    last = _last_alarm.get(key)
+    if last is not None and now - last < _ALARM_WINDOW_SECONDS:
         return
     _last_alarm[key] = now
     logger.error(
