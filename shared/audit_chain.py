@@ -55,8 +55,8 @@ CHAIN_COLUMNS: tuple[str, ...] = (
 )
 
 _FIELD_SEP = "\x1f"  # unit separator between canonical fields
-_LINK_SEP = "\x1e"   # record separator between prev_hash and canonical body
-_NONE = "\x00"       # SQL NULL marker (cannot collide with real text fields)
+_LINK_SEP = "\x1e"  # record separator between prev_hash and canonical body
+_NONE = "\x00"  # SQL NULL marker (cannot collide with real text fields)
 
 
 def canonical_row(values: Sequence[Any]) -> str:
@@ -67,9 +67,7 @@ def canonical_row(values: Sequence[Any]) -> str:
     the contract and a caller fails loudly, never silently truncates.
     """
     if len(values) != len(CHAIN_COLUMNS):
-        raise ValueError(
-            f"canonical_row: expected {len(CHAIN_COLUMNS)} values, got {len(values)}"
-        )
+        raise ValueError(f"canonical_row: expected {len(CHAIN_COLUMNS)} values, got {len(values)}")
     return _FIELD_SEP.join(_NONE if v is None else str(v) for v in values)
 
 
@@ -90,7 +88,7 @@ def legacy_anchor(last_unchained_id: str | None) -> str:
     """
     if last_unchained_id is None:
         return GENESIS
-    return hashlib.sha256(f"LEGACY:{last_unchained_id}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"LEGACY:{last_unchained_id}".encode()).hexdigest()
 
 
 def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -130,7 +128,10 @@ def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             continue
         if row_hash is None or prev_hash is None:
             breaks.append(
-                {"id": str(row.get("id")), "reason": "half-chained row (one of prev/row hash is NULL)"}
+                {
+                    "id": str(row.get("id")),
+                    "reason": "half-chained row (one of prev/row hash is NULL)",
+                }
             )
             continue
         recomputed = compute_row_hash(prev_hash, [row.get(c) for c in CHAIN_COLUMNS])
@@ -142,14 +143,14 @@ def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
     # Chain start: prev is GENESIS or a LEGACY anchor (a hash that is not any
     # chained row's row_hash). Walk forward following links.
-    starts = [
-        r for p, rs in by_prev.items() if p == GENESIS or p not in chained for r in rs
-    ]
+    starts = [r for p, rs in by_prev.items() if p == GENESIS or p not in chained for r in rs]
     if len(chained) > 0 and len(starts) == 0:
         breaks.append({"id": "-", "reason": "no chain start found (anchor row missing)"})
     if len(starts) > 1:
         for r in starts[1:]:
-            breaks.append({"id": str(r.get("id")), "reason": "multiple chain starts (fork or deleted parent)"})
+            breaks.append(
+                {"id": str(r.get("id")), "reason": "multiple chain starts (fork or deleted parent)"}
+            )
 
     head: str | None = None
     visited = 0
@@ -161,12 +162,19 @@ def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             children = by_prev.get(head, [])
             if len(children) > 1:
                 for extra in children[1:]:
-                    breaks.append({"id": str(extra.get("id")), "reason": "fork (two rows share a parent)"})
+                    breaks.append(
+                        {"id": str(extra.get("id")), "reason": "fork (two rows share a parent)"}
+                    )
             cursor = children[0] if children else None
 
     unreached = len(chained) - visited
     if unreached > 0:
-        breaks.append({"id": "-", "reason": f"{unreached} chained row(s) unreachable from the start (deleted parent)"})
+        breaks.append(
+            {
+                "id": "-",
+                "reason": f"{unreached} chained row(s) unreachable from the start (deleted parent)",
+            }
+        )
 
     return {
         "ok": len(breaks) == 0,
