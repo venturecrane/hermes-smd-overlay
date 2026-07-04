@@ -33,6 +33,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -317,6 +318,57 @@ def read_level(path: str | None = None) -> str | None:
     return worst
 
 
+async def run_boot_probe() -> tuple[bool, str]:
+    """Negative-fire self-probe (ADR 0062 §6, ss-console #1701): prove the
+    breaker actually HALTS. In a throwaway db, record spend far past a 1-cent
+    cap and verify (a) the ladder trips HARD_STOP and (b) ``assert_allowed``
+    then REFUSES. Returns ``(ok, reason)``; ok=False means the breaker is inert
+    this boot and the caller must fail closed.
+
+    Async by design: the boot activation handler runs inside the gateway's
+    event loop, so the ``CostBreaker`` sync facade (which calls ``asyncio.run``)
+    cannot be used there — this drives the async state machine directly.
+    """
+    from dataclasses import replace
+
+    fd, tmp = tempfile.mkstemp(prefix="smd-breaker-probe-", suffix=".db")
+    os.close(fd)
+    os.unlink(tmp)  # recreated below; mkstemp just reserves a unique name
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(tmp, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute(_CREATE_TABLE_SQL)
+        conn.commit()
+        machine = StickyStopMachine(
+            store=SqliteStickyStopStore(conn),
+            audit_writer=_NoAuditSink(),
+            thresholds=replace(DEFAULT_THRESHOLDS, cost_daily_cents=1),
+        )
+        # 1000c against a 1c cap = 100000% >> the 200% hard-stop rung.
+        await machine.record_cost_cents(customer="_probe", persona="_probe", amount_cents=1000)
+        state = await machine.get_state("_probe", "_probe")
+        if state.level != StickyStopLevel.HARD_STOP:
+            return False, f"ladder did not trip HARD_STOP (level={state.level.value})"
+        try:
+            await machine.assert_allowed(customer="_probe", persona="_probe")
+        except StickyStopError:
+            return True, ""  # correct: the guard refuses at HARD_STOP
+        return False, "assert_allowed did not refuse at HARD_STOP"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"probe raised: {type(exc).__name__}: {exc}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 __all__ = [
     "AuditLedgerSink",
     "CostBreaker",
@@ -326,5 +378,6 @@ __all__ = [
     "clear_hard_stops",
     "db_path",
     "read_level",
+    "run_boot_probe",
     "thresholds_from_config",
 ]

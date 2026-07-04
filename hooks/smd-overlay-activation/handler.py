@@ -136,6 +136,27 @@ def _audit_row_count(db_path: str) -> int | None:
         return None
 
 
+async def _cost_breaker_self_check() -> None:
+    """Negative-fire probe (ADR 0062 §6, ss-console #1701): prove the cost
+    breaker actually HALTS — at every boot, in a THROWAWAY state file that never
+    touches the real ``/opt/data/smd/sticky_stop.db``. The probe records spend
+    far past a 1-cent cap and asserts the ladder trips HARD_STOP and the guard
+    refuses; ``_die`` on either miss — an operator whose spend breaker cannot
+    fire must not serve. This is the recurring ``prod-boot`` probe that earns
+    ``sticky_stop_cost_cap`` its enforced status (manually trip-proven
+    2026-07-04; this makes it self-proving on every boot). Async because the
+    activation handler runs inside the gateway's event loop."""
+    try:
+        from shared.cost_breaker import run_boot_probe
+    except Exception as e:  # noqa: BLE001
+        _die(f"cost-breaker self-check import failed: {type(e).__name__}: {e}")
+        return
+
+    ok, reason = await run_boot_probe()
+    if not ok:
+        _die(f"COST BREAKER INERT on this boot: {reason} (ADR 0062 §6, #1701)")
+
+
 def _die(reason: str) -> None:
     """Fail closed: an operator that cannot prove it governs live turns must not
     serve. Log CRITICAL with the SPECIFIC reason (so the failure is diagnosable —
@@ -284,10 +305,18 @@ async def handle(event_type: str, context: dict | None = None) -> None:
         )
         return
 
+    # 4. COST-BREAKER negative-fire self-check (ADR 0062 §6, #1701): prove the
+    #    spend circuit breaker actually HALTS. Runs in a throwaway state file, so
+    #    it never touches real breaker state; _die if the ladder does not trip or
+    #    the guard does not refuse. This is the recurring prod-boot probe that
+    #    earns sticky_stop_cost_cap its enforced status.
+    await _cost_breaker_self_check()
+
     logger.info(
-        "SMD overlay ACTIVE + AUDITING on the live gateway: %d hook type(s) in the live "
-        "singleton, trust gate fired on banned %r, audit row written (before=%s after=%s) "
-        "— self-check passed, operator is governed and auditing.",
+        "SMD overlay ACTIVE + AUDITING + SPEND-CAPPED on the live gateway: %d hook "
+        "type(s) in the live singleton, trust gate fired on banned %r, audit row written "
+        "(before=%s after=%s), cost breaker tripped+refused in the boot self-check "
+        "— self-check passed, operator is governed, auditing, and spend-capped.",
         len(present),
         _BANNED_PROBE_TOOL,
         before,
