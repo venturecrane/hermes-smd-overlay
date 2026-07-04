@@ -67,6 +67,12 @@ _CUSTOMER_SLUG: str | None = None
 # register(); the hook no-ops cleanly when either is None.
 _SKILL_D1_CLIENT: D1Client | None = None
 _R2_CONFIG: R2Config | None = None
+# ADR 0062 §4 / #1701: the interactive-turn cost meter feeds the shared
+# sticky_stop ladder from post_llm_call. Breaker built lazily on first turn
+# (needs the audit client + customer.yaml); _COST_BREAKER_INIT guards the
+# one-time build so a construction failure alarms once, not every turn.
+_COST_BREAKER: Any = None
+_COST_BREAKER_INIT: bool = False
 
 # #64: when the writer never wired, every hook is a silent no-op — say so at
 # WARNING on a rate limit (not just once at init) so a dark ledger is visible
@@ -253,6 +259,44 @@ def on_subagent_stop(**kwargs: Any) -> None:
         )
 
 
+def _cost_breaker() -> Any:
+    """Lazily build the Machine-wide cost breaker for interactive metering.
+    Built once; a failure logs loudly and leaves it None (interactive turns
+    then go unmetered — the same unbounded posture as before #1701, never a
+    silent regression, and the meter-fail path is not this: this is breaker
+    CONSTRUCTION, which if it fails means no ladder at all)."""
+    global _COST_BREAKER, _COST_BREAKER_INIT
+    if _COST_BREAKER_INIT:
+        return _COST_BREAKER
+    _COST_BREAKER_INIT = True
+    try:
+        from shared.cost_breaker import build_breaker
+        from shared.customer_config import CustomerConfig
+
+        slug = (
+            _CUSTOMER_SLUG or os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG")
+        )
+        if not slug:
+            logger.error("interactive cost meter: no customer slug; breaker NOT armed")
+            return None
+        config = None
+        try:
+            config = CustomerConfig.from_volume()
+        except Exception as exc:  # noqa: BLE001 — defaults still protect
+            logger.warning("interactive cost meter: customer.yaml unreadable; defaults: %s", exc)
+        _COST_BREAKER = build_breaker(
+            customer=slug,
+            persona="_machine",
+            audit_client=audit_client_from_env(customer_slug=slug),
+            config=config,
+        )
+        logger.info("interactive cost meter: breaker armed (customer=%s)", slug)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("interactive cost meter: breaker construction failed; NOT armed: %s", exc)
+        _COST_BREAKER = None
+    return _COST_BREAKER
+
+
 def on_post_llm_call(**kwargs: Any) -> None:
     """Write one LLM_TURN_COMPLETED audit row per completed turn.
 
@@ -280,6 +324,29 @@ def on_post_llm_call(**kwargs: Any) -> None:
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning(
             "hermes-smd-audit: post_llm_call emission failed (session=%s err=%s)",
+            kwargs.get("session_id"),
+            exc,
+        )
+
+    # ADR 0062 §4 / #1701: meter this interactive turn into the cost breaker.
+    # Separate try/except so a metering fault never affects audit emission (and
+    # vice versa). Never raises — the meter alarms and keeps going on failure.
+    try:
+        from shared.interactive_cost_meter import meter_interactive_turn
+
+        meter_interactive_turn(
+            model=kwargs.get("model", "") or "",
+            conversation_history=kwargs.get("conversation_history"),
+            assistant_response=kwargs.get("assistant_response", "") or "",
+            session_id=kwargs.get("session_id", "") or "",
+            breaker=_cost_breaker(),
+            audit_client=audit_client_from_env(customer_slug=_CUSTOMER_SLUG)
+            if _CUSTOMER_SLUG
+            else None,
+        )
+    except Exception as exc:  # noqa: BLE001 — never raise out of a hook
+        logger.warning(
+            "hermes-smd-audit: interactive cost meter failed (session=%s err=%s)",
             kwargs.get("session_id"),
             exc,
         )
