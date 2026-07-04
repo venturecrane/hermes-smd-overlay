@@ -132,13 +132,14 @@ def test_gate_sticky_stop_clear_core(tmp_path, monkeypatch):
         def execute(self, sql, *params):
             pass
 
-    monkeypatch.setattr("shared.audit_client.audit_client_from_env", lambda **kw: _Client())
-
     # Missing fields -> 400.
     status, body = gate._sticky_stop_clear({})
     assert status == 400
 
-    # Trip, then clear through the core.
+    # Trip, then clear through the gate core. The gate does NOT write the
+    # Machine audit ledger (broker PID-gates to the gateway process), so the
+    # clear must succeed WITHOUT an audit client — proving the recovery is
+    # decoupled from the (impossible-from-the-gate) Machine audit write.
     b = build_breaker(customer="acme", persona="_machine", audit_client=_Client(), path=db)
     b.record_cost_cents(10_000)
     assert read_level(db) == "HARD_STOP"

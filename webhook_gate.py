@@ -454,13 +454,14 @@ def _sticky_stop_clear(req: dict) -> tuple[int, dict]:
     if not captain_id or not reason:
         return 400, {"error": "captain_id and reason are required"}
     try:
-        from shared.audit_client import audit_client_from_env
         from shared.cost_breaker import clear_hard_stops, read_level
 
-        client = audit_client_from_env(
-            customer_slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG")
-        )
-        cleared = clear_hard_stops(captain_id=captain_id, reason=reason, audit_client=client)
+        # No audit_client: the audit-ledger broker PID-gates appends to the
+        # gateway process (OP-P1-4), so this gate process CANNOT write the
+        # Machine ledger — by design. The state reset is the recovery; the
+        # resume is a governance action, audited control-plane-side by the
+        # console's admin clear endpoint (which authenticated the Captain).
+        cleared = clear_hard_stops(captain_id=captain_id, reason=reason)
         return 200, {"cleared": cleared, "level": read_level() or "OK"}
     except Exception as exc:  # noqa: BLE001 — surface the failure honestly
         logger.error("sticky-stop clear failed: %s", exc)

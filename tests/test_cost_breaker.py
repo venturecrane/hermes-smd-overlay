@@ -250,3 +250,21 @@ def test_clear_hard_stops_noop_paths(tmp_path):
     # captain_id/reason are required (module contract).
     with _pytest.raises(ValueError):
         clear_hard_stops(captain_id="", reason="r", audit_client=clear_audit, path=path)
+
+
+def test_clear_hard_stops_without_audit_client_still_resets(tmp_path):
+    """The gate-driven clear passes no audit client (the broker refuses
+    gate-process appends). State must still reset to OK; no Machine audit row
+    is written — the resume is audited control-plane-side."""
+    from shared.cost_breaker import clear_hard_stops, read_level
+
+    audit = FakeAuditClient()
+    b = _breaker(tmp_path, audit)
+    b.record_cost_cents(10_000)
+    path = str(tmp_path / "sticky_stop.db")
+    assert read_level(path) == "HARD_STOP"
+
+    cleared = clear_hard_stops(captain_id="captain-scott", reason="probe", path=path)
+    assert cleared == [{"customer": "acme", "persona": "_machine", "prior_level": "HARD_STOP"}]
+    assert read_level(path) == "OK"
+    b.assert_allowed()
