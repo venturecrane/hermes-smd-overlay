@@ -90,7 +90,7 @@ def legacy_anchor(last_unchained_id: str | None) -> str:
     """
     if last_unchained_id is None:
         return GENESIS
-    return hashlib.sha256(f"LEGACY:{last_unchained_id}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"LEGACY:{last_unchained_id}".encode()).hexdigest()
 
 
 def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

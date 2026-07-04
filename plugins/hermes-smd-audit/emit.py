@@ -44,8 +44,8 @@ from shared.action_classes import (
     classify_tool,
 )
 from shared.audit_client import AuditWriteError
-from shared.audit_contract import CREATE_INDEX_SQL as _CREATE_INDEX_SQL
 from shared.audit_contract import CHAIN_COLUMN_ALTERS as _CHAIN_COLUMN_ALTERS
+from shared.audit_contract import CREATE_INDEX_SQL as _CREATE_INDEX_SQL
 from shared.audit_contract import CREATE_TABLE_SQL as _CREATE_TABLE_SQL
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import build_audit_params

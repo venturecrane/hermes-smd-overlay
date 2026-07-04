@@ -38,7 +38,7 @@ def _chain(n: int, first_prev: str = GENESIS) -> list[dict]:
     for i in range(n):
         vals = _values(i)
         rh = compute_row_hash(prev, vals)
-        rows.append({**dict(zip(CHAIN_COLUMNS, vals)), "prev_hash": prev, "row_hash": rh})
+        rows.append({**dict(zip(CHAIN_COLUMNS, vals, strict=True)), "prev_hash": prev, "row_hash": rh})
         prev = rh
     return rows
 
@@ -113,7 +113,7 @@ def test_deleting_the_tail_is_detected_via_head_comparison():
 
 
 def test_legacy_rows_are_counted_not_failed():
-    legacy = {**dict(zip(CHAIN_COLUMNS, _values(99))), "prev_hash": None, "row_hash": None}
+    legacy = {**dict(zip(CHAIN_COLUMNS, _values(99), strict=True)), "prev_hash": None, "row_hash": None}
     rows = [legacy, *_chain(2, first_prev=legacy_anchor(str(legacy["id"])))]
     report = verify_chain(rows)
     assert report["ok"] is True
@@ -126,7 +126,7 @@ def test_fork_is_detected():
     # Forge a second child of row 0's hash (same parent, different content).
     vals = _values(77)
     fork = {
-        **dict(zip(CHAIN_COLUMNS, vals)),
+        **dict(zip(CHAIN_COLUMNS, vals, strict=True)),
         "prev_hash": rows[0]["row_hash"],
         "row_hash": compute_row_hash(rows[0]["row_hash"], vals),
     }
