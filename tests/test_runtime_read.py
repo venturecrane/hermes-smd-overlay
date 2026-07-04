@@ -71,7 +71,8 @@ def _audit_db(tmp_path, ids):
           id TEXT PRIMARY KEY, ts TEXT NOT NULL, action_type TEXT NOT NULL,
           actor TEXT NOT NULL, actor_role TEXT, skill_name TEXT, matter_ref TEXT,
           input_digest TEXT, output_digest TEXT, diff_digest TEXT,
-          trust_ceiling TEXT, metadata TEXT
+          trust_ceiling TEXT, metadata TEXT,
+          prev_hash TEXT, row_hash TEXT
         );
         """
     )
@@ -213,6 +214,10 @@ def test_audit_export_serves_full_rows_ascending(tmp_path):
         "diff_digest",
         "trust_ceiling",
         "metadata",
+        # Hash-chain columns (#1686): the export carries the chain so an
+        # exported ledger verifies offline.
+        "prev_hash",
+        "row_hash",
     }
     assert first["input_digest"] == "secretdigest"  # digests ARE exported here
 

@@ -63,8 +63,21 @@ CREATE_TABLE_SQL = (
     "output_digest TEXT, "
     "diff_digest TEXT, "
     "trust_ceiling TEXT, "
-    "metadata TEXT"
+    "metadata TEXT, "
+    "prev_hash TEXT, "
+    "row_hash TEXT"
     ")"
+)
+
+# Hash-chain columns (#1686). Stamped by the capability broker at append time
+# (the single RW holder, OP-P1-4) — writers never supply them, so COLUMNS /
+# INSERT_SQL are unchanged. Pre-chain ledgers gain the columns via these
+# ALTERs at ensure_schema time (each wrapped in try/except: "duplicate column"
+# means already upgraded). Chain semantics live in shared/audit_chain.py (a
+# tracked twin of the broker's chain.py).
+CHAIN_COLUMN_ALTERS: tuple[str, ...] = (
+    "ALTER TABLE audit_log ADD COLUMN prev_hash TEXT",
+    "ALTER TABLE audit_log ADD COLUMN row_hash TEXT",
 )
 
 CREATE_INDEX_SQL: tuple[str, ...] = (
@@ -156,6 +169,7 @@ __all__ = [
     "COLUMNS",
     "INSERT_SQL",
     "CREATE_TABLE_SQL",
+    "CHAIN_COLUMN_ALTERS",
     "CREATE_INDEX_SQL",
     "ACTOR_AGENT",
     "build_audit_params",

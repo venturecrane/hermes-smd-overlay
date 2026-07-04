@@ -45,6 +45,7 @@ from shared.action_classes import (
 )
 from shared.audit_client import AuditWriteError
 from shared.audit_contract import CREATE_INDEX_SQL as _CREATE_INDEX_SQL
+from shared.audit_contract import CHAIN_COLUMN_ALTERS as _CHAIN_COLUMN_ALTERS
 from shared.audit_contract import CREATE_TABLE_SQL as _CREATE_TABLE_SQL
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import build_audit_params
@@ -135,6 +136,13 @@ class AuditLogWriter:
         self._client.execute(_CREATE_TABLE_SQL)
         for index_sql in _CREATE_INDEX_SQL:
             self._client.execute(index_sql)
+        # Chain-column upgrade for pre-#1686 ledgers. "duplicate column name"
+        # means already upgraded — expected on every boot after the first.
+        for alter_sql in _CHAIN_COLUMN_ALTERS:
+            try:
+                self._client.execute(alter_sql)
+            except Exception:  # noqa: BLE001 — duplicate-column is the normal case
+                pass
 
     def write(self, event: AuditEvent) -> str:
         """Insert one audit_log row. Returns the inserted ULID.
