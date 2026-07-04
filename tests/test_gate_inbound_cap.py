@@ -112,3 +112,37 @@ def test_resolve_inbound_cap():
     assert resolve_inbound_cap(_Config({"inbound_daily_cap": 50})) == 50
     assert resolve_inbound_cap(_Config({"inbound_daily_cap": 0})) == DEFAULT_INBOUND_DAILY_CAP
     assert resolve_inbound_cap(_Config({"inbound_daily_cap": "junk"})) == DEFAULT_INBOUND_DAILY_CAP
+
+
+# ---------------------------------------------------------------------------
+# Gate clear endpoint core (ADR 0062 §6) — auth glue is the handler; this
+# exercises the pure core like test_mcp_channel does for _mcp_turn.
+# ---------------------------------------------------------------------------
+
+
+def test_gate_sticky_stop_clear_core(tmp_path, monkeypatch):
+    import webhook_gate as gate
+    from shared.cost_breaker import build_breaker, read_level
+
+    db = str(tmp_path / "sticky_stop.db")
+    monkeypatch.setenv("SMD_STICKY_STOP_DB_PATH", db)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+
+    class _Client:
+        def execute(self, sql, *params):
+            pass
+
+    monkeypatch.setattr("shared.audit_client.audit_client_from_env", lambda **kw: _Client())
+
+    # Missing fields -> 400.
+    status, body = gate._sticky_stop_clear({})
+    assert status == 400
+
+    # Trip, then clear through the core.
+    b = build_breaker(customer="acme", persona="_machine", audit_client=_Client(), path=db)
+    b.record_cost_cents(10_000)
+    assert read_level(db) == "HARD_STOP"
+    status, body = gate._sticky_stop_clear({"captain_id": "captain-scott", "reason": "probe"})
+    assert status == 200
+    assert body["level"] == "OK"
+    assert body["cleared"][0]["prior_level"] == "HARD_STOP"
