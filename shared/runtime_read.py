@@ -143,6 +143,10 @@ _AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
     "diff_digest",
     "trust_ceiling",
     "metadata",
+    # Hash-chain columns (#1686): the compliance export carries the chain so
+    # an exported ledger is verifiable offline (shared/audit_chain.verify_chain).
+    "prev_hash",
+    "row_hash",
 )
 
 # A derived key is hex(HMAC-SHA256) = 64 chars; reject anything implausibly short
