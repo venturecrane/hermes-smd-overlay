@@ -214,19 +214,38 @@ def build_breaker(
     return CostBreaker(customer=customer, persona=persona, machine=machine)
 
 
+class _NoAuditSink:
+    """A sink that records nothing. Used for the gate-driven clear: the
+    audit-ledger broker PID-gates appends to the gateway process (OP-P1-4),
+    so the webhook-gate process CANNOT write the Machine ledger. That is by
+    design — the STOP is a runtime self-protection event on the Machine
+    ledger (emitted from the agent process), but the RESUME is a Captain
+    governance action, audited control-plane-side where the Captain is
+    authenticated (the console's admin clear endpoint). The state reset is
+    the recovery; the Machine ledger does not need the resume row."""
+
+    async def write(self, record: Any) -> None:  # noqa: D401
+        return None
+
+
 def clear_hard_stops(
     *,
     captain_id: str,
     reason: str,
-    audit_client: Any,
+    audit_client: Any = None,
     path: str | None = None,
 ) -> list[dict]:
     """Captain recovery (ADR 0062 §6): clear every non-OK sticky_stop row.
 
-    The state machine's ``clear()`` is the ONLY backward transition — each
-    cleared row emits an audited AGENT_RESUMED through the ledger sink with
-    the captain id and reason. Returns the cleared rows (customer, persona,
-    prior level); empty when nothing was pinned or no state file exists yet.
+    The state machine's ``clear()`` is the ONLY backward transition. Returns
+    the cleared rows (customer, persona, prior level); empty when nothing was
+    pinned or no state file exists yet.
+
+    ``audit_client`` is optional. Passed (agent-process callers): each cleared
+    row emits an audited AGENT_RESUMED through the ledger sink. None (the
+    gate-driven clear): no Machine-ledger row is written — the broker refuses
+    gate-process appends by design, and the resume is audited control-plane
+    side. The state reset happens regardless.
 
     Caller responsibility (module contract): verify the actor is a Captain
     BEFORE invoking. The gate endpoint enforces the console-proxy bearer
@@ -245,9 +264,10 @@ def clear_hard_stops(
         ).fetchall()
         if not rows:
             return []
+        sink = AuditLedgerSink(audit_client) if audit_client is not None else _NoAuditSink()
         machine = StickyStopMachine(
             store=SqliteStickyStopStore(conn),
-            audit_writer=AuditLedgerSink(audit_client),
+            audit_writer=sink,
         )
         cleared: list[dict] = []
         for customer, persona, level in rows:
