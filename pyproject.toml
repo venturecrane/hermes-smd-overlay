@@ -62,7 +62,7 @@ where = ["."]
 include = ["plugins*", "shared*", "bootstrap*", "contracts*", "config_applier*"]
 
 [tool.setuptools.package-data]
-shared = ["fabrication_markers.json"]
+shared = ["fabrication_markers.json", "anthropic_pricing.json"]
 # consumes.yaml must ship in the wheel: the env-presence allow-list (config
 # snapshot) and the boot-time conformance WARN both read it at runtime, where
 # only installed package data — not the repo tree — is present.
