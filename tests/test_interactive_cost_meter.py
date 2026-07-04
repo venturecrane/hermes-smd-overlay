@@ -151,3 +151,19 @@ def test_vendored_pricing_covers_declared_models():
     assert baseline <= priced, (
         f"baseline fleet models missing from vendored pricing: {baseline - priced}"
     )
+
+
+def test_pricing_json_declared_as_package_data():
+    """The pricing table must be declared in pyproject package-data or it is
+    EXCLUDED from the installed wheel — the meter then can't price anything and
+    alarms on every turn (the 2026-07-04 live-probe finding). This guards the
+    declaration so a future refactor can't silently drop it again."""
+    import tomllib
+
+    pyproject = Path(m.__file__).resolve().parents[1] / "pyproject.toml"
+    cfg = tomllib.loads(pyproject.read_text())
+    shared_data = cfg["tool"]["setuptools"]["package-data"]["shared"]
+    assert "anthropic_pricing.json" in shared_data, (
+        "anthropic_pricing.json missing from [tool.setuptools.package-data].shared "
+        "— it will be excluded from the wheel and the meter will be dark in prod"
+    )
