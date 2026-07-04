@@ -214,6 +214,54 @@ def build_breaker(
     return CostBreaker(customer=customer, persona=persona, machine=machine)
 
 
+def clear_hard_stops(
+    *,
+    captain_id: str,
+    reason: str,
+    audit_client: Any,
+    path: str | None = None,
+) -> list[dict]:
+    """Captain recovery (ADR 0062 §6): clear every non-OK sticky_stop row.
+
+    The state machine's ``clear()`` is the ONLY backward transition — each
+    cleared row emits an audited AGENT_RESUMED through the ledger sink with
+    the captain id and reason. Returns the cleared rows (customer, persona,
+    prior level); empty when nothing was pinned or no state file exists yet.
+
+    Caller responsibility (module contract): verify the actor is a Captain
+    BEFORE invoking. The gate endpoint enforces the console-proxy bearer
+    (WEBHOOK_SECRET_MCP) — the console authenticated the Captain upstream.
+    """
+    if not captain_id or not reason:
+        raise ValueError("captain_id and reason are required")
+    resolved = Path(path or db_path())
+    if not resolved.exists():
+        return []
+    conn = sqlite3.connect(str(resolved), check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    try:
+        rows = conn.execute(
+            "SELECT customer, persona, level FROM sticky_stop_state WHERE level != 'OK'"
+        ).fetchall()
+        if not rows:
+            return []
+        machine = StickyStopMachine(
+            store=SqliteStickyStopStore(conn),
+            audit_writer=AuditLedgerSink(audit_client),
+        )
+        cleared: list[dict] = []
+        for customer, persona, level in rows:
+            asyncio.run(
+                machine.clear(
+                    customer=customer, persona=persona, captain_id=captain_id, reason=reason
+                )
+            )
+            cleared.append({"customer": customer, "persona": persona, "prior_level": level})
+        return cleared
+    finally:
+        conn.close()
+
+
 def read_level(path: str | None = None) -> str | None:
     """Read the worst (max) persisted level across personas, read-only.
 
@@ -255,6 +303,7 @@ __all__ = [
     "DEFAULT_DB_PATH",
     "StickyStopError",
     "build_breaker",
+    "clear_hard_stops",
     "db_path",
     "read_level",
     "thresholds_from_config",

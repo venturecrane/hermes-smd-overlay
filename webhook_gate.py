@@ -440,6 +440,33 @@ def _breaker_hard_stopped() -> bool:
         return False
 
 
+def _sticky_stop_clear(req: dict) -> tuple[int, dict]:
+    """Pure core of the Captain clear endpoint (ADR 0062 §6).
+
+    Body: ``{captain_id, reason}`` — both required (the state machine's own
+    clear() contract). Clears every non-OK sticky_stop row via
+    shared.cost_breaker.clear_hard_stops (each emits an audited
+    AGENT_RESUMED) and returns what was cleared plus the resulting level.
+    Auth (console-proxy bearer) lives in the handler, like /mcp/turn.
+    """
+    captain_id = str(req.get("captain_id") or "").strip()
+    reason = str(req.get("reason") or "").strip()
+    if not captain_id or not reason:
+        return 400, {"error": "captain_id and reason are required"}
+    try:
+        from shared.audit_client import audit_client_from_env
+        from shared.cost_breaker import clear_hard_stops, read_level
+
+        client = audit_client_from_env(
+            customer_slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG")
+        )
+        cleared = clear_hard_stops(captain_id=captain_id, reason=reason, audit_client=client)
+        return 200, {"cleared": cleared, "level": read_level() or "OK"}
+    except Exception as exc:  # noqa: BLE001 — surface the failure honestly
+        logger.error("sticky-stop clear failed: %s", exc)
+        return 500, {"error": "clear failed", "detail": str(exc)}
+
+
 MCP_ROUTE = "mcp"  # webhook route name; session id == webhook:mcp:<correlation_id>
 HANDOFF_ROUTE = "handoff"  # console→Machine async task handoff (Phase 2, ADR 0043)
 
@@ -902,6 +929,39 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json_nostore(200, result)
 
+    def _handle_sticky_stop_clear(self) -> None:
+        """Captain recovery endpoint (POST /sticky-stop/clear, ADR 0062 §6).
+
+        AUTH: Bearer WEBHOOK_SECRET_MCP — the console-proxy key, identical to
+        /mcp/turn and /webhooks/handoff. The console authenticates the Captain
+        and proxies the clear; the Machine trusts the console's bearer. This is
+        deliberately NOT gated on _breaker_hard_stopped (it is the un-trip
+        path) and works at any level (clears WARN/SOFT_STOP pins too).
+        """
+        secret = os.environ.get("WEBHOOK_SECRET_MCP")
+        if not secret:
+            logger.warning("gate: WEBHOOK_SECRET_MCP not set — /sticky-stop/clear not configured")
+            self._json(503, {"error": "clear route not configured"})
+            return
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or not hmac.compare_digest(
+            auth[len("Bearer ") :], secret
+        ):
+            self._json(401, {"error": "unauthorized"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > _MAX_BODY_BYTES:
+            self._json(413, {"error": "payload too large"})
+            return
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:  # noqa: BLE001
+            self._json(400, {"error": "invalid json"})
+            return
+        status, body = _sticky_stop_clear(req if isinstance(req, dict) else {})
+        self._json(status, body)
+
     def _handle_mcp_turn(self) -> None:
         """Console → Machine synchronous turn endpoint (/mcp/turn, ADR 0057
         amendment — console-sole door).
@@ -1045,6 +1105,9 @@ class _Handler(BaseHTTPRequestHandler):
         post_path = urlsplit(self.path).path.rstrip("/")
         if post_path == "/mcp/turn":
             self._handle_mcp_turn()
+            return
+        if post_path == "/sticky-stop/clear":
+            self._handle_sticky_stop_clear()
             return
         if post_path == "/mcp":
             # Direct public JSON-RPC Claude door retired (ADR 0057 amendment —

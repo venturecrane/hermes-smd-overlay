@@ -197,3 +197,56 @@ def test_job_worker_dead_letters_cost_capped():
     assert outcome == "needs_review"
     assert client.job["status"] == "needs_review"
     assert "cost breaker" in client.job["error"]
+
+
+# ---------------------------------------------------------------------------
+# Captain clear surface (ADR 0062 §6)
+# ---------------------------------------------------------------------------
+
+
+def test_clear_hard_stops_clears_and_audits(tmp_path):
+    from shared.cost_breaker import clear_hard_stops
+
+    audit = FakeAuditClient()
+    b = _breaker(tmp_path, audit)
+    b.record_cost_cents(10_000)  # HARD_STOP
+    path = str(tmp_path / "sticky_stop.db")
+    assert read_level(path) == "HARD_STOP"
+
+    clear_audit = FakeAuditClient()
+    cleared = clear_hard_stops(
+        captain_id="captain-scott",
+        reason="staged trip probe complete",
+        audit_client=clear_audit,
+        path=path,
+    )
+    assert cleared == [{"customer": "acme", "persona": "_machine", "prior_level": "HARD_STOP"}]
+    assert "AGENT_RESUMED" in [p[2] for (_s, p) in clear_audit.rows]
+    assert read_level(path) == "OK"
+    # And the breaker admits work again.
+    b.assert_allowed()
+
+
+def test_clear_hard_stops_noop_paths(tmp_path):
+    import pytest as _pytest
+
+    from shared.cost_breaker import clear_hard_stops
+
+    # Missing state file: nothing to clear.
+    assert (
+        clear_hard_stops(
+            captain_id="c", reason="r", audit_client=FakeAuditClient(), path=str(tmp_path / "x.db")
+        )
+        == []
+    )
+    # All-OK rows: nothing to clear, no audit rows.
+    audit = FakeAuditClient()
+    b = _breaker(tmp_path, audit)
+    b.record_cost_cents(1)
+    clear_audit = FakeAuditClient()
+    path = str(tmp_path / "sticky_stop.db")
+    assert clear_hard_stops(captain_id="c", reason="r", audit_client=clear_audit, path=path) == []
+    assert clear_audit.rows == []
+    # captain_id/reason are required (module contract).
+    with _pytest.raises(ValueError):
+        clear_hard_stops(captain_id="", reason="r", audit_client=clear_audit, path=path)
