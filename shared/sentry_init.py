@@ -201,9 +201,7 @@ def init_sentry(component: str) -> bool:
         return False
 
     _initialized.add(component)
-    logger.info(
-        "sentry: initialized component=%s tenant=%s env=%s", component, slug, environment
-    )
+    logger.info("sentry: initialized component=%s tenant=%s env=%s", component, slug, environment)
     return True
 
 
