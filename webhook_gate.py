@@ -53,6 +53,7 @@ from shared import (
     mcp_thread_store,
     oauth_callback,
     runtime_read,
+    sentry_init,
 )
 
 # Route names are slugs (== adapter slug). Strictly validated before being used
@@ -1248,6 +1249,9 @@ def main() -> int:
         level=os.environ.get("WEBHOOK_GATE_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # ADR 0023 Wave 1: Sentry error monitoring for the gate process. Disabled-safe
+    # (no SENTRY_DSN -> no-op). Init first so the self-checks below are covered.
+    sentry_init.init_sentry("gate")
     port = int(os.environ.get("WEBHOOK_GATE_PORT", DEFAULT_GATE_PORT))
     assert svix_self_check(), "webhook-gate Svix self-check failed"
     assert smokeball_self_check(), "webhook-gate Smokeball self-check failed"

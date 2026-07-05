@@ -192,6 +192,17 @@ def _async_callbacks(manager: Any) -> list[str]:
 async def handle(event_type: str, context: dict | None = None) -> None:
     """Fire at ``gateway:startup``: force-load the overlay into the live singleton,
     then prove it governs the live turn-path or fail closed."""
+    # ADR 0023 Wave 1: Sentry error monitoring for the gateway (agent) process.
+    # Disabled-safe (no SENTRY_DSN -> no-op) and best-effort so it never blocks
+    # activation. Init first so the governance self-checks below — and any _die()
+    # here — are captured in Sentry too.
+    try:
+        from shared.sentry_init import init_sentry
+
+        init_sentry("gateway")
+    except Exception:  # noqa: BLE001 — observability must never block boot
+        logger.warning("sentry: gateway init skipped (import/init error)", exc_info=True)
+
     try:
         from hermes_cli.plugins import (
             discover_plugins,

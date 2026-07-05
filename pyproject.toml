@@ -32,6 +32,10 @@ dependencies = [
     # resolves to the same wheel on the customer Machine; declared here so the
     # import path works in dev environments too.
     "PyJWT[crypto]>=2.12",
+    # ADR 0023 Wave 1 — Sentry error monitoring on Operator Machines
+    # (shared/sentry_init.py). Errors-only, PII-scrubbed at SDK init; the
+    # gate + gateway processes both init from this dependency.
+    "sentry-sdk>=2.0,<3",
 ]
 
 [project.optional-dependencies]
