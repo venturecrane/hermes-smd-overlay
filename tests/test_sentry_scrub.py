@@ -119,7 +119,10 @@ def test_scrub_event_never_raises_on_malformed() -> None:
 
 
 def test_breadcrumb_message_and_data_redacted() -> None:
-    crumb = {"message": "mail owner@example.com", "data": {"url": "pk_live_abcdefghijklmnopqrstuvwx"}}
+    crumb = {
+        "message": "mail owner@example.com",
+        "data": {"url": "pk_live_abcdefghijklmnopqrstuvwx"},
+    }
     out = scrub_breadcrumb(crumb)
     assert out is not None
     assert out["message"] == "mail [redacted-email]"
