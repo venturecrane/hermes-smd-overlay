@@ -115,6 +115,25 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: "per-customer healthchecks.io ping URL staged at provision (ADR 0023 #8). The gate's emitter pings it each tick; grace expiration fires the console /api/webhooks/healthchecks alert. Absent => external dead-man switch disabled, control-plane POST still runs. Stripped from the agent alongside MACHINE_HEARTBEAT_KEY."
+  # ---- ADR 0023 Wave 1 (#10): Sentry error monitoring on Machines ----
+  SENTRY_DSN:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate, overlay-activation-hook]
+    note: "shared smd-operator Sentry project DSN, staged at provision when customer.yaml observability.sentry.enabled (ADR 0023 #11). Both boot processes init from shared/sentry_init.py: the gate (component=gate) and the gateway activation hook (component=gateway), each tagged tenant=<slug>. Absent => Sentry disabled-safe (init is a no-op); errors go unreported but boot is unaffected. PII scrub (send_default_pii=False + before_send/before_breadcrumb) is locked in sentry_init.py and gated by tests/test_sentry_scrub.py."
+  SMD_ENV:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate, overlay-activation-hook]
+    note: "Sentry `environment` tag (shared/sentry_init.py); defaults to 'prod' when unset. These are prod Machines, so the default is correct — the override exists for staging seats."
+  SENTRY_ENVIRONMENT:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate, overlay-activation-hook]
+    note: "fallback source for the Sentry `environment` tag when SMD_ENV is unset (shared/sentry_init.py), matching the conventional sentry-sdk env var name. Absent => 'prod'."
   # ---- ADR 0062 (ss-console #1661): cost breaker + inbound wake guard ----
   SMD_STICKY_STOP_DB_PATH:
     discovery: static
