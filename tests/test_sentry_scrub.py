@@ -155,6 +155,8 @@ def test_init_contract_with_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
     tags: dict[str, str] = {}
 
+    messages: list[tuple[str, str]] = []
+
     fake = types.ModuleType("sentry_sdk")
 
     def _init(**kwargs: object) -> None:
@@ -163,8 +165,12 @@ def test_init_contract_with_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     def _set_tag(key: str, value: str) -> None:
         tags[key] = value
 
+    def _capture_message(message: str, level: str = "info") -> None:
+        messages.append((message, level))
+
     fake.init = _init  # type: ignore[attr-defined]
     fake.set_tag = _set_tag  # type: ignore[attr-defined]
+    fake.capture_message = _capture_message  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sentry_sdk", fake)
 
     monkeypatch.setenv("SENTRY_DSN", "https://pub@o1.ingest.sentry.io/2")
@@ -179,8 +185,12 @@ def test_init_contract_with_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["traces_sample_rate"] == 0.0
     assert captured["release"] == "deadbeef"
     assert tags == {"tenant": "acme", "component": "gateway"}
+    # Boot marker sent once, at info level, with a constant message (grouping key).
+    assert messages == [("boot: monitoring active", "info")]
 
-    # Idempotent per component.
+    # Idempotent per component: no re-init and no second boot marker.
     captured.clear()
+    messages.clear()
     assert init_sentry("gateway") is True
     assert captured == {}
+    assert messages == []

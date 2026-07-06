@@ -202,6 +202,20 @@ def init_sentry(component: str) -> bool:
 
     _initialized.add(component)
     logger.info("sentry: initialized component=%s tenant=%s env=%s", component, slug, environment)
+    # One-time boot marker sent to Sentry itself. Two purposes: (1) a DIRECT,
+    # visible confirmation that this process's monitoring is live — the gateway
+    # process filters our INFO log below root=WARNING, so this event is the only
+    # first-class proof the gateway init fired; (2) a per-boot restart signal
+    # (a Machine crash-looping shows a burst of these). Constant message so all
+    # markers group into one Sentry issue, filterable by the component + tenant
+    # tags already on the scope. Best-effort: a marker failure never unwinds a
+    # good init.
+    try:
+        sentry_sdk.capture_message("boot: monitoring active", level="info")
+    except Exception:  # noqa: BLE001 — the marker is diagnostic, never load-bearing
+        logger.warning(
+            "sentry: boot marker capture failed for component=%s", component, exc_info=True
+        )
     return True
 
 
