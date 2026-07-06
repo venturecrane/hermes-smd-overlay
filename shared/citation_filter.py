@@ -58,8 +58,11 @@ _REPORTER_ABBREVS = [
     r"S\.\s?Ct\.",
     r"L\.\s?Ed\.(?:\s?2d)?",
     r"F\.\s?(?:Supp\.?\s?(?:2d|3d)?|App'?x|R\.D\.|[1-4]?(?:st|nd|rd|th|d))?",  # F., F.2d, F.3d, F. Supp., F. Supp. 2d, F. App'x, F.R.D.
-    # State (common)
-    r"Cal\.\s?(?:App\.?\s?)?(?:[2-5]d)?",
+    # State (common). California's modern series are ordinal (Cal.4th,
+    # Cal.App.5th, Cal.Rptr.3d) — "[2-5]d" alone missed them (found via
+    # #1758's allowlist tests: "123 Cal. App. 5th 456" scanned clean).
+    r"Cal\.\s?(?:App\.?\s?)?(?:[2-5]\s?(?:d|th)\.?)?",
+    r"Cal\.\s?Rptr\.(?:\s?[2-3]d)?",
     r"N\.\s?Y\.(?:\s?[2-3]d)?",
     r"Ill\.(?:\s?(?:App\.?\s?)?[2-3]d)?",
     r"Tex\.(?:\s?(?:App\.?\s?)?)?",
@@ -167,17 +170,81 @@ def _normalize_encoding_bypass(text: str) -> str:
     return text
 
 
-def scan(text: str) -> list[Hit]:
+def canonical_caption(text: str) -> str:
+    """Canonical form of a case caption for allowlist comparison.
+
+    Applies the same anti-evasion normalization the scanner uses, then folds
+    case, collapses whitespace, and normalizes the party separator so
+    "ALVAREZ V DRAPER", "Alvarez vs. Draper", and "Alvarez v. Draper" all
+    compare equal. Used by :func:`scan`'s ``allowed_case_names`` and by
+    callers building a provenance register of captions actually read.
+    """
+    s = _normalize_encoding_bypass(text or "")
+    s = re.sub(r"\s+", " ", s).strip().casefold()
+    return re.sub(r"\bv(?:s)?\.?\s", "v. ", s)
+
+
+def _canonical_allowlist(
+    allowed_case_names: Iterable[str] | None,
+) -> tuple[re.Pattern[str], ...]:
+    """Compile boundary-bounded containment patterns for the allowlist.
+
+    The case-name regex greedily swallows adjacent prose into its parties
+    ("Discovery capture on Alvarez v. Draper is our matter" is ONE hit), so
+    the exemption tests containment at word boundaries rather than equality:
+    the registered caption must appear whole inside the canonical hit, with
+    no name-character touching either edge ("Alvarez v. Drapers" never
+    matches a registered "Alvarez v. Draper"). Prose spillover beyond the
+    caption's own tokens is tolerated; a caption used as fabricated AUTHORITY
+    still dies on the reporter-cite/statute/rule patterns, which are never
+    allowlisted.
+
+    Fail-closed: any error yields an EMPTY tuple (everything stays blocked),
+    never a broadened one.
+    """
+    if not allowed_case_names:
+        return ()
+    try:
+        # Boundary classes guard NAME CONTINUATION only (word chars,
+        # apostrophe, hyphen). Sentence punctuation is deliberately NOT
+        # excluded: the case-name regex swallows a trailing period into the
+        # party ("...Alvarez v. Draper. No signed..."), and a caption ending
+        # a sentence is the commonest legitimate form.
+        return tuple(
+            re.compile(rf"(?<![\w'\-]){re.escape(canonical_caption(s))}(?![\w'\-])")
+            for s in allowed_case_names
+            if s
+        )
+    except Exception:  # noqa: BLE001 — allowlist failure must narrow, not widen
+        return ()
+
+
+def scan(text: str, allowed_case_names: Iterable[str] | None = None) -> list[Hit]:
     """Return every citation-shaped hit in `text`. Empty list = clean.
 
     Scans both the raw text and a whitespace-normalized version to catch
     adversarial encoding (extra spaces inserted to bypass the regex).
+
+    ``allowed_case_names`` is a provenance allowlist of case CAPTIONS the
+    caller can attest the agent actually read this session (e.g. the matter's
+    own caption harvested from read-tool results — issue #1758). A
+    ``case-name`` hit whose matched text canonicalizes to an allowlisted
+    caption is dropped: repeating a caption you read is quoting the record,
+    not fabricating authority. The exemption is deliberately narrow —
+    reporter cites, statutes, and rules are NEVER allowlisted, so an
+    allowlisted caption followed by a reporter cite ("Alvarez v. Draper, 123
+    Cal.App.5th 456") still blocks on the reporter-cite pattern.
     """
+    allow = _canonical_allowlist(allowed_case_names)
     seen_matches: set[tuple[str, str]] = set()
     hits: list[Hit] = []
     for source_text in (text, _normalize_encoding_bypass(text)):
         for label, pat in PATTERNS:
             for m in pat.finditer(source_text):
+                if label == "case-name" and allow:
+                    canon_hit = canonical_caption(m.group(0))
+                    if any(p.search(canon_hit) for p in allow):
+                        continue
                 key = (label, m.group(0))
                 if key in seen_matches:
                     continue
@@ -186,7 +253,7 @@ def scan(text: str) -> list[Hit]:
     return hits
 
 
-def contains_citation(text: str) -> bool:
+def contains_citation(text: str, allowed_case_names: Iterable[str] | None = None) -> bool:
     """Fast yes/no check. True if any strong pattern matches.
 
     `bluebook-signal` alone is NOT enough (too many false positives — "id." is
@@ -194,6 +261,8 @@ def contains_citation(text: str) -> bool:
     returns True if a stronger pattern fires, OR a bluebook signal co-occurs
     with another bluebook signal in close proximity (Bluebook prose typically
     has multiple signals per paragraph).
+
+    ``allowed_case_names`` — see :func:`scan`.
     """
     strong_labels = {
         "case-name",
@@ -203,7 +272,7 @@ def contains_citation(text: str) -> bool:
         "federal-rule",
         "local-rule",
     }
-    hits = scan(text)
+    hits = scan(text, allowed_case_names=allowed_case_names)
     if any(h.pattern in strong_labels for h in hits):
         return True
     bluebook_hits = [h for h in hits if h.pattern == "bluebook-signal"]

@@ -463,7 +463,14 @@ def check_outbound_draft(
 
     vertical = _resolve_vertical()
     cohort = _resolve_cohort()
-    decision = evaluate(body, cohort, vertical)
+    # Provenance-verified captions (ss #1758): a case name the agent READ this
+    # session is quotable; empty register = no exemption (fail-closed).
+    decision = evaluate(
+        body,
+        cohort,
+        vertical,
+        allowed_case_names=provenance.register_for(session_id).captions(),
+    )
     if decision.allowed:
         # A1 report-only identifier gate: signal (never block) any identifier in
         # the body not traceable to a source read this session.
@@ -558,7 +565,14 @@ def check_outbound_send(
         return None
     vertical = _resolve_vertical()
     cohort = _resolve_cohort()
-    decision = evaluate(body, cohort, vertical)
+    # Provenance-verified captions (ss #1758): a case name the agent READ this
+    # session is quotable; empty register = no exemption (fail-closed).
+    decision = evaluate(
+        body,
+        cohort,
+        vertical,
+        allowed_case_names=provenance.register_for(session_id).captions(),
+    )
     if decision.allowed:
         _report_identifiers(
             body=body,

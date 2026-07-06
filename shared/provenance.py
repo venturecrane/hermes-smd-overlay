@@ -59,8 +59,35 @@ def record_read(session_id: str, text: str) -> None:
         else:
             _registers.move_to_end(session_id)  # LRU touch
         reg.add_read_text(text)
+        _record_captions(reg, text)
     except Exception:  # noqa: BLE001 — recording is best-effort, never fatal
         logger.debug("provenance: record_read failed for session %s", session_id, exc_info=True)
+
+
+def _record_captions(reg: ProvenanceRegister, text: str) -> None:
+    """Harvest case CAPTIONS from a read blob into the register (ss #1758).
+
+    A caption the agent actually read this session is quotable — the tier-2
+    citation gate exempts provenance-verified captions from its case-name
+    pattern (fabricated-authority patterns are never exempted). The case-name
+    regex greedily swallows adjacent prose into its parties, so for each raw
+    match we register every left-suffix × right-prefix token combination
+    (bounded at 5×5 by the regex itself): the true caption is always among
+    them, and the gate's boundary-bounded containment does the rest. "In re"
+    forms register whole. Best-effort by construction of the caller.
+    """
+    from shared.citation_filter import CASE_NAME_RE, canonical_caption
+
+    for m in CASE_NAME_RE.finditer(text):
+        canon = canonical_caption(m.group(0))
+        if " v. " not in canon:
+            reg.add_caption(canon)  # "in re ..." — register the whole form
+            continue
+        left, right = canon.split(" v. ", 1)
+        ltoks, rtoks = left.split(), right.split()
+        for i in range(len(ltoks)):
+            for j in range(1, len(rtoks) + 1):
+                reg.add_caption(" ".join(ltoks[i:]) + " v. " + " ".join(rtoks[:j]))
 
 
 def register_for(session_id: str) -> ProvenanceRegister:
