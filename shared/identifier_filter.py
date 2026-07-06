@@ -306,9 +306,15 @@ class ProvenanceRegister:
     design-review correction). This module only consumes the register.
     """
 
+    # Bound the caption set so a pathological read blob cannot grow a session
+    # register without limit. Adds past the cap are IGNORED (the narrow
+    # direction: an unregistered caption stays blocked, never the reverse).
+    _MAX_CAPTIONS = 512
+
     def __init__(self) -> None:
         self._canon: set[str] = set()
         self._names: set[str] = set()
+        self._captions: set[str] = set()
 
     def add_read_text(self, text: str) -> None:
         """Register the structured-shape identifiers found in a blob the agent
@@ -334,13 +340,27 @@ class ProvenanceRegister:
         if canon:
             self._names.add(canon)
 
+    def add_caption(self, canonical_caption: str) -> None:
+        """Register a case-caption string the agent READ this session
+        (already canonicalized by ``citation_filter.canonical_caption``).
+        Feeds the tier-2 citation gate's provenance allowlist (ss-console
+        #1758): repeating a caption you read is quoting the record, not
+        fabricating authority."""
+        if not canonical_caption or len(self._captions) >= self._MAX_CAPTIONS:
+            return
+        self._captions.add(canonical_caption)
+
+    def captions(self) -> frozenset[str]:
+        """The session's provenance-verified case captions (canonical forms)."""
+        return frozenset(self._captions)
+
     def verifies(self, hit: IdentifierHit) -> bool:
         if hit.kind is IdKind.NAME:
             return hit.canonical in self._names
         return hit.canonical in self._canon
 
     def __bool__(self) -> bool:
-        return bool(self._canon or self._names)
+        return bool(self._canon or self._names or self._captions)
 
 
 # ---------------------------------------------------------------------------

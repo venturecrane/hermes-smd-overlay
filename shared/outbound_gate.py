@@ -35,6 +35,7 @@ A gate that cannot evaluate BLOCKS. Silence is never "allow."
 """
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from shared import citation_filter
@@ -113,7 +114,12 @@ def _is_law_or_indeterminate(vertical: str | None) -> bool:
     return False
 
 
-def evaluate(body: str, cohort: str | None, vertical: str | None) -> GateDecision:
+def evaluate(
+    body: str,
+    cohort: str | None,
+    vertical: str | None,
+    allowed_case_names: Iterable[str] | None = None,
+) -> GateDecision:
     """Decide whether a draft ``body`` may be produced.
 
     Args:
@@ -124,6 +130,11 @@ def evaluate(body: str, cohort: str | None, vertical: str | None) -> GateDecisio
             NOT relax any tier.
         vertical: The customer vertical (e.g. ``law-firm``). ``None`` / unknown
             → both tiers run (most-restrictive).
+        allowed_case_names: Provenance-verified case CAPTIONS the agent
+            actually read this session (the runtime register's captions —
+            ss-console #1758). Exempts only the Tier-2 case-name pattern;
+            fabricated-authority patterns (reporter cites, statutes, rules)
+            and every Tier-1 marker are unaffected. Empty/None = no exemption.
 
     Returns:
         A :class:`GateDecision`. ``allowed=False`` means the draft tool must be
@@ -189,8 +200,8 @@ def evaluate(body: str, cohort: str | None, vertical: str | None) -> GateDecisio
     run_law_tier = _is_law_or_indeterminate(vertical)
     if run_law_tier:
         try:
-            if citation_filter.contains_citation(body):
-                hits = citation_filter.scan(body)
+            if citation_filter.contains_citation(body, allowed_case_names=allowed_case_names):
+                hits = citation_filter.scan(body, allowed_case_names=allowed_case_names)
                 labels = tuple(dict.fromkeys(h.pattern for h in hits))
                 return GateDecision(
                     allowed=False,
