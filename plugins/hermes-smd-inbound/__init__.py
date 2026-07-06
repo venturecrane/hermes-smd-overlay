@@ -168,6 +168,13 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "practice_management_get_matter",
         "practice_management_list_documents",
         "practice_management_get_document",
+        # Smokeball document text (read_document, 2026-07-05) — the served
+        # discovery / opposing-response / provider-records content the PI pack
+        # reads is EXACTLY the adversarial document surface (the seeded
+        # injection-attempt stressor targets it). The other mcp_smokeball_*
+        # reads return firm-side metadata and stay unfenced; this one returns
+        # externally-authored body text and must taint like an inbound email.
+        "mcp_smokeball_read_document",
         # Calendar reads — external invites carry third-party content (titles,
         # descriptions, locations are attacker-controllable text). Captain call
         # 2026-06-12: fence both, closing the code-review fence-candidate note.
