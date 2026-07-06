@@ -340,6 +340,13 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_create_task": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_update_task": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_add_file": ActionClass.INTERNAL_WRITE,
+    # Server-side cross-connector transfer (ss-console #1744): fetches an
+    # AgentMail-minted time-limited attachment download_url (host-allowlisted,
+    # https-only, size-capped, no redirects) and runs the two-stage matter
+    # upload. A matter-file write; returns metadata only (no content) so it is
+    # NOT a fenced read — the filed copy is read later via read_document,
+    # which fences and taints.
+    "mcp_smokeball_file_attachment_to_matter": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_get_upload_url": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_event": ActionClass.INTERNAL_WRITE,

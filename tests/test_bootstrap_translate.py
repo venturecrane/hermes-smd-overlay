@@ -1287,3 +1287,39 @@ def test_translate_restores_hermes_home_after_cron_reconcile(tmp_path, monkeypat
     assert os.environ["HERMES_HOME"] == "/sentinel/original", (
         "HERMES_HOME must be restored after cron reconcile"
     )
+
+
+_DIGEST_BLOCK = dedent(
+    """
+    digest:
+      home_matter_id: 11111111-2222-3333-4444-555555555555
+    """
+)
+
+
+def test_translate_renders_digest_home_into_soul(tmp_path):
+    """ss-console #1742: the authored digest home reaches the agent via SOUL.md
+    so the daily digest lands on the designated operations matter."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, VALID_YAML + _DIGEST_BLOCK)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "## Digest home" in soul
+    assert "11111111-2222-3333-4444-555555555555" in soul
+    assert "Do not write the digest to any client matter." in soul
+
+
+def test_translate_omits_digest_home_when_unauthored(tmp_path):
+    """No `digest:` block => no Digest-home section (fail-closed, byte-identical
+    SOUL.md contract); a malformed block is skipped, never guessed."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "## Digest home" not in soul

@@ -812,7 +812,35 @@ def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
         f"## Tone\n\n"
         f"{tone_block}\n"
         f"{_relationship_soul_section(customer)}"
+        f"{_digest_home_soul_section(customer)}"
         f"{_escalation_soul_section(customer)}"
+    )
+
+
+def _digest_home_soul_section(customer: dict[str, Any]) -> str:
+    """Render the ``## Digest home`` SOUL.md section (ss-console #1742).
+
+    The authored destination for the daily needs-you digest: a designated
+    internal/operations matter whose memos carry the full digest text, so a
+    cron-fired digest lands somewhere a person actually reads instead of dying
+    in a session log. Authored per seat (ADR 0035, no imposed defaults) as
+    ``digest.home_matter_id`` in customer.yaml; returns "" when unauthored so
+    the seat stays fail-closed (session output + heartbeat only) and SOUL.md
+    stays byte-identical (the _write_if_changed idempotency contract)."""
+    digest = customer.get("digest") or {}
+    if not isinstance(digest, dict):
+        return ""
+    home = digest.get("home_matter_id")
+    if not isinstance(home, str) or not home:
+        return ""
+    return (
+        "\n## Digest home\n\n"
+        "The firm has authored a digest home: write the full daily "
+        "needs-you digest as a memo on matter "
+        f"{home} "
+        "(the designated internal operations matter). This is the authored "
+        "destination the digest skill resolves; the heartbeat row is written "
+        "regardless. Do not write the digest to any client matter.\n"
     )
 
 
