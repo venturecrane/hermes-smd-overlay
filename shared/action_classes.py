@@ -317,6 +317,13 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_get_files_on_matter": ActionClass.READ,
     "mcp_smokeball_get_file": ActionClass.READ,
     "mcp_smokeball_get_download_url": ActionClass.READ,
+    # Server-side presigned fetch + text extraction (PDF/DOCX/text). The FIRST
+    # content-bearing Smokeball read: it returns externally-authored document
+    # text (opposing counsel, providers), so it is fenced+tainting in
+    # hermes-smd-inbound._FENCED_READ_TOOLS — unlike the metadata-only reads
+    # around it. Added 2026-07-05 (L2 DISC-1: get_download_url minted URLs no
+    # tool could fetch).
+    "mcp_smokeball_read_document": ActionClass.READ,
     "mcp_smokeball_get_memos_on_matter": ActionClass.READ,
     "mcp_smokeball_get_bank_accounts": ActionClass.READ,
     "mcp_smokeball_get_matter_balances": ActionClass.READ,
