@@ -31,9 +31,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
 from collections.abc import Iterable
-
+from dataclasses import dataclass
 
 # ---------- Case-name patterns ----------
 # "Smith v. Jones", "Smith v Jones" (no period), "Smith vs. Jones", "In re Smith",
@@ -279,7 +278,7 @@ def contains_citation(text: str, allowed_case_names: Iterable[str] | None = None
     bluebook_hits = [h for h in hits if h.pattern == "bluebook-signal"]
     if len(bluebook_hits) >= 2:
         spans = sorted(h.span for h in bluebook_hits)
-        for a, b in zip(spans, spans[1:]):
+        for a, b in zip(spans, spans[1:], strict=False):
             if b[0] - a[1] < 200:
                 return True
     return False
