@@ -253,7 +253,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # registry enables ONLY brave_web_search (search + extract, no driven browser),
     # so a single READ verb is the entire surface. Read-only: no writes, no sends,
     # nothing irreversible — always allowed even on an inbound-tainted turn.
-    "mcp_brave_web_search": ActionClass.READ,
+    # Runtime name is mcp_<server>_<tool> = mcp_brave_brave_web_search (server key
+    # "brave" + Brave's own tool name "brave_web_search"); the doubled "brave" is
+    # real — verified live on pilot-smokeball 2026-07-07 (agent.log: "registered
+    # 1 tool(s): mcp_brave_brave_web_search"). Classifying the single-"brave" name
+    # left the real tool unclassified => REFUSED, i.e. web search dead on arrival.
+    "mcp_brave_brave_web_search": ActionClass.READ,
     # --- capability-contract aliases (colon form) — never emitted at runtime,
     #     retained so audit prose / TS-side references still resolve.
     "agentmail:send_message": ActionClass.EXTERNAL_SEND,
