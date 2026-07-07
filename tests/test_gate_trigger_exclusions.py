@@ -58,6 +58,24 @@ def test_excluded_actor_suppresses() -> None:
     assert reason == f"excluded-actor:{_CHRIS}"
 
 
+def test_excluded_matter_suppresses_despite_foreign_top_level_id() -> None:
+    """THE live envelope shape (proven by signed probes 2026-07-07): Smokeball
+    deliveries carry a top-level ``id`` that is NOT the matter id. First-
+    present-wins precedence forwarded the excluded matter; any-candidate
+    matching must suppress it."""
+    ex = resolve_exclusions(_CONFIG)
+    body = json.dumps(
+        {
+            "type": "matter.updated",
+            "id": "de11very-0000-4444-8888-aaaaaaaaaaaa",
+            "matterId": _OPS_MATTER,
+        }
+    ).encode()
+    assert check_excluded(route="smokeball", body=body, exclusions=ex) == (
+        f"excluded-matter:{_OPS_MATTER}"
+    )
+
+
 def test_non_excluded_delivery_forwards() -> None:
     ex = resolve_exclusions(_CONFIG)
     assert (

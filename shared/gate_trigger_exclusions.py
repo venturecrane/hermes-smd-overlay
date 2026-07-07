@@ -110,26 +110,20 @@ def check_excluded(
         rule = exclusions.get((route.strip().lower(), event_type))
         if rule is None:
             return None
-        matter = next(
-            (
-                payload[k].strip().lower()
-                for k in _MATTER_KEYS
-                if isinstance(payload.get(k), str) and payload[k].strip()
-            ),
-            None,
-        )
-        if matter is not None and matter in rule["matters"]:
-            return f"excluded-matter:{matter}"
-        actor = next(
-            (
-                payload[k].strip().lower()
-                for k in _ACTOR_KEYS
-                if isinstance(payload.get(k), str) and payload[k].strip()
-            ),
-            None,
-        )
-        if actor is not None and actor in rule["actors"]:
-            return f"excluded-actor:{actor}"
+        # ANY-candidate match, never first-present-wins: the live Smokeball
+        # envelope carries a top-level ``id`` that is NOT the matter id (proven
+        # 2026-07-07 by signed synthetic probes against the running gate — a
+        # payload with a random ``id`` plus the excluded ``matterId`` FORWARDED
+        # under the old next()-precedence logic; the same payload without
+        # ``id`` suppressed). Every candidate key is checked against the set.
+        for k in _MATTER_KEYS:
+            v = payload.get(k)
+            if isinstance(v, str) and v.strip() and v.strip().lower() in rule["matters"]:
+                return f"excluded-matter:{v.strip().lower()}"
+        for k in _ACTOR_KEYS:
+            v = payload.get(k)
+            if isinstance(v, str) and v.strip() and v.strip().lower() in rule["actors"]:
+                return f"excluded-actor:{v.strip().lower()}"
         return None
     except Exception:  # noqa: BLE001 — fail open to forward, never break the gate
         logger.warning("trigger-exclusions: check failed; forwarding", exc_info=True)
@@ -144,7 +138,11 @@ def live_exclusions() -> dict[tuple[str, str], dict[str, frozenset[str]]]:
         from shared.customer_config import CustomerConfig
 
         return resolve_exclusions(CustomerConfig.from_volume()._data)  # noqa: SLF001 — raw-dict seam; webhook_triggers has no typed accessor
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — fail open to forward; log so a broken
+        # config read is visible in gate logs instead of silently disabling
+        # every authored exclusion (the first live round hid exactly this class
+        # of failure).
+        logger.warning("trigger-exclusions: live config read failed; no exclusions", exc_info=True)
         return {}
 
 
