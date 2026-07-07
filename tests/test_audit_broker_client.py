@@ -167,6 +167,41 @@ def test_execute_ships_row_and_drops_id_ts(broker_socket):
     assert json.loads(row["metadata"]) == {"k": "v"}
 
 
+def test_execute_suppressed_webhook_uses_narrow_verb(broker_socket):
+    # The webhook gate runs as the agent uid on a non-gateway PID, so its
+    # WEBHOOK_SUPPRESSED append must ride the uid-gated ``webhook_suppressed_append``
+    # verb, NOT the gateway-PID-gated generic ``audit_append`` (issue #1791).
+    path, broker = broker_socket
+    client = BrokerAuditClient(socket_path=path)
+    params = build_audit_params(
+        row_id="01LOCALULID000000000000000",
+        ts="2026-07-07T00:00:00Z",
+        action_type="WEBHOOK_SUPPRESSED",
+        actor="gate",
+        actor_role="gate",
+        metadata={"reason": "excluded-matter:abc", "route": "smokeball"},
+    )
+    assert len(params) == len(COLUMNS)
+
+    rows = client.execute_suppressed_webhook(INSERT_SQL, *params)
+    assert rows == 1
+
+    assert broker.received is not None
+    # The distinguishing assertion: the narrow verb, not the generic one.
+    assert broker.received["action"] == "webhook_suppressed_append"
+    row = broker.received["row"]
+    assert "id" not in row and "ts" not in row
+    assert row["action_type"] == "WEBHOOK_SUPPRESSED"
+    assert json.loads(row["metadata"])["reason"] == "excluded-matter:abc"
+
+
+def test_execute_suppressed_webhook_wrong_param_count_raises(broker_socket):
+    path, _ = broker_socket
+    client = BrokerAuditClient(socket_path=path)
+    with pytest.raises(AuditWriteError):
+        client.execute_suppressed_webhook(INSERT_SQL, "only", "three", "params")
+
+
 def test_execute_wrong_param_count_raises(broker_socket):
     path, _ = broker_socket
     client = BrokerAuditClient(socket_path=path)

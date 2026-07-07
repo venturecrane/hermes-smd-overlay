@@ -452,7 +452,16 @@ def _audit_suppression(*, route: str, request_id: str, reason: str) -> None:
                 "request_id": request_id,
             },
         )
-        _GATE_AUDIT_CLIENT.execute(INSERT_SQL, *params)
+        # The generic ``audit_append`` verb is PID-gated to the gateway; this
+        # gate runs as the agent uid on a non-gateway PID, so on the broker path
+        # it must use the uid-gated ``webhook_suppressed_append`` verb (mirrors
+        # the cron pre_run SUPPRESSED_WAKE heartbeat). The direct/legacy client
+        # (no broker socket) has no such verb and writes the INSERT itself.
+        suppressed_append = getattr(_GATE_AUDIT_CLIENT, "execute_suppressed_webhook", None)
+        if suppressed_append is not None:
+            suppressed_append(INSERT_SQL, *params)
+        else:
+            _GATE_AUDIT_CLIENT.execute(INSERT_SQL, *params)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "gate: suppression audit write failed (suppression stands): route=%s id=%s reason=%s err=%s",
