@@ -43,6 +43,37 @@ _MAX_SESSIONS = 256
 
 _registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
 
+# ---------------------------------------------------------------------------
+# Session resolver (overlay #141)
+#
+# Hermes core passes session_id to post_tool_call and pre_llm_call but NOT to
+# pre_tool_call — all three fire sites in run_agent.py (10930, 11093, 11471 at
+# the pinned ref) pass task_id only. Forensic proof: every tier3
+# IDENTIFIER_UNVERIFIED row ever emitted lacked a session_id key and carried
+# register_was_empty=true, while reads were recorded under the REAL id nobody
+# consulted. One Machine = one agent process = sequential sessions, so the
+# plugin keeps the last REAL id any hook observed and consulting hooks resolve
+# a missing id to it. The note lands at turn start (pre_llm_call carries the
+# real id) before any tool pre-hook fires, so the cross-session leak window is
+# nil in practice; a resolver miss degrades to the OLD behavior (empty
+# register: over-report / no exemption), never a widened one.
+# ---------------------------------------------------------------------------
+
+_last_seen_session: str = ""
+
+
+def note_session(session_id: str | None) -> None:
+    """Record the most recent REAL session id any hook observed."""
+    global _last_seen_session
+    if session_id:
+        _last_seen_session = session_id
+
+
+def resolve_session(session_id: str | None) -> str:
+    """The given id when present; otherwise the last real id seen this
+    process (core drops session_id on the pre_tool_call path — #141)."""
+    return session_id or _last_seen_session
+
 
 def record_read(session_id: str, text: str) -> None:
     """Add the structured identifiers found in a read-tool RESULT to the

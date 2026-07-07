@@ -71,6 +71,12 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
             except KeyError:
                 customer_slug = ""
 
+        # Overlay #141: core's pre_tool_call fire sites drop session_id (task_id
+        # only); resolve to the last real id seen (noted at pre_llm_call /
+        # post_tool_call) so the provenance register is consulted under the
+        # SAME key reads were recorded under.
+        session_id = provenance.resolve_session(kwargs.get("session_id") or "")
+
         # SEC-36/16: strip any agent-supplied `_current_turn_approval` flag before
         # the ceiling check. No trusted runtime path stamps it (grep: it is read,
         # never written), so a value present here is an agent forgery — removing it
@@ -80,7 +86,7 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         args.pop("_current_turn_approval", None)
 
         ceiling_block = enforce.evaluate_tool_call(
-            tool_name, args, customer_slug, session_id=kwargs.get("session_id") or ""
+            tool_name, args, customer_slug, session_id=session_id
         )
         if ceiling_block is not None:
             # The trust ceiling already refuses this call; no need to scan a
@@ -93,7 +99,7 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         outbound_block = outbound.check_outbound_draft(
             tool_name=tool_name,
             args=args,
-            session_id=kwargs.get("session_id") or "",
+            session_id=session_id,
             tool_call_id=kwargs.get("tool_call_id") or "",
         )
         if outbound_block is not None:
@@ -105,7 +111,7 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         send_block = outbound.check_outbound_send(
             tool_name=tool_name,
             args=args,
-            session_id=kwargs.get("session_id") or "",
+            session_id=session_id,
             tool_call_id=kwargs.get("tool_call_id") or "",
         )
         if send_block is not None:
@@ -117,13 +123,13 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
                 tool_name,
                 broker_payload,
                 customer_slug=customer_slug,
-                session_id=kwargs.get("session_id") or "",
+                session_id=session_id,
                 tool_call_id=kwargs.get("tool_call_id") or "",
             )
             write_decision(
                 operation=tool_name,
                 payload_digest=str(authorization["payload_digest"]),
-                session_id=kwargs.get("session_id") or "",
+                session_id=session_id,
                 tool_call_id=kwargs.get("tool_call_id") or "",
             )
             args[GRANT_ARG] = authorization["grant"]
@@ -169,17 +175,36 @@ def on_post_tool_call(**kwargs: Any) -> None:
         result = kwargs.get("result")
         if result is None:
             return
+        sid = kwargs.get("session_id") or ""
+        provenance.note_session(sid)  # post_tool_call carries the REAL id (#141)
         provenance.record_read(
-            kwargs.get("session_id") or "",
+            provenance.resolve_session(sid),
             result if isinstance(result, str) else str(result),
         )
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: post_tool_call provenance record failed", exc_info=True)
 
 
+def on_pre_llm_call(**kwargs: Any) -> None:
+    """Note the turn's REAL session id before any tool pre-hook fires (#141).
+
+    pre_llm_call is the earliest hook core passes session_id to; noting it
+    here closes the resolver's first-tool-call gap and refreshes the id at
+    every turn (sequential sessions on a one-agent Machine). Observational:
+    always returns None; never raises.
+    """
+    try:
+        provenance.note_session(kwargs.get("session_id") or "")
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.debug("hermes-smd-trust: pre_llm_call session note failed", exc_info=True)
+    return None
+
+
 def register(ctx) -> None:
-    """Plugin entry point. Wires pre_tool_call (ceiling + outbound gate) and
-    post_tool_call (provenance recording for the A1 identifier gate)."""
+    """Plugin entry point. Wires pre_tool_call (ceiling + outbound gate),
+    post_tool_call (provenance recording for the A1 identifier gate), and
+    pre_llm_call (session-id note for the #141 resolver)."""
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
-    logger.info("hermes-smd-trust registered: pre_tool_call + post_tool_call")
+    ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    logger.info("hermes-smd-trust registered: pre_tool_call + post_tool_call + pre_llm_call")

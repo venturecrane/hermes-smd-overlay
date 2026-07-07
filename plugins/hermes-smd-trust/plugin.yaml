@@ -11,6 +11,8 @@ requires_env:
 provides_hooks:
   - pre_tool_call
   - post_tool_call # A1: records read-tool results into the provenance register
+  - pre_llm_call # #141: notes the turn's real session id for the resolver
 hooks:
   - pre_tool_call
   - post_tool_call
+  - pre_llm_call
