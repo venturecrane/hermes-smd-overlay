@@ -48,6 +48,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from shared import (
     gate_inbound_cap,
+    gate_trigger_exclusions,
     heartbeat,
     mcp_result_store,
     mcp_thread_store,
@@ -426,6 +427,40 @@ _VERIFIERS: dict[str, Any] = {
 # authored daily wake cap — armed in main(). None until then (unit tests that
 # drive handlers directly get today's ungated behavior unless they inject one).
 _INBOUND_GUARD: gate_inbound_cap.InboundWakeGuard | None = None
+_GATE_AUDIT_CLIENT = None  # set in main(); shared by the inbound guard + trigger exclusions
+
+
+def _audit_suppression(*, route: str, request_id: str, reason: str) -> None:
+    """Best-effort WEBHOOK_SUPPRESSED audit row for an excluded delivery. The
+    suppression stands whether or not the write succeeds (mirrors the inbound
+    guard's park-audit posture); failure is logged loudly so the audit-trail
+    gap is visible."""
+    if _GATE_AUDIT_CLIENT is None:
+        logger.warning(
+            "gate: suppressed %s/%s (%s) — no audit client, log-only", route, request_id, reason
+        )
+        return
+    try:
+        from shared.audit_contract import INSERT_SQL, agent_event_params
+
+        params = agent_event_params(
+            action_type="WEBHOOK_SUPPRESSED",
+            metadata={
+                "gate_trigger_exclusion": True,
+                "reason": reason,
+                "route": route,
+                "request_id": request_id,
+            },
+        )
+        _GATE_AUDIT_CLIENT.execute(INSERT_SQL, *params)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "gate: suppression audit write failed (suppression stands): route=%s id=%s reason=%s err=%s",
+            route,
+            request_id,
+            reason,
+            exc,
+        )
 
 
 def _breaker_hard_stopped() -> bool:
@@ -1171,6 +1206,26 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(202, {"accepted": True, "parked": park_reason})
                 return
 
+        # Authored trigger exceptions (#1766 lineage): a verified delivery whose
+        # matter/actor the seat has excluded for this (source, event_type) is
+        # acknowledged 202 (suppression is authored policy, not a vendor error),
+        # audited (WEBHOOK_SUPPRESSED — never silent), and NOT forwarded, so the
+        # agent never wakes. Fail-open: any config/parse issue forwards normally
+        # (see shared/gate_trigger_exclusions.py).
+        suppress_reason = gate_trigger_exclusions.check_excluded(
+            route=route, body=body, exclusions=gate_trigger_exclusions.live_exclusions()
+        )
+        if suppress_reason is not None:
+            _audit_suppression(route=route, request_id=request_id, reason=suppress_reason)
+            logger.info(
+                "gate: suppressed %s/%s (%s) — authored trigger exclusion",
+                route,
+                request_id,
+                suppress_reason,
+            )
+            self._json(202, {"accepted": True, "suppressed": suppress_reason})
+            return
+
         # Stamp the verified ingress provenance (source == route) + the verified
         # per-delivery id (as event_id, the router's replay key) so the header-less
         # router can route on (source, event_type) and dedupe. Done after
@@ -1280,6 +1335,8 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 — guard still parks, log-only audit
         logger.warning("gate: no audit client for inbound guard (log-only parks): %s", exc)
         _audit_client = None
+    global _GATE_AUDIT_CLIENT
+    _GATE_AUDIT_CLIENT = _audit_client
     _INBOUND_GUARD = gate_inbound_cap.InboundWakeGuard(
         cap_resolver=gate_inbound_cap.default_cap_resolver,
         audit_client=_audit_client,
