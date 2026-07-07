@@ -881,6 +881,50 @@ def test_translate_skips_clio_when_required_secret_unset(tmp_path, monkeypatch):
     assert "clio-oktopeak" not in config.get("mcp_servers", {})
 
 
+# Brave Search — the shared web-search connector (ADR 0070). Local stdio server,
+# surface narrowed to brave_web_search, keyed on a shared BRAVE_API_KEY.
+# ---------------------------------------------------------------------------
+
+BRAVE_YAML = VALID_YAML.replace("backend: mcp:gmail", "backend: mcp:brave")
+
+
+def test_translate_materializes_brave_stdio_mcp_server(tmp_path, monkeypatch):
+    """An enabled ``mcp:brave`` connector becomes a stdio mcp_servers entry (ADR 0070)."""
+    monkeypatch.setenv("BRAVE_API_KEY", "brave_key_test")
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=BRAVE_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    servers = config["mcp_servers"]
+    assert "brave" in servers
+    brave = servers["brave"]
+    # stdio shape: a command + args + env, NOT a url/headers.
+    assert brave["command"] == "brave-search-mcp-server"
+    assert brave["enabled"] is True
+    assert "url" not in brave
+    assert "headers" not in brave
+    # Surface narrowed to a single search tool (ADR 0070: search + extract only).
+    assert brave["args"] == ["--transport", "stdio", "--enabled-tools", "brave_web_search"]
+    # The shared, SMD-absorbed key flows in via the env block on the volume.
+    assert brave["env"]["BRAVE_API_KEY"] == "brave_key_test"
+
+
+def test_translate_skips_brave_when_api_key_unset(tmp_path, monkeypatch):
+    """A missing BRAVE_API_KEY leaves the Brave server unwired (boot continues)."""
+    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=BRAVE_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert "brave" not in config.get("mcp_servers", {})
+
+
 # Smokeball — author-built stdio connector with required per-seat ENVIRONMENT and
 # OPTIONAL per-seat auth_mode/refresh_token/account_id (the authorization_code path).
 # ---------------------------------------------------------------------------

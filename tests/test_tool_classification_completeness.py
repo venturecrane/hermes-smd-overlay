@@ -231,6 +231,11 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_reference_record",
         }
     ),
+    # Brave Search (mcp:brave, ADR 0070) — the shared web-search connector. The
+    # registry narrows the surface to a single enabled tool (brave_web_search) via
+    # --enabled-tools, so the pinned surface is exactly that one READ verb. A new
+    # Brave verb we later enable must be classified or it fails here.
+    "brave": frozenset({"mcp_brave_web_search"}),
     "clio-oktopeak": frozenset(
         {
             # reads

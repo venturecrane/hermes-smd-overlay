@@ -249,6 +249,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_agentmail_list_drafts": ActionClass.READ,
     "mcp_agentmail_get_draft": ActionClass.READ,
     "mcp_agentmail_auth_me": ActionClass.READ,
+    # Brave Search (mcp:brave, ADR 0070) — the shared web-search connector. The
+    # registry enables ONLY brave_web_search (search + extract, no driven browser),
+    # so a single READ verb is the entire surface. Read-only: no writes, no sends,
+    # nothing irreversible — always allowed even on an inbound-tainted turn.
+    "mcp_brave_web_search": ActionClass.READ,
     # --- capability-contract aliases (colon form) — never emitted at runtime,
     #     retained so audit prose / TS-side references still resolve.
     "agentmail:send_message": ActionClass.EXTERNAL_SEND,
