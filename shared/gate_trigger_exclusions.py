@@ -110,20 +110,32 @@ def check_excluded(
         rule = exclusions.get((route.strip().lower(), event_type))
         if rule is None:
             return None
-        # ANY-candidate match, never first-present-wins: the live Smokeball
-        # envelope carries a top-level ``id`` that is NOT the matter id (proven
-        # 2026-07-07 by signed synthetic probes against the running gate — a
-        # payload with a random ``id`` plus the excluded ``matterId`` FORWARDED
-        # under the old next()-precedence logic; the same payload without
-        # ``id`` suppressed). Every candidate key is checked against the set.
-        for k in _MATTER_KEYS:
-            v = payload.get(k)
-            if isinstance(v, str) and v.strip() and v.strip().lower() in rule["matters"]:
-                return f"excluded-matter:{v.strip().lower()}"
-        for k in _ACTOR_KEYS:
-            v = payload.get(k)
-            if isinstance(v, str) and v.strip() and v.strip().lower() in rule["actors"]:
-                return f"excluded-actor:{v.strip().lower()}"
+        # ANY-candidate match across BOTH envelope levels. The verbatim live
+        # Smokeball envelope (read from the routed turn's session transcript,
+        # 2026-07-07) nests the changed resource under ``payload``:
+        #   { "accountId": ..., "userId": null, "subscriptionId": ...,
+        #     "type": "matter.updated", "payload": { "id": <MATTER GUID>,
+        #     "versionId": ..., "number": ..., ... } }
+        # so the matter id is ``payload.id`` (the memo skill's contract means
+        # that literally) and the actor is TOP-LEVEL ``userId``. Both levels
+        # are searched for both kinds, so a future envelope flattening or an
+        # actor moving under payload keeps matching. Never first-present-wins:
+        # every candidate is checked against the set (the first live round's
+        # miss came from precedence + level assumptions stacked together).
+        candidates = [payload]
+        nested = payload.get("payload")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+        for obj in candidates:
+            for k in _MATTER_KEYS:
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip() and v.strip().lower() in rule["matters"]:
+                    return f"excluded-matter:{v.strip().lower()}"
+        for obj in candidates:
+            for k in _ACTOR_KEYS:
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip() and v.strip().lower() in rule["actors"]:
+                    return f"excluded-actor:{v.strip().lower()}"
         return None
     except Exception:  # noqa: BLE001 — fail open to forward, never break the gate
         logger.warning("trigger-exclusions: check failed; forwarding", exc_info=True)
