@@ -104,3 +104,34 @@ def test_unauthored_and_malformed_fail_open() -> None:
     assert check_excluded(route="smokeball", body=b"{}", exclusions=ex) is None
     # empty exclusions short-circuits
     assert check_excluded(route="smokeball", body=_body(id=_OPS_MATTER), exclusions={}) is None
+
+
+def test_excluded_matter_suppresses_in_verbatim_live_envelope() -> None:
+    """The VERBATIM live Smokeball envelope (session transcript, 2026-07-07):
+    matter id nested at payload.id, actor at top-level userId. This is the
+    shape that defeated both prior matching attempts; it must suppress."""
+    ex = resolve_exclusions(_CONFIG)
+    envelope = {
+        "accountId": "5233e204-9661-4d46-853f-e408a0ca7f0b",
+        "userId": None,
+        "subscriptionId": "95f0f2cb-942c-4914-b733-a7e730eb28c5",
+        "type": "matter.updated",
+        "source": "smokeball",
+        "payload": {
+            "id": _OPS_MATTER,
+            "externalSystemId": None,
+            "versionId": "639189930090653628",
+            "number": "2026-OPS-001",
+        },
+    }
+    body = json.dumps(envelope).encode()
+    assert check_excluded(route="smokeball", body=body, exclusions=ex) == (
+        f"excluded-matter:{_OPS_MATTER}"
+    )
+    # Actor at top level (the live location) suppresses too.
+    envelope["payload"]["id"] = "some-client-matter"
+    envelope["userId"] = _CHRIS
+    body = json.dumps(envelope).encode()
+    assert check_excluded(route="smokeball", body=body, exclusions=ex) == (
+        f"excluded-actor:{_CHRIS}"
+    )
