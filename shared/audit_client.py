@@ -83,6 +83,25 @@ class BrokerAuditClient:
         self._request({"action": "audit_append", "row": row})
         return 1
 
+    def execute_suppressed_webhook(self, sql: str, *params: Any) -> int:
+        """Ship one WEBHOOK_SUPPRESSED row via the uid-gated broker verb.
+
+        Same ``(sql, *params)`` seam as :meth:`execute`, but routes through
+        ``webhook_suppressed_append`` instead of the generic ``audit_append``.
+        Rationale: the generic verb is PID-gated to the gateway process, and the
+        webhook gate runs as the agent uid on a NON-gateway PID (same shape as
+        the cron ``pre_run`` children behind ``suppressed_wake_append``). The
+        broker locks the row's ``action_type`` to ``WEBHOOK_SUPPRESSED`` on this
+        verb, so it cannot forge any other audit row.
+        """
+        if len(params) != len(COLUMNS):
+            raise AuditWriteError(
+                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, got {len(params)}"
+            )
+        row = dict(zip(COLUMNS[2:], params[2:], strict=True))
+        self._request({"action": "webhook_suppressed_append", "row": row})
+        return 1
+
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         try:
