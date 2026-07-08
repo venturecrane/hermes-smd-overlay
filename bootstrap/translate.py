@@ -651,6 +651,7 @@ def _materialize_telegram_platform(customer: dict[str, Any]) -> dict[str, Any]:
 _AUTHORED_EXPOSURE_ACTION_CLASSES = (
     "internal_write",
     "external_send",
+    "external_send_internal",
     "commitment",
     "destructive",
     "code_execution",
