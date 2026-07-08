@@ -50,7 +50,12 @@ class ActionClass(str, enum.Enum):
 
     READ = "read"  # Always allowed
     INTERNAL_WRITE = "internal_write"  # Notes, drafts, internal state — autonomous OK
-    EXTERNAL_SEND = "external_send"  # Email, SMS, posts — gated
+    EXTERNAL_SEND = "external_send"  # Send to a NON-roster (outside) recipient — gated
+    # Send to a human-rostered INTERNAL recipient (own staff). Its own authored,
+    # fail-closed ceiling. The recipient axis is resolved in evaluate_tool_call via
+    # recipient_classifier; an unclassifiable recipient is forced OUTSIDE (draft),
+    # never INTERNAL — a send is never promoted to autonomous on an unknown recipient.
+    EXTERNAL_SEND_INTERNAL = "external_send_internal"
     COMMITMENT = "commitment"  # Sign, accept terms, agree to dates — never autonomous
     DESTRUCTIVE = "destructive"  # Delete, drop, irreversible — explicit per-call approval
     CODE_EXECUTION = (

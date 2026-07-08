@@ -73,6 +73,7 @@ from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
 _TAINT_GATED_CLASSES: frozenset[ActionClass] = frozenset(
     {
         ActionClass.EXTERNAL_SEND,
+        ActionClass.EXTERNAL_SEND_INTERNAL,
         ActionClass.DESTRUCTIVE,
         ActionClass.COMMITMENT,
         ActionClass.CODE_EXECUTION,
@@ -320,15 +321,19 @@ def _enforce_resolved(
             draft_reason="draft_for_review skills do not originate destructive actions; report instead",
             draft_audit="refuse",
         )
-    if action == ActionClass.EXTERNAL_SEND:
+    if action in (ActionClass.EXTERNAL_SEND, ActionClass.EXTERNAL_SEND_INTERNAL):
+        # Both send classes resolve identically against their OWN authored ceiling
+        # (external_send = outside recipient; external_send_internal = rostered
+        # staff recipient). The recipient axis is decided upstream in
+        # evaluate_tool_call; by here the class is definite.
         if effective == Ceiling.AUTONOMOUS:
-            return _allow("external_send permitted: authored exposure is autonomous", action)
+            return _allow(f"{action.value} permitted: authored exposure is autonomous", action)
         if effective == Ceiling.DRAFT_FOR_REVIEW:
             return _draft(
-                "external_send at authored draft_for_review ceiling; routing to draft", action
+                f"{action.value} at authored draft_for_review ceiling; routing to draft", action
             )
         return _refuse(
-            "external_send refused: no authored exposure (fail-closed, ADR 0056) "
+            f"{action.value} refused: no authored exposure (fail-closed, ADR 0056) "
             "or a vertical floor refuses it",
             action,
         )
@@ -700,6 +705,62 @@ def _audit_decision(tool_name: str, persona_slug: str, decision: EnforcementDeci
 # ---------------------------------------------------------------------------
 
 
+def _resolve_roster() -> list[str]:
+    """Live organization roster (``scope.inbound_allow_from``) from the trusted
+    config, for OUTBOUND recipient classification (ADR 0044 — live-read so
+    authoring the roster takes effect with no restart).
+
+    Empty on missing/stub config — fail-closed: with no roster, every send
+    classifies OUTSIDE (gated), never INTERNAL. Any OTHER read fault propagates
+    to ``evaluate_tool_call``'s outer handler, which fails closed for the send.
+    The roster is documented human-authored (never appended from inbound), which
+    is what makes it safe to use as OUTBOUND authorization, not just inbound trust.
+    """
+    from shared.customer_config import CustomerConfig  # local import
+
+    try:
+        return CustomerConfig.from_volume().inbound_roster
+    except NotImplementedError:
+        return []
+    except CustomerConfigMissingError:
+        return []
+
+
+def _reclassify_send(
+    tool_name: str,
+    args: dict,
+    base_action: ActionClass,
+    session_id: str,
+    tainted: bool,
+) -> ActionClass:
+    """Route a proactive send to its recipient-scoped action class.
+
+    Only proactive sends (``send_message`` / ``forward_message`` / ``send_draft``)
+    that ``classify_tool`` tagged EXTERNAL_SEND are re-routed. A rostered recipient
+    → EXTERNAL_SEND_INTERNAL; anyone else → EXTERNAL_SEND. An UNRESOLVED recipient
+    (a ``send_draft`` of a draft this session never observed, or an empty/garbage
+    ``to``) → EXTERNAL_SEND (outside/draft), **never** INTERNAL: a send is never
+    promoted to autonomous on an unknown recipient. ``reply_to_message`` is not a
+    CLASSIFIED_SEND_TOOL — the reply plugin owns that recipient-locked path.
+    """
+    from shared.outbound_recipient import CLASSIFIED_SEND_TOOLS, send_recipients
+    from shared.recipient_classifier import RecipientClass, classify_recipients
+
+    if base_action is not ActionClass.EXTERNAL_SEND or tool_name not in CLASSIFIED_SEND_TOOLS:
+        return base_action
+    recips = send_recipients(tool_name, args, session_id)
+    if not recips:
+        logger.info(
+            "trust: proactive send %s has an unresolved recipient; routing OUTSIDE (draft)",
+            tool_name,
+        )
+        return ActionClass.EXTERNAL_SEND
+    cls = classify_recipients(list(recips), _resolve_roster(), from_tainted=tainted)
+    if cls is RecipientClass.INTERNAL:
+        return ActionClass.EXTERNAL_SEND_INTERNAL
+    return ActionClass.EXTERNAL_SEND
+
+
 def evaluate_tool_call(
     tool_name: str,
     args: dict,
@@ -752,15 +813,28 @@ def evaluate_tool_call(
     try:
         exposure = _resolve_persona_exposure(persona_slug)
         vertical_floors = _resolve_vertical_floors()
+        session_taint = SESSION_TAINT.trust_class(session_id)
+
+        # Recipient axis: a proactive send to a rostered internal recipient is
+        # governed by its own external_send_internal ceiling; anyone else (or an
+        # unresolved recipient) stays external_send. Decided here where the args
+        # (and, via the registry, the draft) are available.
+        effective_action = _reclassify_send(
+            tool_name,
+            args or {},
+            classification.action_class,
+            session_id,
+            tainted=session_taint != TRUST_CLASS_INTERNAL,
+        )
 
         decision = enforce(
-            action=classification.action_class,
+            action=effective_action,
             exposure=exposure,
             tool_name=tool_name,
             persona_slug=persona_slug,
             current_turn_approval=_resolve_current_turn_approval(args),
             vertical_floors=vertical_floors,
-            inbound_trust_class=SESSION_TAINT.trust_class(session_id),
+            inbound_trust_class=session_taint,
         )
     except Exception:  # noqa: BLE001
         if classification.action_class == ActionClass.READ:
@@ -787,11 +861,15 @@ def evaluate_tool_call(
 
     _audit_decision(tool_name, persona_slug, decision)
 
-    # Content-sensitivity floor (ADR 0031). Only an EXTERNAL_SEND the exposure
-    # would ALLOW (resolved to autonomous send) is subject to the floor — a
-    # draft/refuse decision already withholds the send. Money / contract / scope /
-    # legal content is downgraded to a draft even under an autonomous exposure.
-    if decision.allowed and classification.action_class == ActionClass.EXTERNAL_SEND:
+    # Content-sensitivity floor (ADR 0031). Applies to OUTSIDE sends only: money /
+    # contract / scope / legal content bound for a non-roster recipient is
+    # downgraded to a draft even under an autonomous exposure. An INTERNAL send
+    # (external_send_internal, to the firm's own rostered staff) is deliberately
+    # NOT content-floored — the whole value of an internal alert is that it CARRIES
+    # the matter/deadline/dollar context to a colleague; drafting it would re-break
+    # the fix. Only a send the exposure would ALLOW is floored (a draft/refuse
+    # already withholds it).
+    if decision.allowed and effective_action == ActionClass.EXTERNAL_SEND:
         floor_block = _apply_content_floor(tool_name, args)
         if floor_block is not None:
             return floor_block

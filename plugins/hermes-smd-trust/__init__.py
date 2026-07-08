@@ -166,6 +166,24 @@ def on_post_tool_call(**kwargs: Any) -> None:
         tool_name = kwargs.get("tool_name") or ""
         if not tool_name:
             return
+        sid = kwargs.get("session_id") or ""
+        provenance.note_session(sid)  # post_tool_call carries the REAL id (#141)
+        resolved = provenance.resolve_session(sid)
+
+        # Record a created/updated draft's recipients under the RESOLVED session id
+        # — the same key the pre_tool_call send-gate looks up — so a later
+        # send_draft resolves its recipient. Best-effort; no-ops for non-draft
+        # tools. Must run BEFORE the READ-only provenance gate below, since
+        # create_draft/update_draft are INTERNAL_WRITE.
+        try:
+            from shared.outbound_recipient import record_draft_from_post_tool_call
+
+            record_draft_from_post_tool_call(
+                tool_name, kwargs.get("args"), kwargs.get("result"), resolved
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("hermes-smd-trust: draft-recipient record failed", exc_info=True)
+
         try:
             classification = enforce.classify_tool(tool_name)
         except enforce.BannedToolError:
@@ -175,10 +193,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
         result = kwargs.get("result")
         if result is None:
             return
-        sid = kwargs.get("session_id") or ""
-        provenance.note_session(sid)  # post_tool_call carries the REAL id (#141)
         provenance.record_read(
-            provenance.resolve_session(sid),
+            resolved,
             result if isinstance(result, str) else str(result),
         )
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe

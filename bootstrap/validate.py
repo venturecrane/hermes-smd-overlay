@@ -74,6 +74,7 @@ ACCEPTED_CEILINGS = {"autonomous", "draft_for_review", "refused"}
 AUTHORED_EXPOSURE_ACTION_CLASSES = {
     "internal_write",
     "external_send",
+    "external_send_internal",
     "commitment",
     "destructive",
     "code_execution",
