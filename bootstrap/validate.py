@@ -86,7 +86,10 @@ AUTHORED_EXPOSURE_ACTION_CLASSES = {
 # through a bypassed authoring path.
 LEGACY_ENTITLEMENT_FIELDS = ("trust_ceiling", "action_ceilings")
 
-ACCEPTED_BACKEND_PREFIXES = ("mcp:", "build:", "synthetic:")
+# native: — a bundled Hermes provider (not an external server we wire). Web
+# search rides this: `native:brave-free` -> config web.search_backend, handled by
+# translate._materialize_web_search. Added 2026-07-08 with the ADR 0070 native cut.
+ACCEPTED_BACKEND_PREFIXES = ("mcp:", "build:", "synthetic:", "native:")
 
 REQUIRED_TOP_LEVEL_FIELDS = (
     "customer_id",

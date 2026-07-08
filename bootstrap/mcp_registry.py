@@ -211,31 +211,12 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         ),
         blocked_tools=(),
     ),
-    # Brave Search (mcp:brave) — the SHARED web-search connector (ADR 0070). The
-    # official @brave/brave-search-mcp-server (MIT), baked into the image via
-    # `npm install -g @brave/brave-search-mcp-server` (see the ss-console operator
-    # Dockerfile) so the `brave-search-mcp-server` binary is on PATH. Launched as a
-    # LOCAL stdio server, same transport as Clio.
-    #
-    # Surface is deliberately narrowed to `brave_web_search` via --enabled-tools:
-    # ADR 0070 scopes this to search + extract only, excluding the driven browser
-    # AND the extra Brave modalities (local/image/video/news/summarizer). One tool,
-    # read-only — no blocked_tools, classified READ in shared/action_classes.py.
-    #
-    # Cost is SMD-absorbed on a SHARED key (one BRAVE_API_KEY across Hosted-Agent
-    # seats — NOT BYO, no second signup for the buyer), fair-use capped per-seat by
-    # safety.sticky_stop.web_search_daily_cap. Per-call cap enforcement is a
-    # follow-on; the Machine-wide cost breaker (safety.sticky_stop.cost_cap_daily_cents)
-    # is the interim backstop since every search rides an LLM turn. Default ON for
-    # the Hosted Agent, authored-per-engagement for the Operator (ADR 0035).
-    "brave": McpConnectorSpec(
-        name="brave",
-        auth_model="static",
-        command="brave-search-mcp-server",
-        args=("--transport", "stdio", "--enabled-tools", "brave_web_search"),
-        env_secrets=(("BRAVE_API_KEY", "BRAVE_API_KEY"),),
-        blocked_tools=(),
-    ),
+    # NOTE: web search is NOT an mcp: connector. It is wired natively via Hermes'
+    # bundled web providers (plugins/web/*, e.g. brave-free) and selected by
+    # `connectors.WebSearch.backend: native:<provider>` -> config web.search_backend
+    # in bootstrap.translate._materialize_web_search. The former mcp:brave entry
+    # (ADR 0070, first cut) was removed 2026-07-08: MCP-wrapping a native feature
+    # was the redundant layer. See shared/action_classes.py ("web_search").
 }
 
 

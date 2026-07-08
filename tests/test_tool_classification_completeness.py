@@ -43,7 +43,7 @@ the property that actually prevents a fail-open hole.
 from __future__ import annotations
 
 from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
-from shared.action_classes import BANNED_TOOLS, TOOL_ACTION_CLASS_MAP
+from shared.action_classes import BANNED_TOOLS, TOOL_ACTION_CLASS_MAP, ActionClass
 from tests.conftest import load_plugin
 
 
@@ -231,13 +231,11 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_reference_record",
         }
     ),
-    # Brave Search (mcp:brave, ADR 0070) — the shared web-search connector. The
-    # registry narrows the surface to a single enabled tool (brave_web_search) via
-    # --enabled-tools, so the pinned surface is exactly that one READ verb. The
-    # runtime name doubles the "brave" (server key + Brave's tool name) =>
-    # mcp_brave_brave_web_search, verified live on pilot-smokeball 2026-07-07. A new
-    # Brave verb we later enable must be classified or it fails here.
-    "brave": frozenset({"mcp_brave_brave_web_search"}),
+    # NOTE: web search is NOT an mcp: connector surface — it is a native Hermes
+    # tool (`web_search`, no mcp_<server>_ prefix), so it cannot live in this
+    # prefix-guarded pin. Its READ classification is asserted directly by
+    # test_native_web_search_is_classified_read below. (The former mcp:brave pin
+    # was removed 2026-07-08 with the native cut, ADR 0070.)
     "clio-oktopeak": frozenset(
         {
             # reads
@@ -375,6 +373,15 @@ def test_pinned_surface_tools_match_their_prefix() -> None:
         prefix = _mcp_prefix(server_name)
         mismatched += [t for t in surface if not t.startswith(prefix)]
     assert mismatched == [], f"pinned tools not matching their server prefix: {sorted(mismatched)}"
+
+
+def test_native_web_search_is_classified_read() -> None:
+    """Native web search (WebSearch capability, ADR 0070 native cut) must be a
+    decided READ tool. It is NOT an mcp: surface (bare ``web_search``, no
+    mcp_<server>_ prefix), so it cannot live in PINNED_CONNECTOR_SURFACES; this is
+    its drift guard. Unmapped => REFUSED (fail-closed) would mean web search dead
+    on arrival — exactly the regression this asserts against."""
+    assert TOOL_ACTION_CLASS_MAP.get("web_search") is ActionClass.READ
 
 
 # ---------------------------------------------------------------------------

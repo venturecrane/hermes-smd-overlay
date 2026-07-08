@@ -386,6 +386,45 @@ def _materialize_mcp_servers(connectors: dict[str, Any]) -> dict[str, Any]:
     return servers
 
 
+def _materialize_web_search(connectors: dict[str, Any]) -> dict[str, Any]:
+    """Build the Hermes-native ``web`` block from ``connectors``.
+
+    Web search is a bundled Hermes provider (``plugins/web/*`` — e.g.
+    ``brave-free``, ``ddgs``, ``exa``, ``firecrawl``), NOT an MCP server. Each
+    provider self-registers at import and becomes *available* when its key env
+    var is present; we only name the active one via ``web.search_backend`` (read
+    by ``agent.web_search_registry``). The provider then exposes the native
+    ``web_search`` tool (classified READ in :mod:`shared.action_classes`).
+
+    For the FIRST enabled connector whose ``backend`` is ``native:<provider>``
+    we emit ``{"search_backend": "<provider>"}``. Returns ``{}`` when no native
+    web connector is enabled, so configs for customers without web search stay
+    byte-identical.
+
+    This SUPERSEDES the ``mcp:brave`` connector (ADR 0070 first cut): wrapping a
+    native Hermes feature in an MCP server was the redundant layer. The key
+    itself is a plain Fly secret (e.g. ``BRAVE_SEARCH_API_KEY`` for
+    ``brave-free``) read by the provider — not staged into config here.
+    """
+    for capability, record in (connectors or {}).items():
+        if not isinstance(record, dict) or not record.get("enabled"):
+            continue
+        backend = str(record.get("backend", ""))
+        if not backend.startswith("native:"):
+            continue
+        provider = backend[len("native:") :]
+        if not provider:
+            logger.warning(
+                "translate: connector %s backend %r names no provider; "
+                "native web search NOT wired this boot",
+                capability,
+                backend,
+            )
+            continue
+        return {"search_backend": provider}
+    return {}
+
+
 # Inbound email/webhook handling: the prompt Hermes' native webhook adapter
 # renders from the (front-door-verified) AgentMail payload and feeds to the
 # routed skill. The body is delimited as untrusted DATA (ADR 0027 posture) so
@@ -768,6 +807,14 @@ def _persona_config(
     mcp_servers = _materialize_mcp_servers(customer.get("connectors") or {})
     if mcp_servers:
         config["mcp_servers"] = mcp_servers
+
+    # Materialize `native:` web-search backends into Hermes' native `web` block.
+    # Web search is a bundled Hermes provider (plugins/web/*), not an MCP server —
+    # so it rides `web.search_backend`, not `mcp_servers`. Omitted entirely when no
+    # native web connector is enabled, keeping existing configs byte-identical.
+    web_block = _materialize_web_search(customer.get("connectors") or {})
+    if web_block:
+        config["web"] = web_block
 
     # Inbound webhook routing: materialize platforms.webhook so Hermes' native
     # adapter binds :8644 and routes the (front-door-verified) event to the
