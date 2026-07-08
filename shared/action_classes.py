@@ -254,16 +254,17 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_agentmail_list_drafts": ActionClass.READ,
     "mcp_agentmail_get_draft": ActionClass.READ,
     "mcp_agentmail_auth_me": ActionClass.READ,
-    # Brave Search (mcp:brave, ADR 0070) — the shared web-search connector. The
-    # registry enables ONLY brave_web_search (search + extract, no driven browser),
-    # so a single READ verb is the entire surface. Read-only: no writes, no sends,
-    # nothing irreversible — always allowed even on an inbound-tainted turn.
-    # Runtime name is mcp_<server>_<tool> = mcp_brave_brave_web_search (server key
-    # "brave" + Brave's own tool name "brave_web_search"); the doubled "brave" is
-    # real — verified live on pilot-smokeball 2026-07-07 (agent.log: "registered
-    # 1 tool(s): mcp_brave_brave_web_search"). Classifying the single-"brave" name
-    # left the real tool unclassified => REFUSED, i.e. web search dead on arrival.
-    "mcp_brave_brave_web_search": ActionClass.READ,
+    # Native web search (WebSearch capability, ADR 0070). Hermes' bundled web
+    # providers (plugins/web/*, e.g. brave-free) expose ONE native tool,
+    # `web_search` (tools/web_tools.py) — NOT an MCP tool, so the runtime name is
+    # bare `web_search` with no mcp_<server>_ prefix. Selected per customer.yaml
+    # via connectors.WebSearch.backend: native:<provider> -> Hermes config
+    # `web.search_backend`. Read-only: no writes, no sends, nothing irreversible —
+    # always allowed even on an inbound-tainted turn. Unmapped => REFUSED
+    # (fail-closed), so this entry is what keeps native web search from being dead
+    # on arrival (superseded the mcp:brave connector, whose whole layer was the
+    # redundant wrapper that MCP-wrapped a native Hermes feature).
+    "web_search": ActionClass.READ,
     # --- capability-contract aliases (colon form) — never emitted at runtime,
     #     retained so audit prose / TS-side references still resolve.
     "agentmail:send_message": ActionClass.EXTERNAL_SEND,

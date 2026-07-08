@@ -881,48 +881,44 @@ def test_translate_skips_clio_when_required_secret_unset(tmp_path, monkeypatch):
     assert "clio-oktopeak" not in config.get("mcp_servers", {})
 
 
-# Brave Search — the shared web-search connector (ADR 0070). Local stdio server,
-# surface narrowed to brave_web_search, keyed on a shared BRAVE_API_KEY.
+# Native web search — the WebSearch capability wired via Hermes' bundled web
+# providers (plugins/web/*, e.g. brave-free), NOT an MCP server (ADR 0070, native
+# cut 2026-07-08). Selected by `backend: native:<provider>` -> config
+# web.search_backend; the former mcp:brave stdio wrapper was the redundant layer.
 # ---------------------------------------------------------------------------
 
-BRAVE_YAML = VALID_YAML.replace("backend: mcp:gmail", "backend: mcp:brave")
+NATIVE_WEB_YAML = VALID_YAML.replace("backend: mcp:gmail", "backend: native:brave-free")
 
 
-def test_translate_materializes_brave_stdio_mcp_server(tmp_path, monkeypatch):
-    """An enabled ``mcp:brave`` connector becomes a stdio mcp_servers entry (ADR 0070)."""
-    monkeypatch.setenv("BRAVE_API_KEY", "brave_key_test")
-    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=BRAVE_YAML)
+def test_translate_materializes_native_web_search(tmp_path):
+    """An enabled ``native:brave-free`` connector becomes a Hermes ``web`` block,
+    NOT an mcp_servers entry (ADR 0070 native cut)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(
+        tmp_path, customer_yaml_body=NATIVE_WEB_YAML
+    )
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
     )
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
-    servers = config["mcp_servers"]
-    assert "brave" in servers
-    brave = servers["brave"]
-    # stdio shape: a command + args + env, NOT a url/headers.
-    assert brave["command"] == "brave-search-mcp-server"
-    assert brave["enabled"] is True
-    assert "url" not in brave
-    assert "headers" not in brave
-    # Surface narrowed to a single search tool (ADR 0070: search + extract only).
-    assert brave["args"] == ["--transport", "stdio", "--enabled-tools", "brave_web_search"]
-    # The shared, SMD-absorbed key flows in via the env block on the volume.
-    assert brave["env"]["BRAVE_API_KEY"] == "brave_key_test"
-
-
-def test_translate_skips_brave_when_api_key_unset(tmp_path, monkeypatch):
-    """A missing BRAVE_API_KEY leaves the Brave server unwired (boot continues)."""
-    monkeypatch.delenv("BRAVE_API_KEY", raising=False)
-    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=BRAVE_YAML)
-    translate_customer_yaml(
-        customer_yaml_path=str(customer_yaml),
-        hermes_home=str(hermes_home),
-        skills_dir=str(skills_dir),
-    )
-    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    # Named as the active native search backend; the provider reads its own key
+    # (e.g. BRAVE_SEARCH_API_KEY) at runtime — not staged into config here.
+    assert config["web"] == {"search_backend": "brave-free"}
+    # NOT wrapped as an MCP server — that redundant layer was removed.
     assert "brave" not in config.get("mcp_servers", {})
+
+
+def test_translate_omits_web_block_without_native_connector(tmp_path):
+    """No native web connector => no ``web`` block (configs stay byte-identical)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=VALID_YAML)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert "web" not in config
 
 
 # Smokeball — author-built stdio connector with required per-seat ENVIRONMENT and
