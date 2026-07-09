@@ -93,9 +93,10 @@ logger = logging.getLogger(__name__)
 
 
 class Ceiling(str, enum.Enum):
-    """The three content classes per ADR 0035 / ADR 0056."""
+    """The content classes per ADR 0035 / ADR 0056 / ADR 0071."""
 
     AUTONOMOUS = "autonomous"
+    CONFIRM = "confirm"  # external_send: execute after an explicit current-turn approval (ADR 0071)
     DRAFT_FOR_REVIEW = "draft_for_review"
     REFUSED = "refused"
 
@@ -104,8 +105,9 @@ class Ceiling(str, enum.Enum):
 # configured value with a vertical-pack floor (a floor can only narrow).
 _RESTRICTIVENESS: dict[Ceiling, int] = {
     Ceiling.AUTONOMOUS: 0,
-    Ceiling.DRAFT_FOR_REVIEW: 1,
-    Ceiling.REFUSED: 2,
+    Ceiling.CONFIRM: 1,
+    Ceiling.DRAFT_FOR_REVIEW: 2,
+    Ceiling.REFUSED: 3,
 }
 
 
@@ -171,7 +173,8 @@ class EnforcementDecision:
     """Internal decision shape + the structured audit fields (ADR 0056).
 
     ``audit_action`` is the hint for the audit plugin's downstream
-    classification of this row (``allow`` | ``draft`` | ``refuse``). The four
+    classification of this row (``allow`` | ``draft`` | ``refuse`` |
+    ``await_approval``). The four
     ceiling fields carry the full trust trail: ``authored_ceiling`` is what the
     persona authored for this class (``None`` = unauthored / fail-closed),
     ``vertical_floor`` is the pack floor for this class (``None`` = no floor),
@@ -180,7 +183,7 @@ class EnforcementDecision:
 
     allowed: bool
     reason: str
-    audit_action: str  # "allow" | "draft" | "refuse"
+    audit_action: str  # "allow" | "draft" | "refuse" | "await_approval"
     action_class: ActionClass
     authored_ceiling: Ceiling | None = None
     vertical_floor: Ceiling | None = None
@@ -328,6 +331,20 @@ def _enforce_resolved(
         # evaluate_tool_call; by here the class is definite.
         if effective == Ceiling.AUTONOMOUS:
             return _allow(f"{action.value} permitted: authored exposure is autonomous", action)
+        if effective == Ceiling.CONFIRM:
+            # confirm (ADR 0071): send only with an explicit current-turn approval
+            # captured by a TRUSTED runtime path; otherwise WITHHELD pending approval
+            # (not drafted, not refused). The taint-gate upstream already blocked this
+            # class on a tainted turn, so an inbound/injected "approval" cannot reach
+            # here. Approval-capture round-trip is #1806; until then confirm withholds.
+            if current_turn_approval:
+                return _allow(
+                    f"{action.value} confirmed by explicit current-turn approval (ADR 0071)", action
+                )
+            return _await_approval(
+                f"{action.value} at authored confirm ceiling; withheld pending current-turn approval",
+                action,
+            )
         if effective == Ceiling.DRAFT_FOR_REVIEW:
             return _draft(
                 f"{action.value} at authored draft_for_review ceiling; routing to draft", action
@@ -406,6 +423,15 @@ def _draft(reason: str, action: ActionClass) -> EnforcementDecision:
 def _refuse(reason: str, action: ActionClass) -> EnforcementDecision:
     return EnforcementDecision(
         allowed=False, reason=reason, audit_action="refuse", action_class=action
+    )
+
+
+def _await_approval(reason: str, action: ActionClass) -> EnforcementDecision:
+    # ADR 0071: external_send at the confirm ceiling, withheld pending an explicit
+    # current-turn approval. allowed=False (the gate blocks on `allowed`, so the
+    # send does not fire); audit_action distinguishes it from a draft or a refusal.
+    return EnforcementDecision(
+        allowed=False, reason=reason, audit_action="await_approval", action_class=action
     )
 
 
