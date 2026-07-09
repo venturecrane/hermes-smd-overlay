@@ -271,6 +271,49 @@ def test_enforce_external_send_authored_draft_for_review_drafts() -> None:
     assert decision.audit_action == "draft"
 
 
+def test_enforce_external_send_confirm_ceiling() -> None:
+    """ADR 0071: the confirm ceiling sends only with an explicit current-turn
+    approval, else withholds pending approval (await_approval); a draft_for_review
+    vertical floor narrows an authored confirm; the taint-gate still dominates."""
+    enforce = _load_trust_module("enforce")
+    A = enforce.ActionClass
+    C = enforce.Ceiling
+    # confirm without approval → withheld pending approval (not draft, not refuse).
+    d = enforce.enforce(
+        action=A.EXTERNAL_SEND, exposure={A.EXTERNAL_SEND: C.CONFIRM}, tool_name="x"
+    )
+    assert d.allowed is False and d.audit_action == "await_approval"
+    assert d.effective_ceiling == C.CONFIRM
+    # confirm WITH current-turn approval → send.
+    d = enforce.enforce(
+        action=A.EXTERNAL_SEND,
+        exposure={A.EXTERNAL_SEND: C.CONFIRM},
+        tool_name="x",
+        current_turn_approval=True,
+    )
+    assert d.allowed is True and d.audit_action == "allow"
+    # A draft_for_review vertical floor narrows an authored confirm to draft even
+    # with approval (confirm < draft_for_review in the restrictiveness ordering).
+    d = enforce.enforce(
+        action=A.EXTERNAL_SEND,
+        exposure={A.EXTERNAL_SEND: C.CONFIRM},
+        tool_name="x",
+        current_turn_approval=True,
+        vertical_floors={A.EXTERNAL_SEND: C.DRAFT_FOR_REVIEW},
+    )
+    assert d.allowed is False and d.audit_action == "draft"
+    # Taint-gate dominates: a tainted turn cannot reach the confirm allow-path even
+    # with approval set (an inbound/injected "approval" must never turn into a send).
+    d = enforce.enforce(
+        action=A.EXTERNAL_SEND,
+        exposure={A.EXTERNAL_SEND: C.CONFIRM},
+        tool_name="x",
+        current_turn_approval=True,
+        inbound_trust_class="external_untrusted",
+    )
+    assert d.allowed is False and d.audit_action == "refuse"
+
+
 def test_enforce_commitment_requires_autonomous_exposure_and_approval() -> None:
     enforce = _load_trust_module("enforce")
     A = enforce.ActionClass
