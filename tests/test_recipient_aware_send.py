@@ -231,9 +231,7 @@ def _setup_typed(monkeypatch, enforce, *, exposure, typed=TYPED_ROSTER, floors=N
 def _reclass(monkeypatch, enforce, tool, args, *, session="s1", tainted=False):
     monkeypatch.setattr(enforce, "_resolve_roster", lambda: list(ROSTER))
     monkeypatch.setattr(enforce, "_resolve_typed_roster", lambda: list(TYPED_ROSTER))
-    return enforce._reclassify_send(
-        tool, args, enforce.ActionClass.EXTERNAL_SEND, session, tainted
-    )
+    return enforce._reclassify_send(tool, args, enforce.ActionClass.EXTERNAL_SEND, session, tainted)
 
 
 def test_reclassify_client_recipient(monkeypatch):
@@ -440,16 +438,11 @@ def test_typed_classifier_display_name_and_plus_tag_and_homoglyph():
 
     typed = [("jane@gmail.com", "client")]
     # Display-name form is UNKNOWN (not parsed), a hard error for the caller.
-    assert (
-        classify_recipients_typed(["Jane <jane@gmail.com>"], [], typed) is RecipientClass.UNKNOWN
-    )
+    assert classify_recipients_typed(["Jane <jane@gmail.com>"], [], typed) is RecipientClass.UNKNOWN
     # Plus-tag is not widened to the bare client address.
     assert classify_recipients_typed(["jane+x@gmail.com"], [], typed) is RecipientClass.OUTSIDE
     # Homoglyph domain never matches the ASCII roster (U+0430 Cyrillic 'а').
-    assert (
-        classify_recipients_typed(["jane@gmаil.com"], [], typed)
-        is not RecipientClass.CLIENT
-    )
+    assert classify_recipients_typed(["jane@gmаil.com"], [], typed) is not RecipientClass.CLIENT
 
 
 def test_typed_classifier_empty_typed_roster_is_outside():

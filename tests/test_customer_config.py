@@ -464,7 +464,9 @@ _OUTBOUND_ROSTER_SCOPE = (
 
 
 def test_outbound_roster_normalizes_to_tuples(tmp_path):
-    cfg = CustomerConfig.from_volume(str(_write(tmp_path, _with_scope_extra(_OUTBOUND_ROSTER_SCOPE))))
+    cfg = CustomerConfig.from_volume(
+        str(_write(tmp_path, _with_scope_extra(_OUTBOUND_ROSTER_SCOPE)))
+    )
     # Lowercased + typed; order preserved.
     assert cfg.outbound_roster == [
         ("jane@gmail.com", "client"),
@@ -478,9 +480,9 @@ def test_outbound_roster_drops_malformed_entries_fail_closed(tmp_path):
         "    - address: ok@client.com\n"
         "      class: client\n"
         "    - address: x@y.com\n"
-        "      class: bogus\n"          # bad class → dropped
-        "    - not-a-mapping\n"          # non-dict → dropped
-        "    - class: client\n"          # missing address → dropped
+        "      class: bogus\n"  # bad class → dropped
+        "    - not-a-mapping\n"  # non-dict → dropped
+        "    - class: client\n"  # missing address → dropped
     )
     cfg = CustomerConfig.from_volume(str(_write(tmp_path, _with_scope_extra(scope))))
     assert cfg.outbound_roster == [("ok@client.com", "client")]
