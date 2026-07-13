@@ -31,3 +31,7 @@ node_modules/
 # test artifacts (D1Client default binding writes a local sqlite file)
 CUSTOMER_DB
 *.db
+
+# Never commit local git worktrees created under the repo (breaks uv pip install git+@sha:
+# `git submodule update` fails on the gitlinks with no .gitmodules). ADR 0075 incident 2026-07-13.
+.worktrees/
