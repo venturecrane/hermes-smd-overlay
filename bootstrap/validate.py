@@ -76,9 +76,43 @@ AUTHORED_EXPOSURE_ACTION_CLASSES = {
     "internal_write",
     "external_send",
     "external_send_internal",
+    "external_send_client",
+    "external_send_vendor",
     "commitment",
     "destructive",
     "code_execution",
+}
+
+# The send action classes — the only classes for which the `confirm` ceiling
+# (ADR 0071) has defined behavior, and the classes a typed outbound roster
+# (scope.outbound_roster) resolves to (ADR 0075). Kept as a named set so the
+# confirm guard and any future send-scoped check share one definition.
+SEND_ACTION_CLASSES = {
+    "external_send",
+    "external_send_internal",
+    "external_send_client",
+    "external_send_vendor",
+}
+
+# Closed vocabulary for a scope.outbound_roster entry's `class` (ADR 0075).
+OUTBOUND_ROSTER_CLASSES = {"client", "records_vendor"}
+
+# Public-mail providers where a whole-@domain grant is meaningless (the domain is
+# shared by millions), so a DOMAIN-form outbound_roster entry is rejected — but an
+# EXACT address at one of these domains is valid (a PI client is a consumer on
+# gmail, so `jane@gmail.com` as a client must pass). Mirrors the console rule.
+_PUBLIC_MAIL_DOMAINS = {
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "yahoo.com",
+    "icloud.com",
+    "me.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
 }
 
 # Legacy entitlement fields retired by ADR 0056 with NO compatibility shim. The
@@ -154,6 +188,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_personas(cfg, errors)
     _validate_webhook_triggers(cfg, errors)
     _validate_scope_entitlements(cfg, errors)
+    _validate_outbound_roster(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
     _validate_memory(cfg, errors)
@@ -309,12 +344,13 @@ def _validate_entitlements(raw: Any, path: str, errors: list[str]) -> None:
             )
         elif value not in ACCEPTED_CEILINGS:
             _err(f"{ep}: must be one of {sorted(ACCEPTED_CEILINGS)}", errors)
-        elif value == "confirm" and key not in ("external_send", "external_send_internal"):
-            # `confirm` (ADR 0071) only has defined behavior in enforce()'s
-            # EXTERNAL_SEND branch; reject it on any other class so it can't be
-            # authored where it does nothing.
+        elif value == "confirm" and key not in SEND_ACTION_CLASSES:
+            # `confirm` (ADR 0071) only has defined behavior in enforce()'s send
+            # branch; reject it on any non-send class so it can't be authored where
+            # it does nothing.
             _err(
-                f"{ep}: 'confirm' is only valid for external_send / external_send_internal (ADR 0071)",
+                f"{ep}: 'confirm' is only valid for the send classes "
+                f"{sorted(SEND_ACTION_CLASSES)} (ADR 0071)",
                 errors,
             )
 
@@ -457,6 +493,128 @@ def _validate_scope_entitlements(cfg: dict[str, Any], errors: list[str]) -> None
             )
 
 
+def _canon_roster_address(raw: str) -> str | None:
+    """Canonicalize an outbound-roster address to ``@domain`` or ``local@domain``.
+
+    Mirrors the runtime classifier's ``_canonicalize_roster_entry`` (strict:
+    lowercased, no display-name/list/whitespace, exact-domain, no plus-tag
+    widening) so the validator's notion of "same address" matches the classifier's
+    notion of "match". Returns ``None`` for anything malformed.
+    """
+    s = raw.strip().lower()
+    if not s or any(ch in s for ch in ("<", ">", '"', " ", "\t", ",", ";", "\n", "\r")):
+        return None
+    if s.startswith("@"):
+        domain = s[1:]
+        labels = domain.split(".")
+        if len(labels) < 2 or any(label == "" for label in labels):
+            return None
+        return f"@{domain}"
+    if s.count("@") != 1:
+        return None
+    local, _, domain = s.partition("@")
+    if not local or not domain:
+        return None
+    labels = domain.split(".")
+    if len(labels) < 2 or any(label == "" for label in labels):
+        return None
+    return f"{local}@{domain}"
+
+
+def _canonical_inbound_keys(scope: dict[str, Any]) -> set[str]:
+    """Canonical keys for ``scope.inbound_allow_from`` (for the collision check)."""
+    out: set[str] = set()
+    raw = scope.get("inbound_allow_from")
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, str):
+                canon = _canon_roster_address(entry)
+                if canon is not None:
+                    out.add(canon)
+    return out
+
+
+def _validate_outbound_roster(cfg: dict[str, Any], errors: list[str]) -> None:
+    """Validate ``scope.outbound_roster`` (ADR 0075).
+
+    Each entry is an object with ``address`` (a ``local@domain`` exact address or
+    an ``@domain`` grant), ``class`` in the closed set {client, records_vendor},
+    and an optional ``note``. A whole-@domain grant at a public-mail provider is
+    rejected (the domain is shared by millions) — but an EXACT address at such a
+    domain is valid (a PI client is a consumer on gmail). A canonical address
+    appearing under more than one outbound class, or also in
+    ``scope.inbound_allow_from``, is rejected: a recipient has exactly one class.
+    """
+    scope = cfg.get("scope")
+    if not isinstance(scope, dict):
+        return
+    raw = scope.get("outbound_roster")
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        _err(f"scope.outbound_roster must be a list; got {type(raw).__name__}", errors)
+        return
+    inbound_keys = _canonical_inbound_keys(scope)
+    seen_class: dict[str, str] = {}
+    for i, entry in enumerate(raw):
+        _validate_one_outbound_entry(entry, i, inbound_keys, seen_class, errors)
+
+
+def _validate_one_outbound_entry(
+    entry: Any,
+    i: int,
+    inbound_keys: set[str],
+    seen_class: dict[str, str],
+    errors: list[str],
+) -> None:
+    prefix = f"scope.outbound_roster[{i}]"
+    if not isinstance(entry, dict):
+        _err(f"{prefix}: must be a mapping", errors)
+        return
+    address = entry.get("address")
+    class_str = entry.get("class")
+    note = entry.get("note")
+    if not isinstance(address, str) or not address.strip():
+        _err(f"{prefix}.address: required non-empty string", errors)
+        return
+    if not isinstance(class_str, str) or class_str not in OUTBOUND_ROSTER_CLASSES:
+        _err(f"{prefix}.class: must be one of {sorted(OUTBOUND_ROSTER_CLASSES)}", errors)
+        return
+    if note is not None and not isinstance(note, str):
+        _err(f"{prefix}.note: must be a string when present", errors)
+    canon = _canon_roster_address(address)
+    if canon is None:
+        _err(
+            f"{prefix}.address: {address!r} must be an exact address (local@domain) "
+            "or an @domain grant",
+            errors,
+        )
+        return
+    if canon.startswith("@") and canon[1:] in _PUBLIC_MAIL_DOMAINS:
+        _err(
+            f"{prefix}.address: a whole-@domain grant at a public-mail provider "
+            f"({canon[1:]}) is not allowed; author the exact address",
+            errors,
+        )
+        return
+    if canon in inbound_keys:
+        _err(
+            f"{prefix}.address: {canon!r} is already in scope.inbound_allow_from; a "
+            "recipient cannot be both internal and a typed outbound class",
+            errors,
+        )
+        return
+    prior = seen_class.get(canon)
+    if prior is not None and prior != class_str:
+        _err(
+            f"{prefix}.address: {canon!r} appears in more than one outbound roster "
+            f"class ({prior}, {class_str})",
+            errors,
+        )
+        return
+    seen_class[canon] = class_str
+
+
 def _validate_google_auth_entitlements(cfg: dict[str, Any], errors: list[str]) -> None:
     """Reject the retired managed-mailbox action_ceilings (ADR 0056)."""
     google_auth = cfg.get("google_auth")
@@ -552,6 +710,8 @@ __all__ = [
     "ACCEPTED_VERTICALS",
     "AUTHORED_EXPOSURE_ACTION_CLASSES",
     "LEGACY_ENTITLEMENT_FIELDS",
+    "OUTBOUND_ROSTER_CLASSES",
     "REQUIRED_TOP_LEVEL_FIELDS",
+    "SEND_ACTION_CLASSES",
     "validate_customer_yaml",
 ]

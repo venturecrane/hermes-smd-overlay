@@ -691,6 +691,8 @@ _AUTHORED_EXPOSURE_ACTION_CLASSES = (
     "internal_write",
     "external_send",
     "external_send_internal",
+    "external_send_client",
+    "external_send_vendor",
     "commitment",
     "destructive",
     "code_execution",
@@ -708,6 +710,23 @@ def _initiation_block(raw: Any) -> dict[str, bool]:
     if isinstance(raw, dict):
         for flag in out:
             out[flag] = raw.get(flag) is True
+    return out
+
+
+def _skill_settings_block(raw: Any) -> dict[str, Any]:
+    """Scalar-only pass-through of a skill's authored ``settings`` map (ADR 0075).
+
+    A skill may carry authored scalar knobs (e.g. a chase cadence, an escalation
+    attempt count, a treatment-gap threshold). They are rendered verbatim into the
+    per-profile skill block so the agent reads them at runtime. Only scalars
+    (str / int / float / bool) pass through — nested maps/lists are dropped, keeping
+    this a flat, minimal, non-executable surface. Returns ``{}`` when absent or
+    empty so a skill without settings stays byte-identical."""
+    out: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if isinstance(value, (str, int, float, bool)):
+                out[str(key)] = value
     return out
 
 
@@ -741,16 +760,21 @@ def _persona_config(
             continue
         name = skill.get("name")
         key = f"{persona_slug}/{name}"
-        skills.append(
-            {
-                "name": name,
-                "version": resolved_pins.get(key, str(skill.get("version", "pending"))),
-                # ADR 0056: a skill carries its initiation grants (how it may
-                # START), not a scalar trust_ceiling. trust_ceiling is retired
-                # with no shim and is no longer emitted into profile config.
-                "initiation": _initiation_block(skill.get("initiation")),
-            }
-        )
+        skill_entry: dict[str, Any] = {
+            "name": name,
+            "version": resolved_pins.get(key, str(skill.get("version", "pending"))),
+            # ADR 0056: a skill carries its initiation grants (how it may
+            # START), not a scalar trust_ceiling. trust_ceiling is retired
+            # with no shim and is no longer emitted into profile config.
+            "initiation": _initiation_block(skill.get("initiation")),
+        }
+        # ADR 0075: authored scalar skill settings (chase cadence, gap threshold,
+        # escalation count). Emitted only when present so settings-less skills stay
+        # byte-identical.
+        settings = _skill_settings_block(skill.get("settings"))
+        if settings:
+            skill_entry["settings"] = settings
+        skills.append(skill_entry)
 
     config: dict[str, Any] = {
         "schema_version": 1,

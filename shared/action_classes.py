@@ -56,6 +56,13 @@ class ActionClass(str, enum.Enum):
     # recipient_classifier; an unclassifiable recipient is forced OUTSIDE (draft),
     # never INTERNAL — a send is never promoted to autonomous on an unknown recipient.
     EXTERNAL_SEND_INTERNAL = "external_send_internal"
+    # Send to a firm's own rostered CLIENT / RECORDS VENDOR (scope.outbound_roster).
+    # Each carries its own authored, fail-closed ceiling — graduatable to autonomous
+    # independently of the outside class (ADR 0075). The recipient axis is resolved
+    # in evaluate_tool_call via recipient_classifier.classify_recipients_typed; an
+    # unclassifiable recipient is forced OUTSIDE (draft), never CLIENT/VENDOR.
+    EXTERNAL_SEND_CLIENT = "external_send_client"
+    EXTERNAL_SEND_VENDOR = "external_send_vendor"
     COMMITMENT = "commitment"  # Sign, accept terms, agree to dates — never autonomous
     DESTRUCTIVE = "destructive"  # Delete, drop, irreversible — explicit per-call approval
     CODE_EXECUTION = (
