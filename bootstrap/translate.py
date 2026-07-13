@@ -859,6 +859,60 @@ def _persona_config(
     return config
 
 
+# Ceiling value -> the actionable SOUL.md phrasing. Values match the ADR 0035 /
+# ADR 0071 authored vocabulary; an unknown value renders nothing (fail-quiet in
+# TEXT ONLY — enforcement handles unknown values as fail-closed on its own).
+_CEILING_SOUL_LINE: dict[str, str] = {
+    "autonomous": (
+        "act on your own. When a skill calls for this action and its conditions "
+        "are met, DO it — for a send, actually send it; do not leave a draft"
+    ),
+    "confirm": (
+        "prepare the action and request explicit approval in the same turn; act only once approved"
+    ),
+    "draft_for_review": "prepare a draft; a person reviews and sends or executes it",
+    "refused": "do not perform this action at all",
+}
+
+
+def _send_posture_soul_section(persona: dict[str, Any]) -> str:
+    """Render the persona's AUTHORED exposure into SOUL.md (ADR 0035 / ss ADR 0073).
+
+    The trust plugin enforces these ceilings in code regardless of this text.
+    This section exists to close the other half of the gap: an agent that
+    cannot see its authored posture defaults BELOW it (the ss ADR 0073 live
+    proof drafted a chase its ceiling allowed it to send). Only authored
+    classes are rendered — no imposed defaults; a persona with no authored
+    exposure produces a byte-identical SOUL.md (the _write_if_changed
+    idempotency contract).
+    """
+    entitlements = persona.get("entitlements")
+    if not isinstance(entitlements, dict):
+        return ""
+    raw = entitlements.get("exposure")
+    if not isinstance(raw, dict) or not raw:
+        return ""
+    lines: list[str] = []
+    for action, ceiling in raw.items():
+        if not isinstance(action, str) or not isinstance(ceiling, str):
+            continue
+        desc = _CEILING_SOUL_LINE.get(ceiling.strip().lower())
+        if desc is None:
+            continue
+        lines.append(f"- **{action}**: {ceiling.strip().lower()} — {desc}.")
+    if not lines:
+        return ""
+    return (
+        "\n## Authored autonomy (set by the firm)\n\n"
+        "Your authorization for each action class, authored in the engagement "
+        "config. Work AT this level: do not hold back below it, and never try to "
+        "exceed it. Enforcement gates every action in code regardless of this "
+        "text (content-sensitivity floor, taint gate, banned tools, recipient "
+        "classification); a gate refusal is a normal, logged outcome — redraft "
+        "or surface per the skill, never work around it.\n\n" + "\n".join(lines) + "\n"
+    )
+
+
 def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
     """Build the per-persona ``SOUL.md`` body.
 
@@ -883,6 +937,7 @@ def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
         f"{vertical}\n\n"
         f"## Tone\n\n"
         f"{tone_block}\n"
+        f"{_send_posture_soul_section(persona)}"
         f"{_relationship_soul_section(customer)}"
         f"{_digest_home_soul_section(customer)}"
         f"{_escalation_soul_section(customer)}"

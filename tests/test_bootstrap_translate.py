@@ -178,6 +178,61 @@ _USERS_BLOCK = dedent(
 )
 
 
+def test_translate_renders_authored_exposure_into_soul_md(tmp_path):
+    """ADR 0035 / ss ADR 0073: the persona's AUTHORED exposure reaches SOUL.md so
+    the agent acts AT its ceiling instead of defaulting below it (the live-proof
+    gap: an autonomous chase was drafted because the agent could not see its
+    posture). Enforcement remains the trust plugin's job regardless of text."""
+    autonomous = VALID_YAML.replace("external_send: draft_for_review", "external_send: autonomous")
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, autonomous)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "## Authored autonomy (set by the firm)" in soul
+    # the autonomous line is actionable: send, don't draft
+    assert "**external_send**: autonomous" in soul
+    assert "do not leave a draft" in soul
+    # the authored internal_write renders too; nothing else is invented
+    assert "**internal_write**: autonomous" in soul
+    assert "**destructive**" not in soul  # unauthored class never rendered
+
+
+def test_translate_renders_draft_for_review_exposure_plainly(tmp_path):
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "**external_send**: draft_for_review" in soul
+    assert "a person reviews and sends" in soul
+
+
+def test_translate_no_exposure_yields_no_autonomy_section(tmp_path):
+    """No authored exposure ⇒ no section, no fabricated posture (ADR 0035)."""
+    no_exposure = VALID_YAML.replace(
+        """    entitlements:
+      exposure:
+        internal_write: autonomous
+        external_send: draft_for_review
+""",
+        "",
+    )
+    assert "entitlements" not in no_exposure  # the surgery actually removed the block
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, no_exposure)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    assert "Authored autonomy" not in soul
+
+
 def test_translate_materializes_principal_into_soul_md(tmp_path):
     """#1326: the principal from the authored users[] list reaches SOUL.md so
     the running agent has a statement of whom it works for."""
