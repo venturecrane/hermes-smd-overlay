@@ -439,3 +439,165 @@ def test_relationship_non_mapping_raises(tmp_path):
     cfg = CustomerConfig.from_volume(str(_write(tmp_path, bad)))
     with pytest.raises(CustomerConfigError):
         _ = cfg.relationship
+
+
+# ---------------------------------------------------------------------------
+# ADR 0075 — typed outbound roster (scope.outbound_roster)
+# ---------------------------------------------------------------------------
+
+
+def _with_scope_extra(extra: str) -> str:
+    """Inject extra scope keys after domain_blocks in VALID_YAML."""
+    return VALID_YAML.replace("  domain_blocks: []\n", "  domain_blocks: []\n" + extra)
+
+
+_OUTBOUND_ROSTER_SCOPE = (
+    "  inbound_allow_from:\n"
+    "    - '@ashtonandprice.com'\n"
+    "  outbound_roster:\n"
+    "    - address: jane@gmail.com\n"
+    "      class: client\n"
+    "      note: PI client on gmail\n"
+    "    - address: RECORDS@radiology.com\n"
+    "      class: records_vendor\n"
+)
+
+
+def test_outbound_roster_normalizes_to_tuples(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, _with_scope_extra(_OUTBOUND_ROSTER_SCOPE))))
+    # Lowercased + typed; order preserved.
+    assert cfg.outbound_roster == [
+        ("jane@gmail.com", "client"),
+        ("records@radiology.com", "records_vendor"),
+    ]
+
+
+def test_outbound_roster_drops_malformed_entries_fail_closed(tmp_path):
+    scope = (
+        "  outbound_roster:\n"
+        "    - address: ok@client.com\n"
+        "      class: client\n"
+        "    - address: x@y.com\n"
+        "      class: bogus\n"          # bad class → dropped
+        "    - not-a-mapping\n"          # non-dict → dropped
+        "    - class: client\n"          # missing address → dropped
+    )
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, _with_scope_extra(scope))))
+    assert cfg.outbound_roster == [("ok@client.com", "client")]
+
+
+def test_outbound_roster_absent_is_empty(tmp_path):
+    cfg = CustomerConfig.from_volume(str(_write(tmp_path, VALID_YAML)))
+    assert cfg.outbound_roster == []
+
+
+def test_outbound_roster_non_list_raises(tmp_path):
+    cfg = CustomerConfig.from_volume(
+        str(_write(tmp_path, _with_scope_extra("  outbound_roster: not-a-list\n")))
+    )
+    with pytest.raises(CustomerConfigError):
+        _ = cfg.outbound_roster
+
+
+# ---- validate_customer_yaml: outbound_roster accept/reject ----------------
+
+
+def test_validate_accepts_valid_outbound_roster(tmp_path):
+    path = _write(tmp_path, _with_scope_extra(_OUTBOUND_ROSTER_SCOPE))
+    assert validate_customer_yaml(path) == []
+
+
+def test_validate_rejects_bad_outbound_class(tmp_path):
+    scope = "  outbound_roster:\n    - address: a@b.com\n      class: opposing_counsel\n"
+    errors = validate_customer_yaml(_write(tmp_path, _with_scope_extra(scope)))
+    assert any("outbound_roster" in e and "class" in e for e in errors)
+
+
+def test_validate_accepts_exact_public_domain_client_rejects_domain_grant(tmp_path):
+    # EXACT gmail address is a valid client (PI clients are consumers on gmail).
+    ok_scope = "  outbound_roster:\n    - address: jane@gmail.com\n      class: client\n"
+    assert validate_customer_yaml(_write(tmp_path, _with_scope_extra(ok_scope))) == []
+    # A whole-@gmail.com grant is meaningless (shared by millions) → rejected.
+    bad_scope = "  outbound_roster:\n    - address: '@gmail.com'\n      class: client\n"
+    errors = validate_customer_yaml(_write(tmp_path, _with_scope_extra(bad_scope)))
+    assert any("public-mail" in e for e in errors)
+
+
+def test_validate_rejects_cross_class_collision(tmp_path):
+    scope = (
+        "  outbound_roster:\n"
+        "    - address: x@firm-vendor.com\n"
+        "      class: client\n"
+        "    - address: x@firm-vendor.com\n"
+        "      class: records_vendor\n"
+    )
+    errors = validate_customer_yaml(_write(tmp_path, _with_scope_extra(scope)))
+    assert any("more than one outbound roster class" in e for e in errors)
+
+
+def test_validate_rejects_inbound_collision(tmp_path):
+    scope = (
+        "  inbound_allow_from:\n"
+        "    - scott@smd.services\n"
+        "  outbound_roster:\n"
+        "    - address: scott@smd.services\n"
+        "      class: client\n"
+    )
+    errors = validate_customer_yaml(_write(tmp_path, _with_scope_extra(scope)))
+    assert any("inbound_allow_from" in e for e in errors)
+
+
+def test_validate_rejects_malformed_outbound_address(tmp_path):
+    scope = "  outbound_roster:\n    - address: not-an-email\n      class: client\n"
+    errors = validate_customer_yaml(_write(tmp_path, _with_scope_extra(scope)))
+    assert any("outbound_roster" in e and "address" in e for e in errors)
+
+
+# ---- validate_customer_yaml: new exposure keys + confirm ------------------
+
+
+def test_validate_accepts_new_send_exposure_keys(tmp_path):
+    bad = VALID_YAML.replace(
+        "        external_send: draft_for_review\n",
+        "        external_send: draft_for_review\n"
+        "        external_send_client: autonomous\n"
+        "        external_send_vendor: confirm\n",
+    )
+    assert "external_send_client: autonomous" in bad  # guard: replace landed
+    assert validate_customer_yaml(_write(tmp_path, bad)) == []
+
+
+def test_validate_rejects_confirm_on_non_send_class(tmp_path):
+    bad = VALID_YAML.replace("internal_write: autonomous", "internal_write: confirm")
+    errors = validate_customer_yaml(_write(tmp_path, bad))
+    assert any("confirm" in e and "send classes" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Cross-module parity: the accepted-exposure vocabulary must agree between the
+# validator, the translator filter, and the runtime ActionClass send members.
+# A one-sided edit silently drops a key (validate rejects it, or translate omits
+# it from the profile) — this pins the agreement.
+# ---------------------------------------------------------------------------
+
+
+def test_exposure_action_class_parity_validate_translate_enum():
+    from bootstrap.translate import _AUTHORED_EXPOSURE_ACTION_CLASSES
+    from bootstrap.validate import AUTHORED_EXPOSURE_ACTION_CLASSES, SEND_ACTION_CLASSES
+    from shared.action_classes import ActionClass
+
+    validate_keys = set(AUTHORED_EXPOSURE_ACTION_CLASSES)
+    translate_keys = set(_AUTHORED_EXPOSURE_ACTION_CLASSES)
+    # validator filter == translator filter
+    assert validate_keys == translate_keys
+    # both == every ActionClass value EXCEPT the never-authored read + the
+    # fail-closed terminal refused.
+    enum_authored = {ac.value for ac in ActionClass} - {"read", "refused"}
+    assert validate_keys == enum_authored
+    # the send classes the confirm ceiling + typed roster resolve to
+    assert SEND_ACTION_CLASSES == {
+        ActionClass.EXTERNAL_SEND.value,
+        ActionClass.EXTERNAL_SEND_INTERNAL.value,
+        ActionClass.EXTERNAL_SEND_CLIENT.value,
+        ActionClass.EXTERNAL_SEND_VENDOR.value,
+    }

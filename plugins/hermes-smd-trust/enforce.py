@@ -76,6 +76,8 @@ _TAINT_GATED_CLASSES: frozenset[ActionClass] = frozenset(
     {
         ActionClass.EXTERNAL_SEND,
         ActionClass.EXTERNAL_SEND_INTERNAL,
+        ActionClass.EXTERNAL_SEND_CLIENT,
+        ActionClass.EXTERNAL_SEND_VENDOR,
         ActionClass.DESTRUCTIVE,
         ActionClass.COMMITMENT,
         ActionClass.CODE_EXECUTION,
@@ -326,11 +328,17 @@ def _enforce_resolved(
             draft_reason="draft_for_review skills do not originate destructive actions; report instead",
             draft_audit="refuse",
         )
-    if action in (ActionClass.EXTERNAL_SEND, ActionClass.EXTERNAL_SEND_INTERNAL):
-        # Both send classes resolve identically against their OWN authored ceiling
-        # (external_send = outside recipient; external_send_internal = rostered
-        # staff recipient). The recipient axis is decided upstream in
-        # evaluate_tool_call; by here the class is definite.
+    if action in (
+        ActionClass.EXTERNAL_SEND,
+        ActionClass.EXTERNAL_SEND_INTERNAL,
+        ActionClass.EXTERNAL_SEND_CLIENT,
+        ActionClass.EXTERNAL_SEND_VENDOR,
+    ):
+        # All four send classes resolve identically against their OWN authored
+        # ceiling (external_send = outside recipient; external_send_internal =
+        # rostered staff; external_send_client / external_send_vendor = the firm's
+        # own rostered client / records vendor). The recipient axis is decided
+        # upstream in evaluate_tool_call; by here the class is definite.
         if effective == Ceiling.AUTONOMOUS:
             return _allow(f"{action.value} permitted: authored exposure is autonomous", action)
         if effective == Ceiling.CONFIRM:
@@ -756,6 +764,29 @@ def _resolve_roster() -> list[str]:
         return []
 
 
+def _resolve_typed_roster() -> list[tuple[str, str]]:
+    """Live typed outbound roster (``scope.outbound_roster``) from the trusted
+    config, for OUTBOUND recipient classification (ADR 0075 — live-read so
+    authoring it takes effect with no restart).
+
+    Each entry is ``(address, class)`` with ``class`` in the closed set
+    ``client`` / ``records_vendor``. Empty on missing/stub config — fail-closed:
+    with no typed roster, every outside recipient stays on the outside
+    ``external_send`` ceiling. Same fail-closed posture as :func:`_resolve_roster`;
+    any OTHER read fault propagates to ``evaluate_tool_call``'s outer handler,
+    which fails closed for the send. The roster is human-authored OUTBOUND
+    authorization (never grown from inbound).
+    """
+    from shared.customer_config import CustomerConfig  # local import
+
+    try:
+        return CustomerConfig.from_volume().outbound_roster
+    except NotImplementedError:
+        return []
+    except CustomerConfigMissingError:
+        return []
+
+
 def _reclassify_send(
     tool_name: str,
     args: dict,
@@ -766,15 +797,17 @@ def _reclassify_send(
     """Route a proactive send to its recipient-scoped action class.
 
     Only proactive sends (``send_message`` / ``forward_message`` / ``send_draft``)
-    that ``classify_tool`` tagged EXTERNAL_SEND are re-routed. A rostered recipient
-    → EXTERNAL_SEND_INTERNAL; anyone else → EXTERNAL_SEND. An UNRESOLVED recipient
-    (a ``send_draft`` of a draft this session never observed, or an empty/garbage
-    ``to``) → EXTERNAL_SEND (outside/draft), **never** INTERNAL: a send is never
-    promoted to autonomous on an unknown recipient. ``reply_to_message`` is not a
-    CLASSIFIED_SEND_TOOL — the reply plugin owns that recipient-locked path.
+    that ``classify_tool`` tagged EXTERNAL_SEND are re-routed. A rostered internal
+    recipient → EXTERNAL_SEND_INTERNAL; a typed-roster CLIENT / VENDOR recipient →
+    EXTERNAL_SEND_CLIENT / EXTERNAL_SEND_VENDOR; anyone else → EXTERNAL_SEND. An
+    UNRESOLVED recipient (a ``send_draft`` of a draft this session never observed,
+    or an empty/garbage ``to``) → EXTERNAL_SEND (outside/draft), **never** a
+    rostered class: a send is never promoted to a graduatable ceiling on an unknown
+    recipient. ``reply_to_message`` is not a CLASSIFIED_SEND_TOOL — the reply plugin
+    owns that recipient-locked path.
     """
     from shared.outbound_recipient import CLASSIFIED_SEND_TOOLS, send_recipients
-    from shared.recipient_classifier import RecipientClass, classify_recipients
+    from shared.recipient_classifier import RecipientClass, classify_recipients_typed
 
     if base_action is not ActionClass.EXTERNAL_SEND or tool_name not in CLASSIFIED_SEND_TOOLS:
         return base_action
@@ -785,9 +818,15 @@ def _reclassify_send(
             tool_name,
         )
         return ActionClass.EXTERNAL_SEND
-    cls = classify_recipients(list(recips), _resolve_roster(), from_tainted=tainted)
+    cls = classify_recipients_typed(
+        list(recips), _resolve_roster(), _resolve_typed_roster(), from_tainted=tainted
+    )
     if cls is RecipientClass.INTERNAL:
         return ActionClass.EXTERNAL_SEND_INTERNAL
+    if cls is RecipientClass.CLIENT:
+        return ActionClass.EXTERNAL_SEND_CLIENT
+    if cls is RecipientClass.VENDOR:
+        return ActionClass.EXTERNAL_SEND_VENDOR
     return ActionClass.EXTERNAL_SEND
 
 
@@ -891,23 +930,29 @@ def evaluate_tool_call(
 
     _audit_decision(tool_name, persona_slug, decision)
 
-    # Content-sensitivity floor (ADR 0031). Applies to OUTSIDE sends only: money /
-    # contract / scope / legal content bound for a non-roster recipient is
-    # downgraded to a draft even under an autonomous exposure. An INTERNAL send
-    # (external_send_internal, to the firm's own rostered staff) is deliberately
-    # NOT content-floored — the whole value of an internal alert is that it CARRIES
-    # the matter/deadline/dollar context to a colleague; drafting it would re-break
-    # the fix. Only a send the exposure would ALLOW is floored (a draft/refuse
-    # already withholds it).
-    if decision.allowed and effective_action == ActionClass.EXTERNAL_SEND:
+    # Content-sensitivity floor (ADR 0031). Applies to sends that LEAVE the firm:
+    # the outside class plus the typed client / records-vendor classes. Money /
+    # contract / scope / legal content bound for a client or vendor is downgraded
+    # to a draft even under an autonomous exposure — a settlement dollar figure to
+    # a client must draft. Only the INTERNAL send (external_send_internal, to the
+    # firm's own rostered staff) is deliberately NOT content-floored — the whole
+    # value of an internal alert is that it CARRIES the matter/deadline/dollar
+    # context to a colleague; drafting it would re-break the ADR 0072 fix. Only a
+    # send the exposure would ALLOW is floored (a draft/refuse already withholds it).
+    if decision.allowed and effective_action in (
+        ActionClass.EXTERNAL_SEND,
+        ActionClass.EXTERNAL_SEND_CLIENT,
+        ActionClass.EXTERNAL_SEND_VENDOR,
+    ):
         floor_block = _apply_content_floor(tool_name, args)
         if floor_block is not None:
             return floor_block
 
-        # Voice live-gate (ADR 0028 §2, #855). ONLY an AUTONOMOUS outside send
+        # Voice live-gate (ADR 0028 §2, #855). ONLY an AUTONOMOUS send that LEAVES
+        # the firm (outside, or the typed client / records-vendor classes)
         # impersonates the principal's voice with no human review — confirm /
         # draft / refused already route to a human, and external_send_internal is
-        # ops traffic, so both are out of scope. The gate itself adds the
+        # ops traffic, so it is out of scope. The gate itself adds the
         # voice-authored BINDING check (silent on a non-voice seat); when bound it
         # downgrades to draft (same block-directive plumbing as the content floor)
         # unless the voice transform demonstrably ran on this turn.

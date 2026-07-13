@@ -43,6 +43,29 @@ rules, enforced here in code:
   originated in untrusted/tainted content (``from_tainted=True``), the result is
   OUTSIDE even if it matches the roster — an injected "send to X" can never
   promote X to internal.
+
+The typed outbound roster — CLIENT / VENDOR are independently-authored classes
+--------------------------------------------------------------------------------
+Beyond the two-way internal/outside split, :func:`classify_recipients_typed`
+resolves a send against a **typed outbound roster**: a human-authored list of
+``(entry, class)`` pairs where ``class`` is a closed vocabulary of exactly
+``client`` (the firm's own client) and ``records_vendor`` (a records provider).
+These map to the ``external_send_client`` / ``external_send_vendor`` action
+classes, each with its OWN authored, fail-closed ceiling — so an engagement can
+graduate "chase our own client" or "chase the records vendor" to autonomous with
+a one-line config change, without touching the outside class. Same hard rules as
+the internal roster apply: **human-authored only** (never grown from inbound),
+strict canonicalization (exact address or exact ``@domain`` equality, no plus-tag
+widening, no display-name parsing, homoglyph-safe), and tainted provenance forces
+OUTSIDE before any match. The vocabulary is closed BY DESIGN: there is no
+"opposing counsel" or "court" class — an un-rostered outside recipient stays
+:data:`RecipientClass.OUTSIDE`, governed by the outside ``external_send`` ceiling,
+exactly as before. The classifier NEVER guesses: an address that matches entries
+in more than one class resolves to OUTSIDE (the validators make this unreachable,
+but the classifier does not depend on them). The 3-class functions
+(:func:`classify_recipient`, :func:`classify_recipients`) are unchanged — the
+reactive reply gate consumes them; only the proactive send gate reaches for the
+typed variant.
 """
 
 from __future__ import annotations
@@ -59,6 +82,12 @@ from collections.abc import Iterable, Sequence
 # (the outside ceiling, unchanged).
 ACTION_CLASS_EXTERNAL_SEND_INTERNAL = "external_send_internal"
 ACTION_CLASS_EXTERNAL_SEND = "external_send"
+# A send to a firm's own rostered CLIENT / RECORDS VENDOR resolves to its own
+# authored, fail-closed ceiling (graduatable to autonomous independently of the
+# outside class). These MUST equal the ``ActionClass`` ``.value`` strings on both
+# enforcement sides.
+ACTION_CLASS_EXTERNAL_SEND_CLIENT = "external_send_client"
+ACTION_CLASS_EXTERNAL_SEND_VENDOR = "external_send_vendor"
 
 
 class UnclassifiedRecipientError(Exception):
@@ -74,14 +103,20 @@ class UnclassifiedRecipientError(Exception):
 class RecipientClass(str, enum.Enum):
     """Outbound recipient trust classes.
 
-    ``INTERNAL`` — a human-rostered address; eligible for the
-    ``external_send_internal`` ceiling. ``OUTSIDE`` — any other resolvable
-    address; governed by the ``external_send`` ceiling. ``UNKNOWN`` — the
-    recipient could not be resolved to a clean address; the caller MUST fail
-    closed with a hard error (never a silent draft).
+    ``INTERNAL`` — a human-rostered internal-staff address; eligible for the
+    ``external_send_internal`` ceiling. ``CLIENT`` / ``VENDOR`` — a human-rostered
+    outbound-roster address typed as the firm's own client / records vendor;
+    eligible for the ``external_send_client`` / ``external_send_vendor`` ceilings
+    (each authored independently, fail-closed when unauthored). ``OUTSIDE`` — any
+    other resolvable address (opposing counsel, court, anyone un-rostered);
+    governed by the ``external_send`` ceiling. ``UNKNOWN`` — the recipient could
+    not be resolved to a clean address; the caller MUST fail closed with a hard
+    error (never a silent draft).
     """
 
     INTERNAL = "internal"
+    CLIENT = "client"
+    VENDOR = "records_vendor"
     OUTSIDE = "outside"
     UNKNOWN = "unknown"
 
@@ -211,17 +246,137 @@ def classify_recipients(
     return worst
 
 
+# Closed vocabulary of the typed outbound-roster class strings → the recipient
+# class they resolve to. Anything not in this map is ignored (never guessed).
+_TYPED_ROSTER_CLASSES: dict[str, RecipientClass] = {
+    "client": RecipientClass.CLIENT,
+    "records_vendor": RecipientClass.VENDOR,
+}
+
+
+def _roster_entry_matches(entry: str, canon: str, canon_domain: str) -> bool:
+    """True iff a roster ENTRY matches a canonical recipient.
+
+    Same strict semantics as :func:`classify_recipient`: an ``@domain`` entry
+    matches on exact domain equality; a ``local@domain`` entry matches on exact
+    address equality. A malformed entry canonicalizes to ``None`` and never
+    matches, so a junk roster line can never widen into an accidental match.
+    """
+    centry = _canonicalize_roster_entry(entry)
+    if centry is None:
+        return False
+    if centry.startswith("@"):
+        return canon_domain == centry[1:]
+    return canon == centry
+
+
+def _classify_one_typed(
+    recipient: str,
+    internal_roster: Iterable[str],
+    typed_roster: Sequence[tuple[str, str]],
+    *,
+    from_tainted: bool,
+) -> RecipientClass:
+    """Classify a single recipient across the internal roster + typed roster.
+
+    Order: unresolvable → UNKNOWN; tainted → OUTSIDE (before any match); internal
+    roster match → INTERNAL (a rostered internal recipient outranks a typed
+    class); else the typed roster decides CLIENT / VENDOR. Zero typed matches, OR
+    a defensive multi-class match (one address typed as more than one class),
+    resolves to OUTSIDE — the classifier never guesses.
+    """
+    canon = _canonicalize_address(recipient)
+    if canon is None:
+        return RecipientClass.UNKNOWN
+    if from_tainted:
+        return RecipientClass.OUTSIDE
+    _, _, canon_domain = canon.partition("@")
+    for entry in internal_roster:
+        if _roster_entry_matches(entry, canon, canon_domain):
+            return RecipientClass.INTERNAL
+    matched: set[RecipientClass] = set()
+    for entry, class_str in typed_roster:
+        cls = _TYPED_ROSTER_CLASSES.get(class_str)
+        if cls is None:
+            continue
+        if _roster_entry_matches(entry, canon, canon_domain):
+            matched.add(cls)
+    if len(matched) == 1:
+        return next(iter(matched))
+    # Zero matches → outside. More than one class on one address → OUTSIDE too:
+    # the validators reject a cross-class collision, but the classifier does not
+    # depend on them and refuses to guess which class wins.
+    return RecipientClass.OUTSIDE
+
+
+def classify_recipients_typed(
+    recipients: Sequence[str],
+    internal_roster: Iterable[str],
+    typed_roster: Sequence[tuple[str, str]],
+    *,
+    from_tainted: bool = False,
+) -> RecipientClass:
+    """Aggregate class for a send, resolving CLIENT / VENDOR via a typed roster.
+
+    Each recipient is classified by :func:`_classify_one_typed`; the send as a
+    whole is aggregated to prevent ceiling-shopping on a mixed send:
+
+      * empty recipient list → UNKNOWN (a send with no resolvable recipient is a
+        hard error, not an autonomous send);
+      * any UNKNOWN recipient → UNKNOWN;
+      * any OUTSIDE recipient → OUTSIDE;
+      * otherwise the per-recipient classes are ⊆ {INTERNAL, CLIENT, VENDOR}.
+        Internal CCs ride along governed by the counterparty class:
+        ⊆ {INTERNAL} → INTERNAL, ⊆ {INTERNAL, CLIENT} → CLIENT,
+        ⊆ {INTERNAL, VENDOR} → VENDOR, and a CLIENT+VENDOR mix → OUTSIDE (a
+        heterogeneous outside mix fails toward draft).
+
+    ``internal_roster`` (``scope.inbound_allow_from``) and ``typed_roster``
+    (``scope.outbound_roster`` as ``(entry, class)`` pairs) are both materialized
+    once so a one-shot iterable is not exhausted across recipients.
+    """
+    internal_materialized = list(internal_roster)
+    typed_materialized = list(typed_roster)
+    if not recipients:
+        return RecipientClass.UNKNOWN
+    seen: set[RecipientClass] = set()
+    for r in recipients:
+        seen.add(
+            _classify_one_typed(
+                r, internal_materialized, typed_materialized, from_tainted=from_tainted
+            )
+        )
+    if RecipientClass.UNKNOWN in seen:
+        return RecipientClass.UNKNOWN
+    if RecipientClass.OUTSIDE in seen:
+        return RecipientClass.OUTSIDE
+    non_internal = seen - {RecipientClass.INTERNAL}
+    if not non_internal:
+        return RecipientClass.INTERNAL
+    if non_internal == {RecipientClass.CLIENT}:
+        return RecipientClass.CLIENT
+    if non_internal == {RecipientClass.VENDOR}:
+        return RecipientClass.VENDOR
+    # CLIENT + VENDOR heterogeneous mix — fail toward the outside ceiling (draft).
+    return RecipientClass.OUTSIDE
+
+
 def send_action_class(recipient_class: RecipientClass) -> str:
     """Map a resolved recipient class to the send action-class string.
 
-    INTERNAL → ``external_send_internal``; OUTSIDE → ``external_send``. UNKNOWN is
-    a **hard error** (:class:`UnclassifiedRecipientError`), never a silent draft —
+    INTERNAL → ``external_send_internal``; CLIENT → ``external_send_client``;
+    VENDOR → ``external_send_vendor``; OUTSIDE → ``external_send``. UNKNOWN is a
+    **hard error** (:class:`UnclassifiedRecipientError`), never a silent draft —
     a send whose recipient we cannot resolve does not fall through to a permissive
     OR a lenient default; it stops loudly. This is the structural guarantee that
     the "unclassified → draft" regression cannot silently return.
     """
     if recipient_class is RecipientClass.INTERNAL:
         return ACTION_CLASS_EXTERNAL_SEND_INTERNAL
+    if recipient_class is RecipientClass.CLIENT:
+        return ACTION_CLASS_EXTERNAL_SEND_CLIENT
+    if recipient_class is RecipientClass.VENDOR:
+        return ACTION_CLASS_EXTERNAL_SEND_VENDOR
     if recipient_class is RecipientClass.OUTSIDE:
         return ACTION_CLASS_EXTERNAL_SEND
     raise UnclassifiedRecipientError(

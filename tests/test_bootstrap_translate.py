@@ -360,6 +360,67 @@ def test_translate_emits_no_memory_provider_block(tmp_path):
     assert config["memory"]["d1_namespace"] == "acme"
 
 
+def test_translate_emits_new_send_exposure_keys(tmp_path):
+    # ADR 0075: external_send_client / external_send_vendor survive translation into
+    # the per-profile exposure block (else they are silently DROPPED — the sneakiest
+    # failure).
+    body = VALID_YAML.replace(
+        "        external_send: draft_for_review\n",
+        "        external_send: draft_for_review\n"
+        "        external_send_client: autonomous\n"
+        "        external_send_vendor: draft_for_review\n",
+    )
+    assert "external_send_client: autonomous" in body  # guard: replace landed
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    exposure = config["entitlements"]["exposure"]
+    assert exposure["external_send_client"] == "autonomous"
+    assert exposure["external_send_vendor"] == "draft_for_review"
+
+
+def test_translate_renders_scalar_skill_settings(tmp_path):
+    # ADR 0075: a skill's authored scalar settings render into the profile skill
+    # block; nested (non-scalar) values are dropped.
+    body = VALID_YAML.replace(
+        "        enabled: true\n",
+        "        enabled: true\n"
+        "        settings:\n"
+        "          chase_cadence_days: 3\n"
+        "          max_attempts: 5\n"
+        "          explain_by_default: true\n"
+        "          nested_dropped:\n"
+        "            a: 1\n",
+    )
+    assert "chase_cadence_days: 3" in body  # guard: replace landed
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    settings = config["skills"][0]["settings"]
+    assert settings == {"chase_cadence_days": 3, "max_attempts": 5, "explain_by_default": True}
+    assert "nested_dropped" not in settings
+
+
+def test_translate_omits_settings_key_when_skill_has_none(tmp_path):
+    # Inertness: a skill without settings emits no `settings` key (byte-identical).
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert "settings" not in config["skills"][0]
+
+
 def test_translate_carries_customer_identity_into_config(tmp_path):
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
     translate_customer_yaml(

@@ -270,6 +270,39 @@ class CustomerConfig:
                     out.append(norm)
         return out
 
+    @property
+    def outbound_roster(self) -> list[tuple[str, str]]:
+        """Return the typed outbound roster — ``scope.outbound_roster`` — normalized.
+
+        Each authored entry is ``{address, class, note?}`` where ``class`` is the
+        closed vocabulary ``client`` / ``records_vendor`` (ADR 0075). Returns a list
+        of ``(address, class)`` tuples with the address lowercased + stripped;
+        entries that are not mappings, are missing ``address``/``class``, or carry a
+        ``class`` outside the closed set are DROPPED (never guessed). Absent or empty
+        ⇒ ``[]`` — fail-closed: with no typed roster every outside send stays on the
+        outside ``external_send`` ceiling, exactly as before this block existed. This
+        list is human-authored OUTBOUND authorization; it is never grown from inbound.
+        """
+        raw = self.scope.get("outbound_roster") or []
+        if not isinstance(raw, list):
+            raise CustomerConfigError(
+                f"customer.yaml: scope.outbound_roster must be a list; got {type(raw).__name__}"
+            )
+        out: list[tuple[str, str]] = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            class_str = entry.get("class")
+            if not isinstance(address, str) or not isinstance(class_str, str):
+                continue
+            norm_addr = address.strip().lower()
+            norm_class = class_str.strip().lower()
+            if not norm_addr or norm_class not in ("client", "records_vendor"):
+                continue
+            out.append((norm_addr, norm_class))
+        return out
+
     def sender_on_roster(self, sender_address: object) -> bool:
         """True iff ``sender_address`` is on the organization roster (ADR 0055).
 
