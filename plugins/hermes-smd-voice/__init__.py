@@ -38,6 +38,9 @@ import logging
 import threading
 from typing import Any
 
+from shared import provenance
+from shared.voice_status import VOICE_STATUS
+
 from . import samples, transform  # noqa: F401 — surface module imports for tests
 from .diff import SCHEMA_VERSION as _DIFF_SCHEMA_VERSION
 from .diff import StructuralDiff
@@ -88,11 +91,36 @@ def bind_runtime(*, customer_slug: str, r2_reader: samples.R2SampleReader) -> No
     _R2_READER = r2_reader
     _CUSTOMER_SLUG = customer_slug
     _VOICE_BUNDLE = None  # invalidate on rebind (tests, reprovision)
+    # Publish the samples probe the trust plugin's voice live-gate consults
+    # (ADR 0028 §2). The probe reads the live globals, so a rebind takes effect
+    # without republishing.
+    VOICE_STATUS.publish_samples_probe(_probe_samples_available)
     logger.info(
         "hermes-smd-voice: runtime bound customer=%s r2=%s",
         customer_slug,
         type(r2_reader).__name__,
     )
+
+
+def _probe_samples_available() -> bool:
+    """Zero-arg probe published to ``shared.voice_status`` for the trust plugin's
+    voice live-gate: are ≥1 voice samples retrievable for this seat right now?
+
+    Reads the live bound reader / slug so a rebind is reflected without
+    republishing. Returns ``False`` when the runtime is unbound.
+    ``retrieve_relevant_samples`` is itself exception-safe (empty list on R2
+    error), and ``VOICE_STATUS.samples_available`` wraps this call in a
+    fail-closed try — so a probe fault degrades to "no samples" (draft), never a
+    crash."""
+    if _R2_READER is None or not _CUSTOMER_SLUG:
+        return False
+    hits = samples.retrieve_relevant_samples(
+        customer_slug=_CUSTOMER_SLUG,
+        r2_reader=_R2_READER,
+        query_context=None,
+        limit=1,
+    )
+    return len(hits) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +239,16 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
     ``None`` and a logged warning.
     """
     try:
+        # Per-turn voice live-gate marker (ADR 0028 §2): clear at the start of
+        # EVERY turn so a prior turn's successful transform can never certify
+        # THIS turn's send. Keyed by the resolved session id (the same value the
+        # trust gate reads under). Runs before the unbound check — the clear is
+        # cheap and keeps the marker strictly per-turn regardless of bind state.
+        try:
+            VOICE_STATUS.clear_turn(provenance.resolve_session(kwargs.get("session_id") or ""))
+        except Exception:  # noqa: BLE001 — marker bookkeeping must never break the hook
+            logger.debug("hermes-smd-voice: per-turn marker clear failed", exc_info=True)
+
         if _R2_READER is None or not _CUSTOMER_SLUG:
             logger.debug("hermes-smd-voice: pre_llm_call no-op (runtime unbound)")
             return None
@@ -281,6 +319,13 @@ def on_transform_llm_output(**kwargs: Any) -> str | None:
         )
 
         if result.status == TransformStatus.TRANSFORMED:
+            # Voice live-gate marker (ADR 0028 §2): the transform demonstrably
+            # reshaped this turn's output, so mark THIS turn as voice-applied.
+            # Set ONLY on a successful transform — a passthrough (below) or a
+            # swallowed exception (the except clause) leaves the mark clear, so a
+            # send on such a turn fails the gate (draft). Keyed by the resolved
+            # session id (matches the trust gate's read key).
+            VOICE_STATUS.mark_applied(provenance.resolve_session(kwargs.get("session_id") or ""))
             return result.transformed_draft
         return None
     except Exception:  # noqa: BLE001 — never raise out of a hook

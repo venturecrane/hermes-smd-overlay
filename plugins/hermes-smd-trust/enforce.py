@@ -66,6 +66,8 @@ from shared.action_classes import (
 from shared.customer_config import CustomerConfigMissingError
 from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
 
+from . import voice_gate
+
 # Action classes that must never fire autonomously on a turn that ingested
 # untrusted (non-internal) inbound content — the taint-gate. READ and
 # INTERNAL_WRITE (drafts) stay allowed: an EA reads untrusted mail and DRAFTS a
@@ -901,6 +903,18 @@ def evaluate_tool_call(
         floor_block = _apply_content_floor(tool_name, args)
         if floor_block is not None:
             return floor_block
+
+        # Voice live-gate (ADR 0028 §2, #855). ONLY an AUTONOMOUS outside send
+        # impersonates the principal's voice with no human review — confirm /
+        # draft / refused already route to a human, and external_send_internal is
+        # ops traffic, so both are out of scope. The gate itself adds the
+        # voice-authored BINDING check (silent on a non-voice seat); when bound it
+        # downgrades to draft (same block-directive plumbing as the content floor)
+        # unless the voice transform demonstrably ran on this turn.
+        if decision.effective_ceiling == Ceiling.AUTONOMOUS:
+            voice_block = voice_gate.check_voice_gate(tool_name=tool_name, session_id=session_id)
+            if voice_block is not None:
+                return voice_block
 
     if decision.allowed:
         return None
