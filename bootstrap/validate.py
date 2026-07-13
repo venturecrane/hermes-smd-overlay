@@ -62,10 +62,11 @@ ACCEPTED_VERTICALS = {
     "mixed",
 }
 
-# SOURCE OF TRUTH: ss-console ACCEPTED_EXPOSURE_CEILINGS (types.ts). The three
-# content classes per ADR 0035 — the only legal values for a persona exposure
-# entry. Already aligned with the console.
-ACCEPTED_CEILINGS = {"autonomous", "draft_for_review", "refused"}
+# SOURCE OF TRUTH: ss-console ACCEPTED_EXPOSURE_CEILINGS (types.ts). The legal
+# values for a persona exposure entry — the ADR 0035 content classes plus the
+# ADR 0071 `confirm` (send after an explicit in-turn approval) ceiling. Kept
+# aligned with the console.
+ACCEPTED_CEILINGS = {"autonomous", "confirm", "draft_for_review", "refused"}
 
 # SOURCE OF TRUTH: ss-console ACCEPTED_ACTION_CLASSES (types.ts), minus ``read``.
 # ADR 0056: exposure is authored PER action class; ``read`` is never customer-
@@ -308,6 +309,14 @@ def _validate_entitlements(raw: Any, path: str, errors: list[str]) -> None:
             )
         elif value not in ACCEPTED_CEILINGS:
             _err(f"{ep}: must be one of {sorted(ACCEPTED_CEILINGS)}", errors)
+        elif value == "confirm" and key not in ("external_send", "external_send_internal"):
+            # `confirm` (ADR 0071) only has defined behavior in enforce()'s
+            # EXTERNAL_SEND branch; reject it on any other class so it can't be
+            # authored where it does nothing.
+            _err(
+                f"{ep}: 'confirm' is only valid for external_send / external_send_internal (ADR 0071)",
+                errors,
+            )
 
 
 def _validate_persona_cron(raw: Any, skills: Any, path: str, errors: list[str]) -> None:
