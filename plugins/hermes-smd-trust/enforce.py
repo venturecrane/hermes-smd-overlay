@@ -44,6 +44,7 @@ trail the audit review reads. The plugin's ``pre_tool_call`` hook expects either
 ``evaluate_tool_call`` returns exactly that shape.
 """
 
+import copy
 import enum
 import logging
 import os
@@ -65,6 +66,7 @@ from shared.action_classes import (
 )
 from shared.customer_config import CustomerConfigMissingError
 from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
+from shared.pending_send import PENDING_SEND
 
 from . import voice_gate
 
@@ -830,6 +832,21 @@ def _reclassify_send(
     return ActionClass.EXTERNAL_SEND
 
 
+def _resolve_send_recipients(tool_name: str, args: dict, session_id: str) -> set[str]:
+    """Normalized recipient set for a proactive send — the confirm-approval
+    match key (ADR 0071 #1806). Empty when the recipient is unresolvable (a
+    ``send_draft`` for a draft this session never saw, or a malformed ``to``);
+    such a send is never approvable (stays fail-closed). Best-effort: any
+    resolution error yields the empty set, not a raise."""
+    from shared.outbound_recipient import send_recipients
+
+    try:
+        recips = send_recipients(tool_name, args or {}, session_id)
+    except Exception:  # noqa: BLE001 — recipient resolution must not break the gate
+        return set()
+    return set(recips) if recips else set()
+
+
 def evaluate_tool_call(
     tool_name: str,
     args: dict,
@@ -896,12 +913,43 @@ def evaluate_tool_call(
             tainted=session_taint != TRUST_CLASS_INTERNAL,
         )
 
+        # Confirm-approval round-trip (ADR 0071 #1806). A send withheld at the
+        # confirm ceiling is CAPTURED below (on await_approval); a matching
+        # current-turn approval — marked by the trusted pre_llm_call path when the
+        # allowlisted owner replies over Telegram — is PEEKED here (not yet
+        # consumed) so it flows into enforce() as the current-turn approval. When
+        # approved, the STORED payload is replayed over the live args BEFORE
+        # enforce and every downstream scan (content-floor / voice / fabrication),
+        # so what ships and what is inspected is exactly the reviewed content —
+        # never the LLM's (possibly drifted) re-composition. Only a
+        # resolved-recipient send participates; an unresolved recipient stays
+        # fail-closed (never approvable). Consume happens once the send clears
+        # every gate (below).
+        # All send classes that can resolve at the confirm ceiling participate —
+        # the outside class, the internal-staff class, and the typed client /
+        # vendor classes (ADR 0075). _enforce_resolved routes all of them through
+        # the same confirm branch, so all must capture/replay identically.
+        is_send = effective_action in (
+            ActionClass.EXTERNAL_SEND,
+            ActionClass.EXTERNAL_SEND_INTERNAL,
+            ActionClass.EXTERNAL_SEND_CLIENT,
+            ActionClass.EXTERNAL_SEND_VENDOR,
+        )
+        send_recips = _resolve_send_recipients(tool_name, args, session_id) if is_send else set()
+        approved_replay = False
+        if send_recips and PENDING_SEND.has_approved_match(tool_name, send_recips):
+            stored = PENDING_SEND.peek()
+            if stored is not None and isinstance(args, dict):
+                args.clear()
+                args.update(copy.deepcopy(stored.args))
+            approved_replay = True
+
         decision = enforce(
             action=effective_action,
             exposure=exposure,
             tool_name=tool_name,
             persona_slug=persona_slug,
-            current_turn_approval=_resolve_current_turn_approval(args),
+            current_turn_approval=approved_replay or _resolve_current_turn_approval(args),
             vertical_floors=vertical_floors,
             inbound_trust_class=session_taint,
         )
@@ -929,6 +977,12 @@ def evaluate_tool_call(
         }
 
     _audit_decision(tool_name, persona_slug, decision)
+
+    # Capture a send withheld at the confirm ceiling so a later current-turn
+    # approval releases exactly THIS payload (ADR 0071 #1806). A new compose
+    # supersedes any prior pending; only a resolved-recipient send is captured.
+    if is_send and send_recips and decision.audit_action == "await_approval":
+        PENDING_SEND.capture(tool_name, args, send_recips)
 
     # Content-sensitivity floor (ADR 0031). Applies to sends that LEAVE the firm:
     # the outside class plus the typed client / records-vendor classes. Money /
@@ -962,6 +1016,12 @@ def evaluate_tool_call(
                 return voice_block
 
     if decision.allowed:
+        # A confirm-approved send has cleared the ceiling, the content-floor, and
+        # the voice-gate and is about to ship — consume the single-use approval so
+        # it can never release a second send (ADR 0071 #1806). The live args were
+        # already overwritten with the stored payload above.
+        if is_send and approved_replay:
+            PENDING_SEND.take_for_send(tool_name, send_recips)
         return None
 
     return {"action": "block", "message": f"Refused: {decision.reason}"}

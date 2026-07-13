@@ -21,7 +21,7 @@ from shared.broker_audit import write_decision
 from shared.secrets import get_secret
 from shared.workspace_broker import GRANT_ARG, authorize
 
-from . import enforce, outbound
+from . import approval, enforce, outbound
 
 logger = logging.getLogger(__name__)
 
@@ -202,17 +202,34 @@ def on_post_tool_call(**kwargs: Any) -> None:
 
 
 def on_pre_llm_call(**kwargs: Any) -> None:
-    """Note the turn's REAL session id before any tool pre-hook fires (#141).
+    """Note the turn's REAL session id, and capture a current-turn send approval.
 
-    pre_llm_call is the earliest hook core passes session_id to; noting it
-    here closes the resolver's first-tool-call gap and refreshes the id at
-    every turn (sequential sessions on a one-agent Machine). Observational:
-    always returns None; never raises.
+    Two observational duties, both exception-safe (always return None):
+
+    1. Note the REAL session id before any tool pre-hook fires (#141). pre_llm_call
+       is the earliest hook core passes session_id to; noting it here closes the
+       resolver's first-tool-call gap and refreshes the id at every turn.
+    2. Confirm-approval capture (ADR 0071 #1806). This is the trusted seam where an
+       allowlisted owner's Telegram DM ("yes send it") arrives as native principal
+       input. ``approval.maybe_capture_approval`` marks the single pending send
+       approved iff platform is Telegram, ``sender_id`` is allowlisted, and the whole
+       message is a bare affirmative — so the send's re-invocation (pre_tool_call,
+       later this turn) can release exactly the withheld payload. The agent cannot
+       forge this: SEC-36 strips agent-supplied approval, and an agent/sub-agent
+       message never presents an allowlisted telegram sender_id.
     """
     try:
         provenance.note_session(kwargs.get("session_id") or "")
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: pre_llm_call session note failed", exc_info=True)
+    try:
+        approval.maybe_capture_approval(
+            kwargs.get("platform"),
+            kwargs.get("sender_id"),
+            kwargs.get("user_message"),
+        )
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.debug("hermes-smd-trust: approval capture failed", exc_info=True)
     return None
 
 
