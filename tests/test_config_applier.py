@@ -351,12 +351,23 @@ def test_apply_rejects_invalid_config_without_writing(tmp_path):
     assert audit.rows == []
 
 
-def test_apply_rejects_floor_widening(tmp_path):
-    # Current volume: law-firm with external_send at the floor (draft_for_review).
+def test_apply_rejects_floor_widening(tmp_path, monkeypatch):
+    # Machinery coverage: a synthetic external_send floor is injected for the
+    # law-firm slug (the validator's accepted vertical). In production law-firm
+    # declares NO floor — the external-send-draft-floor was removed 2026-07
+    # (ADR 0035) — but the apply path must still reject widening past any
+    # floor a future vertical declares. vertical_floors() reads the shared map
+    # at call time, so the injection reaches the live apply path.
+    from shared import action_classes
+
+    monkeypatch.setitem(
+        action_classes.VERTICAL_FLOORS, "law-firm", {"external_send": "draft_for_review"}
+    )
+    # Current volume: external_send at the injected floor (draft_for_review).
     volume = tmp_path / "customer.yaml"
     before = _valid_yaml(external_send="draft_for_review").encode()
     volume.write_bytes(before)
-    # New config tries to widen external_send to autonomous on a law Machine.
+    # New config tries to widen external_send to autonomous past the floor.
     new = _valid_yaml(external_send="autonomous").encode()
 
     result = apply(

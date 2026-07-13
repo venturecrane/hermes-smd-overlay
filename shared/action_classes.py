@@ -82,16 +82,19 @@ class ActionClass(str, enum.Enum):
 #     so a config that widens past a floor is rejected before it is written.
 # A copy in either consumer would silently drift; this is the single source.
 #
-#   law-firm / ``external-send-draft-floor`` -> external_send pinned to
-#     draft_for_review: client-/tribunal-bound mail ships under a human
-#     reviewer's identity (ADR 0005), non-raisable. See
-#     ``operator/verticals/law-firm/{vertical.yaml,compliance-floor.md}``.
+# No vertical currently declares a ceiling floor. The law-firm
+# ``external-send-draft-floor`` (external_send pinned to draft_for_review) was
+# removed 2026-07 by Captain decision: outside-send is a firm-authored dial per
+# ADR 0035, and supervision (ABA 512) is held by the audit journal +
+# attribution + fail-closed entitlement, not by a non-raisable send gate. The
+# machinery stays: a future vertical with a genuinely regulation-compelled
+# floor (one a customer must not be able to raise) declares it here. Note the
+# law wedge's hard BANS (trust-account writes, principal-identity sends) are
+# NOT floors and live in ``BANNED_TOOLS`` below — those are unchanged.
 # ---------------------------------------------------------------------------
 
 
-VERTICAL_FLOORS: dict[str, dict[str, str]] = {
-    "law-firm": {ActionClass.EXTERNAL_SEND.value: "draft_for_review"},
-}
+VERTICAL_FLOORS: dict[str, dict[str, str]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -105,16 +108,21 @@ VERTICAL_FLOORS: dict[str, dict[str, str]] = {
 
 BANNED_TOOLS: frozenset[str] = frozenset(
     {
-        # Pattern A — autonomous outbound from the agent identity. ADR 0005
-        # locks external_send to draft; the agent NEVER sends from its own
-        # identity. The draft-creation path is allowed (DRAFT_CREATE);
-        # the send path is permanently banned at this layer.
+        # Principal-identity sends — the Email connector wired to a human
+        # principal's own mailbox. The Operator never sends AS a human: a send
+        # from the principal's mailbox is indistinguishable from the human
+        # having written it, which forges authorship and breaks the
+        # attribution the audit journal's supervision record depends on
+        # (ABA 512 posture). Drafting INTO the principal's mailbox is allowed
+        # (DRAFT_CREATE); the send path is a hard identity-integrity ban, not
+        # a configurable ceiling. Autonomous sending happens only from the
+        # Operator's own identity (see the AgentMail note below).
         "email_send",
         "email_send_message",
         "email_reply",
         "email_reply_all",
         "email_forward",
-        # SMS / messaging — same rationale as email_send. Pattern A.
+        # SMS / messaging — same principal-identity rationale as email_send.
         "sms_send",
         "sms_send_message",
         # Money movement — never autonomous.
@@ -149,14 +157,13 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # ``EXTERNAL_SEND`` in TOOL_ACTION_CLASS_MAP below and governed by the
         # resolved ceiling. Per ADR 0035 there is no default posture: unauthored
         # ``external_send`` is fail-closed (``refused`` — no send, no draft);
-        # ``draft_for_review`` and ``autonomous`` are both
-        # values authored in ``action_ceilings``; a vertical floor can only
-        # narrow. The content-sensitivity floor
+        # the authored values are ``autonomous`` / ``confirm`` /
+        # ``draft_for_review`` / ``refused``. The content-sensitivity floor
         # (``shared.content_floor``) additionally forces money / contract /
         # scope / legal content to draft even under an autonomous ceiling.
         # The PRINCIPAL-identity sends (`email_send`, `email_reply`, ...) stay
-        # banned above — "never send as Scott" is a hard floor; the agent owns
-        # its OWN AgentMail identity, not the principal's mailbox.
+        # banned above — the agent sends only from its OWN identity, never
+        # from a human principal's mailbox.
     }
 )
 

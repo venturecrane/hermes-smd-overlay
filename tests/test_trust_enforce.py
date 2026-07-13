@@ -722,7 +722,14 @@ def test_send_draft_with_no_body_fails_toward_draft(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Vertical-pack floors (_resolve_vertical_floors) for law-firm
+# Vertical-pack floors (_resolve_vertical_floors)
+#
+# No production vertical declares a floor today: the law-firm
+# external-send-draft-floor was removed 2026-07 (Captain decision, ADR 0035 —
+# outside-send is a firm-authored dial; supervision is held by audit +
+# attribution + fail-closed entitlement). The floor machinery stays live for
+# any future regulation-compelled floor and is exercised below by injecting a
+# synthetic floor map into the loaded module.
 # ---------------------------------------------------------------------------
 
 
@@ -732,8 +739,29 @@ def env_vertical_law(monkeypatch):
     yield
 
 
-def test_resolve_vertical_floors_law_firm_floors_external_send(env_vertical_law) -> None:
+def _inject_floor(monkeypatch, enforce, vertical: str, floors: dict) -> None:
+    """Inject a synthetic vertical floor into a loaded enforce module."""
+    monkeypatch.setattr(enforce, "_VERTICAL_FLOORS", {vertical: floors})
+
+
+def test_resolve_vertical_floors_law_firm_has_no_floor(env_vertical_law) -> None:
+    # REGRESSION GUARD for the 2026-07 removal: the law-firm vertical resolves
+    # to NO floors. Re-adding an external_send floor requires a Captain
+    # decision reversing the removal, not a drive-by edit.
     enforce = _load_trust_module("enforce")
+    assert enforce._resolve_vertical_floors() == {}
+
+
+def test_resolve_vertical_floors_declared_floor_resolves(monkeypatch) -> None:
+    # Machinery coverage: a vertical that DOES declare a floor still resolves it.
+    enforce = _load_trust_module("enforce")
+    monkeypatch.setenv("SMD_VERTICAL", "floored-test-vertical")
+    _inject_floor(
+        monkeypatch,
+        enforce,
+        "floored-test-vertical",
+        {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.DRAFT_FOR_REVIEW},
+    )
     floors = enforce._resolve_vertical_floors()
     assert floors == {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.DRAFT_FOR_REVIEW}
 
@@ -751,15 +779,36 @@ def test_resolve_vertical_failure_falls_through_to_env(monkeypatch) -> None:
     assert enforce._resolve_vertical_floors() == {}
 
 
-def test_law_floor_narrows_authored_autonomous_send_to_draft(monkeypatch, env_vertical_law) -> None:
-    """A law customer whose persona AUTHORED external_send=autonomous is still
-    narrowed to draft (blocked) by the pack floor — even on a clean body."""
+def test_law_authored_autonomous_clean_send_is_not_floored(monkeypatch, env_vertical_law) -> None:
+    """THE 2026-07 behavior change: a law customer whose persona authored
+    external_send=autonomous SENDS (clean body, no floor downgrade). The firm's
+    authored exposure governs outside-send (ADR 0035); the pack no longer pins
+    it. The content-sensitivity floor and taint gate still narrow when they
+    apply — this body triggers neither."""
     enforce = _load_trust_module("enforce")
     _set_exposure(
         monkeypatch, enforce, {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS}
     )
     args = {"subject": "Saw your note", "text": "Got it, that works on my end. Talk soon."}
-    result = enforce.evaluate_tool_call("agentmail:send_message", args, "pilot-law")
+    assert enforce.evaluate_tool_call("agentmail:send_message", args, "pilot-law") is None
+
+
+def test_declared_floor_narrows_authored_autonomous_send_to_draft(monkeypatch) -> None:
+    """Machinery coverage: a vertical that DOES declare an external_send floor
+    still narrows an authored autonomous send to draft — even on a clean body."""
+    enforce = _load_trust_module("enforce")
+    monkeypatch.setenv("SMD_VERTICAL", "floored-test-vertical")
+    _inject_floor(
+        monkeypatch,
+        enforce,
+        "floored-test-vertical",
+        {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.DRAFT_FOR_REVIEW},
+    )
+    _set_exposure(
+        monkeypatch, enforce, {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS}
+    )
+    args = {"subject": "Saw your note", "text": "Got it, that works on my end. Talk soon."}
+    result = enforce.evaluate_tool_call("agentmail:send_message", args, "floored-test")
     assert isinstance(result, dict)
     assert result["action"] == "block"
     assert "draft" in result["message"].lower()
@@ -775,9 +824,10 @@ def test_non_law_authored_autonomous_clean_send_is_not_floored(monkeypatch) -> N
     assert enforce.evaluate_tool_call("agentmail:send_message", args, "smd") is None
 
 
-def test_law_floor_does_not_widen_unauthored_send(monkeypatch, env_vertical_law) -> None:
-    """A law persona with NO authored external_send exposure is still fail-closed
-    (refused) — the floor narrows, it never grants."""
+def test_law_unauthored_send_stays_fail_closed(monkeypatch, env_vertical_law) -> None:
+    """A law persona with NO authored external_send exposure is fail-closed
+    (refused) — pure ADR 0035, no floor involved. Removing the pack floor
+    granted nothing: unauthored is still no send, no draft."""
     enforce = _load_trust_module("enforce")
     _set_exposure(monkeypatch, enforce, {})
     result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "pilot-law")
