@@ -381,6 +381,7 @@ def _validate_webhook_triggers(cfg: dict[str, Any], errors: list[str]) -> None:
         if not isinstance(trig, dict):
             _err(f"{prefix}: must be a mapping", errors)
             continue
+        _validate_trigger_throttle(trig.get("throttle"), prefix, errors)
         persona = trig.get("persona")
         skill = trig.get("skill")
         if not isinstance(persona, str) or not isinstance(skill, str):
@@ -394,6 +395,38 @@ def _validate_webhook_triggers(cfg: dict[str, Any], errors: list[str]) -> None:
                 f"initiation.webhook on persona {persona!r}",
                 errors,
             )
+
+
+def _validate_trigger_throttle(throttle: Any, prefix: str, errors: list[str]) -> None:
+    """``throttle.cooldown_minutes`` must be a non-negative integer when
+    authored (ss-console #1781). The gate's runtime resolver tolerates a
+    malformed block by falling back to the platform default; the validator
+    surfaces the typo at provision time instead of silently changing the
+    authored intent."""
+    if throttle is None:
+        return
+    if not isinstance(throttle, dict):
+        _err(
+            f"{prefix}.throttle: must be a mapping; got {type(throttle).__name__}",
+            errors,
+        )
+        return
+    for key in throttle:
+        if key != "cooldown_minutes":
+            _err(
+                f"{prefix}.throttle.{key}: unknown throttle key (known: cooldown_minutes)",
+                errors,
+            )
+            return
+    raw = throttle.get("cooldown_minutes")
+    if raw is None:
+        return
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        _err(
+            f"{prefix}.throttle.cooldown_minutes: must be a non-negative "
+            f"integer (0 disables); got {raw!r}",
+            errors,
+        )
 
 
 def _webhook_skills_by_persona(personas: Any) -> dict[str, set[str]]:

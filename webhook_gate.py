@@ -49,6 +49,7 @@ from urllib.parse import parse_qs, urlsplit
 from shared import (
     gate_inbound_cap,
     gate_trigger_exclusions,
+    gate_trigger_throttle,
     heartbeat,
     mcp_result_store,
     mcp_thread_store,
@@ -428,6 +429,11 @@ _VERIFIERS: dict[str, Any] = {
 # drive handlers directly get today's ungated behavior unless they inject one).
 _INBOUND_GUARD: gate_inbound_cap.InboundWakeGuard | None = None
 _GATE_AUDIT_CLIENT = None  # set in main(); shared by the inbound guard + trigger exclusions
+
+# Per-(trigger, matter) cooldown (ss-console #1781): the deterministic break
+# for write-then-echo webhook loops. In-memory per gate process (mirrors the
+# replay guard); authored throttles live-read from customer.yaml per delivery.
+_TRIGGER_THROTTLE = gate_trigger_throttle.TriggerThrottle()
 
 
 def _audit_suppression(*, route: str, request_id: str, reason: str) -> None:
@@ -1233,6 +1239,28 @@ class _Handler(BaseHTTPRequestHandler):
                 suppress_reason,
             )
             self._json(202, {"accepted": True, "suppressed": suppress_reason})
+            return
+
+        # Per-(trigger, matter) cooldown (ss-console #1781): after a delivery
+        # for a matter forwards, further deliveries for the same (source,
+        # event_type, matter) inside the window are acknowledged 202, audited
+        # (WEBHOOK_SUPPRESSED — never silent), and NOT forwarded — so the
+        # seat's own create_memo echoing back as matter.updated never re-wakes
+        # the skill and the loop terminates. Checked LAST so only deliveries
+        # that actually forward start a window. Fail-open on parse/config
+        # surprises (see shared/gate_trigger_throttle.py).
+        throttle_reason = _TRIGGER_THROTTLE.check(
+            route=route, body=body, throttles=gate_trigger_throttle.live_throttles()
+        )
+        if throttle_reason is not None:
+            _audit_suppression(route=route, request_id=request_id, reason=throttle_reason)
+            logger.info(
+                "gate: suppressed %s/%s (%s) — trigger cooldown",
+                route,
+                request_id,
+                throttle_reason,
+            )
+            self._json(202, {"accepted": True, "suppressed": throttle_reason})
             return
 
         # Stamp the verified ingress provenance (source == route) + the verified
