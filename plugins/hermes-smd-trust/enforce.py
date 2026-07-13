@@ -609,9 +609,11 @@ def _resolve_vertical() -> str:
 def _resolve_vertical_floors() -> dict[ActionClass, Ceiling]:
     """Resolve non-raisable per-action-class floors from the vertical pack.
 
-    The law-firm pack pins ``external_send`` to ``draft_for_review`` — a floor a
-    persona's authored exposure can only narrow, never raise (ADR 0025 / ADR
-    0022). Returns ``{}`` for verticals with no declared floor.
+    A declared floor is one a persona's authored exposure can only narrow,
+    never raise (ADR 0025 / ADR 0022). No vertical currently declares one —
+    the law-firm external-send floor was removed 2026-07 per ADR 0035 (see
+    ``shared.action_classes.VERTICAL_FLOORS``). Returns ``{}`` for verticals
+    with no declared floor.
     """
     floors = _VERTICAL_FLOORS.get(_resolve_vertical())
     return dict(floors) if floors else {}

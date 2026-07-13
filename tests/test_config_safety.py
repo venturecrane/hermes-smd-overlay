@@ -69,8 +69,33 @@ def test_classify_direction_unknown_old_reads_as_tightening_to_known():
 # ---------------------------------------------------------------------------
 
 
-def test_vertical_floors_law_firm_external_send():
-    assert vertical_floors("law-firm") == {"external_send": "draft_for_review"}
+# Synthetic floor for machinery coverage. No production vertical declares a
+# floor today — the law-firm external-send-draft-floor was removed 2026-07
+# (Captain decision, ADR 0035: outside-send is a firm-authored dial). The
+# floor-preservation machinery stays live for any future regulation-compelled
+# floor, so it is exercised here against an injected test vertical.
+_TEST_VERTICAL = "floored-test-vertical"
+_TEST_FLOOR = {"external_send": "draft_for_review"}
+
+
+@pytest.fixture
+def synthetic_floor(monkeypatch):
+    from shared import action_classes
+
+    monkeypatch.setitem(action_classes.VERTICAL_FLOORS, _TEST_VERTICAL, dict(_TEST_FLOOR))
+    yield
+
+
+def test_vertical_floors_law_firm_has_no_floor():
+    # REGRESSION GUARD for the 2026-07 removal: the law-firm pack must NOT
+    # declare an external_send floor. A firm's authored exposure governs
+    # outside-send (ADR 0035); re-adding this floor requires a Captain
+    # decision reversing the removal, not a drive-by edit.
+    assert vertical_floors("law-firm") == {}
+
+
+def test_vertical_floors_declared_floor_returned(synthetic_floor):
+    assert vertical_floors(_TEST_VERTICAL) == _TEST_FLOOR
 
 
 def test_vertical_floors_unknown_vertical_is_empty():
@@ -88,13 +113,14 @@ def test_vertical_floors_non_string_is_empty():
 # ---------------------------------------------------------------------------
 
 
-def _law_cfg(external_send: str | None) -> dict:
+def _floored_cfg(external_send: str | None) -> dict:
     # ADR 0056: exposure is authored PER persona at entitlements.exposure.
+    # Uses the synthetic floored vertical (see synthetic_floor fixture above).
     exposure: dict = {}
     if external_send is not None:
         exposure["external_send"] = external_send
     return {
-        "vertical": "law-firm",
+        "vertical": _TEST_VERTICAL,
         "personas": [{"slug": "marcus", "entitlements": {"exposure": exposure}}],
     }
 
@@ -108,11 +134,12 @@ def test_floor_preserving_no_vertical_floor_always_true():
     assert floor_preserving({}, cfg) is True
 
 
-def test_floor_preserving_rejects_when_any_persona_exceeds_floor():
-    # A multi-persona law config where ONE persona raises external_send above the
-    # floor is rejected even though the other is clean (exposure is per-persona).
+def test_floor_preserving_rejects_when_any_persona_exceeds_floor(synthetic_floor):
+    # A multi-persona config where ONE persona raises external_send above a
+    # declared floor is rejected even though the other is clean (exposure is
+    # per-persona).
     cfg = {
-        "vertical": "law-firm",
+        "vertical": _TEST_VERTICAL,
         "personas": [
             {"slug": "clean", "entitlements": {"exposure": {"external_send": "draft_for_review"}}},
             {"slug": "loud", "entitlements": {"exposure": {"external_send": "autonomous"}}},
@@ -121,26 +148,26 @@ def test_floor_preserving_rejects_when_any_persona_exceeds_floor():
     assert floor_preserving({}, cfg) is False
 
 
-def test_floor_preserving_authored_at_floor_is_ok():
-    assert floor_preserving({}, _law_cfg("draft_for_review")) is True
+def test_floor_preserving_authored_at_floor_is_ok(synthetic_floor):
+    assert floor_preserving({}, _floored_cfg("draft_for_review")) is True
 
 
-def test_floor_preserving_authored_below_floor_is_ok():
+def test_floor_preserving_authored_below_floor_is_ok(synthetic_floor):
     # refused is MORE restrictive than the draft_for_review floor — narrowing is
     # always allowed.
-    assert floor_preserving({}, _law_cfg("refused")) is True
+    assert floor_preserving({}, _floored_cfg("refused")) is True
 
 
-def test_floor_preserving_authored_above_floor_is_rejected():
+def test_floor_preserving_authored_above_floor_is_rejected(synthetic_floor):
     # autonomous is wider than the draft_for_review floor — a live apply would
     # widen past the compliance floor. Reject.
-    assert floor_preserving({}, _law_cfg("autonomous")) is False
+    assert floor_preserving({}, _floored_cfg("autonomous")) is False
 
 
-def test_floor_preserving_unauthored_action_is_ok():
+def test_floor_preserving_unauthored_action_is_ok(synthetic_floor):
     # Unauthored external_send: the runtime applies the pack floor itself, so it
     # is floor-preserving by construction.
-    assert floor_preserving({}, _law_cfg(None)) is True
+    assert floor_preserving({}, _floored_cfg(None)) is True
 
 
 def test_floor_preserving_non_mapping_new_fails_closed():
@@ -148,10 +175,10 @@ def test_floor_preserving_non_mapping_new_fails_closed():
     assert floor_preserving({}, "not-a-config") is False
 
 
-def test_floor_preserving_garbled_ceiling_fails_closed():
+def test_floor_preserving_garbled_ceiling_fails_closed(synthetic_floor):
     # An unparseable authored ceiling ranks as maximally permissive → above the
     # floor → rejected.
-    assert floor_preserving({}, _law_cfg("yolo")) is False
+    assert floor_preserving({}, _floored_cfg("yolo")) is False
 
 
 # ---------------------------------------------------------------------------
@@ -391,14 +418,19 @@ def test_vertical_floors_reads_shared_source_of_truth():
 def test_apply_floor_map_matches_enforce_runtime_map():
     # enforce.py builds an enum-keyed runtime map from the same shared source;
     # convert it back to strings and assert byte-for-byte agreement with the
-    # apply-time string map for law-firm. A hand-copy in either place would fail
-    # this the moment the two drifted.
+    # apply-time string map for EVERY declared vertical. A hand-copy in either
+    # place would fail this the moment the two drifted.
+    from shared.action_classes import VERTICAL_FLOORS
     from tests.conftest import load_plugin
 
     enforce = load_plugin("hermes-smd-trust").enforce
-    enforce_law = {
-        ac.value: ceiling.value for ac, ceiling in enforce._VERTICAL_FLOORS["law-firm"].items()
+    derived = {
+        vertical: {ac.value: ceiling.value for ac, ceiling in floors.items()}
+        for vertical, floors in enforce._VERTICAL_FLOORS.items()
     }
-    assert vertical_floors("law-firm") == enforce_law
-    # And the concrete contract value the law-firm pack pins.
-    assert vertical_floors("law-firm") == {"external_send": "draft_for_review"}
+    assert derived == {v: dict(f) for v, f in VERTICAL_FLOORS.items()}
+    # Regression guard for the 2026-07 removal (ADR 0035): the law-firm pack
+    # declares no floor — outside-send is governed by the firm's authored
+    # exposure, not a non-raisable pin.
+    assert "law-firm" not in enforce._VERTICAL_FLOORS
+    assert vertical_floors("law-firm") == {}

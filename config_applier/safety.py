@@ -17,11 +17,12 @@ Three concerns:
    safety posture must take effect immediately); a widening change may be
    deferred to a Captain-supervised re-provision.
 
-2. **Floor preservation.** A vertical pack (and the content-class floors) pin
-   certain action classes to a non-raisable ceiling — e.g. the law-firm pack
-   floors ``external_send`` at ``draft_for_review``. :func:`floor_preserving`
-   rejects any diff that would raise an effective ceiling *above* its floor.
-   A live apply can never widen past a compliance floor.
+2. **Floor preservation.** A vertical pack may pin an action class to a
+   non-raisable ceiling (``shared.action_classes.VERTICAL_FLOORS``; currently
+   empty — the law-firm external-send floor was removed 2026-07 per ADR 0035).
+   :func:`floor_preserving` rejects any diff that would raise an effective
+   ceiling *above* a declared floor. A live apply can never widen past a
+   compliance floor.
 
 3. **Live-writability.** Only an explicit allow-list of fields may change on the
    live path. Rebuild-class fields (``vertical``, ``model``, ``memory.*``,
@@ -123,9 +124,10 @@ def classify_direction(old: object, new: object) -> Direction:
 # floor added to the shared map is honored by both without a second edit
 # (derive-don't-duplicate, 2026-06-15 review of PR #81).
 #
-# law-firm / external-send-draft-floor → external_send pinned to
-#   draft_for_review (client-/tribunal-bound mail ships under a human reviewer's
-#   identity, ADR 0005). Non-raisable on the live path.
+# The map is currently empty: the law-firm external-send-draft-floor was
+# removed 2026-07 (Captain decision, ADR 0035 — outside-send is a firm-authored
+# dial; supervision is held by audit + attribution + fail-closed entitlement).
+# The check stays live for any future regulation-compelled floor.
 # ---------------------------------------------------------------------------
 
 
@@ -150,8 +152,8 @@ def _persona_exposures(cfg: object) -> list[dict[str, str]]:
 
     Exposure is authored PER persona (``personas[].entitlements.exposure``),
     so a floor must be checked against every persona's map — a single persona
-    that raises ``external_send`` above the law-firm floor is a violation even
-    if the others are clean. Parsed defensively: a missing / non-mapping
+    that raises an action class above a declared vertical floor is a violation
+    even if the others are clean. Parsed defensively: a missing / non-mapping
     personas list, entitlements, or exposure yields no entry. Keys/values are
     coerced to stripped lower-case strings; non-string entries are dropped.
     """
@@ -185,9 +187,9 @@ def floor_preserving(old_cfg: object, new_cfg: object) -> bool:
     floors are in force). For each action class with a declared floor, EVERY
     persona's authored exposure for that class must be at or below the floor's
     permissiveness — i.e. ``rank(authored) <= rank(floor)``. A config where any
-    persona authors ``external_send: autonomous`` on a law-firm Machine is *not*
-    floor-preserving and must be rejected on the live path (ADR 0056 moved
-    exposure from a customer-wide scope scalar to a per-persona map).
+    persona authors above a declared floor is *not* floor-preserving and must
+    be rejected on the live path (ADR 0056 moved exposure from a customer-wide
+    scope scalar to a per-persona map).
 
     ``old_cfg`` is accepted for symmetry and future cross-config invariants; the
     floor check itself only needs the config being applied. Fails CLOSED: any
