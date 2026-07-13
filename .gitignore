@@ -31,3 +31,8 @@ node_modules/
 # test artifacts (D1Client default binding writes a local sqlite file)
 CUSTOMER_DB
 *.db
+
+# Local git worktrees (isolated per-task checkouts) must never be tracked —
+# a committed gitlink with no .gitmodules breaks `uv pip install git+...` (the
+# seat build). ss-console#1806 reprovision hit exactly this.
+.worktrees/
