@@ -411,6 +411,13 @@ def _validate_trigger_throttle(throttle: Any, prefix: str, errors: list[str]) ->
             errors,
         )
         return
+    for key in throttle:
+        if key != "cooldown_minutes":
+            _err(
+                f"{prefix}.throttle.{key}: unknown throttle key (known: cooldown_minutes)",
+                errors,
+            )
+            return
     raw = throttle.get("cooldown_minutes")
     if raw is None:
         return
