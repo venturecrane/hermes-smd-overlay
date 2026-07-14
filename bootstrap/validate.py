@@ -193,6 +193,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_connectors(cfg, errors)
     _validate_memory(cfg, errors)
     _validate_voice_library(cfg, errors)
+    _validate_custody_guard(cfg, errors)
 
     return errors
 
@@ -209,6 +210,108 @@ def _scan_parsed_secrets(cfg: dict[str, Any], errors: list[str]) -> None:
         if msg not in already:
             _err(msg, errors)
             already.add(msg)
+
+
+# ---- Credential-custody guard (ADR 0044 Decision 8 / ADR 0045 §7, ss #1841) ----
+#
+# Non-refused `code_execution` exposure lets agent-authored code read the
+# gateway process environment — every raw connector/channel credential there
+# is reachable, bypassing first-class tool classification entirely. The guard
+# rejects a config that authors code_execution alongside gateway-held creds,
+# unless each offending surface is explicitly accepted in the top-level
+# `custody_exceptions` list. Eligibility is enum-limited to IDENTITY-CHANNEL
+# adapters (the seat's own channels; blast radius = impersonating itself).
+# Client-data adapters (smokeball, clio, microsoft-graph, ...) are NEVER
+# exception-eligible: ADR 0045 — no paying client with a raw privileged
+# credential reachable from the gateway. Disposition record:
+# ss-console operator/contracts/connector-custody-dispositions.md.
+_CUSTODY_EXCEPTION_ELIGIBLE = ("telegram", "agentmail", "brave")
+# connectors{} backends whose credential lives behind the broker boundary
+# (none today: Google rides the google_auth block, broker-held by
+# construction, not a connectors{} backend). Grows as ADR 0045 migration
+# step 7 moves connectors behind the broker.
+_BROKER_MEDIATED_BACKENDS: frozenset[str] = frozenset()
+
+
+def _gateway_cred_surfaces(cfg: dict[str, Any]) -> set[str]:
+    """Authored surfaces that imply a raw credential in the gateway env.
+    Authored-surface approximation: the live-runtime env scan (ADR 0045
+    verification item 10) is the runtime backstop, not this validator."""
+    surfaces: set[str] = set()
+    connectors = cfg.get("connectors")
+    if isinstance(connectors, dict):
+        for value in connectors.values():
+            if not isinstance(value, dict) or value.get("enabled") is False:
+                continue
+            adapter = value.get("adapter")
+            backend = value.get("backend")
+            if isinstance(adapter, str) and adapter:
+                if not (isinstance(backend, str) and backend in _BROKER_MEDIATED_BACKENDS):
+                    surfaces.add(adapter)
+    telegram = cfg.get("telegram")
+    # Block present and not explicitly disabled counts (fail-closed): the
+    # bot token is a gateway-env credential whenever the channel is wired.
+    if isinstance(telegram, dict) and telegram.get("enabled") is not False:
+        surfaces.add("telegram")
+    personas = cfg.get("personas")
+    if isinstance(personas, list):
+        for persona in personas:
+            if not isinstance(persona, dict):
+                continue
+            send_as = persona.get("send_as")
+            if isinstance(send_as, dict) and send_as.get("agentmail_identity"):
+                surfaces.add("agentmail")
+    return surfaces
+
+
+def _validate_custody_guard(cfg: dict[str, Any], errors: list[str]) -> None:
+    exceptions_raw = cfg.get("custody_exceptions")
+    exceptions: set[str] = set()
+    if exceptions_raw is not None:
+        if not isinstance(exceptions_raw, list):
+            _err(
+                f"custody_exceptions: must be a list; got {type(exceptions_raw).__name__}",
+                errors,
+            )
+            return
+        for i, entry in enumerate(exceptions_raw):
+            if not isinstance(entry, str) or entry not in _CUSTODY_EXCEPTION_ELIGIBLE:
+                _err(
+                    f"custody_exceptions[{i}]: {entry!r} is not exception-eligible "
+                    f"(identity-channel adapters only: {sorted(_CUSTODY_EXCEPTION_ELIGIBLE)}; "
+                    "client-data connectors can never be excepted — ADR 0045)",
+                    errors,
+                )
+            elif entry in exceptions:
+                _err(f"custody_exceptions[{i}]: duplicate entry {entry!r}", errors)
+            else:
+                exceptions.add(entry)
+
+    personas = cfg.get("personas")
+    offenders: list[str] = []
+    if isinstance(personas, list):
+        for persona in personas:
+            if not isinstance(persona, dict):
+                continue
+            entitlements = persona.get("entitlements")
+            exposure = entitlements.get("exposure") if isinstance(entitlements, dict) else None
+            ceiling = exposure.get("code_execution") if isinstance(exposure, dict) else None
+            if ceiling is not None and ceiling != "refused":
+                offenders.append(str(persona.get("slug") or persona.get("name") or "?"))
+    if not offenders:
+        return
+    uncovered = sorted(_gateway_cred_surfaces(cfg) - exceptions)
+    if uncovered:
+        _err(
+            f"personas ({', '.join(offenders)}) author non-refused code_execution while "
+            f"gateway-held credential surfaces exist without an authored custody exception: "
+            f"{uncovered}. Executed code can read these credentials from the gateway env, "
+            "bypassing tool classification (ADR 0044 Decision 8 / ADR 0045, ss #1841). "
+            "Either author code_execution: refused, move the connector behind the broker, "
+            "or accept an IDENTITY-CHANNEL surface explicitly via top-level "
+            "custody_exceptions (client-data connectors are never eligible).",
+            errors,
+        )
 
 
 def _validate_top_level(cfg: dict[str, Any], errors: list[str]) -> None:

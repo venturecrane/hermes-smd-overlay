@@ -33,7 +33,7 @@ _MANIFEST = Path(__file__).parent / "validator_parity_fixtures.json"
 # — independent of file formatting, so prettier in the console repo cannot break
 # it. MUST equal PINNED_CONTENT_SHA256 in the console contract test. Update in
 # BOTH repos whenever the fixture data changes.
-_PINNED_CONTENT_SHA256 = "986fc8dba196c085cfd3452b13dd52531735c6676907d82a2331336c23904de1"
+_PINNED_CONTENT_SHA256 = "fe2b8d0186d887ff29b5cf7c497191b839daca28a9ff110fb738cf8cac6e84c2"
 
 
 def _load() -> dict:
