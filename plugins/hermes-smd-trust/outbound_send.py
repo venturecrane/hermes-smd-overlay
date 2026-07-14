@@ -108,7 +108,12 @@ def resolve_inbox_id(
     if _INBOX_ID and not _refresh:
         return _INBOX_ID
     parsed = _request_json(
-        base_url + "/inboxes", api_key=api_key, method="GET", body=None, timeout_s=timeout_s, opener=opener
+        base_url + "/inboxes",
+        api_key=api_key,
+        method="GET",
+        body=None,
+        timeout_s=timeout_s,
+        opener=opener,
     )
     inboxes = parsed.get("inboxes") if isinstance(parsed, dict) else None
     if not isinstance(inboxes, list) or not inboxes:
