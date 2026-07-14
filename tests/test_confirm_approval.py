@@ -103,6 +103,25 @@ def test_maybe_capture_requires_telegram_allowlisted_sender_and_pending():
     assert PENDING_SEND.peek().approved is True
 
 
+def test_agent_and_subagent_contexts_cannot_self_approve():
+    """Anti-self-approval: only a real allowlisted Telegram DM approves. An agent /
+    sub-agent / cron / system turn presents a non-telegram platform (or no
+    allowlisted sender), so even an affirmative user_message never marks approval.
+
+    The runtime guarantee that Hermes never sets platform=telegram + an allowlisted
+    sender_id for an agent-authored message was verified live on the seat (the
+    gateway threads sender_id from the real inbound); this pins the overlay half."""
+    approval = _load_approval()
+    PENDING_SEND.capture("mcp_agentmail_send_message", {"to": "x@y.com"}, {"x@y.com"})
+    # delegate_task children, cron/system turns, agent self-talk — none approve.
+    for platform in ["delegate_task", "subagent", "cron", "system", "webhook", "", None]:
+        assert approval.maybe_capture_approval(platform, ALLOWED, "yes send it") is None, platform
+    # Even on Telegram, an empty / non-allowlisted sender cannot approve.
+    for sender in ["", None, "0", "999999"]:
+        assert approval.maybe_capture_approval("telegram", sender, "yes send it") is None, sender
+    assert PENDING_SEND.peek().approved is False  # still unapproved after all attempts
+
+
 # ---------------------------------------------------------------------------
 # end-to-end gate: withhold + capture -> approve -> replay stored payload
 # ---------------------------------------------------------------------------

@@ -17,13 +17,25 @@ import logging
 from typing import Any
 
 from shared import provenance
+from shared.audit_client import audit_client_from_env
+from shared.audit_contract import INSERT_SQL as _AUDIT_INSERT_SQL
+from shared.audit_contract import agent_event_params
 from shared.broker_audit import write_decision
+from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
 from shared.workspace_broker import GRANT_ARG, authorize
 
-from . import approval, enforce, outbound
+from . import approval, enforce, outbound, outbound_send
 
 logger = logging.getLogger(__name__)
+
+# Out-of-band confirmed-send audit binding (ADR 0071 #1806 harden). The overlay
+# dispatches an approved send itself (the LLM does not reliably re-invoke), so the
+# send never passes through a tool call and the audit plugin's post_tool_call
+# never sees it — this plugin emits the row directly, mirroring hermes-smd-reply's
+# out-of-band relay audit. Best-effort: audit is observability, never a gate.
+_AUDIT_CLIENT: Any = None
+_AUDIT_CUSTOMER_SLUG: str | None = None
 
 
 def on_pre_tool_call(**kwargs: Any) -> dict | None:
@@ -201,7 +213,92 @@ def on_post_tool_call(**kwargs: Any) -> None:
         logger.debug("hermes-smd-trust: post_tool_call provenance record failed", exc_info=True)
 
 
-def on_pre_llm_call(**kwargs: Any) -> None:
+def _emit_confirm_event(action_type: str, metadata: dict) -> None:
+    """Write one confirmed-send audit row directly (ADR 0071 #1806 harden).
+
+    Mirrors hermes-smd-reply's out-of-band relay audit: shares the
+    ``shared.audit_contract`` row shape with the audit plugin so they never
+    desync. Metadata carries approval source + recipients + message id + reason
+    ONLY — never the send body. Best-effort; a failed emission is logged and
+    swallowed (the send decision already happened)."""
+    if _AUDIT_CLIENT is None or _AUDIT_CUSTOMER_SLUG is None:
+        return
+    try:
+        params = agent_event_params(
+            action_type=action_type,
+            metadata={"customer": _AUDIT_CUSTOMER_SLUG, "confirm_channel": True, **metadata},
+        )
+        _AUDIT_CLIENT.execute(_AUDIT_INSERT_SQL, *params)
+    except Exception as exc:  # noqa: BLE001 — audit must never break the hook
+        logger.warning("hermes-smd-trust: %s audit emission failed (%s)", action_type, exc)
+
+
+def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
+    """Execute an approved confirm send OUT OF BAND (ADR 0071 #1806 harden).
+
+    Called from pre_llm_call the moment a trusted approval is captured. The LLM
+    does not reliably re-invoke the send tool on "yes" (it sometimes reasons /
+    investigates instead); the overlay is deterministic, so it dispatches the send
+    itself. Returns a short context string to inject (so the agent knows the send
+    is done / why not), or ``None`` when there is nothing to dispatch.
+
+    SAFETY: this does NOT bypass the gate. The approved payload is re-authorized
+    through the SAME ``evaluate_tool_call`` (taint-gate, content-floor, fabrication
+    scan, confirm-approval) — which also CONSUMES the pending record — and the REST
+    send fires only when the gate returns allow. So an approved-but-tainted or
+    approved-but-money/legal send still withholds/drafts exactly as on the tool
+    path. The consume also means a later agent re-invoke finds no approval and
+    withholds, so there is no double-send.
+    """
+    rec = PENDING_SEND.peek()
+    if rec is None or not rec.approved:
+        return None
+    recipients = ", ".join(sorted(rec.recipients)) or "(unresolved)"
+    # Re-authorize through the gate on a payload COPY (the gate overwrites it with
+    # the stored payload and consumes the approval). Fail-safe: any gate error →
+    # do not send.
+    payload = dict(rec.args)
+    try:
+        block = enforce.evaluate_tool_call(rec.tool_name, payload, customer_slug, session_id=session_id)
+    except Exception:  # noqa: BLE001 — an indeterminate gate must not send
+        logger.exception("hermes-smd-trust: out-of-band send gate raised; NOT dispatching (fail-safe)")
+        return None
+    if block is not None:
+        # taint-gate / content-floor withheld the approved send. Not sent; the
+        # record was not consumed. Tell the agent why, plainly.
+        reason = block.get("message", "withheld") if isinstance(block, dict) else "withheld"
+        logger.info("hermes-smd-trust: approved send withheld by gate for %s (%s)", recipients, reason)
+        return f"[Your approved send to {recipients} was not dispatched: {reason}]"
+    # Gate allowed + consumed the approval; `payload` now holds the approved payload.
+    try:
+        api_key = get_secret("AGENTMAIL_API_KEY")
+    except KeyError:
+        logger.error("hermes-smd-trust: AGENTMAIL_API_KEY unset; cannot dispatch approved send")
+        return None
+    try:
+        inbox_id = outbound_send.resolve_inbox_id(api_key)
+        message_id = outbound_send.send_message(api_key=api_key, inbox_id=inbox_id, payload=payload)
+    except outbound_send.AgentMailSendError as exc:
+        logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
+        _emit_confirm_event(
+            "CONFIRM_SEND_FAILED",
+            {"recipients": sorted(rec.recipients), "source": rec.approval_source, "reason": str(exc)},
+        )
+        return f"[Your approved send to {recipients} could not be delivered; it was not sent. You can ask me to retry.]"
+    logger.info(
+        "hermes-smd-trust: dispatched approved send to %s (source=%s, message=%s)",
+        recipients,
+        rec.approval_source,
+        message_id,
+    )
+    _emit_confirm_event(
+        "CONFIRM_SEND_DISPATCHED",
+        {"recipients": sorted(rec.recipients), "source": rec.approval_source, "message_id": message_id},
+    )
+    return f"[Dispatched your approved send to {recipients} (message {message_id}). Do not send it again.]"
+
+
+def on_pre_llm_call(**kwargs: Any) -> dict | None:
     """Note the turn's REAL session id, and capture a current-turn send approval.
 
     Two observational duties, both exception-safe (always return None):
@@ -218,25 +315,55 @@ def on_pre_llm_call(**kwargs: Any) -> None:
        forge this: SEC-36 strips agent-supplied approval, and an agent/sub-agent
        message never presents an allowlisted telegram sender_id.
     """
+    session_id = kwargs.get("session_id") or ""
     try:
-        provenance.note_session(kwargs.get("session_id") or "")
+        provenance.note_session(session_id)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: pre_llm_call session note failed", exc_info=True)
     try:
-        approval.maybe_capture_approval(
+        source = approval.maybe_capture_approval(
             kwargs.get("platform"),
             kwargs.get("sender_id"),
             kwargs.get("user_message"),
         )
+        if source is not None:
+            # Approval captured — dispatch the send OUT OF BAND (the LLM does not
+            # reliably re-invoke). The gate re-authorizes + consumes; on success we
+            # inject a note so the agent knows it is done and does not re-send.
+            customer_slug = _AUDIT_CUSTOMER_SLUG or ""
+            if not customer_slug:
+                try:
+                    customer_slug = get_secret("SMD_CUSTOMER_SLUG")
+                except KeyError:
+                    customer_slug = ""
+            context = _dispatch_approved_send(session_id, customer_slug)
+            if context:
+                return {"context": context}
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
-        logger.debug("hermes-smd-trust: approval capture failed", exc_info=True)
+        logger.debug("hermes-smd-trust: approval capture/dispatch failed", exc_info=True)
     return None
 
 
 def register(ctx) -> None:
     """Plugin entry point. Wires pre_tool_call (ceiling + outbound gate),
     post_tool_call (provenance recording for the A1 identifier gate), and
-    pre_llm_call (session-id note for the #141 resolver)."""
+    pre_llm_call (session-id note + confirm-approval capture + out-of-band
+    dispatch of the approved send)."""
+    global _AUDIT_CLIENT, _AUDIT_CUSTOMER_SLUG
+    # Confirmed-send audit binding — best-effort (observability, not a gate). Mirror
+    # hermes-smd-reply: the broker-aware factory returns a tamper-resistant client
+    # when the broker is configured, else a D1 client; same .execute(sql, *params).
+    try:
+        _AUDIT_CUSTOMER_SLUG = get_secret("SMD_CUSTOMER_SLUG")
+        _AUDIT_CLIENT = audit_client_from_env(customer_slug=_AUDIT_CUSTOMER_SLUG)
+    except KeyError as exc:
+        _AUDIT_CUSTOMER_SLUG = None
+        _AUDIT_CLIENT = None
+        logger.info(
+            "hermes-smd-trust: confirmed-send audit binding unconfigured (%s); "
+            "out-of-band sends will dispatch without emitting audit rows",
+            exc,
+        )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
