@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from email.utils import parseaddr
 from typing import Any
@@ -171,6 +171,146 @@ def gate_body(scan_text: str, *, vertical: str | None, cohort: str | None) -> Ga
 
 
 # ---------------------------------------------------------------------------
+# Proactive outbound relay (ADR 0075 / #1868)
+#
+# The inbound reply path (above) delivers the agent's governed draft back to a
+# verified INBOUND sender. This section is the mirror for PROACTIVE sends: a
+# scheduled chase draft addressed to the firm's own rostered CLIENT / RECORDS
+# VENDOR (``scope.outbound_roster``). The model, on a cron turn, reliably drafts
+# and does not choose ``send_message`` (three weeks of audit: create_draft dozens
+# of times, send_message zero). So — exactly as the reply relay does for inbound —
+# this trusted code turns that governed draft into a sent message when, and only
+# when, the SAME authorization the gate's ``send_message`` would require holds:
+# the recipients classify to a typed outbound-roster class, that class's authored
+# ceiling is ``autonomous``, and the turn is not tainted. Otherwise it holds (the
+# draft simply stays a draft — the day-one posture).
+#
+# It re-applies the content + fabrication floors (``gate_body`` above) before
+# sending, mirrors the gate's recipient classification via the SAME shared
+# ``recipient_classifier`` primitives, and reads the authored ceiling from the
+# SAME ``customer.yaml`` — so a proactive send can never be authorized where the
+# model-path gate's ``send_message`` would be held. It defeats no floor.
+# ---------------------------------------------------------------------------
+
+
+# The canonical "autonomous" ceiling string — mirrors ``Ceiling.AUTONOMOUS.value``
+# in ``plugins/hermes-smd-trust/enforce.py`` (the gate). ``test_proactive_relay``
+# pins the equality against the gate via ``load_plugin`` so a rename on either
+# side fails CI rather than silently diverging.
+CEILING_AUTONOMOUS = "autonomous"
+
+
+@dataclass(frozen=True)
+class ProactiveDecision:
+    """Whether a proactive draft may be autonomously delivered, plus the audit trail.
+
+    ``send`` is the single bit the hook acts on. ``action_class`` / ``ceiling`` /
+    ``reason`` are for the audit row (never the body). A held decision (``send``
+    False) always carries a legible ``reason``.
+    """
+
+    send: bool
+    action_class: str = ""
+    ceiling: str = ""
+    reason: str = ""
+
+
+def proactive_disposition(
+    *,
+    recipients: set[str],
+    internal_roster: Iterable[str],
+    typed_roster: Sequence[tuple[str, str]],
+    persona_exposure: Mapping[str, str],
+    tainted: bool,
+) -> ProactiveDecision:
+    """Decide whether a proactive draft to ``recipients`` may be autonomously sent.
+
+    Composes the SAME shared primitives the trust gate uses on the model send path
+    — :func:`shared.recipient_classifier.classify_recipients_typed` +
+    :func:`shared.recipient_classifier.send_action_class` + the authored per-class
+    ceiling — so a proactive relay send can never be authorized where the gate's
+    ``send_message`` would be held. Fail-closed at every branch:
+
+      * no resolvable recipient → hold;
+      * recipients do not classify to a typed outbound-roster class (CLIENT /
+        VENDOR) → hold with no ``action_class`` (OUTSIDE — incl. an injected extra
+        or heterogeneous recipient — / INTERNAL / UNKNOWN are owned by the model's
+        own governed path or the inbound reply relay, not this one);
+      * tainted turn → hold (a turn that read untrusted external content never
+        fires an autonomous proactive send — the same net decision the gate reaches
+        by reclassifying a tainted send to the outside/draft ceiling);
+      * the class's authored ceiling is absent or not ``autonomous``
+        (day-one ``draft_for_review``, ``confirm``, or unauthored) → hold.
+
+    Recipients are classified with ``from_tainted=False`` so a client/vendor-aimed
+    chase held purely by taint still resolves its intended ``action_class`` for a
+    legible audit reason; the taint gate is then applied explicitly. The send/hold
+    DECISION is identical to the gate either way — only the audit reason is sharper.
+    """
+    from shared.recipient_classifier import (
+        RecipientClass,
+        classify_recipients_typed,
+        send_action_class,
+    )
+
+    if not recipients:
+        return ProactiveDecision(False, reason="no_recipient")
+
+    cls = classify_recipients_typed(
+        sorted(recipients), internal_roster, typed_roster, from_tainted=False
+    )
+    if cls not in (RecipientClass.CLIENT, RecipientClass.VENDOR):
+        # OUTSIDE (incl. an injected extra/heterogeneous recipient), INTERNAL, or
+        # UNKNOWN — not a graduatable typed outbound send. Held as a draft, no
+        # action_class (the caller stays silent: not a proactive-relay event).
+        return ProactiveDecision(False, reason=f"not_typed_roster:{cls.value}")
+
+    action = send_action_class(cls)
+    if tainted:
+        return ProactiveDecision(False, action_class=action, ceiling="", reason="tainted_turn")
+    ceiling = persona_exposure.get(action, "")
+    if ceiling != CEILING_AUTONOMOUS:
+        return ProactiveDecision(
+            False, action_class=action, ceiling=ceiling, reason="ceiling_not_autonomous"
+        )
+    return ProactiveDecision(True, action_class=action, ceiling=ceiling, reason="autonomous")
+
+
+def parse_created_draft(result: Any) -> tuple[str, str]:
+    """Return ``(inbox_id, draft_id)`` from a ``create_draft`` tool result.
+
+    The ``post_tool_call`` hook receives the tool output as ``result`` (a JSON
+    string, per the AgentMail MCP Draft object). Tolerant of shape: accepts a
+    JSON string or an already-parsed mapping, camelCase (``draftId`` / ``inboxId``,
+    the node SDK) or snake_case (``draft_id`` / ``inbox_id``, the REST envelope),
+    a bare ``id`` for the draft, and one level of ``{"draft": {...}}`` nesting.
+    Returns ``("", "")`` when either id is absent — the caller fails closed (a
+    draft whose ids we cannot read is not sent).
+    """
+    obj: Any = result
+    if isinstance(obj, (bytes, bytearray)):
+        obj = obj.decode("utf-8", "replace")
+    if isinstance(obj, str):
+        try:
+            obj = json.loads(obj)
+        except (json.JSONDecodeError, ValueError):
+            return "", ""
+    if not isinstance(obj, dict):
+        return "", ""
+    inner = obj.get("draft") if isinstance(obj.get("draft"), dict) else obj
+    draft_id = inner.get("draftId") or inner.get("draft_id") or inner.get("id") or ""
+    inbox_id = inner.get("inboxId") or inner.get("inbox_id") or ""
+    if not isinstance(draft_id, str) or not isinstance(inbox_id, str):
+        return "", ""
+    draft_id, inbox_id = draft_id.strip(), inbox_id.strip()
+    if not (draft_id and inbox_id):
+        # Both ids are required to send; a partial result fails closed so the
+        # caller never attempts a send it cannot address.
+        return "", ""
+    return inbox_id, draft_id
+
+
+# ---------------------------------------------------------------------------
 # Rate limiter (per-sender + global, rolling window)
 # ---------------------------------------------------------------------------
 
@@ -297,14 +437,72 @@ def send_reply(
     return str(parsed.get("messageId") or parsed.get("message_id") or "")
 
 
+def send_draft(
+    *,
+    api_key: str,
+    inbox_id: str,
+    draft_id: str,
+    base_url: str = AGENTMAIL_API_BASE,
+    timeout_s: float = _SEND_TIMEOUT_S,
+    opener: Callable[..., Any] | None = None,
+) -> str:
+    """Send an EXISTING draft via the AgentMail REST API; return the new msg id.
+
+    Endpoint: ``POST /v0/inboxes/{inbox_id}/drafts/{draft_id}/send`` with a
+    ``Bearer`` token and an empty body (no scheduling). This is the proactive
+    outbound relay's delivery step: the model already composed and created the
+    draft (``create_draft``), the floors have been re-applied to that draft's
+    body, and this sends *that exact draft* — so the content inspected is byte-for-
+    byte the content transmitted, with no re-composition. ``opener`` is injectable
+    for tests. Raises :class:`RelaySendError` on any failure; the caller is
+    exception-safe and audits the failure.
+    """
+    path = (
+        f"/inboxes/{urllib.parse.quote(inbox_id, safe='')}"
+        f"/drafts/{urllib.parse.quote(draft_id, safe='')}/send"
+    )
+    url = base_url + path
+    data = b"{}"
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    _open = opener or urllib.request.urlopen
+    try:
+        with _open(req, timeout=timeout_s) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise RelaySendError(f"agentmail send-draft returned HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        raise RelaySendError(f"agentmail send-draft unreachable: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RelaySendError(f"agentmail send-draft timed out after {timeout_s}s") from exc
+    try:
+        parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        parsed = {}
+    return str(parsed.get("messageId") or parsed.get("message_id") or "")
+
+
 __all__ = [
     "AGENTMAIL_API_BASE",
+    "CEILING_AUTONOMOUS",
     "GateResult",
+    "ProactiveDecision",
     "RateLimiter",
     "RelaySendError",
     "draft_body",
     "draft_recipients",
     "gate_body",
+    "parse_created_draft",
+    "proactive_disposition",
     "recipient_locked",
+    "send_draft",
     "send_reply",
 ]

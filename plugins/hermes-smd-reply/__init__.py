@@ -39,6 +39,19 @@ trusted code, not in a loosened model capability. Reaching anyone OUTSIDE the
 roster is not this plugin's job; that requires explicit authorization and goes
 through the model's governed (drafting) path (ADR 0055 §3).
 
+Proactive outbound relay (ADR 0075 / #1868). The same ``post_tool_call`` hook
+carries a second, mirror path for PROACTIVE (scheduled/cron) sends: when a
+``create_draft`` has NO verified inbound origin but its recipients classify to a
+rostered CLIENT / RECORDS VENDOR (``scope.outbound_roster``), the relay delivers
+the model's governed draft — sending the EXACT draft the model created — but
+ONLY when the same authorization the gate's ``send_message`` would require holds
+(typed-roster class + that class's authored ceiling is ``autonomous`` + the turn
+is untainted + the content/fabrication floors re-pass). The model reliably drafts
+and does not choose ``send_message`` on cron turns (three weeks of audit:
+create_draft dozens of times, send_message zero), so this trusted code turns that
+governed draft into the graduated send the firm authored. Day-one posture
+(``draft_for_review``) holds the draft, unchanged.
+
 Hook callbacks are exception-safe per AGENTS.md hard rule #3.
 """
 
@@ -121,6 +134,132 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
     )
 
 
+def _active_persona() -> str:
+    """Resolve the active persona (profile) slug from the runtime env.
+
+    Same channel the trust gate reads (``HERMES_ACTIVE_PROFILE``, then the
+    ``SMD_ACTIVE_PERSONA`` fallback) — so the proactive relay reads the exact
+    authored per-class ceiling the gate would for this turn. Empty when neither is
+    set: the persona-exposure lookup then returns ``{}`` and every class is
+    fail-closed (held)."""
+    return os.environ.get("HERMES_ACTIVE_PROFILE") or os.environ.get("SMD_ACTIVE_PERSONA") or ""
+
+
+def _try_proactive_relay(cfg, args: dict, session_id: str, result: Any) -> None:
+    """Deliver a model-drafted proactive chase to a rostered outbound recipient.
+
+    The proactive mirror of the inbound reply relay (ADR 0075 / #1868). Sends only
+    when the SAME authorization the gate's ``send_message`` would require holds:
+    the draft's recipients classify to a typed outbound-roster class (CLIENT /
+    VENDOR), that class's authored ceiling is ``autonomous``, and the turn is not
+    tainted — and the content + fabrication floors re-pass on the draft body.
+    Otherwise it holds (the draft simply stays a draft, the day-one posture).
+
+    Delivery sends the EXACT draft the model created (``drafts/{id}/send``), so the
+    body the floors inspected is byte-for-byte the body transmitted. Exception-safe
+    via the caller's try/except.
+    """
+    recipients = relay.draft_recipients(args)
+    if not recipients:
+        return  # an unaddressed draft — nothing to relay, nothing to audit
+
+    tainted = inbound.SESSION_TAINT.trust_class(session_id) != inbound.TRUST_CLASS_INTERNAL
+    decision = relay.proactive_disposition(
+        recipients=recipients,
+        internal_roster=cfg.inbound_roster,
+        typed_roster=cfg.outbound_roster,
+        persona_exposure=cfg.persona_exposure(_active_persona()),
+        tainted=tainted,
+    )
+    if not decision.send:
+        # Audit a HELD only when the draft was genuinely aimed at a graduatable
+        # typed class (action_class set) — an ordinary internal/outside draft is
+        # not a proactive-relay event and must not spam the ledger.
+        if decision.action_class:
+            _emit_reply_event(
+                action_type="PROACTIVE_HELD",
+                metadata={
+                    "reason": decision.reason,
+                    "action_class": decision.action_class,
+                    "ceiling": decision.ceiling,
+                    "recipients": sorted(recipients),
+                },
+            )
+        return
+
+    # (c) Re-apply the content + fabrication floors to the draft body — the same
+    # floors the autonomous model-send path would have applied. A body we cannot
+    # certify clean is held, never sent.
+    scan_text, _send_text, _send_html = relay.draft_body(args)
+    gate = relay.gate_body(scan_text, vertical=(cfg.vertical or None), cohort=_CUSTOMER_SLUG)
+    if not gate.allowed:
+        _emit_reply_event(
+            action_type="PROACTIVE_HELD",
+            metadata={
+                "reason": gate.reason,
+                "action_class": decision.action_class,
+                "categories": list(gate.categories),
+                "recipients": sorted(recipients),
+            },
+        )
+        return
+
+    # (d) The delivery reads the created draft's ids from the create_draft result.
+    inbox_id, draft_id = relay.parse_created_draft(result)
+    if not (inbox_id and draft_id):
+        _emit_reply_event(
+            action_type="PROACTIVE_HELD",
+            metadata={
+                "reason": "unresolved_draft_ids",
+                "action_class": decision.action_class,
+                "recipients": sorted(recipients),
+            },
+        )
+        return
+
+    # (e) Rate-limit (per-recipient + global), keyed by the sorted recipient set.
+    rl_key = ",".join(sorted(recipients))
+    if _LIMITER is None or not _LIMITER.allow(rl_key):
+        _emit_reply_event(
+            action_type="PROACTIVE_HELD",
+            metadata={
+                "reason": "rate_limited",
+                "action_class": decision.action_class,
+                "recipients": sorted(recipients),
+            },
+        )
+        return
+
+    # (f) Send the exact draft via the AgentMail REST API.
+    try:
+        sent_id = relay.send_draft(api_key=_API_KEY or "", inbox_id=inbox_id, draft_id=draft_id)
+    except relay.RelaySendError as exc:
+        _emit_reply_event(
+            action_type="PROACTIVE_FAILED",
+            metadata={
+                "reason": str(exc),
+                "action_class": decision.action_class,
+                "recipients": sorted(recipients),
+            },
+        )
+        return
+
+    # (g) Audit the send — digest + recipients + action class + message ids only,
+    # never the body.
+    _emit_reply_event(
+        action_type="PROACTIVE_SENT",
+        metadata={
+            "action_class": decision.action_class,
+            "ceiling": decision.ceiling,
+            "recipients": sorted(recipients),
+            "inbox_id": inbox_id,
+            "draft_id": draft_id,
+            "sent_message_id": sent_id,
+            "body_digest": inbound.content_digest(scan_text),
+        },
+    )
+
+
 def on_post_tool_call(**kwargs: Any) -> None:
     """Relay the agent's governed draft back to a verified, rostered inbound sender.
 
@@ -172,9 +311,13 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 )
                 origin = recovered
         if origin is None:
-            # Fail closed: no verified inbound sender matches this draft, so
-            # there is no address to reply to. A create_draft that did NOT
-            # originate from an inbound email never relays.
+            # No verified inbound sender matches this draft — this is a PROACTIVE
+            # turn (a scheduled/cron chase), not a reply. Try the proactive
+            # outbound relay (ADR 0075 / #1868): deliver the model's governed
+            # draft to a rostered CLIENT / VENDOR when the authored class ceiling
+            # is autonomous and the turn is untainted; otherwise hold (the draft
+            # stays a draft). It never falls through to the inbound reply path.
+            _try_proactive_relay(cfg, args, session_id, kwargs.get("result"))
             return
 
         # (a) Roster authorization — the Operator replies autonomously only to a
