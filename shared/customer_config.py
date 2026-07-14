@@ -195,33 +195,6 @@ class CustomerConfig:
             )
         return list(raw)
 
-    def persona_exposure(self, persona_slug: str) -> dict[str, str]:
-        """Return the named persona's authored ``entitlements.exposure`` as raw
-        ``{action_class: ceiling}`` strings, or ``{}`` when the persona is absent
-        or authored no exposure.
-
-        This is the raw authored surface — NO ceiling-string validation, no
-        fail-closed defaulting, no vertical-floor application. The trust gate
-        (``plugins/hermes-smd-trust/enforce.py``) remains the authority that
-        parses these into typed ceilings and resolves the effective ceiling. This
-        accessor exists so the proactive outbound relay (``hermes-smd-reply``,
-        ADR 0075) can read the SAME authored class ceiling the gate would —
-        without importing gate internals (a plugin directory carries a hyphen and
-        is not an importable module). An empty map is fail-closed: the relay
-        treats an absent or non-``autonomous`` ceiling as "hold as draft", never a
-        reason to send.
-        """
-        if not persona_slug:
-            return {}
-        for persona in self.personas:
-            if isinstance(persona, dict) and persona.get("slug") == persona_slug:
-                entitlements = persona.get("entitlements")
-                raw = entitlements.get("exposure") if isinstance(entitlements, dict) else None
-                if not isinstance(raw, dict):
-                    return {}
-                return {str(k): str(v) for k, v in raw.items()}
-        return {}
-
     # ------------------------------------------------------------------
     # Scope
     # ------------------------------------------------------------------

@@ -259,15 +259,21 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     # do not send.
     payload = dict(rec.args)
     try:
-        block = enforce.evaluate_tool_call(rec.tool_name, payload, customer_slug, session_id=session_id)
+        block = enforce.evaluate_tool_call(
+            rec.tool_name, payload, customer_slug, session_id=session_id
+        )
     except Exception:  # noqa: BLE001 — an indeterminate gate must not send
-        logger.exception("hermes-smd-trust: out-of-band send gate raised; NOT dispatching (fail-safe)")
+        logger.exception(
+            "hermes-smd-trust: out-of-band send gate raised; NOT dispatching (fail-safe)"
+        )
         return None
     if block is not None:
         # taint-gate / content-floor withheld the approved send. Not sent; the
         # record was not consumed. Tell the agent why, plainly.
         reason = block.get("message", "withheld") if isinstance(block, dict) else "withheld"
-        logger.info("hermes-smd-trust: approved send withheld by gate for %s (%s)", recipients, reason)
+        logger.info(
+            "hermes-smd-trust: approved send withheld by gate for %s (%s)", recipients, reason
+        )
         return f"[Your approved send to {recipients} was not dispatched: {reason}]"
     # Gate allowed + consumed the approval; `payload` now holds the approved payload.
     try:
@@ -282,7 +288,11 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
         logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
         _emit_confirm_event(
             "CONFIRM_SEND_FAILED",
-            {"recipients": sorted(rec.recipients), "source": rec.approval_source, "reason": str(exc)},
+            {
+                "recipients": sorted(rec.recipients),
+                "source": rec.approval_source,
+                "reason": str(exc),
+            },
         )
         return f"[Your approved send to {recipients} could not be delivered; it was not sent. You can ask me to retry.]"
     logger.info(
@@ -293,7 +303,11 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     )
     _emit_confirm_event(
         "CONFIRM_SEND_DISPATCHED",
-        {"recipients": sorted(rec.recipients), "source": rec.approval_source, "message_id": message_id},
+        {
+            "recipients": sorted(rec.recipients),
+            "source": rec.approval_source,
+            "message_id": message_id,
+        },
     )
     return f"[Dispatched your approved send to {recipients} (message {message_id}). Do not send it again.]"
 

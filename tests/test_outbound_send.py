@@ -59,7 +59,9 @@ def _reset_inbox_cache():
 def test_resolve_inbox_id_parses_and_caches():
     mod = _load()
     calls = []
-    inbox = mod.resolve_inbox_id("am_key", opener=_opener(calls, {"inboxes": [{"inbox_id": "crane@x.agentmail.to"}]}))
+    inbox = mod.resolve_inbox_id(
+        "am_key", opener=_opener(calls, {"inboxes": [{"inbox_id": "crane@x.agentmail.to"}]})
+    )
     assert inbox == "crane@x.agentmail.to"
     # second call is cached — no second HTTP request.
     inbox2 = mod.resolve_inbox_id("am_key", opener=_opener(calls, {"inboxes": []}))
@@ -90,7 +92,10 @@ def test_send_message_forwards_only_allowlisted_fields():
         "tool_call_id": "abc",  # noise — must NOT be forwarded
     }
     mid = mod.send_message(
-        api_key="am_key", inbox_id="inbox1", payload=payload, opener=_opener(calls, {"message_id": "msg_123"})
+        api_key="am_key",
+        inbox_id="inbox1",
+        payload=payload,
+        opener=_opener(calls, {"message_id": "msg_123"}),
     )
     assert mid == "msg_123"
     sent = json.loads(calls[0].data.decode("utf-8"))
@@ -102,13 +107,21 @@ def test_send_message_forwards_only_allowlisted_fields():
 def test_send_message_refuses_without_recipient():
     mod = _load()
     with pytest.raises(mod.AgentMailSendError):
-        mod.send_message(api_key="am_key", inbox_id="inbox1", payload={"subject": "x", "text": "y"}, opener=_opener([], {}))
+        mod.send_message(
+            api_key="am_key",
+            inbox_id="inbox1",
+            payload={"subject": "x", "text": "y"},
+            opener=_opener([], {}),
+        )
 
 
 def test_send_message_tolerates_missing_message_id():
     mod = _load()
     mid = mod.send_message(
-        api_key="am_key", inbox_id="inbox1", payload={"to": "a@b.com", "text": "hi"}, opener=_opener([], {})
+        api_key="am_key",
+        inbox_id="inbox1",
+        payload={"to": "a@b.com", "text": "hi"},
+        opener=_opener([], {}),
     )
     assert "sent" in mid
 
@@ -122,4 +135,9 @@ def test_http_error_maps_to_agentmail_send_error():
         raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, io.BytesIO(b""))
 
     with pytest.raises(mod.AgentMailSendError):
-        mod.send_message(api_key="am_key", inbox_id="inbox1", payload={"to": "a@b.com", "text": "hi"}, opener=_boom)
+        mod.send_message(
+            api_key="am_key",
+            inbox_id="inbox1",
+            payload={"to": "a@b.com", "text": "hi"},
+            opener=_boom,
+        )
