@@ -517,6 +517,13 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # File mutation — internal write (not code-exec, but not read either).
     "write_file": ActionClass.INTERNAL_WRITE,
     "patch": ActionClass.INTERNAL_WRITE,
+    # Escalation-ledger tools (hermes-smd-escalation, ss #1915). The append is
+    # operator communication telemetry through the broker's validated verb —
+    # internal state, never client-facing content; the state read folds the
+    # read-only ledger twin. These replaced the execute_code append snippet so
+    # skills never need a code_execution exposure to run the escalation loop.
+    "escalation_append": ActionClass.INTERNAL_WRITE,
+    "escalation_state": ActionClass.READ,
 }
 
 

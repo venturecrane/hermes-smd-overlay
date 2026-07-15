@@ -210,6 +210,12 @@ vars:
     requirement: optional
     consumed_by: [voice]
     note: local voice-vault dir (bootstrap Step 2a); preferred so the agent holds NO R2 credential (OP-P0-2)
+  SMD_ESCALATION_LEDGER_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [escalation]
+    note: "override for the escalation-ledger twin path read by escalation_state (plugins/hermes-smd-escalation); unset => the Machine default /opt/data/audit/escalation-ledger.jsonl (shared/escalation_ledger.DEFAULT_LEDGER_PATH). Tests set it to a tmp file."
   R2_ENDPOINT_URL:
     discovery: static
     stage: agent

@@ -15,3 +15,4 @@ plugins:
   - plugins/hermes-smd-peer-memory
   - plugins/hermes-smd-mcp-result-sink
   - plugins/hermes-smd-jobs
+  - plugins/hermes-smd-escalation
