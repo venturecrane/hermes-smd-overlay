@@ -228,8 +228,15 @@ def test_persona_filter(mod, client):
 # ---------------------------------------------------------------------------
 
 
-def test_render_empty_is_blank(mod):
-    assert mod.store.render_preference_block([], peer_id="p") == ""
+def test_render_empty_still_carries_capture_nudge(mod):
+    # The write side of the lane: even with nothing learned yet, the block
+    # instructs the agent to record stated/demonstrated preferences. Without
+    # this the lane never fills (ss #1941 — zero rows on every seat).
+    block = mod.store.render_preference_block([], peer_id="p")
+    assert "record_peer_preference" in block
+    assert "stated" in block and "demonstrated" in block
+    # No fabricated read-side framing when nothing is known.
+    assert "likes you to work with them" not in block
 
 
 def test_render_includes_preference_why_apply(mod):
@@ -239,6 +246,17 @@ def test_render_includes_preference_why_apply(mod):
     assert "Bullets" in block
     assert "why: faster" in block
     assert "apply: lead with ask" in block
+    # The capture instruction rides along even when preferences exist.
+    assert "record_peer_preference" in block
+
+
+def test_pre_llm_call_injects_nudge_for_unknown_peer(mod, client):
+    # Active store + sender with no recorded preferences → the hook still
+    # injects the capture instruction (the activation path for the lane).
+    mod.bind_runtime(customer_slug="testco", client=client)
+    out = mod.on_pre_llm_call(session_id="sess-n", sender_id="new@firm.com", user_message="hi")
+    assert out is not None
+    assert "record_peer_preference" in out["context"]
 
 
 # ---------------------------------------------------------------------------

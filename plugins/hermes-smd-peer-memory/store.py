@@ -157,30 +157,48 @@ def active_preferences(
     )
 
 
-def render_preference_block(rows: list[dict[str, Any]], *, peer_id: str) -> str:
-    """Render active preferences as the pre_llm_call context block.
+# The capture-side instruction, injected on every sender-attributed turn.
+# Without this the learned lane never fills: the 2026-07-15 live probe (ss
+# #1941) found ZERO peer_preferences rows on every seat because the tool
+# existed but nothing ever instructed the agent to use it. The read side
+# (preferences above) and the write side (this nudge) ship together so the
+# capability is wired into behavior, not just registered.
+_CAPTURE_NUDGE = (
+    "If this person states a preference about how they want you to work with "
+    "them, or concretely demonstrates one, record it with the "
+    "record_peer_preference tool: one concrete working preference per call, "
+    "marked stated or demonstrated. Never record a trait label or a guess. "
+    "If they change a preference, record the new version."
+)
 
-    Returns ``""`` when there is nothing to inject (the hook then contributes
-    no context). ``peer_id`` is intentionally NOT printed — it may be a raw
-    email and carries no meaning for the model; the block is framed as "the
-    person you are replying to".
+
+def render_preference_block(rows: list[dict[str, Any]], *, peer_id: str) -> str:
+    """Render the per-peer context block for pre_llm_call.
+
+    Always ends with the capture instruction (the write side of the lane —
+    ADR 0048 §3); when active preferences exist they render first (the read
+    side). ``peer_id`` is intentionally NOT printed — it may be a raw email
+    and carries no meaning for the model; the block is framed as "the person
+    you are replying to".
     """
-    if not rows:
-        return ""
-    lines = [
-        "How the person you are replying to likes you to work with them "
-        "(captured from what they have stated or demonstrated, never assumed). "
-        "Apply these in how you respond:"
-    ]
-    for row in rows[:_RENDER_CAP]:
-        line = f"- {row['preference']}"
-        why = row.get("why")
-        how = row.get("how_to_apply")
-        if why:
-            line += f" (why: {why})"
-        if how:
-            line += f" [apply: {how}]"
-        lines.append(line)
+    lines: list[str] = []
+    if rows:
+        lines.append(
+            "How the person you are replying to likes you to work with them "
+            "(captured from what they have stated or demonstrated, never assumed). "
+            "Apply these in how you respond:"
+        )
+        for row in rows[:_RENDER_CAP]:
+            line = f"- {row['preference']}"
+            why = row.get("why")
+            how = row.get("how_to_apply")
+            if why:
+                line += f" (why: {why})"
+            if how:
+                line += f" [apply: {how}]"
+            lines.append(line)
+        lines.append("")
+    lines.append(_CAPTURE_NUDGE)
     return "\n".join(lines)
 
 
