@@ -418,8 +418,21 @@ def _safety_gate(
     is_initial = not old_cfg
     non_writable = () if is_initial else tuple(safety.non_live_writable_changes(old_cfg, new_cfg))
     if non_writable:
-        reason = "change touches rebuild-class (non-live-writable) paths: " + ", ".join(
-            non_writable
+        # Name each offending path by WHY it is held (ss #1931): a rebuild-class
+        # path needs a re-provision; a merely-unlisted path needs an allow-list
+        # decision — telling the operator "rebuild-class" for both was wrong
+        # advice. Also say the atomicity consequence out loud: one held path
+        # holds the WHOLE diff, live-writable siblings included.
+        rebuild = tuple(p for p in non_writable if safety.rebuild_class(p))
+        unlisted = tuple(p for p in non_writable if p not in rebuild)
+        parts = []
+        if rebuild:
+            parts.append("rebuild-class paths (re-provision required): " + ", ".join(rebuild))
+        if unlisted:
+            parts.append("paths not on the live-writable allow-list: " + ", ".join(unlisted))
+        reason = (
+            "no partial apply — the whole diff is held, including any live-writable "
+            "changes bundled with it; " + "; ".join(parts)
         )
         outcome = ApplyOutcome.DEFERRED if allow_deferred_paths else ApplyOutcome.REJECTED
         return ApplyResult(outcome=outcome, reasons=(reason,), changed=changed)

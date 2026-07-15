@@ -67,6 +67,69 @@ def test_append_derives_item_key_and_token_from_components(escalation):
     assert event["v"] == escalation_ledger.SCHEMA_VERSION
 
 
+def test_derive_only_returns_identity_and_writes_nothing(escalation):
+    """ss #1935: the alert body must quote real broker-derived ACK codes, but the
+    safe failure direction (send fails -> nothing recorded -> re-fires next run)
+    requires the raise to be appended AFTER the send. derive_only=true is the
+    first step of that ordering: identity out, zero events written."""
+    plugin, requests = escalation
+    out = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "matter_id": "m-1",
+                "source_id": "task-1",
+                "label": "records-outstanding",
+                "authored_date": "2026-07-11",
+                "event": "fired",
+                "attempt": 1,
+                "derive_only": True,
+            }
+        )
+    )
+    expected_key = escalation_ledger.item_key("m-1", "task-1", "records-outstanding", "2026-07-11")
+    assert out["ok"] is True
+    assert out["written"] is False
+    assert out["item_key"] == expected_key
+    assert out["token"] == escalation_ledger.token_for(expected_key)
+    assert requests == []  # NOTHING reached the broker
+
+
+def test_derive_only_matches_the_later_real_append(escalation):
+    """Determinism guard: the token quoted in the alert (derive_only) and the
+    token recorded by the post-send append are the same value."""
+    plugin, requests = escalation
+    components = {
+        "skill": "deadline-miss-escalator",
+        "matter_id": "m-1",
+        "source_id": "task-9",
+        "label": "lien-payoff",
+        "authored_date": None,
+        "event": "fired",
+        "attempt": 1,
+    }
+    derived = json.loads(plugin._escalation_append({**components, "derive_only": True}))
+    appended = json.loads(plugin._escalation_append(components))
+    assert derived["token"] == appended["token"]
+    assert derived["item_key"] == appended["item_key"]
+    assert len(requests) == 1  # only the second call wrote
+
+
+def test_derive_only_rejects_ack_token(escalation):
+    plugin, requests = escalation
+    with pytest.raises(ValueError, match="one or the other"):
+        plugin._escalation_append(
+            {
+                "skill": "s",
+                "event": "acked",
+                "attempt": 1,
+                "ack_token": "ACK-ABCDEF",
+                "derive_only": True,
+            }
+        )
+    assert requests == []
+
+
 def test_append_idless_item_gets_no_token(escalation):
     plugin, requests = escalation
     json.loads(

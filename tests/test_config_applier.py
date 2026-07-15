@@ -449,6 +449,63 @@ def test_apply_applies_live_writable_ceiling_change(tmp_path):
     assert volume.read_bytes() == new
 
 
+def test_apply_applies_per_skill_settings_change(tmp_path):
+    # ss #1931: per-skill settings are the engagement's authored dials — a
+    # chase-cadence flip must apply live (before this, a settings edit held the
+    # WHOLE diff, found live 2026-07-14).
+    volume = tmp_path / "customer.yaml"
+    current_doc = _valid_doc()
+    current_doc["personas"][0]["skills"][0]["settings"] = {
+        "chase_cadence_days": 5,
+        "escalate_after_attempts": 3,
+    }
+    volume.write_bytes(yaml.safe_dump(current_doc, sort_keys=False).encode())
+    new_doc = _valid_doc()
+    new_doc["personas"][0]["skills"][0]["settings"] = {
+        "chase_cadence_days": 9,
+        "escalate_after_attempts": 3,
+    }
+    new = yaml.safe_dump(new_doc, sort_keys=False).encode()
+
+    result = apply(
+        s3_client=FakeS3({KEY: new}),
+        bucket=BUCKET,
+        slug=SLUG,
+        volume_path=volume,
+        audit_client=FakeAudit(),
+    )
+    assert result.outcome is ApplyOutcome.APPLIED, result.reasons
+    assert "personas.0.skills.0.settings.chase_cadence_days" in result.changed
+    assert volume.read_bytes() == new
+
+
+def test_apply_held_diff_reason_is_accurate_and_names_atomicity(tmp_path):
+    # ss #1931: a held diff must (a) label an unlisted path as an allow-list
+    # matter, NOT "rebuild-class", and (b) say out loud that the whole diff is
+    # held, including live-writable changes bundled with it.
+    volume = tmp_path / "customer.yaml"
+    volume.write_bytes(VALID)
+    new_doc = _valid_doc()
+    new_doc["personas"][0]["name"] = "Marcus II"  # unlisted (not never-list)
+    new_doc["personas"][0]["skills"][0]["enabled"] = False  # live-writable sibling
+    new = yaml.safe_dump(new_doc, sort_keys=False).encode()
+
+    result = apply(
+        s3_client=FakeS3({KEY: new}),
+        bucket=BUCKET,
+        slug=SLUG,
+        volume_path=volume,
+        audit_client=FakeAudit(),
+    )
+    assert result.outcome is ApplyOutcome.REJECTED
+    joined = " ".join(result.reasons)
+    assert "not on the live-writable allow-list" in joined
+    assert "personas.0.name" in joined
+    assert "rebuild-class" not in joined  # unlisted ≠ rebuild-class
+    assert "whole diff is held" in joined
+    assert volume.read_bytes() == VALID  # the enabled flip did NOT partially apply
+
+
 # ---------------------------------------------------------------------------
 # apply — unrecoverable faults propagate as ConfigApplyError
 # ---------------------------------------------------------------------------

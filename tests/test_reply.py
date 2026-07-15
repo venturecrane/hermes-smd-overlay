@@ -401,20 +401,85 @@ def test_non_create_draft_tool_ignored(relay_mod) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sensitive_body_held(relay_mod) -> None:
+_SENSITIVE_BODY = "Our fee for this engagement is $5,000 due on signing the contract."
+
+
+def test_internal_recipient_sensitive_body_sends(relay_mod) -> None:
+    """ss #1932: the locked recipient is on ``scope.inbound_allow_from``, so they
+    classify INTERNAL — the content floor does not apply, mirroring the send
+    path's ADR 0072 carve-out (firm-internal coordination legitimately names
+    deadlines, signatures, attorneys). The live failure this pins: an ack
+    confirmation naming a "deadline" was held in drafts on its way back to a
+    rostered colleague."""
     mod, d1, sent = relay_mod
     _record_origin(sender="greg@whitfield.example")
-    # A money/contract body trips the content floor — hold (do not relay).
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args=_draft(
             ["greg@whitfield.example"],
-            text="Our fee for this engagement is $5,000 due on signing the contract.",
+            text=(
+                "Acknowledged ACK-6WS08D. The deadline item is snoozed for 7 days; "
+                "the attorney still needs to sign off in Smokeball."
+            ),
         ),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+    sent_meta = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert sent_meta and sent_meta[0]["recipient_class"] == "internal"
+    assert sent_meta[0]["content_floor_applied"] is False
+
+
+def test_non_internal_class_keeps_the_floor(relay_mod, monkeypatch) -> None:
+    """The skip is CLASS-conditional, never unconditional: a locked recipient
+    that does not classify INTERNAL keeps the content floor exactly as before."""
+    from shared.recipient_classifier import RecipientClass
+
+    mod, d1, sent = relay_mod
+    monkeypatch.setattr(mod, "classify_recipients_typed", lambda *a, **k: RecipientClass.CLIENT)
+    _record_origin(sender="greg@whitfield.example")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text=_SENSITIVE_BODY),
         session_id="s1",
     )
     assert sent == []
     assert any(a == "REPLY_HELD" and m["reason"] == "content_sensitive" for a, m in d1.events())
+
+
+def test_classifier_fault_keeps_the_floor(relay_mod, monkeypatch) -> None:
+    """Classification faults fail toward floored, never open."""
+    mod, d1, sent = relay_mod
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("classifier down")
+
+    monkeypatch.setattr(mod, "classify_recipients_typed", _boom)
+    _record_origin(sender="greg@whitfield.example")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text=_SENSITIVE_BODY),
+        session_id="s1",
+    )
+    assert sent == []
+    assert any(a == "REPLY_HELD" and m["reason"] == "content_sensitive" for a, m in d1.events())
+
+
+def test_internal_recipient_fabrication_gate_still_applies(relay_mod) -> None:
+    """The ADR 0072 carve-out skips ONLY the content floor. A Tier-1 fabrication
+    marker holds the reply even to an INTERNAL recipient."""
+    mod, d1, sent = relay_mod
+    _record_origin(sender="greg@whitfield.example")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(
+            ["greg@whitfield.example"],
+            text="The client portal is coming soon; tell the team to hold questions.",
+        ),
+        session_id="s1",
+    )
+    assert sent == []
+    assert any(a == "REPLY_HELD" and m["reason"].startswith("fabrication") for a, m in d1.events())
 
 
 def test_empty_body_held(relay_mod) -> None:

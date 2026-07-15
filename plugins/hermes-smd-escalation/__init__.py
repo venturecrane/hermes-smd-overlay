@@ -107,6 +107,18 @@ _APPEND_SCHEMA = {
                 "raises — pass this INSTEAD of the identity components."
             ),
         },
+        "derive_only": {
+            "type": "boolean",
+            "description": (
+                "When true, derive and return item_key + ACK token from the "
+                "identity components WITHOUT writing any event. Use this BEFORE "
+                "composing an alert so the sent body quotes the real broker-"
+                "derived codes (ss #1935: an alert composed before the ledger "
+                "writes printed invented or wrong-item codes). Not valid with "
+                "ack_token. The send-then-record failure direction is preserved: "
+                "derive, send, then append the raise."
+            ),
+        },
     },
     "required": ["skill", "event", "attempt"],
     "additionalProperties": False,
@@ -158,6 +170,12 @@ def _resolve_token_identity(ack_token: str) -> tuple[str, str | None]:
 def _escalation_append(args: dict[str, Any], **_: Any) -> str:
     kind = str(args["event"])
     ack_token = args.get("ack_token")
+    derive_only = bool(args.get("derive_only"))
+    if derive_only and ack_token:
+        raise ValueError(
+            "derive_only resolves identity for a raise you have not written yet; "
+            "an acked event already has its token — pass one or the other"
+        )
     if ack_token:
         if kind != "acked":
             raise ValueError("ack_token is only valid for acked events")
@@ -178,6 +196,15 @@ def _escalation_append(args: dict[str, Any], **_: Any) -> str:
         )
         key = escalation_ledger.item_key(matter_id or "", source_id, str(label), authored_date)
         token = escalation_ledger.token_for(key) if source_id is not None else None
+    if derive_only:
+        # Identity only — NOTHING is written. The turn quotes these codes in the
+        # alert it is about to send, then appends the raise after a successful
+        # send. A failed send therefore still records nothing (the item re-fires
+        # next run: annoying, never dangerous — ss #1935).
+        return json.dumps(
+            {"ok": True, "derive_only": True, "written": False, "item_key": key, "token": token},
+            ensure_ascii=False,
+        )
     event = {
         "v": escalation_ledger.SCHEMA_VERSION,
         "ts": None,  # broker stamps ts/id server-side; the agent cannot backdate
@@ -227,7 +254,10 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "escalation_append": (
         "Append one escalation-ledger event (fired/chased/acked/handed_off/resolved) "
         "through the validated broker seam. The broker stamps ts/id and rejects an "
-        "acked event whose token has no prior raise.",
+        "acked event whose token has no prior raise. With derive_only=true, returns "
+        "the derived item_key + ACK token WITHOUT writing — call this before "
+        "composing an alert so the sent body quotes real codes, then append the "
+        "raise after the send succeeds.",
         _APPEND_SCHEMA,
         _escalation_append,
     ),
