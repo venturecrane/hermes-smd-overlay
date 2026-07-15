@@ -1,0 +1,5 @@
+name: hermes-smd-escalation
+version: "0.1.0"
+description: "Escalation-ledger tools (WP-A/#1894 follow-on, ss #1915): escalation_append writes one validated event through the broker's uid-gated escalation_event_append verb; escalation_state folds the read-only ledger twin into per-item state + ACK tokens. Closes the execute_code dependency the ledger-append procedure shipped with — skills append events without any code_execution exposure. Registers tools only; wires no gateway hooks."
+requires_env:
+  - SMD_WORKSPACE_BROKER_SOCKET
