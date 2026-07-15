@@ -340,16 +340,38 @@ async def run_boot_probe() -> tuple[bool, str]:
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute(_CREATE_TABLE_SQL)
         conn.commit()
+        thresholds = replace(DEFAULT_THRESHOLDS, cost_daily_cents=1)
         machine = StickyStopMachine(
             store=SqliteStickyStopStore(conn),
             audit_writer=_NoAuditSink(),
-            thresholds=replace(DEFAULT_THRESHOLDS, cost_daily_cents=1),
+            thresholds=thresholds,
         )
         # 1000c against a 1c cap = 100000% >> the 200% hard-stop rung.
-        await machine.record_cost_cents(customer="_probe", persona="_probe", amount_cents=1000)
+        recorded = await machine.record_cost_cents(
+            customer="_probe", persona="_probe", amount_cents=1000
+        )
         state = await machine.get_state("_probe", "_probe")
         if state.level != StickyStopLevel.HARD_STOP:
-            return False, f"ladder did not trip HARD_STOP (level={state.level.value})"
+            # Capture the intermediate values so a future firing is diagnosable
+            # (ss #1701): the reason string is all that reaches the boot log /
+            # Sentry, and a bare "level=OK" cannot distinguish a transient
+            # persistence blip from a real ladder defect. The three signatures:
+            #   recorded=HARD_STOP but readback != HARD_STOP -> store/read did
+            #     not persist the transition (transient sqlite/fs at boot)
+            #   recorded != HARD_STOP                        -> ladder/threshold
+            #     logic (a real defect)
+            #   cost_cents_today != 1000                     -> the date-reset
+            #     path zeroed the recorded spend
+            return False, (
+                "ladder did not trip HARD_STOP "
+                f"(readback level={state.level.value} "
+                f"cost_cents_today={state.cost_cents_today} cost_date={state.cost_date!r}; "
+                f"record_cost_cents returned level={recorded.level.value} "
+                f"cost_cents_today={recorded.cost_cents_today}; "
+                f"cap={thresholds.cost_daily_cents}c rungs warn/soft/hard="
+                f"{thresholds.cost_warn_pct}/{thresholds.cost_soft_stop_pct}/"
+                f"{thresholds.cost_hard_stop_pct}%)"
+            )
         try:
             await machine.assert_allowed(customer="_probe", persona="_probe")
         except StickyStopError:
