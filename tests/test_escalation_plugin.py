@@ -32,29 +32,100 @@ def escalation(monkeypatch):
     return plugin, requests
 
 
-def test_append_marshals_event_through_broker_verb(escalation):
+def test_append_derives_item_key_and_token_from_components(escalation):
+    """The tool hashes the identity tuple ITSELF (the first live probe proved
+    a model-authored item_key forks the pre_run join: it wrote a colon-joined
+    composite the sha256 join never matched)."""
     plugin, requests = escalation
     out = json.loads(
         plugin._escalation_append(
             {
                 "skill": "client-verification-tracker",
                 "matter_id": "m-1",
-                "item_key": "a" * 64,
+                "source_id": "task-1",
+                "label": "client-verification",
+                "authored_date": None,
                 "event": "chased",
                 "attempt": 2,
-                "token": "ACK-7Q3M2K",
             }
         )
     )
-    assert out == {"ok": True, "id": "evt-1"}
+    expected_key = escalation_ledger.item_key("m-1", "task-1", "client-verification", None)
+    expected_token = escalation_ledger.token_for(expected_key)
+    assert out["ok"] is True
+    assert out["item_key"] == expected_key  # echoed for the turn
+    assert out["token"] == expected_token
     assert len(requests) == 1
     req = requests[0]
     assert req["action"] == "escalation_event_append"
     event = req["event"]
+    assert event["item_key"] == expected_key  # EXACTLY the pre_run gate's key
+    assert event["token"] == expected_token
     assert event["event"] == "chased"
     assert event["attempt"] == 2
     assert event["ts"] is None  # broker stamps server-side; agent cannot backdate
     assert event["v"] == escalation_ledger.SCHEMA_VERSION
+
+
+def test_append_idless_item_gets_no_token(escalation):
+    plugin, requests = escalation
+    json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "matter_id": "m-1",
+                "source_id": None,
+                "label": "sol-date",
+                "authored_date": "2026-08-01",
+                "event": "fired",
+                "attempt": 1,
+            }
+        )
+    )
+    assert requests[0]["event"]["token"] is None  # blanket-ack-only group
+
+
+def test_acked_resolves_identity_from_token(escalation, tmp_path, monkeypatch):
+    """The acker knows the ACK code from the reply, not the identity tuple —
+    the tool resolves the token against the ledger's prior raises."""
+    plugin, requests = escalation
+    key = escalation_ledger.item_key("m-1", "task-1", "client-verification", None)
+    token = escalation_ledger.token_for(key)
+    ledger_file = tmp_path / "ledger.jsonl"
+    fired = escalation_ledger.make_event(
+        skill="deadline-miss-escalator",
+        matter_id="m-1",
+        item_key=key,
+        event="fired",
+        attempt=1,
+        token=token,
+        ts="2026-07-14T09:00:00.000Z",
+    )
+    ledger_file.write_text(json.dumps(fired) + "\n", encoding="utf-8")
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
+    out = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "acked",
+                "attempt": 1,
+                "ack_token": token,
+            }
+        )
+    )
+    assert out["ok"] is True
+    assert requests[0]["event"]["item_key"] == key
+    assert requests[0]["event"]["matter_id"] == "m-1"
+
+
+def test_acked_unknown_token_is_rejected_before_the_broker(escalation, tmp_path, monkeypatch):
+    plugin, requests = escalation
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(tmp_path / "empty.jsonl"))
+    with pytest.raises(ValueError, match="never rang"):
+        plugin._escalation_append(
+            {"skill": "s", "event": "acked", "attempt": 1, "ack_token": "ACK-XXXXXX"}
+        )
+    assert requests == []  # nothing shipped
 
 
 def test_append_returns_broker_rejection_verbatim(escalation, monkeypatch):
@@ -66,7 +137,14 @@ def test_append_returns_broker_rejection_verbatim(escalation, monkeypatch):
     )
     out = json.loads(
         plugin._escalation_append(
-            {"skill": "s", "item_key": "k", "event": "acked", "attempt": 1, "token": "ACK-X"}
+            {
+                "skill": "s",
+                "matter_id": "m-1",
+                "source_id": "t-1",
+                "label": "x",
+                "event": "fired",
+                "attempt": 1,
+            }
         )
     )
     assert out["ok"] is False
