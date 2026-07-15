@@ -259,6 +259,15 @@ _LIVE_WRITABLE_PREFIXES: tuple[str, ...] = (
     # (``personas.0.skills.3.enabled``) is normalized to a wildcard before this
     # prefix match — see ``_normalize_path``.
     "personas.*.skills.*.enabled",
+    # Per-skill settings (ss #1931). These are the engagement's authored dials —
+    # chase cadence, escalation ceilings, per-skill numbers a skill's pre_run
+    # reads live from the volume yaml. They are behavioral configuration, not
+    # image structure: flipping chase_cadence_days must take effect on apply,
+    # exactly like the sibling initiation/enabled leaves. Before this entry, a
+    # settings edit rejected the WHOLE diff (fail-closed but wrong grain — found
+    # live 2026-07-14 when a cadence flip silently blocked a refire flip bundled
+    # with it).
+    "personas.*.skills.*.settings",
 )
 
 # Rebuild-class paths that must NEVER apply live, even if a future allow-list
@@ -303,6 +312,18 @@ def _matches_prefix(normalized: str, prefix: str) -> bool:
     if normalized == prefix:
         return True
     return normalized.startswith(prefix + ".")
+
+
+def rebuild_class(field_path: object) -> bool:
+    """True iff ``field_path`` matches the never-list (a rebuild-class path whose
+    change alters the booted image and requires a re-provision). Used to label
+    rejections accurately (ss #1931): a path that is merely not on the allow-list
+    is NOT rebuild-class, and telling an operator to re-provision for it would be
+    wrong advice."""
+    if not isinstance(field_path, str) or not field_path.strip():
+        return False
+    normalized = _normalize_path(field_path.strip())
+    return any(_matches_prefix(normalized, prefix) for prefix in _NEVER_LIVE_WRITABLE_PREFIXES)
 
 
 def live_writable(field_path: object) -> bool:

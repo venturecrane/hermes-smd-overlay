@@ -200,10 +200,27 @@ def test_floor_preserving_garbled_ceiling_fails_closed(synthetic_floor):
         "personas.0.skills.2.enabled",
         "personas.1.skills.0.initiation",
         "personas.1.skills.0.initiation.scheduled",
+        # Per-skill settings are the engagement's authored dials (ss #1931):
+        # a chase-cadence flip must apply live, like initiation/enabled.
+        "personas.0.skills.3.settings",
+        "personas.0.skills.3.settings.chase_cadence_days",
+        "personas.0.skills.3.settings.escalate_after_attempts",
     ],
 )
 def test_live_writable_allows_allow_list(path):
     assert live_writable(path) is True
+
+
+def test_rebuild_class_labels_only_the_never_list():
+    """ss #1931: rejection reasons must distinguish "re-provision required"
+    (never-list) from "not on the allow-list" (an allow-list decision)."""
+    from config_applier.safety import rebuild_class
+
+    assert rebuild_class("connectors.Email.backend") is True
+    assert rebuild_class("personas.0.oauth.scopes") is True
+    assert rebuild_class("some.random.path") is False
+    assert rebuild_class("personas.0.name") is False
+    assert rebuild_class(None) is False
 
 
 @pytest.mark.parametrize(
