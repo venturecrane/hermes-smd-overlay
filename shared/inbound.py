@@ -247,12 +247,15 @@ class InboundItem:
 
     ``content`` is the untrusted text; ``envelope`` carries its provenance.
     Items are keyed by session so the chokepoint fences only the content
-    belonging to the turn it is firing for.
+    belonging to the turn it is firing for. ``enqueued_at`` (monotonic) lets
+    the unkeyed-bucket drain expire stale items instead of fencing an old
+    inbound into an unrelated turn (ss #1943).
     """
 
     session_id: str
     content: str
     envelope: InboundEnvelope
+    enqueued_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -275,6 +278,28 @@ class PendingInbound:
             q = deque(maxlen=self.max_per_session)
             self._by_session[item.session_id] = q
         q.append(item)
+
+    def drain_unkeyed_fresh(
+        self, max_age_seconds: float = 180.0, now: float | None = None
+    ) -> list[InboundItem]:
+        """Drain the SESSION-LESS bucket, keeping only fresh items (ss #1943).
+
+        The live email path dispatches with no session id (the router enqueues
+        under ``""``), so the chokepoint's session-keyed drain never finds the
+        item — the fence and the taint mark silently miss the turn. This drain
+        is the rendezvous: the NEXT pre_llm_call (the turn the dispatch
+        produced, single tenant + serialized) claims the unkeyed bucket and
+        fences + taints under its own session id. Stale items are DROPPED, not
+        fenced — injecting an old inbound's body into an unrelated later turn
+        would leak content across turns; the enforcement lost with a drop is
+        defense-in-depth only, and mis-rendezvous within the window merely
+        over-taints (fail-safe direction).
+        """
+        q = self._by_session.pop("", None)
+        if not q:
+            return []
+        ts = time.monotonic() if now is None else now
+        return [item for item in q if (ts - item.enqueued_at) <= max_age_seconds]
 
     def drain(self, session_id: str) -> list[InboundItem]:
         """Return and clear all pending items for ``session_id``."""

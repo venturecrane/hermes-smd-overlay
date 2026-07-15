@@ -67,6 +67,18 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
             session_id = ""
 
         items = inbound.PENDING.drain(session_id)
+        # Rendezvous for dispatch-unkeyed items (ss #1943): the live email
+        # path enqueues under "" (the dispatch carries no session id), so the
+        # session-keyed drain above misses and neither the fence nor the
+        # taint ever landed on the email's turn. Claim the fresh unkeyed
+        # bucket here — this turn IS the one the dispatch produced (single
+        # tenant, serialized); stale items were dropped by the drain. The
+        # fence + taint below then key THIS session, which is the id every
+        # downstream taint read (trust gate pre_tool_call, peer-memory
+        # capture) uses. Only when this turn has a session id to mark —
+        # otherwise leave the bucket for the turn that does.
+        if session_id:
+            items = items + inbound.PENDING.drain_unkeyed_fresh()
         if not items:
             return None
 

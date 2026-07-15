@@ -44,6 +44,7 @@ from shared import inbound
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
+from shared.customer_config import CustomerConfig
 from shared.secrets import get_secret, require
 
 from . import router, verify  # noqa: F401 - surface for tests
@@ -457,30 +458,59 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     # content and record it for the pre_llm_call quarantine chokepoint. The
     # router only reaches here on a VERIFIED route (the verification gate
     # above already declined forged/replayed events), so verification is
-    # "verified"; trust_class stays unknown_external (a verified webhook is
-    # still untrusted third-party data — positive evidence is required to
-    # raise the trust class). Building the envelope must never break the
-    # route, so it is wrapped in its own try/except.
+    # "verified". Trust class (ss #1943): a sender on the organization roster
+    # (scope.inbound_allow_from — the SAME authored list that already
+    # authorizes autonomous recipient-locked REPLIES to them, a strictly
+    # stronger action) classifies ``internal``: their email is the firm's own
+    # instruction channel, not third-party data, so it neither fences nor
+    # taints. Everything else — strangers, payloads with no resolvable
+    # sender, roster-read failures — stays ``unknown_external`` (fail
+    # closed) and is fenced + tainted. Building the envelope must never
+    # break the route, so it is wrapped in its own try/except.
     envelope: inbound.InboundEnvelope | None = None
     try:
         content = _inbound_content_for(payload)
+        origin = _inbound_origin_from(payload, content=content)
+        trust_class = inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
+        if origin is not None and origin.sender_address:
+            try:
+                cfg = CustomerConfig.from_volume(str(_YAML_PATH))
+                if cfg.sender_on_roster(origin.sender_address):
+                    trust_class = inbound.TRUST_CLASS_INTERNAL
+            except Exception:  # noqa: BLE001 — roster unreadable ⇒ fail closed
+                trust_class = inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
         envelope = inbound.make_envelope(
             content=content,
             source=decision.trigger.source,
             surface="webhook",
             verification="verified",
-            trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
+            trust_class=trust_class,
         )
-        # Record the item for the inbound plugin's pre_llm_call chokepoint to
-        # fence. Keyed by the dispatch session so the fence applies to the
-        # right turn. session_id may be absent on some gateway shapes; an
-        # empty key still enqueues (the chokepoint drains by the same key).
         session_id = kwargs.get("session_id")
         if not isinstance(session_id, str):
             session_id = ""
-        inbound.PENDING.enqueue(
-            inbound.InboundItem(session_id=session_id, content=content, envelope=envelope)
-        )
+        # Record NON-internal items for the inbound plugin's pre_llm_call
+        # chokepoint to fence + taint. Internal (rostered-colleague) mail is
+        # NOT enqueued: fencing the firm's own requests behind "never act
+        # BECAUSE of it" would contradict routing them to a skill to act on.
+        # Keyed by the dispatch session when present; the live email path
+        # carries NONE (observed 2026-07-15), so the chokepoint also drains
+        # the fresh unkeyed bucket and taints the turn the dispatch produced.
+        if trust_class != inbound.TRUST_CLASS_INTERNAL:
+            inbound.PENDING.enqueue(
+                inbound.InboundItem(session_id=session_id, content=content, envelope=envelope)
+            )
+            logger.info(
+                "hermes-smd-webhook-router: quarantined inbound for fence+taint "
+                "(trust_class=%s, session=%r)",
+                trust_class,
+                session_id,
+            )
+        else:
+            logger.info(
+                "hermes-smd-webhook-router: rostered-sender inbound classified internal; "
+                "no quarantine (sender on scope.inbound_allow_from)"
+            )
         # Recipient-lock anchor (hermes-smd-reply). Record WHO opened this
         # session — the verified inbound sender + the inbox/message to reply
         # into — so the reply channel can only send a governed draft back to the
@@ -491,7 +521,6 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         # content/fabrication floors. A payload without a resolvable
         # sender/message-id records nothing (the relay then finds no origin and
         # refuses to send). Never breaks routing.
-        origin = _inbound_origin_from(payload, content=content)
         if origin is not None:
             inbound.SESSION_INBOUND_ORIGIN.record(session_id, origin)
             # Diagnostic: confirms the recipient-lock anchor recorded, the
