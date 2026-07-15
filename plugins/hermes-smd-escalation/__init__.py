@@ -46,6 +46,14 @@ _TIMEOUT_SECONDS = 10
 STRING = {"type": "string"}
 NULLABLE_STRING = {"type": ["string", "null"]}
 
+# The tool derives item_key + token from the IDENTITY COMPONENTS — the agent
+# never hashes. The first live probe (ss #1915 WP-D) proved why: with item_key
+# as an opaque string parameter, the model wrote a human-readable colon-joined
+# composite; the broker accepted it, and the pre_run gate's sha256 join could
+# never match it — the suppression state silently forked. The tuple here MUST
+# be the exact tuple the skill's pre_run computes (see each skill's SKILL.md
+# for its authored_date convention — the chase uses None, identity rides on
+# the stable task source_id).
 _APPEND_SCHEMA = {
     "type": "object",
     "properties": {
@@ -57,11 +65,28 @@ _APPEND_SCHEMA = {
             **NULLABLE_STRING,
             "description": "Smokeball matter id; null for seat-level sentinel items.",
         },
-        "item_key": {
+        "source_id": {
+            **NULLABLE_STRING,
+            "description": (
+                "The item's STABLE Smokeball task/event id (the anti-collision "
+                "identity field). null only for items with no stable id — those "
+                "get no per-item token (blanket-ack-only group)."
+            ),
+        },
+        "label": {
             "type": "string",
             "description": (
-                "Stable per-item key from item_key(matter_id, task_id, label, "
-                "authored_date) — the same tuple the pre_run gate computes."
+                "The item's fixed label, exactly as the skill's pre_run computes "
+                "it (e.g. 'client-verification', or the deadline label)."
+            ),
+        },
+        "authored_date": {
+            **NULLABLE_STRING,
+            "description": (
+                "The authored date component of the identity tuple (YYYY-MM-DD), "
+                "or null when the skill's identity convention omits it (the "
+                "verification chase uses null — a re-dated tracking task must "
+                "not change identity)."
             ),
         },
         "event": {
@@ -74,15 +99,16 @@ _APPEND_SCHEMA = {
             "minimum": 0,
             "description": "The attempt number this raise carries (0 for non-raises).",
         },
-        "token": {
+        "ack_token": {
             **NULLABLE_STRING,
             "description": (
-                "ACK-XXXXXX token for fired/chased raises and for the acked event "
-                "that references them; omit for items with no stable identity."
+                "For acked events ONLY: the ACK-XXXXXX code quoted in the reply. "
+                "The tool resolves it to its item against the ledger's prior "
+                "raises — pass this INSTEAD of the identity components."
             ),
         },
     },
-    "required": ["skill", "item_key", "event", "attempt"],
+    "required": ["skill", "event", "attempt"],
     "additionalProperties": False,
 }
 
@@ -116,20 +142,58 @@ def _broker_request(payload: dict[str, Any]) -> dict[str, Any]:
     return json.loads(raw.decode("utf-8"))
 
 
+def _resolve_token_identity(ack_token: str) -> tuple[str, str | None]:
+    """Resolve an ACK token to (item_key, matter_id) via the ledger's prior
+    raises. Raises ValueError when no prior raise carries the token — the same
+    verdict the broker would return, surfaced before a malformed event ships."""
+    path = os.environ.get(_LEDGER_PATH_ENV) or escalation_ledger.DEFAULT_LEDGER_PATH
+    for event in reversed(escalation_ledger.read_ledger(path)):
+        if event.get("token") == ack_token and event.get("event") in ("fired", "chased"):
+            return str(event.get("item_key")), event.get("matter_id")
+    raise ValueError(
+        f"no prior raise carries token {ack_token!r}; an alarm that never rang cannot be acked"
+    )
+
+
 def _escalation_append(args: dict[str, Any], **_: Any) -> str:
+    kind = str(args["event"])
+    ack_token = args.get("ack_token")
+    if ack_token:
+        if kind != "acked":
+            raise ValueError("ack_token is only valid for acked events")
+        key, matter_id = _resolve_token_identity(str(ack_token))
+        token: str | None = str(ack_token)
+    else:
+        # Derived, never model-authored: the sha256 identity key and its ACK
+        # token come from the same vendored helpers the pre_run gates use, so
+        # the join can never fork on a hand-typed key (the first live probe's
+        # failure mode: a colon-joined composite the sha256 join never matched).
+        label = args.get("label")
+        if not label:
+            raise ValueError("label is required (with matter_id/source_id) unless acking by token")
+        matter_id = None if args.get("matter_id") is None else str(args["matter_id"])
+        source_id = None if args.get("source_id") is None else str(args["source_id"])
+        authored_date = (
+            None if args.get("authored_date") in (None, "") else str(args["authored_date"])
+        )
+        key = escalation_ledger.item_key(matter_id or "", source_id, str(label), authored_date)
+        token = escalation_ledger.token_for(key) if source_id is not None else None
     event = {
         "v": escalation_ledger.SCHEMA_VERSION,
         "ts": None,  # broker stamps ts/id server-side; the agent cannot backdate
         "skill": str(args["skill"]),
-        "matter_id": None if args.get("matter_id") is None else str(args["matter_id"]),
-        "item_key": str(args["item_key"]),
-        "event": str(args["event"]),
+        "matter_id": matter_id,
+        "item_key": key,
+        "event": kind,
         "attempt": int(args["attempt"]),
-        "token": None if args.get("token") is None else str(args["token"]),
+        "token": token,
     }
     response = _broker_request({"action": "escalation_event_append", "event": event})
     # The broker's verdict (ok/id or a validation error) goes back verbatim —
-    # a rejected acked-with-no-prior-raise must stay visible to the turn.
+    # a rejected acked-with-no-prior-raise must stay visible to the turn. Echo
+    # the derived identity so the turn can quote the token in the alert body.
+    if isinstance(response, dict):
+        response = {**response, "item_key": key, "token": token}
     return json.dumps(response, ensure_ascii=False)
 
 
