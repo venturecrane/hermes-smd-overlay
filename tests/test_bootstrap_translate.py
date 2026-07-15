@@ -358,6 +358,47 @@ def test_translate_omits_delegation_when_no_escalation_model(tmp_path):
     assert "delegation" not in config
 
 
+def test_translate_emits_disabled_toolsets_fleet_default(tmp_path):
+    """Tool-surface trim (2026-07-15): every profile config disables the
+    toolsets no Operator seat uses — their schemas otherwise ride every API
+    call as prompt-cache write (measured 40,457-token first call on
+    pilot-smokeball, 70% tool schemas). A seat without google_auth also drops
+    the overlay `workspace` toolset (18 dead workspace_* schemas)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML, no google_auth
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    disabled = config["agent"]["disabled_toolsets"]
+    for ts in ("browser", "session_search", "tts", "computer_use", "workspace"):
+        assert ts in disabled
+    # Load-bearing surfaces must never appear here: terminal is called from
+    # SKILL.md prose (ar-chaser, retainer-hours-reconciler), web is fenced-safe
+    # in client-verification-tracker, and skills/file/memory/todo are core.
+    for ts in ("terminal", "web", "skills", "file", "memory", "todo",
+               "code_execution", "delegation", "escalation", "jobs"):
+        assert ts not in disabled
+
+
+def test_translate_keeps_workspace_toolset_when_google_auth(tmp_path):
+    """A seat with customer-owned Google Workspace authority (google_auth,
+    e.g. smd/Crane) keeps the overlay `workspace` toolset — those 18 tools are
+    its live capability, not dead weight."""
+    body = VALID_YAML + "\ngoogle_auth:\n  mode: dwd\n  subject: crane@example.com\n"
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    disabled = config["agent"]["disabled_toolsets"]
+    assert "workspace" not in disabled
+    assert "browser" in disabled  # fleet default still applies
+
+
 def test_translate_renders_escalation_soul_when_escalation_model(tmp_path):
     """ADR 0049: a seat with an escalation_model gets the standing 'Allocating
     heavy work' instruction in SOUL.md. The general escalation behavior lives
@@ -906,7 +947,9 @@ def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
 
     Exposure is a configurable per-action trust ceiling, not an MCP-level
     exclusion — the sends stay on the menu so the trust layer can govern them.
-    The materialized agentmail server carries no ``tools.exclude``.
+    The materialized ``tools.exclude`` (tool-surface trim, 2026-07-15) carries
+    only inbox-admin / destructive-mutation tools; every send, draft, and read
+    tool stays on the menu.
     """
     monkeypatch.setenv("AGENTMAIL_API_KEY", "am_us_test_key")
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
@@ -916,7 +959,22 @@ def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
         skills_dir=str(skills_dir),
     )
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
-    assert "tools" not in config["mcp_servers"]["agentmail"]
+    excluded = set(config["mcp_servers"]["agentmail"]["tools"]["exclude"])
+    assert excluded == {
+        "create_inbox",
+        "delete_inbox",
+        "update_inbox",
+        "list_organizations",
+        "select_organization",
+        "delete_thread",
+        "update_thread",
+        "update_message",
+    }
+    # The governed surface stays on the menu for the trust layer.
+    for tool in ("send_message", "send_draft", "reply_to_message",
+                 "forward_message", "create_draft", "get_thread",
+                 "list_messages", "get_attachment"):
+        assert tool not in excluded
 
 
 def test_translate_skips_agentmail_when_key_unset(tmp_path, monkeypatch):
@@ -1110,7 +1168,8 @@ def test_agentmail_sends_are_external_send_not_banned():
 
     The send tools are NO LONGER in BANNED_TOOLS — they are EXTERNAL_SEND in
     the action-class map, governed by the resolved trust ceiling. The registry
-    no longer excludes them (blocked_tools is empty)."""
+    blocks only inbox-admin / destructive-mutation tools (tool-surface trim,
+    2026-07-15) — never a send."""
     from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
     from shared.action_classes import (
         BANNED_TOOLS,
@@ -1119,7 +1178,7 @@ def test_agentmail_sends_are_external_send_not_banned():
     )
 
     spec = MCP_CONNECTOR_REGISTRY["agentmail"]
-    assert spec.blocked_tools == ()
+    assert not any("send" in t or "reply" in t or "forward" in t for t in spec.blocked_tools)
     for tool in ("send_message", "send_draft", "reply_to_message", "forward_message"):
         prefixed = f"agentmail:{tool}"
         assert prefixed not in BANNED_TOOLS

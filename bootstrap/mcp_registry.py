@@ -122,7 +122,24 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         url="https://mcp.agentmail.to/mcp",
         auth_header="x-api-key",
         secret_env="AGENTMAIL_API_KEY",
-        blocked_tools=(),
+        # Inbox-admin and destructive thread/message mutations are excluded at
+        # the menu layer: no Operator routine provisions inboxes or rewrites
+        # message state, and unlike sends there is no authored ceiling that
+        # would ever enable them (provisioning is Captain-side). This is
+        # surface reduction, not governance — send/draft/read tools all stay
+        # on the menu for the trust layer (comment above). Measured on
+        # pilot-smokeball 2026-07-15: the full 26-tool catalog costs ~5.2k
+        # tokens of prompt-cache write on every turn; these 8 are dead weight.
+        blocked_tools=(
+            "create_inbox",
+            "delete_inbox",
+            "update_inbox",
+            "list_organizations",
+            "select_organization",
+            "delete_thread",
+            "update_thread",
+            "update_message",
+        ),
     ),
     # Clio (oktopeak/clio-mcp v2.0.0, MIT) — practice-management system of record
     # for the law vertical. Unlike AgentMail this is a LOCAL stdio server: the
