@@ -42,6 +42,7 @@ on the model noticing an injection.
 import hashlib
 import logging
 import secrets
+import time
 from collections import OrderedDict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -434,6 +435,17 @@ class SessionInboundOrigin:
     # router records after signature verification), so a match is always a
     # verified sender — the recovery is injection-safe.
     _by_address: "OrderedDict[str, InboundOrigin]" = field(default_factory=OrderedDict)
+    # Unbound-origin handoff (claim-once). The dispatch-time session_id is
+    # empty on the live email path (observed on pilot-smokeball, 2026-07-15:
+    # the router logged ``recorded inbound origin (session='')`` while the
+    # agent loop ran under its own id), so consumers that need the verified
+    # sender at pre_llm_call — per-peer memory keying (ss #1941 follow-up) —
+    # can never find it by session. Each origin recorded WITHOUT a session id
+    # is also queued here with its arrival time; the turn that the dispatch
+    # produced claims it exactly once. Injection-safe by construction: entries
+    # come only from Svix-verified From headers, never from message content.
+    _unbound: "deque[tuple[float, InboundOrigin]]" = field(default_factory=deque)
+    unbound_max: int = 8
 
     def record(self, session_id: str, origin: InboundOrigin) -> None:
         """Record the opening inbound's origin (recipient-lock anchor).
@@ -455,6 +467,11 @@ class SessionInboundOrigin:
             while len(self._by_address) > self.max_sessions:
                 self._by_address.popitem(last=False)
         if not session_id:
+            # No session to bind to — queue for the claim-once handoff so the
+            # turn this dispatch produces can still learn its verified sender.
+            self._unbound.append((time.monotonic(), origin))
+            while len(self._unbound) > self.unbound_max:
+                self._unbound.popleft()
             return
         if session_id in self._origins:
             # Lock already set by the opening inbound; a later inbound cannot
@@ -474,6 +491,26 @@ class SessionInboundOrigin:
         if not session_id:
             return None
         return self._origins.get(session_id)
+
+    def claim_unbound(
+        self, max_age_seconds: float = 180.0, now: float | None = None
+    ) -> InboundOrigin | None:
+        """Claim the ONE fresh dispatch-unkeyed origin, or ``None``.
+
+        The claim-once half of the unbound handoff (see ``_unbound``). Expired
+        entries are dropped first. The claim succeeds only when EXACTLY ONE
+        fresh entry remains — with two or more pending, matching a turn to its
+        inbound would be a guess, and misattributing a verified sender to the
+        wrong turn is worse than not resolving (the caller falls back to its
+        channel-level identity). The winning entry is REMOVED, so one inbound
+        can never attribute two turns.
+        """
+        ts = time.monotonic() if now is None else now
+        while self._unbound and (ts - self._unbound[0][0]) > max_age_seconds:
+            self._unbound.popleft()
+        if len(self._unbound) != 1:
+            return None
+        return self._unbound.popleft()[1]
 
     def find_for_recipient(self, addresses: "Iterable[str]") -> InboundOrigin | None:
         """Recover a verified inbound origin by matching the draft's intended
