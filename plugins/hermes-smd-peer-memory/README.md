@@ -14,7 +14,7 @@ the per-peer layer on top of it — zero changes to Hermes core.
 
 | Hook | Role |
 | --- | --- |
-| `pre_llm_call` | Carries the only per-peer id Hermes threads (`sender_id`). Stashes it by `session_id`, and injects that peer's active preferences as turn context. |
+| `pre_llm_call` | Carries the only per-peer id Hermes threads (`sender_id`). Stashes it by `session_id`, and injects the per-peer context block: the peer's active preferences (when any exist) plus, on every sender-attributed turn, the capture instruction telling the agent to record stated/demonstrated preferences via `record_peer_preference` (without it the lane never fills — ss #1941). |
 | `post_tool_call` | When the agent called `record_peer_preference`, resolves the peer from the stash (server-side — the agent never names them), checks the session taint-gate, and writes the row. |
 | `on_session_end` | Evicts the session's stashed sender. |
 

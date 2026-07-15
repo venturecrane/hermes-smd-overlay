@@ -144,13 +144,16 @@ def _persona_slug(args: Any = None) -> str:
 
 
 def on_pre_llm_call(**kwargs: Any) -> dict | None:
-    """Stash the turn's sender, then inject that peer's active preferences.
+    """Stash the turn's sender, then inject the per-peer context block.
 
     Expected kwargs (pre_llm_call): session_id, user_message,
     conversation_history, is_first_turn, model, platform, sender_id.
 
-    Returns ``{"context": block}`` when the peer has preferences, else ``None``.
-    Exception-safe.
+    Returns ``{"context": block}`` on every sender-attributed turn while the
+    store is active: the peer's active preferences (read side) when any exist,
+    always followed by the capture instruction (write side — the lane never
+    fills if nothing tells the agent to record; ss #1941). ``None`` only when
+    there is no sender to attribute or the store is inactive. Exception-safe.
     """
     try:
         session_id = kwargs.get("session_id") or ""
