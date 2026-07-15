@@ -178,7 +178,7 @@ def read_ledger(path: str | None = None) -> list[dict]:
     """
     path = path or ledger_path()
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             raw_lines = handle.readlines()
     except FileNotFoundError:
         return []
