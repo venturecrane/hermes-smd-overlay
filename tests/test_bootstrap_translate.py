@@ -377,8 +377,18 @@ def test_translate_emits_disabled_toolsets_fleet_default(tmp_path):
     # Load-bearing surfaces must never appear here: terminal is called from
     # SKILL.md prose (ar-chaser, retainer-hours-reconciler), web is fenced-safe
     # in client-verification-tracker, and skills/file/memory/todo are core.
-    for ts in ("terminal", "web", "skills", "file", "memory", "todo",
-               "code_execution", "delegation", "escalation", "jobs"):
+    for ts in (
+        "terminal",
+        "web",
+        "skills",
+        "file",
+        "memory",
+        "todo",
+        "code_execution",
+        "delegation",
+        "escalation",
+        "jobs",
+    ):
         assert ts not in disabled
 
 
@@ -971,9 +981,16 @@ def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
         "update_message",
     }
     # The governed surface stays on the menu for the trust layer.
-    for tool in ("send_message", "send_draft", "reply_to_message",
-                 "forward_message", "create_draft", "get_thread",
-                 "list_messages", "get_attachment"):
+    for tool in (
+        "send_message",
+        "send_draft",
+        "reply_to_message",
+        "forward_message",
+        "create_draft",
+        "get_thread",
+        "list_messages",
+        "get_attachment",
+    ):
         assert tool not in excluded
 
 
