@@ -856,6 +856,39 @@ def _persona_config(
     if telegram_block:
         config["telegram"] = telegram_block
 
+    # Tool-surface trim (2026-07-15 cost forensics, vfy_01KXKJEEV1R4EPYFKA6J7YDH16):
+    # every enabled tool's JSON schema rides every API call and is re-written to
+    # the 5-minute prompt cache once per turn — measured 40,457 tokens on a
+    # pilot-smokeball first call, 70% of it tool schemas. These toolsets have
+    # zero invocations across the full audit ledger, no SKILL.md references
+    # (grep-verified), and nothing wired on any Operator seat. Hermes subtracts
+    # them natively (model_tools.py disabled_toolsets path); unknown names warn
+    # and no-op, so this list is safe across Hermes versions. `terminal` and
+    # `web` deliberately stay: ar-chaser/retainer-hours-reconciler SKILL.md call
+    # terminal(cmd), and client-verification-tracker fences web_search as safe.
+    disabled_toolsets = [
+        "browser",
+        "computer_use",
+        "image_gen",
+        "tts",
+        "video",
+        "video_gen",
+        "x_search",
+        "homeassistant",
+        "spotify",
+        "discord",
+        "discord_admin",
+        "yuanbao",
+        "session_search",
+    ]
+    # The overlay `workspace` toolset (18 workspace_* tools) is live capability
+    # only on seats with customer-owned Google Workspace authority (google_auth,
+    # e.g. the smd/Crane seat). On every other seat the broker socket has no
+    # Google credential and the tools are dead schema weight — drop them.
+    if not customer.get("google_auth"):
+        disabled_toolsets.append("workspace")
+    config["agent"] = {"disabled_toolsets": disabled_toolsets}
+
     return config
 
 
