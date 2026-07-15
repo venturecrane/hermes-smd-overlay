@@ -136,28 +136,44 @@ class GateResult:
     categories: tuple[str, ...] = field(default_factory=tuple)
 
 
-def gate_body(scan_text: str, *, vertical: str | None, cohort: str | None) -> GateResult:
+def gate_body(
+    scan_text: str,
+    *,
+    vertical: str | None,
+    cohort: str | None,
+    internal_recipient: bool = False,
+) -> GateResult:
     """Re-run the content-sensitivity floor + fabrication gate on the draft body.
 
     The relay sends OUTSIDE the model's governed tool path, so it must itself
-    enforce the same two floors the autonomous-send path would have applied:
+    enforce the same floors the autonomous-send path would have applied:
 
     * ``content_floor.classify`` — money / contract / scope / legal content
       drops to draft (here: refuse to relay). Fails toward refuse on an
-      empty / uninspectable body.
+      empty / uninspectable body. **Skipped when ``internal_recipient`` is
+      True** — the send path deliberately does not content-floor a send whose
+      recipients classify INTERNAL (ADR 0072; enforce.py), because firm-internal
+      coordination legitimately names deadlines, signatures, and attorneys.
+      Flooring it here held ack confirmations in drafts (ss #1932). The caller
+      owns the classification; this flag must come from the recipient
+      classifier, never from a hardcoded True.
     * ``outbound_gate.evaluate`` — banned fabrication markers (Tier-1) +
       fabricated legal citations (Tier-2, law/indeterminate). Fails closed.
+      Applies to EVERY reply, internal or not.
 
     Any exception is treated as a refuse (fail closed) — a body we cannot
     certify clean does not leave.
     """
-    try:
-        floor = content_floor.classify(scan_text)
-    except Exception:  # noqa: BLE001 — uncertifiable body must not relay
-        logger.exception("reply-channel: content floor raised; refusing to reply")
-        return GateResult(allowed=False, reason="content_floor_error")
-    if floor.sensitive:
-        return GateResult(allowed=False, reason="content_sensitive", categories=floor.categories)
+    if not internal_recipient:
+        try:
+            floor = content_floor.classify(scan_text)
+        except Exception:  # noqa: BLE001 — uncertifiable body must not relay
+            logger.exception("reply-channel: content floor raised; refusing to reply")
+            return GateResult(allowed=False, reason="content_floor_error")
+        if floor.sensitive:
+            return GateResult(
+                allowed=False, reason="content_sensitive", categories=floor.categories
+            )
 
     try:
         decision = outbound_gate.evaluate(scan_text, cohort, vertical)

@@ -25,9 +25,13 @@ What it does:
      (``SESSION_INBOUND_ORIGIN``, first-inbound-wins), keyed on the recorded
      inbox + message id — an injected/substituted recipient cannot redirect it.
      Roster membership authorizes; the recipient-lock structurally bounds.
-  3. **Re-applied floors.** Re-runs ``content_floor.classify`` +
-     ``outbound_gate.evaluate`` on the draft body before sending (the same
-     content/fabrication floors the autonomous-send path would have applied).
+  3. **Re-applied floors, recipient-aware (ADR 0072 / ss #1932).** Re-runs the
+     same floors the autonomous-send path would have applied: the fabrication
+     gate (``outbound_gate.evaluate``) on EVERY reply, and the content floor
+     (``content_floor.classify``) only when the locked recipient does NOT
+     classify INTERNAL under ``recipient_classifier`` (the send path
+     deliberately does not content-floor internal sends — firm coordination
+     legitimately names deadlines, signatures, attorneys).
   4. **Rate-limit.** Per-sender + global rolling-window bound.
   5. **Audit.** Emits ``REPLY_SENT`` on send, ``REPLY_HELD`` on a reply held
      back to draft (reason only — never the body), ``REPLY_FAILED`` on a send
@@ -54,6 +58,7 @@ from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
 from shared.customer_config import CustomerConfig, CustomerConfigError
+from shared.recipient_classifier import RecipientClass, classify_recipients_typed
 from shared.secrets import get_secret
 
 from . import relay  # noqa: F401 - surface for tests
@@ -197,8 +202,33 @@ def on_post_tool_call(**kwargs: Any) -> None:
 
         scan_text, send_text, send_html = relay.draft_body(args)
 
-        # (c) Re-apply the content + fabrication floors to the draft body.
-        gate = relay.gate_body(scan_text, vertical=vertical, cohort=_CUSTOMER_SLUG)
+        # (c) Re-apply the outbound floors to the draft body. ADR 0072 carve-out
+        # (ss #1932): the send path deliberately does NOT content-floor a send
+        # whose recipients all classify INTERNAL (enforce.py evaluate_tool_call —
+        # firm-internal coordination legitimately names deadlines, signatures,
+        # attorneys; flooring it held ack confirmations in drafts). Mirror it
+        # with the SAME classifier and the SAME rosters the send path resolves.
+        # ``from_tainted`` stays False deliberately: taint guards MODEL-CHOSEN
+        # recipients, but this recipient is structurally pinned to the
+        # Svix-verified inbound sender by the recipient-lock above — an injected
+        # body cannot redirect the reply. The fabrication gate still applies to
+        # every reply. Classification faults fail toward floored, never open.
+        try:
+            recipient_class = classify_recipients_typed(
+                [origin.sender_address], cfg.inbound_roster, cfg.outbound_roster
+            )
+        except Exception:  # noqa: BLE001 — unclassifiable recipient keeps the floor
+            logger.exception(
+                "hermes-smd-reply: recipient classification raised; keeping the content floor"
+            )
+            recipient_class = None
+        internal = recipient_class is RecipientClass.INTERNAL
+        gate = relay.gate_body(
+            scan_text,
+            vertical=vertical,
+            cohort=_CUSTOMER_SLUG,
+            internal_recipient=internal,
+        )
         if not gate.allowed:
             _held(gate.reason, origin, categories=list(gate.categories))
             return
@@ -240,6 +270,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
             action_type="REPLY_SENT",
             metadata={
                 "recipient": origin.sender_address,
+                "recipient_class": recipient_class.value if recipient_class else "unclassified",
+                "content_floor_applied": not internal,
                 "in_reply_to": origin.message_id,
                 "inbox_id": origin.inbox_id,
                 "sent_message_id": sent_id,
