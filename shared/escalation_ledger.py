@@ -337,9 +337,7 @@ def validate_append(existing_events, new_event: dict) -> None:
                 raised = True
                 break
         if not raised:
-            raise ValueError(
-                "acked event has no prior fired/chased raise for its token/item_key"
-            )
+            raise ValueError("acked event has no prior fired/chased raise for its token/item_key")
 
 
 def _ulid() -> str:

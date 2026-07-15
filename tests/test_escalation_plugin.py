@@ -89,9 +89,7 @@ def test_state_folds_ledger_file(escalation, tmp_path, monkeypatch):
             ts="2026-07-14T09:00:00.000Z",
         ),
     ]
-    ledger_file.write_text(
-        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8"
-    )
+    ledger_file.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
     monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
     out = json.loads(plugin._escalation_state({}))
     assert out["event_count"] == 1
@@ -160,6 +158,13 @@ def test_tools_are_mapped_in_action_class_registry():
 def test_vendored_ledger_twin_matches_reference_shapes():
     # Guard the vendored twin's load-bearing API (the console-side sync test
     # guards byte-identity; this guards the plugin's import surface).
-    for name in ("read_ledger", "derive_state", "token_for", "item_key",
-                 "make_event", "SCHEMA_VERSION", "DEFAULT_LEDGER_PATH"):
+    for name in (
+        "read_ledger",
+        "derive_state",
+        "token_for",
+        "item_key",
+        "make_event",
+        "SCHEMA_VERSION",
+        "DEFAULT_LEDGER_PATH",
+    ):
         assert hasattr(escalation_ledger, name)
