@@ -39,7 +39,7 @@ from collections import OrderedDict
 from typing import Any
 
 from shared.d1_client import D1Client
-from shared.inbound import SESSION_TAINT
+from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT
 from shared.tool_registration import register_wrapped_tool
 
 from . import schemas, store  # noqa: F401 — surface module imports for tests
@@ -121,6 +121,39 @@ def bind_runtime(*, customer_slug: str, client: D1Client | None) -> None:
     )
 
 
+def _resolve_peer(session_id: str, sender_id: str) -> str:
+    """The person this turn belongs to — never a channel identity.
+
+    Webhook-dispatched turns thread the ROUTE as ``sender_id`` (e.g.
+    ``webhook:agentmail``), which is a channel, not a person: keying on it
+    collapses every email correspondent into one shared peer (found by the ss
+    #1941 live probe — the first captured preference keyed ``webhook:agentmail``
+    instead of the sender's address). The webhook router records the
+    Svix-verified sender of the inbound (``SESSION_INBOUND_ORIGIN``, the reply
+    channel's recipient-lock anchor) — prefer that address; it is verified
+    attribution, never content-derived. On the live email path the dispatch
+    carries NO session id (observed 2026-07-15), so the session lookup misses
+    and the claim-once unbound handoff resolves it instead; the claim declines
+    under ambiguity, falling back to the channel identity rather than ever
+    guessing a person. Channels that thread a real per-user id (Telegram) have
+    no recorded origin and keep their ``sender_id`` unchanged.
+    """
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id) if session_id else None
+        # Only a channel-shaped sender consults the unbound handoff: a real
+        # per-user id (Telegram) must never be overridden by a coincidentally
+        # pending email origin.
+        if origin is None and sender_id.startswith("webhook:"):
+            origin = SESSION_INBOUND_ORIGIN.claim_unbound()
+    except Exception:  # noqa: BLE001 — resolution must never break the hook
+        origin = None
+    if origin is not None and origin.sender_address:
+        addr = origin.sender_address.strip().lower()
+        if addr:
+            return addr
+    return sender_id
+
+
 def _stash_sender(session_id: str, sender_id: str) -> None:
     _sender_by_session[session_id] = sender_id
     _sender_by_session.move_to_end(session_id)
@@ -158,14 +191,15 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
     try:
         session_id = kwargs.get("session_id") or ""
         sender_id = kwargs.get("sender_id") or ""
-        if session_id and sender_id:
-            _stash_sender(session_id, sender_id)
+        peer_id = _resolve_peer(session_id, sender_id)
+        if session_id and peer_id:
+            _stash_sender(session_id, peer_id)
 
-        if not sender_id or _D1 is None or not _CUSTOMER_SLUG:
+        if not peer_id or _D1 is None or not _CUSTOMER_SLUG:
             return None
 
-        rows = store.active_preferences(_D1, peer_id=sender_id, persona_slug=_persona_slug())
-        block = store.render_preference_block(rows, peer_id=sender_id)
+        rows = store.active_preferences(_D1, peer_id=peer_id, persona_slug=_persona_slug())
+        block = store.render_preference_block(rows, peer_id=peer_id)
         return {"context": block} if block else None
     except Exception:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-peer-memory: pre_llm_call failed", exc_info=True)

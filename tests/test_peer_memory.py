@@ -260,6 +260,64 @@ def test_pre_llm_call_injects_nudge_for_unknown_peer(mod, client):
 
 
 # ---------------------------------------------------------------------------
+# Peer resolution — the person, never the channel (ss #1941 live-probe find)
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_turn_keys_peer_on_session_bound_verified_sender(mod, client):
+    from shared import inbound
+
+    mod.bind_runtime(customer_slug="testco", client=client)
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "sess-wh1",
+        inbound.InboundOrigin(sender_address="Paralegal@Firm.com", message_id="m1"),
+    )
+    mod.on_pre_llm_call(session_id="sess-wh1", sender_id="webhook:agentmail", user_message="hi")
+    assert mod._sender_by_session.get("sess-wh1") == "paralegal@firm.com"
+    # Capture attributes to the person, not the channel.
+    mod.on_post_tool_call(
+        tool_name="record_peer_preference",
+        args={"preference": "Bullets only", "source": "stated"},
+        session_id="sess-wh1",
+    )
+    rows = mod.store.active_preferences(client, peer_id="paralegal@firm.com", persona_slug="")
+    assert [r["preference"] for r in rows] == ["Bullets only"]
+    assert mod.store.active_preferences(client, peer_id="webhook:agentmail", persona_slug="") == []
+
+
+def test_webhook_turn_claims_unbound_origin_when_dispatch_had_no_session(mod, client):
+    # The live email path: the router records the origin under session='' (the
+    # dispatch carries none), so the session lookup misses and the claim-once
+    # handoff resolves the verified sender.
+    from shared import inbound
+
+    mod.bind_runtime(customer_slug="testco", client=client)
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "", inbound.InboundOrigin(sender_address="christa@firm.com", message_id="m2")
+    )
+    mod.on_pre_llm_call(session_id="sess-wh2", sender_id="webhook:agentmail", user_message="hi")
+    assert mod._sender_by_session.get("sess-wh2") == "christa@firm.com"
+    # Claim-once: a SECOND turn does not inherit the already-claimed origin.
+    mod.on_pre_llm_call(session_id="sess-wh3", sender_id="webhook:agentmail", user_message="hi")
+    assert mod._sender_by_session.get("sess-wh3") == "webhook:agentmail"
+
+
+def test_real_per_user_sender_never_overridden_by_pending_origin(mod, client):
+    # A Telegram-style real per-user id must keep its identity even when an
+    # unclaimed email origin is pending (only channel-shaped senders claim).
+    from shared import inbound
+
+    mod.bind_runtime(customer_slug="testco", client=client)
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "", inbound.InboundOrigin(sender_address="colleague@firm.com", message_id="m3")
+    )
+    mod.on_pre_llm_call(session_id="sess-tg", sender_id="tg:123456", user_message="hi")
+    assert mod._sender_by_session.get("sess-tg") == "tg:123456"
+    # Drain the pending origin so it cannot leak into later tests.
+    inbound.SESSION_INBOUND_ORIGIN.claim_unbound()
+
+
+# ---------------------------------------------------------------------------
 # Hook glue — attribution, taint-gate, isolation, inject
 # ---------------------------------------------------------------------------
 

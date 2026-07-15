@@ -301,6 +301,43 @@ def test_session_inbound_origin_empty_session_recoverable_by_address() -> None:
     assert recovered.inbox_id == "inbox_1"
 
 
+def test_claim_unbound_returns_single_fresh_origin_exactly_once() -> None:
+    # The claim-once handoff for dispatch-unkeyed origins (ss #1941 follow-up):
+    # a session-less record queues the origin; the first claim wins; a second
+    # claim gets nothing (one inbound never attributes two turns).
+    reg = inbound.SessionInboundOrigin()
+    reg.record("", inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1"))
+    got = reg.claim_unbound()
+    assert got is not None and got.sender_address == "jane@example.com"
+    assert reg.claim_unbound() is None
+
+
+def test_claim_unbound_declines_when_ambiguous() -> None:
+    # Two pending unkeyed origins: matching a turn to its inbound would be a
+    # guess, and misattribution is worse than not resolving — decline.
+    reg = inbound.SessionInboundOrigin()
+    reg.record("", inbound.InboundOrigin("jane@example.com", "msg_1"))
+    reg.record("", inbound.InboundOrigin("john@example.com", "msg_2"))
+    assert reg.claim_unbound() is None
+
+
+def test_claim_unbound_expires_stale_entries() -> None:
+    reg = inbound.SessionInboundOrigin()
+    reg.record("", inbound.InboundOrigin("jane@example.com", "msg_1"))
+    # Far in the future relative to the recorded monotonic timestamp.
+    import time as _time
+
+    assert reg.claim_unbound(max_age_seconds=180.0, now=_time.monotonic() + 10_000) is None
+
+
+def test_session_keyed_record_does_not_queue_unbound() -> None:
+    # A properly session-bound origin is not claimable — the handoff exists
+    # only for the dispatch-unkeyed path.
+    reg = inbound.SessionInboundOrigin()
+    reg.record("sess", inbound.InboundOrigin("jane@example.com", "msg_1"))
+    assert reg.claim_unbound() is None
+
+
 def test_find_for_recipient_only_matches_verified_senders() -> None:
     # Injection-safety: an address that never emailed in is not in the index,
     # so a draft addressed to it recovers nothing (the relay then fails closed).
@@ -347,10 +384,12 @@ def _clear_pending():
     inbound.PENDING._by_session.clear()
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
+    inbound.SESSION_INBOUND_ORIGIN._unbound.clear()
     yield
     inbound.PENDING._by_session.clear()
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
+    inbound.SESSION_INBOUND_ORIGIN._unbound.clear()
 
 
 def test_inbound_plugin_registers_pre_llm_call(fake_ctx) -> None:
