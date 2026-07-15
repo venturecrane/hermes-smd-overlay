@@ -100,8 +100,16 @@ def _job_status(args: dict[str, Any], **_: Any) -> str:
     job = BrokerJobClient().read(job_id)
     if not job:
         return json.dumps({"job_id": job_id, "error": "no such job"})
-    fields = ("id", "status", "spent_cents", "budget_cents", "result_ref", "error", "attempts")
-    return json.dumps({k: job.get(k) for k in fields}, ensure_ascii=False)
+    # Broker-authored metadata ONLY (ss #1916 / the UNFENCED_READ_BY_DESIGN
+    # rationale): the row's free-text `error` column is runtime exception prose
+    # that can echo content the job read — the one field a failed job could
+    # launder untrusted content through into an unfenced parent turn. The
+    # projection replaces it with a boolean; the full error text still reaches
+    # a person via the job's delivery channel and the audit trail.
+    fields = ("id", "status", "spent_cents", "budget_cents", "result_ref", "attempts")
+    projected = {k: job.get(k) for k in fields}
+    projected["failed"] = bool(job.get("error"))
+    return json.dumps(projected, ensure_ascii=False)
 
 
 def _job_cancel(args: dict[str, Any], **_: Any) -> str:

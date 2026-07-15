@@ -60,6 +60,19 @@ UNFENCED_READ_BY_DESIGN: frozenset[str] = frozenset(
         "mcp_agentmail_get_inbox",
         "mcp_agentmail_list_drafts",
         "mcp_agentmail_auth_me",
+        # Durable-job status (ss #1916): broker-authored metadata only. The
+        # projection in plugins/hermes-smd-jobs/_job_status deliberately
+        # excludes the row's free-text error column (replaced with a boolean)
+        # because runtime exception prose can echo content the job read — with
+        # that column out, no field carries attacker-influenceable content
+        # (ids, closed-set status, cents, attempts, opaque result_ref).
+        "job_status",
+        # Escalation-ledger state (ss #1915): folds the broker-owned ledger
+        # twin — every field is broker-validated telemetry (event kinds are a
+        # closed set, ts/id are broker-stamped, tokens are derived hashes).
+        # item_key/matter_id originate from Smokeball identifiers, not
+        # sender-authored prose.
+        "escalation_state",
     }
 )
 
@@ -134,10 +147,12 @@ def test_unfenced_by_design_does_not_overlap_fenced() -> None:
 
 def test_unfenced_by_design_has_no_stale_entries() -> None:
     """Every by-design entry must still be a registered tool — a renamed/removed
-    tool must not leave a stale carve-out behind. Workspace entries are checked
-    against the workspace registry; AgentMail (``mcp_agentmail_*``) entries
-    against the action-class map (their registry)."""
+    tool must not leave a stale carve-out behind. Workspace/jobs/escalation
+    entries are checked against their plugin registries; AgentMail
+    (``mcp_agentmail_*``) entries against the action-class map (their registry)."""
     registered = set(_workspace_tools())
+    for plugin_dir in ("hermes-smd-jobs", "hermes-smd-escalation"):
+        registered |= set(load_plugin(plugin_dir).TOOLS)
     classified = set(TOOL_ACTION_CLASS_MAP)
     stale = {
         t
@@ -174,3 +189,33 @@ def test_every_workspace_tool_has_an_action_class() -> None:
     tool must be deliberately classified to function."""
     unmapped = [t for t in _workspace_tools() if t not in TOOL_ACTION_CLASS_MAP]
     assert unmapped == [], f"workspace tools missing from TOOL_ACTION_CLASS_MAP: {sorted(unmapped)}"
+
+
+def _plugin_tool_names(plugin_dir: str) -> list[str]:
+    plugin = load_plugin(plugin_dir)
+    return list(plugin.TOOLS)
+
+
+def test_every_jobs_and_escalation_tool_is_mapped_and_reads_are_decided() -> None:
+    """The #1916 drift class, closed as a guard: a plugin tool absent from
+    TOOL_ACTION_CLASS_MAP fails closed to REFUSED and is dead at runtime
+    (exactly how the durable-job tools shipped inert). Every registered
+    jobs/escalation tool must be classified, and every READ among them must
+    carry an explicit fencing decision."""
+    fenced = _fenced_read_tools()
+    for plugin_dir in ("hermes-smd-jobs", "hermes-smd-escalation"):
+        names = _plugin_tool_names(plugin_dir)
+        unmapped = [t for t in names if t not in TOOL_ACTION_CLASS_MAP]
+        assert unmapped == [], (
+            f"{plugin_dir} tools missing from TOOL_ACTION_CLASS_MAP: {sorted(unmapped)}"
+        )
+        undecided = [
+            t
+            for t in names
+            if TOOL_ACTION_CLASS_MAP.get(t) is ActionClass.READ
+            and t not in fenced
+            and t not in UNFENCED_READ_BY_DESIGN
+        ]
+        assert undecided == [], (
+            f"{plugin_dir} READ tool(s) with no fencing decision: {sorted(undecided)}"
+        )
