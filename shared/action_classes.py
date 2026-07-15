@@ -524,6 +524,19 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # skills never need a code_execution exposure to run the escalation loop.
     "escalation_append": ActionClass.INTERNAL_WRITE,
     "escalation_state": ActionClass.READ,
+    # Durable-job tools (hermes-smd-jobs, ss #1916 — these were unmapped, so the
+    # fail-closed REFUSED default made durable jobs inert at runtime).
+    # start_background_job launches a budgeted background agent turn with tools:
+    # CODE_EXECUTION, consistent with delegate_task (the background turn taints
+    # ITSELF when it ingests; see _CODE_NO_INGEST_BY_DESIGN in
+    # tests/test_code_execution_taint.py for the parent-turn disposition).
+    # job_status is READ over broker-authored metadata only — its projection
+    # deliberately excludes the free-text error column (see _job_status), which
+    # is the one field a failed job could launder untrusted content through.
+    "start_background_job": ActionClass.CODE_EXECUTION,
+    "job_status": ActionClass.READ,
+    "job_cancel": ActionClass.INTERNAL_WRITE,
+    "job_record_sideeffect": ActionClass.INTERNAL_WRITE,
 }
 
 

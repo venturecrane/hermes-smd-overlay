@@ -130,6 +130,13 @@ _CODE_NO_INGEST_BY_DESIGN: frozenset[str] = frozenset(
         # multi-delegation orchestration; it needs separate design (result
         # provenance), tracked rather than papered over here.
         "delegate_task",
+        # Schedules a budgeted BACKGROUND job (ss #1916) — no third-party
+        # content enters this turn's context (the return is a broker-minted
+        # ticket id). The background job's own turn taints itself when it
+        # ingests; the result path back to the parent is job_status, whose
+        # projection is broker-authored metadata only (free-text error
+        # excluded — see _job_status and UNFENCED_READ_BY_DESIGN).
+        "start_background_job",
     }
 )
 
