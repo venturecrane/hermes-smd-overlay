@@ -42,9 +42,9 @@ from typing import Any
 
 from shared import inbound
 from shared.audit_client import audit_client_from_env
-from shared.customer_config import CustomerConfig
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
+from shared.customer_config import CustomerConfig
 from shared.secrets import get_secret, require
 
 from . import router, verify  # noqa: F401 - surface for tests
