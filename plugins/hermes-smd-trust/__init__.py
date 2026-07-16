@@ -16,7 +16,7 @@ this plugin does not cross-import the audit plugin.
 import logging
 from typing import Any
 
-from shared import provenance
+from shared import provenance, report_render
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _AUDIT_INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -36,6 +36,41 @@ logger = logging.getLogger(__name__)
 # out-of-band relay audit. Best-effort: audit is observability, never a gate.
 _AUDIT_CLIENT: Any = None
 _AUDIT_CUSTOMER_SLUG: str | None = None
+
+
+def _attach_html_body(tool_name: str, args: dict) -> None:
+    """Give a report send an html half, rendered from the markdown it already wrote.
+
+    **Call this ONLY after every gate has returned allow.** The ordering is the
+    safety argument, not an implementation detail:
+
+    The ceiling, the taint gate, the content floor, and the fabrication scan all
+    read the send body — ``enforce._SEND_BODY_ARG_KEYS`` and
+    ``outbound._SEND_SCAN_KEYS`` both include ``html``, so an html body IS
+    scannable and a fabricated citation could not hide in one. We render after
+    those gates anyway, because the html is a PURE presentational transform of
+    the ``text`` they just scanned (``report_render`` purity invariant, held by
+    ``tests/test_report_render.py``). It therefore introduces no token of content
+    any gate has not already evaluated, and rendering before the gates would only
+    feed them the same content twice wearing markup.
+
+    If the purity invariant is ever weakened so the renderer can ADD content,
+    this call must move ahead of the gates or the argument collapses.
+
+    Idempotent and non-destructive: a model-authored html body is never
+    clobbered, and a send with no markdown block structure is left untouched.
+    """
+    if not outbound._is_gated_send_tool(tool_name):
+        return
+    text = args.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return
+    existing = args.get("html")
+    if isinstance(existing, str) and existing.strip():
+        return  # the composer supplied its own html; it wins
+    if not report_render.looks_like_report(text):
+        return  # prose reply, not a report — leave the send exactly as it was
+    args["html"] = report_render.render_markdown(text)
 
 
 def on_pre_tool_call(**kwargs: Any) -> dict | None:
@@ -145,6 +180,11 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
                 tool_call_id=kwargs.get("tool_call_id") or "",
             )
             args[GRANT_ARG] = authorization["grant"]
+
+        # Every gate allowed. A report send gets its html half here — after the
+        # scans, mirroring the GRANT_ARG mutation above (pre_tool_call arg
+        # mutation reaches the tool; that is the established, live-proven path).
+        _attach_html_body(tool_name, args)
         return None
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.exception(
@@ -276,6 +316,10 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
         )
         return f"[Your approved send to {recipients} was not dispatched: {reason}]"
     # Gate allowed + consumed the approval; `payload` now holds the approved payload.
+    # Same post-gate html attach as the tool path. This path needs its own call:
+    # the pending record was stored by the gate BEFORE the tool path's attach ran,
+    # so a withheld-then-approved report arrives here as markdown-only.
+    _attach_html_body(rec.tool_name, payload)
     try:
         api_key = get_secret("AGENTMAIL_API_KEY")
     except KeyError:
