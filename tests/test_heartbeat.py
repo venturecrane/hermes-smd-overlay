@@ -8,9 +8,11 @@ load-bearing property, so it gets explicit coverage.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from shared import heartbeat as hb
+from shared.scheduler_check import SchedulerCheck
 
 _KEY = "shared-fleet-key"
 _SLUG = "ashton-price"
@@ -155,6 +157,12 @@ def _emitter(**overrides):
         audit_db_path_fn=lambda: None,
         post_fn=post_fn,
         ping_fn=ping_fn,
+        # Hermetic default: tests never run the real filesystem check.
+        scheduler_check_fn=overrides.get(
+            "scheduler_check_fn",
+            lambda: SchedulerCheck(ok=True, job_count=0, max_overdue_seconds=None),
+        ),
+        scheduler_check_debounce=overrides.get("scheduler_check_debounce", 3),
     )
     return hb.HeartbeatEmitter(**kwargs), calls
 
@@ -295,3 +303,103 @@ def test_payload_carries_sticky_stop_level_when_present():
         version=None,
     )
     assert "sticky_stop_level" not in p2
+
+
+# ---------------------------------------------------------------------------
+# scheduler self-check wiring (ss work-liveness fix)
+# ---------------------------------------------------------------------------
+
+
+def _last_payload(calls):
+    return json.loads(calls["posts"][-1][2])
+
+
+def test_payload_sends_scheduler_fields_including_falsy_values():
+    """ok=False -> 0 and job_count=0 are REAL values that must reach the
+    wire; truthiness-omission would silence exactly the states the alerter
+    exists to see."""
+    p = hb.build_payload(
+        heartbeat_ts="2026-07-24T00:00:00Z",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        scheduler_ok=False,
+        scheduler_job_count=0,
+    )
+    assert p["scheduler_ok"] == 0
+    assert p["scheduler_job_count"] == 0
+    assert "scheduler_max_overdue_seconds" not in p
+    p2 = hb.build_payload(
+        heartbeat_ts="2026-07-24T00:00:00Z",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+    )
+    assert "scheduler_ok" not in p2
+    assert "scheduler_job_count" not in p2
+
+
+def test_tick_carries_scheduler_check_result():
+    em, calls = _emitter(
+        scheduler_check_fn=lambda: SchedulerCheck(ok=True, job_count=4, max_overdue_seconds=1234)
+    )
+    em._tick()
+    p = _last_payload(calls)
+    assert p["scheduler_ok"] == 1
+    assert p["scheduler_job_count"] == 4
+    assert p["scheduler_max_overdue_seconds"] == 1234
+
+
+def test_scheduler_check_crash_debounces_then_reports_not_omits():
+    """Two failed ticks keep last-known-good; the third reports ok=0 with
+    the last-good job count. REPORTED, never omitted — an omitted field on
+    a crashed checker recreates 'monitoring green while broken'."""
+    state = {"good": True}
+
+    def flappy():
+        if not state["good"]:
+            raise RuntimeError("checker exploded")
+        return SchedulerCheck(ok=True, job_count=7, max_overdue_seconds=None)
+
+    em, calls = _emitter(scheduler_check_fn=flappy, scheduler_check_debounce=3)
+    em._tick()  # good tick establishes last-known-good
+    state["good"] = False
+    em._tick()  # failure 1 -> last-good carried
+    em._tick()  # failure 2 -> last-good carried
+    assert _last_payload(calls)["scheduler_ok"] == 1
+    em._tick()  # failure 3 -> debounce reached, report ok=0
+    p = _last_payload(calls)
+    assert p["scheduler_ok"] == 0
+    assert p["scheduler_job_count"] == 7  # last-good count carried
+    assert "scheduler_max_overdue_seconds" not in p
+
+
+def test_scheduler_check_recovery_resets_debounce():
+    state = {"good": False}
+
+    def flappy():
+        if not state["good"]:
+            raise RuntimeError("checker exploded")
+        return SchedulerCheck(ok=True, job_count=2, max_overdue_seconds=None)
+
+    em, calls = _emitter(scheduler_check_fn=flappy, scheduler_check_debounce=3)
+    em._tick()  # failure 1 (no prior good -> fields omitted entirely)
+    assert "scheduler_ok" not in _last_payload(calls)
+    state["good"] = True
+    em._tick()  # recovery
+    assert _last_payload(calls)["scheduler_ok"] == 1
+    state["good"] = False
+    em._tick()  # failure 1 again (counter was reset)
+    assert _last_payload(calls)["scheduler_ok"] == 1  # last-good, not ok=0
+
+
+def test_scheduler_check_crash_never_escapes_the_tick():
+    def boom():
+        raise RuntimeError("checker exploded")
+
+    em, calls = _emitter(scheduler_check_fn=boom, scheduler_check_debounce=1)
+    em._tick()  # must not raise; POST still happens
+    assert len(calls["posts"]) == 1
+    assert _last_payload(calls)["scheduler_ok"] == 0

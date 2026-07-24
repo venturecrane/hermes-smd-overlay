@@ -159,6 +159,12 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: "heartbeat tick cadence; defaults to 60 (matches customer.yaml.observability.health.period_seconds). Floored at 5 by the emitter."
+  SCHEDULER_CHECK_DEBOUNCE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "consecutive scheduler self-check crashes before the heartbeat reports scheduler_ok=0 (ss work-liveness fix; report-late beats report-never). Default 3; set 1 on a staging seat to tighten the kill-test window."
   SMD_OVERLAY_REF:
     discovery: static
     stage: agent
