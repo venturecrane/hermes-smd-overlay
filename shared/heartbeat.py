@@ -117,11 +117,21 @@ def build_payload(
     uptime_seconds: int | None,
     version: str | None,
     sticky_stop_level: str | None = None,
+    scheduler_ok: bool | None = None,
+    scheduler_job_count: int | None = None,
+    scheduler_max_overdue_seconds: int | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
     than sent as null (the receiver COALESCEs, but a smaller body is
-    cleaner and never overwrites a good prior value with null)."""
+    cleaner and never overwrites a good prior value with null).
+
+    The scheduler_* fields use ``is not None`` checks deliberately: a failing
+    check (``scheduler_ok=False`` → 0) and an empty store (``job_count=0``)
+    are REAL values that must reach the wire — truthiness-omitting them would
+    silence exactly the states the work-liveness alerter exists to see. The
+    console stores these three as overwrite-including-NULL (not COALESCE) and
+    holds open alerts rather than resolving when a field is absent."""
     payload: dict[str, object] = {"heartbeat_ts": heartbeat_ts}
     if last_audit_ts:
         payload["last_audit_ts"] = last_audit_ts
@@ -133,6 +143,12 @@ def build_payload(
         payload["version"] = version
     if sticky_stop_level:
         payload["sticky_stop_level"] = sticky_stop_level
+    if scheduler_ok is not None:
+        payload["scheduler_ok"] = 1 if scheduler_ok else 0
+    if scheduler_job_count is not None:
+        payload["scheduler_job_count"] = scheduler_job_count
+    if scheduler_max_overdue_seconds is not None:
+        payload["scheduler_max_overdue_seconds"] = scheduler_max_overdue_seconds
     return payload
 
 
@@ -200,6 +216,8 @@ class HeartbeatEmitter:
         period_seconds: int = DEFAULT_PERIOD_SECONDS,
         post_fn=_default_post,
         ping_fn=_default_ping,
+        scheduler_check_fn=None,
+        scheduler_check_debounce: int = 3,
     ) -> None:
         self._slug = slug
         self._key = key
@@ -212,6 +230,12 @@ class HeartbeatEmitter:
         self._ping_fn = ping_fn
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Work-liveness self-check (shared.scheduler_check). Injectable for
+        # tests; None = the real check with uptime-based boot suppression.
+        self._scheduler_check_fn = scheduler_check_fn or _default_scheduler_check
+        self._sched_debounce = max(1, scheduler_check_debounce)
+        self._sched_fail_count = 0
+        self._sched_last_good = None
 
     def start(self) -> bool:
         """Launch the daemon thread. Returns False (and logs) when the
@@ -265,6 +289,37 @@ class HeartbeatEmitter:
             except Exception as exc:
                 logger.warning("heartbeat: healthchecks ping failed: %s", exc)
 
+    def _read_scheduler_check(self):
+        """Run the work-liveness self-check with a consecutive-failure
+        debounce. A transient crash (< debounce ticks) keeps reporting the
+        last-known-good verdict; a persistent crash reports ``ok=False``
+        with the last-good job count — REPORTED, never omitted, because an
+        omitted field on a crashed checker would recreate the exact
+        "monitoring green while broken" class this exists to close. Returns
+        None only before the first-ever success (console holds on absence)."""
+        from shared.scheduler_check import SchedulerCheck
+
+        try:
+            result = self._scheduler_check_fn()
+        except Exception as exc:  # noqa: BLE001 — the check must never kill the beat
+            self._sched_fail_count += 1
+            logger.warning(
+                "heartbeat: scheduler check failed (%d consecutive): %s",
+                self._sched_fail_count,
+                exc,
+            )
+            if self._sched_fail_count >= self._sched_debounce:
+                last = self._sched_last_good
+                return SchedulerCheck(
+                    ok=False,
+                    job_count=last.job_count if last else 0,
+                    max_overdue_seconds=None,
+                )
+            return self._sched_last_good
+        self._sched_fail_count = 0
+        self._sched_last_good = result
+        return result
+
     def _post_control_plane(self) -> None:
         last_audit_ts, last_skill_ts = read_audit_timestamps(self._audit_db_path_fn())
         # ADR 0062: surface the cost-breaker ladder level so the fleet view
@@ -277,6 +332,7 @@ class HeartbeatEmitter:
             level = read_level()
         except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
             logger.debug("heartbeat: sticky_stop level read failed: %s", exc)
+        sched = self._read_scheduler_check()
         payload = build_payload(
             heartbeat_ts=_iso_utc_now(),
             last_audit_ts=last_audit_ts,
@@ -284,6 +340,11 @@ class HeartbeatEmitter:
             uptime_seconds=read_uptime_seconds(),
             version=self._version,
             sticky_stop_level=level,
+            scheduler_ok=sched.ok if sched is not None else None,
+            scheduler_job_count=sched.job_count if sched is not None else None,
+            scheduler_max_overdue_seconds=(
+                sched.max_overdue_seconds if sched is not None else None
+            ),
         )
         import json
 
@@ -306,6 +367,15 @@ class HeartbeatEmitter:
             logger.warning("heartbeat: control-plane returned %d", status)
 
 
+def _default_scheduler_check():
+    """The real work-liveness check, with uptime-based boot suppression.
+    Lazy import keeps heartbeat importable even if the check module is
+    somehow absent (the emitter's debounce then reports the failure)."""
+    from shared.scheduler_check import check
+
+    return check(uptime_seconds=read_uptime_seconds())
+
+
 def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
     """Build a :class:`HeartbeatEmitter` from the gate process environment.
 
@@ -318,6 +388,10 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         period = int(os.environ.get("HEARTBEAT_PERIOD_SECONDS", str(DEFAULT_PERIOD_SECONDS)))
     except ValueError:
         period = DEFAULT_PERIOD_SECONDS
+    try:
+        debounce = int(os.environ.get("SCHEDULER_CHECK_DEBOUNCE", "3"))
+    except ValueError:
+        debounce = 3
     return HeartbeatEmitter(
         slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG"),
         key=os.environ.get("MACHINE_HEARTBEAT_KEY"),
@@ -326,6 +400,7 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         version=os.environ.get("SMD_OVERLAY_REF"),
         audit_db_path_fn=audit_db_path_fn,
         period_seconds=period,
+        scheduler_check_debounce=debounce,
     )
 
 
