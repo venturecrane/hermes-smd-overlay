@@ -312,6 +312,25 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: upstream Hermes gateway port; defaults to 8644
+  # ---- ADR 0078 email-channel-seam D1: the msgraph delta poller (shared/msgraph_poller.py, in the gate) ----
+  WEBHOOK_SECRET_MSGRAPH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [bootstrap-translate, webhook-gate]
+    note: "the msgraph inbound route's HMAC secret. Read as a literal by translate (materializes the loopback `msgraph` route, fail-closed/omitted when unset) and by the delta poller to sign its loopback POST so Hermes' webhook adapter re-verifies. The MSGRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET/MAILBOX creds are read via shared.secrets.get_secret (the declared dynamic seam), not as static literals."
+  MSGRAPH_POLL_SECONDS:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "poller cadence fallback (seconds) when customer.yaml connectors.Email.poll_seconds is absent; defaults to 45. The authored per-seat value wins."
+  SMD_MSGRAPH_STATE_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "override for the poller's durable delta-cursor + seen-id ledger file; defaults to $HERMES_HOME/msgraph/delta-state.json."
   WEBHOOK_SMOKEBALL_CLIENT_ID:
     discovery: static
     stage: agent

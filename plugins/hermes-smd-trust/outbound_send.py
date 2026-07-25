@@ -29,6 +29,8 @@ import urllib.request
 from collections.abc import Callable
 from typing import Any
 
+from shared import msgraph_client
+
 logger = logging.getLogger(__name__)
 
 # Verified against AgentMail docs (api-reference/inboxes/messages/send +
@@ -47,9 +49,18 @@ _SEND_BODY_FIELDS: tuple[str, ...] = ("to", "cc", "bcc", "subject", "text", "htm
 _INBOX_ID: str | None = None
 
 
-class AgentMailSendError(RuntimeError):
-    """A raw AgentMail send/list call failed. The caller is exception-safe and
-    audits the failure (send_failed) rather than crashing the hook."""
+class OutboundSendError(RuntimeError):
+    """An out-of-band confirm-dispatch send failed, for any transport. The caller
+    is exception-safe and audits the failure (CONFIRM_SEND_FAILED) rather than
+    crashing the hook."""
+
+
+class AgentMailSendError(OutboundSendError):
+    """A raw AgentMail send/list call failed."""
+
+
+class MsGraphSendError(OutboundSendError):
+    """A Microsoft Graph confirm-dispatch send failed (bad creds or a Graph 4xx/5xx)."""
 
 
 def _request_json(
@@ -162,3 +173,40 @@ def send_message(
         logger.warning("hermes-smd-trust: agentmail send returned no message_id; body kept minimal")
         return "(sent, id unavailable)"
     return message_id
+
+
+# The flat send-body fields the overlay forwards to Graph from the stored msgraph
+# payload (mcp_msgraph_mail_send_message args are flat, ADR 0078 D4). Anything
+# else on the args is NOT forwarded — the wire body is built from a closed
+# allowlist. cc may be absent; body_text carries the reply/send prose.
+_MSGRAPH_SEND_FIELDS: tuple[str, ...] = ("to", "cc", "subject", "body_text")
+
+
+def send_via_msgraph(payload: dict[str, Any]) -> str:
+    """POST an approved send via Microsoft Graph ``/users/{mailbox}/sendMail``.
+
+    The msgraph counterpart of :func:`send_message`: the transport only — the
+    caller has already re-authorized the payload through the same
+    ``evaluate_tool_call`` gate. Builds the Graph client from ``MSGRAPH_*`` (via
+    the shared client's env builder) so the mailbox is pinned and no arg can
+    redirect the send. Fail-closed: a seat with no ``MSGRAPH_*`` creds raises
+    :class:`MsGraphSendError` — it NEVER falls back to AgentMail. Graph returns
+    202 with no id, so a placeholder is surfaced for the audit row."""
+    client = msgraph_client.build_client_from_env()
+    if client is None:
+        raise MsGraphSendError("msgraph send unavailable: MSGRAPH_* env not configured")
+    body = {
+        k: payload.get(k) for k in _MSGRAPH_SEND_FIELDS if payload.get(k) not in (None, "", [], {})
+    }
+    if not body.get("to"):
+        raise MsGraphSendError("refusing to send: payload has no recipient")
+    try:
+        client.send_mail(
+            to=body["to"],
+            subject=str(body.get("subject") or ""),
+            body_text=str(body.get("body_text") or ""),
+            cc=body.get("cc"),
+        )
+    except (msgraph_client.MsGraphApiError, msgraph_client.MsGraphAuthError) as exc:
+        raise MsGraphSendError(f"graph sendMail failed: {exc}") from exc
+    return "(sent via msgraph, id unavailable)"

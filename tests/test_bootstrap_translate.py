@@ -1257,6 +1257,62 @@ def test_webhook_platform_empty_when_no_webhook_url():
     assert _wh._materialize_webhook_platform(cust) == {}
 
 
+# --- msgraph poll-based inbound route (ADR 0078 slice 4) --------------------
+
+_WH_MSGRAPH_CUSTOMER = {
+    "connectors": {
+        "Email": {
+            "adapter": "msgraph",
+            "backend": "mcp:msgraph-mail",
+            "enabled": True,
+            # No webhook_url — inbound is PULLED by the overlay delta poller.
+        }
+    },
+    "webhook_triggers": [
+        {
+            "source": "msgraph",
+            "event_type": "message.received",
+            "skill": "inbox-triage",
+            "persona": "marcus",
+        }
+    ],
+}
+
+
+def test_msgraph_reply_adapter_in_email_reply_set():
+    assert "msgraph" in _wh._EMAIL_REPLY_ADAPTERS
+
+
+def test_msgraph_loopback_route_materialized_without_webhook_url(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_SECRET_MSGRAPH", "graph-secret")
+    out = _wh._materialize_webhook_platform(_WH_MSGRAPH_CUSTOMER)
+    route = out["webhook"]["extra"]["routes"]["msgraph"]
+    assert route["secret"] == "graph-secret"
+    assert route["events"] == ["message.received"]
+    assert route["skills"] == ["inbox-triage"]
+    # The msgraph prompt names the tool an msgraph seat actually exposes and reads
+    # DTO dot-paths (the poller's inbound_message shape), not {message.*}.
+    assert "mcp_msgraph_mail_create_draft" in route["prompt"]
+    assert "{inbound_message.from_addr}" in route["prompt"]
+    assert "{message.from}" not in route["prompt"]
+
+
+def test_msgraph_route_fail_closed_without_secret(monkeypatch):
+    monkeypatch.delenv("WEBHOOK_SECRET_MSGRAPH", raising=False)
+    assert _wh._materialize_webhook_platform(_WH_MSGRAPH_CUSTOMER) == {}
+
+
+def test_msgraph_outbound_only_email_emits_no_route(monkeypatch):
+    # adapter msgraph + enabled but NOT a webhook_triggers source → outbound-only,
+    # never wakes the agent, so no inbound route (and no poller ingress).
+    monkeypatch.setenv("WEBHOOK_SECRET_MSGRAPH", "graph-secret")
+    cust = {
+        "connectors": {"Email": {"adapter": "msgraph", "enabled": True}},
+        "webhook_triggers": [],
+    }
+    assert _wh._materialize_webhook_platform(cust) == {}
+
+
 def test_route_name_parsed_from_webhook_url():
     assert _wh._route_name_from_webhook_url("https://h.fly.dev/webhooks/agentmail") == "agentmail"
     assert _wh._route_name_from_webhook_url("https://h/webhooks/x/") == "x"
