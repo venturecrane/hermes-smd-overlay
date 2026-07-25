@@ -399,3 +399,25 @@ def test_every_workspace_tool_is_classified() -> None:
         f"workspace tool(s) not classified: {undecided}. "
         f"Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
     )
+
+
+def test_msgraph_mail_tools_mirror_the_manifest_oracle():
+    """msgraph-mail (ss #1978 / ADR 0078 slice 1): the connector's manifest.toml
+    declares tool_classes as the conformance oracle, and the seat's boot-time
+    connector-classification probe FATALs when a baked manifest disagrees with
+    this map — the missing half of ss#1986 crashlooped the first post-merge
+    reprovision (2026-07-24). These six entries ARE that coordinated change."""
+    from shared.action_classes import ActionClass, classify_tool
+
+    expected = {
+        "mcp_msgraph_mail_list_messages": ActionClass.READ,
+        "mcp_msgraph_mail_read_message": ActionClass.READ,
+        "mcp_msgraph_mail_poll_delta": ActionClass.READ,
+        "mcp_msgraph_mail_create_draft": ActionClass.INTERNAL_WRITE,
+        "mcp_msgraph_mail_send_message": ActionClass.EXTERNAL_SEND,
+        "mcp_msgraph_mail_reply_message": ActionClass.EXTERNAL_SEND,
+    }
+    for name, cls in expected.items():
+        resolved = classify_tool(name)
+        assert resolved.action_class is cls, name
+        assert resolved.unmapped is False, name

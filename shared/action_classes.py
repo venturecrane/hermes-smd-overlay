@@ -279,6 +279,24 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # on arrival (superseded the mcp:brave connector, whose whole layer was the
     # redundant wrapper that MCP-wrapped a native Hermes feature).
     "web_search": ActionClass.READ,
+    # msgraph-mail author-built connector (ss #1978 / ADR 0078 slice 1 — the
+    # COORDINATED CHANGE its manifest.toml names). Runtime names are
+    # mcp_msgraph_mail_<tool>. Classes mirror the manifest's tool_classes
+    # oracle exactly; the boot-time connector-classification probe FATALs the
+    # seat when a baked connector's manifest disagrees with this map (which is
+    # how the missing half of #1986 crashlooped the first post-merge
+    # reprovision, 2026-07-24). Mapping is classification, not authorization:
+    # the send tools sit behind the authored external_send ceiling (fail-closed
+    # when unauthored) and the ADR 0072 recipient-aware machinery; the
+    # connector's arg surface is deliberately flat (to/cc plain addresses) so
+    # governance sees recipients directly, and an unresolvable recipient never
+    # classifies INTERNAL.
+    "mcp_msgraph_mail_list_messages": ActionClass.READ,
+    "mcp_msgraph_mail_read_message": ActionClass.READ,
+    "mcp_msgraph_mail_poll_delta": ActionClass.READ,
+    "mcp_msgraph_mail_create_draft": ActionClass.INTERNAL_WRITE,
+    "mcp_msgraph_mail_send_message": ActionClass.EXTERNAL_SEND,
+    "mcp_msgraph_mail_reply_message": ActionClass.EXTERNAL_SEND,
     # --- capability-contract aliases (colon form) — never emitted at runtime,
     #     retained so audit prose / TS-side references still resolve.
     "agentmail:send_message": ActionClass.EXTERNAL_SEND,
