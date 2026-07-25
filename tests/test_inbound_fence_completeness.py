@@ -115,6 +115,33 @@ def _agentmail_read_tools() -> list[str]:
     ]
 
 
+def _msgraph_read_tools() -> list[str]:
+    """msgraph-mail connector READ tools (live ``mcp_msgraph_mail_*`` runtime
+    form) — the client-custody operator mailbox (ss #1978 / ADR 0078). Same
+    rationale as the AgentMail clause: without this prefix in the guard, a
+    future msgraph read tool could slip both the fence and CI."""
+    return [
+        name
+        for name, cls in TOOL_ACTION_CLASS_MAP.items()
+        if name.startswith("mcp_msgraph_mail_") and cls is ActionClass.READ
+    ]
+
+
+def test_every_msgraph_read_tool_is_fenced_or_explicitly_unfenced() -> None:
+    """Client-custody mailbox reads are the same primary untrusted channel as
+    AgentMail's PULL path — every msgraph READ tool must carry a fencing
+    decision. (All three initial tools are fenced: even list_messages returns
+    sender-authored subject + bodyPreview.)"""
+    fenced = _fenced_read_tools()
+    undecided = [
+        n for n in _msgraph_read_tools() if n not in fenced and n not in UNFENCED_READ_BY_DESIGN
+    ]
+    assert undecided == [], (
+        f"msgraph READ tools with no fencing decision: {undecided} — add to "
+        "_FENCED_READ_TOOLS (sender content) or UNFENCED_READ_BY_DESIGN (with rationale)"
+    )
+
+
 def test_every_agentmail_read_tool_is_fenced_or_explicitly_unfenced() -> None:
     """The PULL-path guard (SEC-05/13 residual): every AgentMail READ tool the
     agent can call must be fenced (sender content) or explicitly unfenced

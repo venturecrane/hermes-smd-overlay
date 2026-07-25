@@ -168,6 +168,15 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_agentmail_search_messages",
         "mcp_agentmail_get_attachment",
         "mcp_agentmail_get_draft",
+        # msgraph-mail (ss #1978 / ADR 0078) — the operator's client-custody
+        # mailbox, the same primary untrusted channel as AgentMail's PULL path.
+        # ALL THREE reads carry sender-authored content: list_messages returns
+        # subject + bodyPreview (triage metadata IS attacker-influenceable),
+        # read_message returns the full normalized body, poll_delta returns
+        # full InboundMessage payloads. Fence all three.
+        "mcp_msgraph_mail_list_messages",
+        "mcp_msgraph_mail_read_message",
+        "mcp_msgraph_mail_poll_delta",
         # Web fetches — attacker-controlled page content.
         "web_search",
         "web_extract",
