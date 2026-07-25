@@ -165,6 +165,18 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: "consecutive scheduler self-check crashes before the heartbeat reports scheduler_ok=0 (ss work-liveness fix; report-late beats report-never). Default 3; set 1 on a staging seat to tighten the kill-test window."
+  CONNECTOR_CHECK_DEBOUNCE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "consecutive connector self-check crashes before the heartbeat reports connector_check_ok=0 (ADR 0080; a map has no natural degraded value — the boolean is the reported failure state). Default 3."
+  SMD_CONNECTOR_LEDGER_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [connector-health, webhook-gate]
+    note: "path of the per-server connector call-outcome ledger (shared/connector_ledger.py); the agent-side connector-health plugin writes, the gate's heartbeat connector_check reads — the SMD_MCP_STORE_DIR two-process shape. Defaults to /run/smd-connector-health/ledger.json (tmpfs; wiped on restart BY DESIGN — console holds open alerts until post-restart calls rebuild the run)."
   SMD_OVERLAY_REF:
     discovery: static
     stage: agent

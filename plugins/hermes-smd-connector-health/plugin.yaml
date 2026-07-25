@@ -1,0 +1,9 @@
+name: hermes-smd-connector-health
+version: "0.1.0"
+description: "Agent-side half of connector-outage alerting (ss#1990 / ADR 0080): observes every MCP tool call's outcome in post_tool_call and maintains the per-server failure ledger on tmpfs, which the gate's heartbeat emitter ships to the console for connector_down / connector_check_error evaluation. Observer-only, content-agnostic, no external side effect."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - post_tool_call
+hooks:
+  - post_tool_call
