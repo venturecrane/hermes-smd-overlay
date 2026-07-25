@@ -43,6 +43,37 @@ from shared.secrets import get_secret
 
 logger = logging.getLogger(__name__)
 
+# Connector-health ledger key for the Graph mail channel (ADR 0080). Matches
+# the sanitized name Hermes would register for an mcp:msgraph-mail server, so
+# the alert identity stays stable if/when the connector also lands as agent
+# MCP tools.
+_CHANNEL_SERVER = "msgraph_mail"
+
+# Conn-class statuses, computed structurally at this chokepoint (no message
+# matching needed): unreachable (our status 0), auth (401/403/407),
+# timeout-ish (408), throttle (429), and any 5xx. 4xx business errors
+# (400/404/410-expired-cursor...) count as failures but carry no conn-class
+# evidence — the signature-free backstop still pages a sustained run of them.
+_CONN_CLASS_FIXED = frozenset({0, 401, 403, 407, 408, 429})
+
+
+def _record_channel_outcome(
+    *, ok: bool, status: int | None = None, message: str | None = None
+) -> None:
+    """Fail-soft ledger write for one Graph call. Health capture must never
+    break the mail channel; any ledger error is logged and swallowed."""
+    try:
+        from shared.connector_ledger import record_call
+
+        if ok:
+            record_call(_CHANNEL_SERVER, ok=True)
+        else:
+            conn = status is not None and (status in _CONN_CLASS_FIXED or 500 <= status <= 599)
+            record_call(_CHANNEL_SERVER, ok=False, error_message=message, conn_class=conn)
+    except Exception as exc:  # noqa: BLE001 — never raise into the mail path
+        logger.debug("msgraph connector-health record failed: %s", exc)
+
+
 PROVIDER = "msgraph"
 
 _TOKEN_HOST = "https://login.microsoftonline.com"
@@ -367,7 +398,35 @@ class MsGraphClient:
         a Graph-supplied ``@odata.nextLink``/``deltaLink``). Returns parsed JSON (or
         None for a 202/204/empty body). Retries a 429 with backoff; re-mints once on
         a 401. Raises :class:`MsGraphApiError` on a 4xx/5xx (its ``status`` lets the
-        delta path detect a 410)."""
+        delta path detect a 410).
+
+        Every outcome is also recorded in the connector-health ledger
+        (ADR 0080 / ss#1990): the Graph mail channel bypasses the MCP tool
+        path (poller in the gate, transports in plugins), so the
+        ``post_tool_call`` seam never sees it — this chokepoint is where the
+        whole channel's health is observed. Conn-class is computed from the
+        REAL status code here, not from message text."""
+        try:
+            result = self._request_inner(method, url, params=params, json_body=json_body)
+        except MsGraphAuthError as exc:
+            # A dead app credential / tenant grant is the canonical ADR 0078
+            # outage: auth failures are conn-class by definition.
+            _record_channel_outcome(ok=False, status=401, message=str(exc))
+            raise
+        except MsGraphApiError as exc:
+            _record_channel_outcome(ok=False, status=exc.status, message=str(exc))
+            raise
+        _record_channel_outcome(ok=True)
+        return result
+
+    def _request_inner(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any | None = None,
+    ) -> Any:
         if params:
             clean = {k: v for k, v in params.items() if v is not None}
             if clean:
