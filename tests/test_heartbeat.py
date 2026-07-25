@@ -12,6 +12,7 @@ import json
 import sqlite3
 
 from shared import heartbeat as hb
+from shared.connector_check import ConnectorCheck
 from shared.scheduler_check import SchedulerCheck
 
 _KEY = "shared-fleet-key"
@@ -163,6 +164,12 @@ def _emitter(**overrides):
             lambda: SchedulerCheck(ok=True, job_count=0, max_overdue_seconds=None),
         ),
         scheduler_check_debounce=overrides.get("scheduler_check_debounce", 3),
+        # Hermetic default for the connector check too (ADR 0080).
+        connector_check_fn=overrides.get(
+            "connector_check_fn",
+            lambda: ConnectorCheck(ok=True, servers={}),
+        ),
+        connector_check_debounce=overrides.get("connector_check_debounce", 3),
     )
     return hb.HeartbeatEmitter(**kwargs), calls
 
@@ -403,3 +410,93 @@ def test_scheduler_check_crash_never_escapes_the_tick():
     em._tick()  # must not raise; POST still happens
     assert len(calls["posts"]) == 1
     assert _last_payload(calls)["scheduler_ok"] == 0
+
+
+# ---------------------------------------------------------------------------
+# connector check wiring (ADR 0080)
+# ---------------------------------------------------------------------------
+
+
+def test_payload_sends_connector_fields_including_empty_map():
+    p = hb.build_payload(
+        heartbeat_ts="2026-07-25T00:00:00+00:00",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        connector_check_ok=True,
+        connectors={},
+    )
+    # An empty map is a REAL "check ran, nothing observed yet" state — it
+    # must reach the wire (truthiness-omitting it would be a silent hold).
+    assert p["connector_check_ok"] == 1
+    assert p["connectors"] == {}
+
+
+def test_payload_omits_connector_fields_when_absent():
+    p = hb.build_payload(
+        heartbeat_ts="2026-07-25T00:00:00+00:00",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+    )
+    assert "connector_check_ok" not in p
+    assert "connectors" not in p
+
+
+def test_tick_carries_connector_check_result():
+    entry = {"consecutive_failures": 4, "run_age_seconds": 400, "conn_evidence": True}
+    em, calls = _emitter(
+        connector_check_fn=lambda: ConnectorCheck(ok=True, servers={"smokeball": entry})
+    )
+    em._tick()
+    p = _last_payload(calls)
+    assert p["connector_check_ok"] == 1
+    assert p["connectors"] == {"smokeball": entry}
+
+
+def test_connector_check_crash_debounces_then_reports_not_omits():
+    def boom():
+        raise RuntimeError("connector checker exploded")
+
+    em, calls = _emitter(connector_check_fn=boom, connector_check_debounce=3)
+    em._tick()  # failure 1: no prior good -> fields omitted (console holds)
+    assert "connector_check_ok" not in _last_payload(calls)
+    em._tick()  # failure 2: still held
+    assert "connector_check_ok" not in _last_payload(calls)
+    em._tick()  # failure 3: REPORTED as broken, map withheld
+    p = _last_payload(calls)
+    assert p["connector_check_ok"] == 0
+    assert "connectors" not in p
+
+
+def test_connector_check_recovery_resets_debounce():
+    state = {"good": False}
+
+    def flappy():
+        if not state["good"]:
+            raise RuntimeError("connector checker exploded")
+        return ConnectorCheck(ok=True, servers={"agentmail": {"consecutive_failures": 0}})
+
+    em, calls = _emitter(connector_check_fn=flappy, connector_check_debounce=3)
+    em._tick()  # failure 1
+    assert "connector_check_ok" not in _last_payload(calls)
+    state["good"] = True
+    em._tick()  # recovery
+    assert _last_payload(calls)["connector_check_ok"] == 1
+    state["good"] = False
+    em._tick()  # failure 1 again (counter reset) -> last-good reported
+    p = _last_payload(calls)
+    assert p["connector_check_ok"] == 1
+    assert p["connectors"] == {"agentmail": {"consecutive_failures": 0}}
+
+
+def test_connector_check_crash_never_escapes_the_tick():
+    def boom():
+        raise RuntimeError("connector checker exploded")
+
+    em, calls = _emitter(connector_check_fn=boom, connector_check_debounce=1)
+    em._tick()  # must not raise; POST still happens
+    assert len(calls["posts"]) == 1
+    assert _last_payload(calls)["connector_check_ok"] == 0

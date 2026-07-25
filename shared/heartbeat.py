@@ -120,6 +120,8 @@ def build_payload(
     scheduler_ok: bool | None = None,
     scheduler_job_count: int | None = None,
     scheduler_max_overdue_seconds: int | None = None,
+    connector_check_ok: bool | None = None,
+    connectors: dict[str, dict] | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -149,6 +151,14 @@ def build_payload(
         payload["scheduler_job_count"] = scheduler_job_count
     if scheduler_max_overdue_seconds is not None:
         payload["scheduler_max_overdue_seconds"] = scheduler_max_overdue_seconds
+    # Connector health (ADR 0080). Same is-not-None discipline: an empty map
+    # ({}) is a REAL "check ran, no MCP calls observed" state and a failing
+    # check (connector_check_ok=False → 0) must reach the wire; the console
+    # stores both overwrite-including-NULL and holds alerts on absence.
+    if connector_check_ok is not None:
+        payload["connector_check_ok"] = 1 if connector_check_ok else 0
+    if connectors is not None:
+        payload["connectors"] = connectors
     return payload
 
 
@@ -218,6 +228,8 @@ class HeartbeatEmitter:
         ping_fn=_default_ping,
         scheduler_check_fn=None,
         scheduler_check_debounce: int = 3,
+        connector_check_fn=None,
+        connector_check_debounce: int = 3,
     ) -> None:
         self._slug = slug
         self._key = key
@@ -236,6 +248,12 @@ class HeartbeatEmitter:
         self._sched_debounce = max(1, scheduler_check_debounce)
         self._sched_fail_count = 0
         self._sched_last_good = None
+        # Connector-health self-check (shared.connector_check, ADR 0080).
+        # Same injectable + debounce shape as the scheduler check.
+        self._connector_check_fn = connector_check_fn or _default_connector_check
+        self._conn_debounce = max(1, connector_check_debounce)
+        self._conn_fail_count = 0
+        self._conn_last_good = None
 
     def start(self) -> bool:
         """Launch the daemon thread. Returns False (and logs) when the
@@ -320,6 +338,33 @@ class HeartbeatEmitter:
         self._sched_last_good = result
         return result
 
+    def _read_connector_check(self):
+        """Run the connector-health self-check with the same consecutive-
+        failure debounce as the scheduler check. A connectors MAP has no
+        natural degraded value the way ``scheduler_ok=False`` is one, so a
+        persistent crash reports ``ConnectorCheck(ok=False, servers=None)``
+        — the boolean IS the reported failure state, and the console pages
+        ``connector_check_error`` instead of the whole connector alert
+        class going silently dark. Returns None only before the first-ever
+        success (console holds on absence)."""
+        from shared.connector_check import ConnectorCheck
+
+        try:
+            result = self._connector_check_fn()
+        except Exception as exc:  # noqa: BLE001 — the check must never kill the beat
+            self._conn_fail_count += 1
+            logger.warning(
+                "heartbeat: connector check failed (%d consecutive): %s",
+                self._conn_fail_count,
+                exc,
+            )
+            if self._conn_fail_count >= self._conn_debounce:
+                return ConnectorCheck(ok=False, servers=None)
+            return self._conn_last_good
+        self._conn_fail_count = 0
+        self._conn_last_good = result
+        return result
+
     def _post_control_plane(self) -> None:
         last_audit_ts, last_skill_ts = read_audit_timestamps(self._audit_db_path_fn())
         # ADR 0062: surface the cost-breaker ladder level so the fleet view
@@ -333,6 +378,7 @@ class HeartbeatEmitter:
         except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
             logger.debug("heartbeat: sticky_stop level read failed: %s", exc)
         sched = self._read_scheduler_check()
+        conn = self._read_connector_check()
         payload = build_payload(
             heartbeat_ts=_iso_utc_now(),
             last_audit_ts=last_audit_ts,
@@ -345,6 +391,8 @@ class HeartbeatEmitter:
             scheduler_max_overdue_seconds=(
                 sched.max_overdue_seconds if sched is not None else None
             ),
+            connector_check_ok=conn.ok if conn is not None else None,
+            connectors=conn.servers if conn is not None else None,
         )
         import json
 
@@ -376,6 +424,15 @@ def _default_scheduler_check():
     return check(uptime_seconds=read_uptime_seconds())
 
 
+def _default_connector_check():
+    """The real connector-health check (ADR 0080). Lazy import for the same
+    reason as the scheduler default: a missing module surfaces through the
+    emitter's debounce as connector_check_ok=0, reported not omitted."""
+    from shared.connector_check import check
+
+    return check()
+
+
 def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
     """Build a :class:`HeartbeatEmitter` from the gate process environment.
 
@@ -392,6 +449,10 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         debounce = int(os.environ.get("SCHEDULER_CHECK_DEBOUNCE", "3"))
     except ValueError:
         debounce = 3
+    try:
+        conn_debounce = int(os.environ.get("CONNECTOR_CHECK_DEBOUNCE", "3"))
+    except ValueError:
+        conn_debounce = 3
     return HeartbeatEmitter(
         slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG"),
         key=os.environ.get("MACHINE_HEARTBEAT_KEY"),
@@ -401,6 +462,7 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         audit_db_path_fn=audit_db_path_fn,
         period_seconds=period,
         scheduler_check_debounce=debounce,
+        connector_check_debounce=conn_debounce,
     )
 
 
