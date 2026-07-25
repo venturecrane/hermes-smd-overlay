@@ -16,12 +16,23 @@ def _ledger_in_tmp(tmp_path, monkeypatch):
     return tmp_path / "ledger.json"
 
 
-def test_missing_ledger_is_legit_empty_not_error(_ledger_in_tmp):
-    # Fresh boot / no MCP call yet: check ok, empty map — the console holds
-    # any open alert (absence never resolves) but nothing pages.
+def test_missing_ledger_with_dir_present_is_legit_empty(_ledger_in_tmp):
+    # Fresh boot / no MCP call yet, boot-created dir present: check ok, empty
+    # map — the console holds any open alert (absence never resolves) but
+    # nothing pages.
     result = check(now=1000.0)
     assert result.ok is True
     assert result.servers == {}
+
+
+def test_missing_ledger_DIR_is_check_not_ok(tmp_path, monkeypatch):
+    # 2026-07-25 smd-staging live finding: dir never boot-created → every
+    # record_call silently failed → a real 401 outage read legit-empty green.
+    # A missing DIR means the writer cannot possibly record: page, not hold.
+    monkeypatch.setenv("SMD_CONNECTOR_LEDGER_PATH", str(tmp_path / "no-such-dir" / "ledger.json"))
+    result = check(now=1000.0)
+    assert result.ok is False
+    assert result.servers is None
 
 
 def test_corrupt_ledger_is_check_not_ok(_ledger_in_tmp):

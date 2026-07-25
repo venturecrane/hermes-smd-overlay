@@ -106,8 +106,22 @@ def check(*, now: float | None = None) -> ConnectorCheck:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        # Fresh boot / no MCP call yet — a legitimate empty state, not an
-        # error. The console holds open alerts until calls rebuild the run.
+        # Distinguish two very different absences (2026-07-25 live finding on
+        # smd-staging: /run is root-owned tmpfs, the ledger DIR was never
+        # boot-created, every record_call silently failed, and a REAL 401
+        # outage read as legit-empty green — the exact class this system
+        # exists to kill). entrypoint.sh now creates the dir root-side before
+        # the privilege drop, so:
+        #   dir present, file missing → genuinely no calls yet: legit-empty.
+        #   dir MISSING → the writer cannot possibly record; the check is
+        #     broken and must PAGE (connector_check_error), not hold green.
+        if not path.parent.is_dir():
+            logger.warning(
+                "connector_check: ledger dir %s missing — writer cannot "
+                "record; boot contract broken (entrypoint mkdir absent?)",
+                path.parent,
+            )
+            return ConnectorCheck(ok=False, servers=None)
         return ConnectorCheck(ok=True, servers={})
     except OSError as exc:
         logger.warning("connector_check: ledger unreadable: %s", exc)
