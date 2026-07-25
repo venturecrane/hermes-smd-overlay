@@ -793,6 +793,116 @@ def test_router_routes_via_event_raw_message_no_headers(tmp_path, monkeypatch) -
     assert rec.inbox_id == "inbox_abc"
 
 
+# ---------------------------------------------------------------------------
+# Layer 2b — the normalized InboundMessage rides the dispatch (ADR 0078 D2)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_carries_inbound_message_for_agentmail(tmp_path, monkeypatch) -> None:
+    """A routed AgentMail message attaches the normalized seam DTO to the dispatch
+    directive (additive: ``payload`` and ``inbound_envelope`` are unchanged)."""
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+    payload = {
+        "source": "agentmail",
+        "event_type": "message.received",
+        "message": {
+            "inbox_id": "inbox_abc",
+            "message_id": "msg_123",
+            "from": "Greg Whitfield <greg@whitfield.example>",
+            "subject": "New matter",
+            "text": "I'd like to discuss a new matter.",
+        },
+    }
+    result = mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-dto"))
+    assert result is not None
+    # Raw payload + envelope still present; the DTO rides alongside.
+    assert result["payload"] is payload
+    assert "inbound_envelope" in result
+    dto = result["inbound_message"]
+    assert dto["provider"] == "agentmail"
+    assert dto["from_addr"] == "greg@whitfield.example"
+    assert dto["message_id"] == "msg_123"
+    assert dto["subject"] == "New matter"
+    assert dto["provider_refs"]["inbox_id"] == "inbox_abc"
+
+
+def test_dispatch_omits_inbound_message_when_unparseable_but_still_quarantines(
+    tmp_path, monkeypatch
+) -> None:
+    """A KNOWN-source payload the normalizer cannot parse (no message block)
+    behaves no worse than the pre-seam unparseable path: no DTO is attached, yet
+    the content is still fenced+quarantined (trust_class unknown_external)."""
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+    payload = {"source": "agentmail", "event_type": "message.received", "body": "no message block"}
+    result = mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-nodto"))
+    assert result is not None
+    assert "inbound_message" not in result  # nothing to normalize ⇒ no DTO
+    # Still quarantined for the pre_llm_call fence (the enforcing posture holds).
+    assert inbound.PENDING.size("sess-nodto") == 1
+    env = result["inbound_envelope"]
+    assert env["trust_class"] == inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
+
+
+def test_dispatch_never_crashes_if_normalize_raises(tmp_path, monkeypatch) -> None:
+    """Defense-in-depth: even if seam normalization raised, the hook must not
+    crash (AGENTS.md rule #3) — it routes through, just without the DTO."""
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("synthetic normalize failure")
+
+    monkeypatch.setattr(mod.inbound_message, "normalize_inbound", boom)
+    payload = {
+        "source": "agentmail",
+        "event_type": "message.received",
+        "message": {"inbox_id": "i", "message_id": "m", "from": "a@b.com"},
+    }
+    # Must not raise; still returns a routing directive (DTO omitted).
+    result = mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-boom"))
+    assert isinstance(result, dict)
+    assert result["action"] == "route_to_skill"
+    assert "inbound_message" not in result
+
+
+def test_dispatch_carries_msgraph_inbound_message(tmp_path, monkeypatch) -> None:
+    """The seam is provider-neutral: an msgraph-sourced dispatch carrying the
+    connector's DTO-shaped block attaches the same normalized shape. (The poller
+    that produces these lands in slice 4; here we prove the router-side seam.)"""
+    mod, _ = _load_router_with_table(tmp_path, monkeypatch)
+    # The routing table is read live per dispatch; rewrite the pointed-at file
+    # with an msgraph inbound trigger.
+    (tmp_path / "customer.yaml").write_text(
+        dedent(
+            """
+            customer_id: acme
+            webhook_triggers:
+              - source: msgraph
+                event_type: message.received
+                skill: triage_inbox
+                persona: assistant
+            """
+        ).strip()
+    )
+    payload = {
+        "source": "msgraph",
+        "event_type": "message.received",
+        "inbound_message": {
+            "provider": "msgraph",
+            "mailbox": "operator@clientdomain.com",
+            "message_id": "AAMk...",
+            "from_addr": "Client <CLIENT@theirfirm.com>",
+            "subject": "Re: intake",
+            "body_text": "Thanks.",
+        },
+    }
+    result = mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-mg"))
+    assert result is not None
+    dto = result["inbound_message"]
+    assert dto["provider"] == "msgraph"
+    assert dto["from_addr"] == "client@theirfirm.com"
+    assert dto["message_id"] == "AAMk..."
+
+
 def test_module_imports_stable() -> None:
     """shared.inbound and the new plugin import cleanly."""
     assert "shared.inbound" in sys.modules or importlib.util.find_spec("shared.inbound")
