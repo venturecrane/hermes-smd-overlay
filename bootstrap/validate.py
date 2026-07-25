@@ -929,13 +929,25 @@ def _validate_email_seam(cfg: dict[str, Any], errors: list[str]) -> None:
     channel that cannot be fenced cannot be bound". Scope: EMAIL only (Telegram
     and other channels are tracked separately).
 
-    Inbound-bound is the fence-relevant condition: an Email connector whose
-    adapter is named as a ``webhook_triggers[].source`` carries gate→router
-    inbound, so it must be fenceable. An Email connector with no inbound trigger
-    is outbound-only tooling and is out of scope here — this keeps the
-    cross-repo validator parity contract intact (the console does not yet enforce
-    the seam-adapter enum, so existing outbound-only Email MCP bindings such as
-    the softeria microsoft-graph adapter stay accepted)."""
+    Inbound-bound is the fence-relevant condition, and it IS the invariant, not a
+    weakening (Captain call 2026-07-24). D3's invariant is that inbound must not
+    reach the model unfenced (the F1 bypass). The ONLY push-style wake path is
+    ``webhook_triggers`` — an Email connector whose adapter is named as a
+    ``webhook_triggers[].source`` carries gate→router inbound, so it must be
+    fenceable. An Email connector NOT wired as a trigger source is outbound-only /
+    read MCP tooling: it never wakes the agent, and its tool-result reads are
+    already quarantined at ``transform_tool_result``, so leaving it unfenced is
+    safe. The delegated ``microsoft-graph`` adapter stays legitimate for
+    read/draft tooling — ADR 0078 rejected it only as the SENSITIVE-seat
+    mail-identity default, not wholesale — so outlawing it here would be wrong.
+
+    DO NOT tighten this to "every Email adapter" without the coordinated ss-console
+    change: the cross-repo parity fixtures (byte-shared, hash-pinned) bind an
+    outbound-only softeria ``microsoft-graph`` Email that the console accepts, so
+    full-strict enforcement requires swapping those fixtures (microsoft-graph →
+    msgraph) and re-pinning the content hash in BOTH repos. That is deliberately
+    deferred (slice-4/5 coordination item) — the inbound-bound scope here is the
+    correct invariant in the meantime, not a placeholder to "fix" back to strict."""
     connectors = cfg.get("connectors")
     if not isinstance(connectors, dict):
         return
