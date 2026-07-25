@@ -113,7 +113,7 @@ def test_healthy_future_jobs_green(tmp_path):
     profile.mkdir()
     _write_jobs(profile, [_job(), _job(id="j2", name="op-managed:operator:digest")])
     result = check(home, customer_yaml_path=_no_yaml(tmp_path), now_utc=NOW)
-    assert result == SchedulerCheck(ok=True, job_count=2, max_overdue_seconds=None)
+    assert result == SchedulerCheck(ok=True, job_count=2, max_overdue_seconds=0)
 
 
 def test_overdue_job_reports_seconds(tmp_path):
@@ -153,7 +153,9 @@ def test_disabled_paused_completed_jobs_skipped(tmp_path):
     )
     result = check(home, customer_yaml_path=_no_yaml(tmp_path), now_utc=NOW)
     assert result.ok is True
-    assert result.max_overdue_seconds is None
+    assert (
+        result.max_overdue_seconds == 0
+    )  # 0 = measured "nothing overdue" (resolves); None only when unmeasurable
     assert result.job_count == 3  # counted (materialization signal), not aged
 
 
@@ -184,7 +186,9 @@ def test_naive_and_unparseable_next_run_at_skipped(tmp_path):
     )
     result = check(home, customer_yaml_path=_no_yaml(tmp_path), now_utc=NOW)
     assert result.ok is True
-    assert result.max_overdue_seconds is None
+    assert (
+        result.max_overdue_seconds == 0
+    )  # 0 = measured "nothing overdue" (resolves); None only when unmeasurable
 
 
 def test_malformed_job_row_fails_the_check(tmp_path):
