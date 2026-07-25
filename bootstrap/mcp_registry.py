@@ -228,6 +228,35 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         ),
         blocked_tools=(),
     ),
+    # Microsoft Graph mail (mcp:msgraph-mail) — the client-custody email connector
+    # (ADR 0078 / email-channel-seam D4; ss-console operator/connectors/msgraph-mail,
+    # live-verified app-only against the smdopslab sandbox mailbox 2026-07-24). Local
+    # stdio MCP server launched by the ABSOLUTE path to its own venv console-script,
+    # same shape as smokeball. The server is named "msgraph-mail"; Hermes sanitizes
+    # the hyphen so runtime tools are mcp_msgraph_mail_<tool> (matches the
+    # hand-authored classes in shared/action_classes.py). App-only client_credentials:
+    # the four MSGRAPH_* are REQUIRED per-seat secrets the connector validates at
+    # construction (a missing one fail-closes the server rather than booting a
+    # half-wired mail surface). Tenant-side least privilege is the Exchange
+    # ApplicationAccessPolicy pinning the app to exactly the operator mailbox,
+    # enforced outside this process. INBOUND does NOT run through this server (the
+    # overlay delta poller pulls + fences); this materializes the OUTBOUND/read tool
+    # surface the agent acts with (send / reply / draft / list / read).
+    "msgraph-mail": McpConnectorSpec(
+        name="msgraph-mail",
+        auth_model="client_credentials",
+        command="/opt/connectors/msgraph-mail/.venv/bin/msgraph-mail-mcp",
+        args=(),
+        env_static=(),
+        env_secrets=(
+            ("MSGRAPH_TENANT_ID", "MSGRAPH_TENANT_ID"),
+            ("MSGRAPH_CLIENT_ID", "MSGRAPH_CLIENT_ID"),
+            ("MSGRAPH_CLIENT_SECRET", "MSGRAPH_CLIENT_SECRET"),
+            ("MSGRAPH_MAILBOX", "MSGRAPH_MAILBOX"),
+        ),
+        env_secrets_optional=(),
+        blocked_tools=(),
+    ),
     # NOTE: web search is NOT an mcp: connector. It is wired natively via Hermes'
     # bundled web providers (plugins/web/*, e.g. brave-free) and selected by
     # `connectors.WebSearch.backend: native:<provider>` -> config web.search_backend
