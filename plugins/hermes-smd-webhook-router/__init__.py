@@ -36,11 +36,10 @@ Hook callbacks are exception-safe per AGENTS.md hard rule #3.
 import json
 import logging
 import os
-from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
-from shared import inbound
+from shared import inbound, inbound_message
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -168,43 +167,34 @@ def _inbound_content_for(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _inbound_origin_from(payload: Any, *, content: str) -> inbound.InboundOrigin | None:
-    """Extract the recipient-lock origin from an AgentMail ``message.received``
-    payload, or ``None`` if the sender/message-id cannot be resolved.
+def _origin_from_dto(
+    dto: inbound_message.InboundMessage | None, *, content: str
+) -> inbound.InboundOrigin | None:
+    """Derive the recipient-lock origin from the normalized seam DTO (spec D2).
 
-    The ``message`` block of the AgentMail webhook carries ``from`` (a
-    ``"Display Name <addr@host>"`` string), ``message_id``, and ``inbox_id``.
-    We normalize ``from`` to a bare lower-cased address via ``parseaddr`` — the
-    recipient-lock compares the agent draft's ``to`` against THIS address, so it
-    must be canonical. Returns ``None`` (fail closed — no recorded origin, the
-    relay refuses to send) when there is no sender address or no message id.
+    The origin fields — the verified sender (roster input), the reply
+    ``message_id``, and the AgentMail ``inbox_id`` the reply threads into — are
+    read FROM the :class:`shared.inbound_message.InboundMessage`, not re-parsed
+    from the raw payload, so the seam is the single place that understands
+    provider shapes. Behavior is preserved for AgentMail: the DTO's ``from_addr``
+    is the same bare lower-cased address the old inline parse produced, and
+    ``provider_refs['inbox_id']`` is the same inbox anchor.
 
-    Tolerant of two shapes: the ``message`` block nested under ``message`` (the
-    AgentMail webhook) or under ``data`` (some ingress wrappers). The fields are
-    never trusted as instructions — only as attribution for the structural lock.
-    """
-    if not isinstance(payload, dict):
+    Returns ``None`` (fail closed — no recorded origin, the relay refuses to
+    send) when the DTO is absent or lacks a sender address or a message id."""
+    if dto is None:
         return None
-    msg = payload.get("message")
-    if not isinstance(msg, dict):
-        # Svix envelope (AgentMail): {"type": ..., "data": {...}}. The message
-        # fields may sit under data.message OR directly under data itself.
-        data = payload.get("data")
-        if isinstance(data, dict):
-            cand = data.get("message")
-            msg = cand if isinstance(cand, dict) else data
-    if not isinstance(msg, dict):
-        return None
-
-    raw_from = msg.get("from")
-    sender = parseaddr(raw_from)[1].strip().lower() if isinstance(raw_from, str) else ""
-    message_id = msg.get("message_id")
-    message_id = message_id.strip() if isinstance(message_id, str) else ""
-    inbox_id = msg.get("inbox_id")
-    inbox_id = inbox_id.strip() if isinstance(inbox_id, str) else ""
-
+    sender = dto.from_addr
+    message_id = dto.message_id
     if not sender or not message_id:
         return None
+    inbox_id = ""
+    if isinstance(dto.provider_refs, dict):
+        candidate = dto.provider_refs.get("inbox_id")
+        if isinstance(candidate, str):
+            inbox_id = candidate
+    if not inbox_id and isinstance(dto.mailbox, str):
+        inbox_id = dto.mailbox
     return inbound.InboundOrigin(
         sender_address=sender,
         message_id=message_id,
@@ -468,9 +458,16 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     # closed) and is fenced + tainted. Building the envelope must never
     # break the route, so it is wrapped in its own try/except.
     envelope: inbound.InboundEnvelope | None = None
+    dto: inbound_message.InboundMessage | None = None
     try:
         content = _inbound_content_for(payload)
-        origin = _inbound_origin_from(payload, content=content)
+        # Normalize at the seam (spec D2): one InboundMessage shape regardless of
+        # provider. The recipient-lock origin is derived FROM the DTO, and the DTO
+        # is attached to the dispatch below — nothing downstream re-parses the raw
+        # provider payload. normalize_inbound is fail-closed (unknown source →
+        # None) and never raises.
+        dto = inbound_message.normalize_inbound(decision.trigger.source, payload)
+        origin = _origin_from_dto(dto, content=content)
         trust_class = inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
         if origin is not None and origin.sender_address:
             try:
@@ -589,6 +586,11 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         # Attach provenance to the dispatch directive so downstream consumers
         # (and the dashboard) can trace the action back to the inbound item.
         directive["inbound_envelope"] = envelope.as_dict()
+    if dto is not None:
+        # Additive (spec D2): the normalized seam DTO rides alongside the raw
+        # ``payload`` and ``inbound_envelope``. Live authored skills still read
+        # the raw ``{message.*}`` paths; downstream seam consumers read this.
+        directive["inbound_message"] = dto.to_dict()
     return directive
 
 

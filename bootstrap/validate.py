@@ -24,6 +24,7 @@ two adaptations:
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,28 @@ LEGACY_ENTITLEMENT_FIELDS = ("trust_ceiling", "action_ceilings")
 # translate._materialize_web_search. Added 2026-07-08 with the ADR 0070 native cut.
 ACCEPTED_BACKEND_PREFIXES = ("mcp:", "build:", "synthetic:", "native:")
 
+# ---- Email-channel seam (ADR 0078 / email-channel-seam spec D3/D5) -----------
+#
+# SOURCE OF TRUTH: ss-console customer-yaml/types.ts (MSGRAPH_ADAPTER,
+# MSGRAPH_GUID_PATTERN, MSGRAPH_SECRET_REF_PATTERN, ACCEPTED_SEND_PROVIDERS). The
+# on-box validator must accept exactly what the console accepts on these blocks
+# (validator parity contract, ADR 0044); keep these aligned with the TS.
+MSGRAPH_ADAPTER = "msgraph"
+MSGRAPH_GUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+MSGRAPH_SECRET_REF_PATTERN = re.compile(r"^fly-secret:[A-Za-z_][A-Za-z0-9_]*$")
+
+# Provider-neutral persona send-as identity (ADR 0078 §4). send_identity.provider
+# is one of these; the legacy agentmail_identity string normalizes to
+# {provider: agentmail, address}. Mirrors ss-console ACCEPTED_SEND_PROVIDERS.
+ACCEPTED_SEND_PROVIDERS = {"agentmail", "msgraph"}
+
+# The Email-connector adapters that HAVE an inbound seam normalizer
+# (shared.inbound_message.NORMALIZERS). Structural D3: an Email channel bound for
+# inbound must be a member — "a channel that cannot be fenced cannot be bound".
+EMAIL_SEAM_ADAPTERS = {"agentmail", MSGRAPH_ADAPTER}
+
 REQUIRED_TOP_LEVEL_FIELDS = (
     "customer_id",
     "customer_name",
@@ -191,6 +214,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_outbound_roster(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
+    _validate_email_seam(cfg, errors)
     _validate_memory(cfg, errors)
     _validate_voice_library(cfg, errors)
     _validate_custody_guard(cfg, errors)
@@ -259,7 +283,14 @@ def _gateway_cred_surfaces(cfg: dict[str, Any]) -> set[str]:
             if not isinstance(persona, dict):
                 continue
             send_as = persona.get("send_as")
-            if isinstance(send_as, dict) and send_as.get("agentmail_identity"):
+            # A persona send_as (either the legacy agentmail_identity or the
+            # provider-neutral send_identity block, ADR 0078 §4) implies the
+            # AgentMail identity channel as a gateway-env credential surface —
+            # mirrors the console custody guard treating a non-null send_as as an
+            # 'agentmail' surface.
+            if isinstance(send_as, dict) and (
+                send_as.get("agentmail_identity") or send_as.get("send_identity") is not None
+            ):
                 surfaces.add("agentmail")
     return surfaces
 
@@ -363,6 +394,7 @@ def _validate_one_persona(persona: Any, i: int, seen_slugs: set[str], errors: li
         if field not in persona:
             _err(f"{prefix}({slug}): missing field {field}", errors)
     _validate_entitlements(persona.get("entitlements"), f"{prefix}({slug}).entitlements", errors)
+    _validate_send_as(persona.get("send_as"), f"{prefix}.send_as", errors)
     skills = persona.get("skills", []) or []
     for j, skill in enumerate(skills):
         _validate_skill(skill, f"{prefix}({slug}).skills[{j}]", errors)
@@ -413,6 +445,64 @@ def _validate_initiation(raw: Any, path: str, errors: list[str]) -> None:
             _err(f"{path}.{flag}: required boolean", errors)
         elif not isinstance(raw[flag], bool):
             _err(f"{path}.{flag}: must be a boolean", errors)
+
+
+def _validate_send_as(raw: Any, path: str, errors: list[str]) -> None:
+    """Validate a persona ``send_as`` block (ADR 0078 §4 / email-channel-seam D5).
+
+    Mirrors ss-console ``checkSendAs``. Optional (absent ⇒ no error). Two authored
+    forms: the provider-neutral ``send_identity: {provider, address}`` or the
+    deprecated ``agentmail_identity: <address>`` string. Authoring BOTH is a hard
+    error (ambiguous — fail closed rather than silently pick one). Missing both is
+    an error when the block itself is present."""
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        _err(f"{path}: must be an object", errors)
+        return
+    has_send_identity = raw.get("send_identity") is not None
+    has_legacy = raw.get("agentmail_identity") is not None
+    if has_send_identity and has_legacy:
+        _err(
+            f"{path}: sets both send_identity and the deprecated agentmail_identity — "
+            "author exactly one (send_identity is preferred; agentmail_identity is "
+            "back-compat only)",
+            errors,
+        )
+        return
+    if has_send_identity:
+        _validate_send_identity(raw.get("send_identity"), f"{path}.send_identity", errors)
+        return
+    if has_legacy:
+        legacy = raw.get("agentmail_identity")
+        if not isinstance(legacy, str) or not legacy:
+            _err(
+                f"{path}.agentmail_identity: must be a non-empty string when set",
+                errors,
+            )
+        return
+    _err(
+        f"{path}.send_identity: send_as requires send_identity {{provider, address}} "
+        "(or legacy agentmail_identity)",
+        errors,
+    )
+
+
+def _validate_send_identity(raw: Any, path: str, errors: list[str]) -> None:
+    """Validate a ``send_identity: {provider, address}`` sub-block (ADR 0078 §4)."""
+    if not isinstance(raw, dict):
+        _err(f"{path}: must be an object", errors)
+        return
+    provider = raw.get("provider")
+    if not isinstance(provider, str) or provider not in ACCEPTED_SEND_PROVIDERS:
+        _err(
+            f"{path}.provider: must be one of {sorted(ACCEPTED_SEND_PROVIDERS)}",
+            errors,
+        )
+        return
+    address = raw.get("address")
+    if not isinstance(address, str) or not address:
+        _err(f"{path}.address: must be a non-empty string", errors)
 
 
 def _validate_entitlements(raw: Any, path: str, errors: list[str]) -> None:
@@ -757,6 +847,122 @@ def _validate_connectors(cfg: dict[str, Any], errors: list[str]) -> None:
                 f"{prefix}: backend {backend!r} must start with one of {ACCEPTED_BACKEND_PREFIXES}",
                 errors,
             )
+            continue
+        _validate_msgraph_connector(key, conn, errors)
+
+
+def _validate_msgraph_connector(key: str, conn: dict[str, Any], errors: list[str]) -> None:
+    """Validate the msgraph-specific knobs on a connector (email-channel-seam D5).
+
+    Mirrors ss-console ``checkMsgraph``: when ``adapter == msgraph`` the
+    ``msgraph_auth`` block is REQUIRED and validated and ``poll_seconds`` (optional)
+    must be a positive integer; on any other adapter BOTH must be absent — a present
+    block is a hard error (no dead config)."""
+    adapter = conn.get("adapter")
+    raw_auth = conn.get("msgraph_auth")
+    raw_poll = conn.get("poll_seconds")
+    prefix = f"connectors.{key}"
+    if adapter != MSGRAPH_ADAPTER:
+        if raw_auth is not None:
+            _err(
+                f"{prefix}.msgraph_auth: only valid when adapter is {MSGRAPH_ADAPTER!r} "
+                f"(adapter is {adapter!r})",
+                errors,
+            )
+        if raw_poll is not None:
+            _err(
+                f"{prefix}.poll_seconds: only valid when adapter is {MSGRAPH_ADAPTER!r} "
+                f"(adapter is {adapter!r})",
+                errors,
+            )
+        return
+    _validate_msgraph_auth(f"{prefix}.msgraph_auth", raw_auth, errors)
+    _validate_poll_seconds(f"{prefix}.poll_seconds", raw_poll, errors)
+
+
+def _validate_msgraph_auth(path: str, raw: Any, errors: list[str]) -> None:
+    """Validate the required ``msgraph_auth`` block (adapter is msgraph, D5).
+
+    Fail-closed: absent or malformed ⇒ error, never a silent default. tenant_id /
+    client_id are GUIDs, mailbox is an email address, secret_ref references a
+    per-seat Fly secret (``fly-secret:<ENV_NAME>`` — ADR 0010 custody, never an
+    ``infisical:`` token_ref)."""
+    if raw is None:
+        _err(f"{path}: required when adapter is {MSGRAPH_ADAPTER!r}", errors)
+        return
+    if not isinstance(raw, dict):
+        _err(f"{path}: must be an object", errors)
+        return
+    tenant_id = raw.get("tenant_id")
+    if not isinstance(tenant_id, str) or not MSGRAPH_GUID_PATTERN.match(tenant_id):
+        _err(f"{path}.tenant_id: must be a GUID (8-4-4-4-12 hex)", errors)
+    client_id = raw.get("client_id")
+    if not isinstance(client_id, str) or not MSGRAPH_GUID_PATTERN.match(client_id):
+        _err(f"{path}.client_id: must be a GUID (8-4-4-4-12 hex)", errors)
+    mailbox = raw.get("mailbox")
+    if not isinstance(mailbox, str) or "@" not in mailbox:
+        _err(f"{path}.mailbox: must be the operator mailbox email address", errors)
+    secret_ref = raw.get("secret_ref")
+    if not isinstance(secret_ref, str) or not MSGRAPH_SECRET_REF_PATTERN.match(secret_ref):
+        _err(
+            f"{path}.secret_ref: must reference a per-seat Fly secret as "
+            "'fly-secret:<ENV_NAME>' (ADR 0010 custody)",
+            errors,
+        )
+
+
+def _validate_poll_seconds(path: str, raw: Any, errors: list[str]) -> None:
+    """``poll_seconds`` (adapter is msgraph) is optional; when present it must be a
+    positive integer. Absent ⇒ the overlay poller applies its default cadence."""
+    if raw is None:
+        return
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        _err(f"{path}: must be a positive integer (seconds)", errors)
+
+
+def _validate_email_seam(cfg: dict[str, Any], errors: list[str]) -> None:
+    """D3 structural enforcement (ADR 0078 §3 / email-channel-seam spec): the
+    inbound trust spine is the only door.
+
+    An Email connector wired to carry inbound agent turns MUST bind an adapter
+    that has a seam normalizer (``shared.inbound_message.NORMALIZERS``) — "a
+    channel that cannot be fenced cannot be bound". Scope: EMAIL only (Telegram
+    and other channels are tracked separately).
+
+    Inbound-bound is the fence-relevant condition: an Email connector whose
+    adapter is named as a ``webhook_triggers[].source`` carries gate→router
+    inbound, so it must be fenceable. An Email connector with no inbound trigger
+    is outbound-only tooling and is out of scope here — this keeps the
+    cross-repo validator parity contract intact (the console does not yet enforce
+    the seam-adapter enum, so existing outbound-only Email MCP bindings such as
+    the softeria microsoft-graph adapter stay accepted)."""
+    connectors = cfg.get("connectors")
+    if not isinstance(connectors, dict):
+        return
+    email = connectors.get("Email")
+    if not isinstance(email, dict) or email.get("enabled") is False:
+        return
+    adapter = email.get("adapter")
+    if not isinstance(adapter, str) or not adapter:
+        return  # adapter-shape errors are the console's authoring concern
+    if adapter in EMAIL_SEAM_ADAPTERS:
+        return  # bound via a seam normalizer — fenceable
+    triggers = cfg.get("webhook_triggers")
+    if not isinstance(triggers, list):
+        return
+    inbound_sources = {
+        trig.get("source")
+        for trig in triggers
+        if isinstance(trig, dict) and isinstance(trig.get("source"), str)
+    }
+    if adapter in inbound_sources:
+        _err(
+            f"connectors.Email.adapter: {adapter!r} carries inbound (a webhook_triggers "
+            f"source names it) but has no seam normalizer; an Email channel bound for "
+            f"inbound must use a seam adapter {sorted(EMAIL_SEAM_ADAPTERS)} — a channel "
+            "that cannot be fenced cannot be bound (ADR 0078 D3)",
+            errors,
+        )
 
 
 def _validate_memory(cfg: dict[str, Any], errors: list[str]) -> None:
@@ -810,9 +1016,14 @@ def _validate_voice_library(cfg: dict[str, Any], errors: list[str]) -> None:
 __all__ = [
     "ACCEPTED_BACKEND_PREFIXES",
     "ACCEPTED_CEILINGS",
+    "ACCEPTED_SEND_PROVIDERS",
     "ACCEPTED_VERTICALS",
     "AUTHORED_EXPOSURE_ACTION_CLASSES",
+    "EMAIL_SEAM_ADAPTERS",
     "LEGACY_ENTITLEMENT_FIELDS",
+    "MSGRAPH_ADAPTER",
+    "MSGRAPH_GUID_PATTERN",
+    "MSGRAPH_SECRET_REF_PATTERN",
     "OUTBOUND_ROSTER_CLASSES",
     "REQUIRED_TOP_LEVEL_FIELDS",
     "SEND_ACTION_CLASSES",

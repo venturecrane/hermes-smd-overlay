@@ -90,6 +90,14 @@ _BANNED_FIELD_NAME_SUBSTRINGS: tuple[str, ...] = (
     "auth_token",
 )
 
+# Secret-REFERENCE field names — they carry a POINTER, never a literal, so they
+# are exempt from the banned-field-name ban even though the name contains a
+# banned substring. Mirrors ss-console SECRET_REFERENCE_FIELD_NAMES:
+#   - token_ref  — an ``infisical:`` path (the Infisical reference channel).
+#   - secret_ref — a ``fly-secret:<NAME>`` reference to a per-seat Fly secret
+#     (ADR 0010 custody for the msgraph client secret; email-channel-seam D5).
+_SECRET_REFERENCE_FIELD_NAMES: frozenset[str] = frozenset({"token_ref", "secret_ref"})
+
 # Paths permitted to carry long high-entropy / base64-shaped values. They are
 # STILL scanned for provider-shaped keys; only the shape heuristics are skipped.
 _SHAPE_HEURISTIC_ALLOWLIST_PATHS: tuple[str, ...] = (
@@ -97,6 +105,13 @@ _SHAPE_HEURISTIC_ALLOWLIST_PATHS: tuple[str, ...] = (
     "personas[*].signature_html",
     "personas[*].avatar_url",
     "personas[*].send_as.agentmail_identity",
+    # Provider-neutral send-as address (ADR 0078 §4) — an email address, never a
+    # secret; parity with ss-console SHAPE_HEURISTIC_ALLOWLIST_PATHS.
+    "personas[*].send_as.send_identity.address",
+    # msgraph_auth carries a mailbox address, two GUIDs, and a fly-secret: ref —
+    # all references / identifiers, never literals (the GUIDs can brush the
+    # high-entropy heuristic; the secret is custodied out-of-band per ADR 0010).
+    "connectors.Email.msgraph_auth",
     "users[*].email",
     "users[*].full_name",
     "escalation.red_flag_recipients",
@@ -259,9 +274,10 @@ def _visit(value: object, path: str, findings: list[SecretFinding], extra: tuple
             key_str = str(key)
             key_lower = key_str.lower()
             banned = any(s in key_lower for s in _BANNED_FIELD_NAME_SUBSTRINGS)
-            # token_ref is the explicitly permitted Infisical-reference field,
-            # even though the name contains "token". Skip the field-name ban.
-            if banned and key_str != "token_ref":
+            # token_ref / secret_ref are the permitted secret-REFERENCE fields
+            # (they carry a pointer, never a literal), even though the names
+            # contain a banned substring. Skip the field-name ban for them.
+            if banned and key_str not in _SECRET_REFERENCE_FIELD_NAMES:
                 findings.append(
                     SecretFinding(
                         "banned_field_name",
@@ -303,7 +319,7 @@ def scan_raw_yaml(text: str, extra_allowlist: tuple[str, ...] = ()) -> list[Secr
             key_name = field_name.strip("\"'")
             key_lower = key_name.lower()
             banned = any(s in key_lower for s in _BANNED_FIELD_NAME_SUBSTRINGS)
-            if banned and key_name != "token_ref":
+            if banned and key_name not in _SECRET_REFERENCE_FIELD_NAMES:
                 findings.append(
                     SecretFinding(
                         "banned_field_name",
