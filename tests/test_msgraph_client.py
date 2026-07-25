@@ -207,3 +207,77 @@ def test_build_client_from_env_constructs_when_present(monkeypatch):
     client = msgraph_client.build_client_from_env()
     assert isinstance(client, MsGraphClient)
     assert client.mailbox == "op@client.example"
+
+
+# ---------------------------------------------------------------------------
+# Connector-health instrumentation (ADR 0080 / ss#1990)
+#
+# The Graph mail channel bypasses the MCP tool path, so its health is
+# observed at the request() chokepoint: every outcome lands in the
+# connector ledger under the msgraph_mail key, with conn-class computed
+# from the REAL status code.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def ledger_path(tmp_path, monkeypatch):
+    path = tmp_path / "ledger.json"
+    monkeypatch.setenv("SMD_CONNECTOR_LEDGER_PATH", str(path))
+    return path
+
+
+def _ledger_entry(path):
+    import json as _json
+
+    return _json.loads(path.read_text(encoding="utf-8"))["servers"]["msgraph_mail"]
+
+
+def test_success_records_ok_in_connector_ledger(ledger_path):
+    opener = _Opener(graph_script=[_Resp(200, b'{"id":"m1"}')])
+    _client(opener).get_message("m1")
+    entry = _ledger_entry(ledger_path)
+    assert entry["consecutive_failures"] == 0
+    assert "last_ok_ts" in entry
+
+
+def test_5xx_records_conn_class_failure(ledger_path):
+    opener = _Opener(graph_script=[_http_error(503, b"upstream"), _http_error(503, b"upstream")])
+    client = _client(opener)
+    with pytest.raises(MsGraphApiError):
+        client.get_message("m1")
+    entry = _ledger_entry(ledger_path)
+    assert entry["consecutive_failures"] == 1
+    assert "last_conn_error_ts" in entry
+    assert "-> HTTP 503" in entry["last_error_message"]
+
+
+def test_404_records_failure_without_conn_evidence(ledger_path):
+    opener = _Opener(graph_script=[_http_error(404, b"gone")])
+    client = _client(opener)
+    with pytest.raises(MsGraphApiError):
+        client.get_message("m1")
+    entry = _ledger_entry(ledger_path)
+    assert entry["consecutive_failures"] == 1
+    assert "last_conn_error_ts" not in entry
+
+
+def test_auth_failure_records_conn_class(ledger_path):
+    # Dead app credential — the canonical ADR 0078 outage shape.
+    opener = _Opener(
+        token_responses=[_http_error(401, b"invalid_client")],
+        graph_script=[],
+    )
+    client = _client(opener)
+    with pytest.raises(MsGraphAuthError):
+        client.get_message("m1")
+    entry = _ledger_entry(ledger_path)
+    assert entry["consecutive_failures"] == 1
+    assert "last_conn_error_ts" in entry
+
+
+def test_ledger_failure_never_breaks_the_mail_path(ledger_path, monkeypatch):
+    # Point the ledger at an unwritable location: the Graph call must still
+    # succeed — health capture is fail-soft by contract.
+    monkeypatch.setenv("SMD_CONNECTOR_LEDGER_PATH", "/dev/null/nope/ledger.json")
+    opener = _Opener(graph_script=[_Resp(200, b'{"id":"m1"}')])
+    assert _client(opener).get_message("m1") == {"id": "m1"}
