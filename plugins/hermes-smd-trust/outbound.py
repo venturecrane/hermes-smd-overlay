@@ -514,9 +514,27 @@ _SEND_SCAN_KEYS: tuple[str, ...] = (
     "html",
     "html_body",
     "body",
+    # msgraph-mail (ADR 0078) send/reply bodies ride ``body_text`` (flat args, D4).
+    # WITHOUT this key the scanner found no body on an msgraph send, scanned "",
+    # and silently ALLOWED — a fabricated citation in body_text would sail through
+    # the fabrication/citation gate. body_plain is added for symmetry with the
+    # draft path's _BODY_ARG_KEYS.
+    "body_text",
+    "body_plain",
     "content",
     "message",
     "note",
+)
+
+
+# EXTERNAL_SEND tools that ALWAYS author a prose body (a mail send with no body
+# is malformed). For these, an unlocatable body fails CLOSED (block) rather than
+# the default "no content → no fabrication surface → allow": a send-class tool
+# whose body the scanner cannot find must not ship un-scanned. Scoped to the
+# msgraph sends so the established AgentMail send behavior (text/html, already in
+# the scan keys) is unchanged.
+_BODY_REQUIRED_SEND_TOOLS: frozenset[str] = frozenset(
+    {"mcp_msgraph_mail_send_message", "mcp_msgraph_mail_reply_message"}
 )
 
 
@@ -562,6 +580,33 @@ def check_outbound_send(
         return None
     body = _extract_send_body(args)
     if not body.strip():
+        if tool_name in _BODY_REQUIRED_SEND_TOOLS:
+            # A body-required send whose body the scanner cannot locate — fail
+            # CLOSED rather than skip the fabrication scan (the msgraph
+            # body-key-omission bypass class). Report the block for the audit trail.
+            logger.warning(
+                "outbound gate: body-required send tool %r carried no recognizable "
+                "body key; BLOCKING (fail-closed, ADR 0028/0078)",
+                tool_name,
+            )
+            decision = GateDecision(
+                allowed=False,
+                reason=(
+                    f"Refused: send tool {tool_name} carried no recognizable body to "
+                    "scan for fabrication; failing closed (ADR 0028)"
+                ),
+                audit_action="fabrication_block",
+                tier="load_error",
+            )
+            _emit_fabrication_audit(
+                tool_name=tool_name,
+                decision=decision,
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                vertical=_resolve_vertical(),
+                cohort=_resolve_cohort(),
+            )
+            return {"action": "block", "message": decision.reason}
         return None
     vertical = _resolve_vertical()
     cohort = _resolve_cohort()

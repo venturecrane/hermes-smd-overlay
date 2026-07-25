@@ -53,7 +53,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import inbound
+from shared import inbound, msgraph_client
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -66,15 +66,39 @@ from . import relay  # noqa: F401 - surface for tests
 logger = logging.getLogger(__name__)
 
 
-# The tool the relay acts on. AgentMail draft creation is INTERNAL_WRITE
+# The tools the relay acts on. Draft creation is INTERNAL_WRITE
 # (shared/action_classes.py) — it passes the taint-gate by design (drafting is
-# the safe behavior); the relay turns that governed draft into a sent reply.
+# the safe behavior); the relay turns that governed draft into a sent reply. Both
+# email adapters (ADR 0078) surface draft creation, so both trigger the relay;
+# the actual transport is chosen per-seat by the Email adapter below.
 #
 # Hermes registers MCP tools as ``mcp_<server>_<tool>``, so the live runtime
-# name is ``mcp_agentmail_create_draft`` — the ONLY form the agent emits. The
-# colon spelling is retained as an accepted alias (capability-contract / tests);
-# matching a set keeps the hook firing regardless of which form reaches it.
-_CREATE_DRAFT_TOOLS = frozenset({"mcp_agentmail_create_draft", "agentmail:create_draft"})
+# names are ``mcp_agentmail_create_draft`` / ``mcp_msgraph_mail_create_draft`` —
+# the ONLY forms the agent emits. The colon spelling is retained as an accepted
+# alias (capability-contract / tests).
+_CREATE_DRAFT_TOOLS = frozenset(
+    {"mcp_agentmail_create_draft", "agentmail:create_draft", "mcp_msgraph_mail_create_draft"}
+)
+
+# Email adapters (customer.yaml connectors.Email.adapter, ADR 0078). The relay is
+# provider-neutral: roster/recipient-lock/floors/rate-limit are shared; only the
+# transport differs. msgraph replies in-thread via Graph; agentmail via REST.
+_ADAPTER_MSGRAPH = "msgraph"
+
+
+def _email_adapter(cfg: CustomerConfig) -> str:
+    """The seat's Email connector adapter (``agentmail`` default). Read live so a
+    seat that swaps providers is dispatched correctly without a code change."""
+    try:
+        record = cfg.connectors.get("Email")
+    except CustomerConfigError:
+        return "agentmail"
+    if isinstance(record, dict):
+        adapter = record.get("adapter")
+        if isinstance(adapter, str) and adapter:
+            return adapter
+    return "agentmail"
+
 
 _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
 
@@ -93,6 +117,25 @@ _CUSTOMER_SLUG: str | None = None
 _D1_CLIENT: Any | None = None
 _LIMITER: relay.RateLimiter | None = None
 _YAML_PATH: Path = Path(_DEFAULT_CUSTOMER_YAML_PATH)
+
+
+def _send_msgraph_reply(graph_message_id: str, comment: str) -> str:
+    """Reply in-thread via Microsoft Graph, keyed on the recorded message id.
+
+    Graph derives the recipients from the original message (POST
+    /messages/{id}/reply), so the reply is structurally locked to the inbound
+    thread — the same recipient-lock property the AgentMail transport has.
+    Fail-closed: a seat with no ``MSGRAPH_*`` creds raises :class:`RelaySendError`
+    (audited REPLY_FAILED) and NEVER falls back to another transport. Graph
+    returns 202 with no id, so a placeholder is surfaced for the audit row."""
+    client = msgraph_client.build_client_from_env()
+    if client is None:
+        raise relay.RelaySendError("msgraph reply unavailable: MSGRAPH_* env not configured")
+    try:
+        client.reply(graph_message_id, comment)
+    except (msgraph_client.MsGraphApiError, msgraph_client.MsGraphAuthError) as exc:
+        raise relay.RelaySendError(f"msgraph reply failed: {exc}") from exc
+    return "(sent via msgraph, id unavailable)"
 
 
 def _emit_reply_event(*, action_type: str, metadata: dict) -> None:
@@ -244,21 +287,31 @@ def on_post_tool_call(**kwargs: Any) -> None:
             _held("rate_limited", origin)
             return
 
-        # (e) Send the threaded reply via the AgentMail REST API, keyed on the
-        # recorded inbox + message id (structural recipient-lock).
+        # (e) Send the threaded reply, keyed on the recorded message id (structural
+        # recipient-lock), via the seat's Email transport. Provider dispatch (ADR
+        # 0078): msgraph replies in-thread through Graph (Graph derives the
+        # recipients from the original message id — the reply cannot be
+        # redirected); agentmail via its REST reply endpoint. Fail-closed: a
+        # msgraph seat with no MSGRAPH_* creds REFUSES (audited REPLY_FAILED),
+        # never falls back to AgentMail.
+        adapter = _email_adapter(cfg)
         try:
-            sent_id = relay.send_reply(
-                api_key=_API_KEY or "",
-                inbox_id=origin.inbox_id,
-                message_id=origin.message_id,
-                text=send_text,
-                html=send_html,
-            )
+            if adapter == _ADAPTER_MSGRAPH:
+                sent_id = _send_msgraph_reply(origin.message_id, send_text or send_html)
+            else:
+                sent_id = relay.send_reply(
+                    api_key=_API_KEY or "",
+                    inbox_id=origin.inbox_id,
+                    message_id=origin.message_id,
+                    text=send_text,
+                    html=send_html,
+                )
         except relay.RelaySendError as exc:
             _emit_reply_event(
                 action_type="REPLY_FAILED",
                 metadata={
                     "reason": str(exc),
+                    "adapter": adapter,
                     "recipient": origin.sender_address,
                     "message_id": origin.message_id,
                 },
@@ -272,6 +325,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 "recipient": origin.sender_address,
                 "recipient_class": recipient_class.value if recipient_class else "unclassified",
                 "content_floor_applied": not internal,
+                "adapter": adapter,
                 "in_reply_to": origin.message_id,
                 "inbox_id": origin.inbox_id,
                 "sent_message_id": sent_id,
@@ -299,20 +353,21 @@ def register(ctx) -> None:
     _INFRA_READY = False  # fail closed until the send infra resolves
     _YAML_PATH = Path(os.environ.get("SMD_CUSTOMER_YAML_PATH") or _DEFAULT_CUSTOMER_YAML_PATH)
 
-    # Resolve the send credential UNCONDITIONALLY — do not gate it on the roster.
-    # Because the roster is read live, the relay must be ready to act the instant
-    # a colleague on the roster emails in, with no reprovision. A customer without
-    # the AgentMail key simply never becomes infra-ready and never replies (the
-    # live roster is moot without a credential to send with).
+    # Resolve the AgentMail send credential best-effort. The relay is now
+    # provider-neutral (ADR 0078): a msgraph seat has NO AgentMail key and mints
+    # its Graph token per-send from MSGRAPH_* — so a missing AgentMail key no
+    # longer disables the relay. Infra-readiness means "the rate-limiter is
+    # built"; the actual transport (and its credential) is resolved per-call by
+    # the seat's Email adapter, and the msgraph/agentmail path each fails closed
+    # when ITS credential is absent (audited REPLY_FAILED), never cross-falling.
     try:
         _API_KEY = get_secret("AGENTMAIL_API_KEY")
     except KeyError:
+        _API_KEY = None
         logger.info(
-            "hermes-smd-reply: AGENTMAIL_API_KEY unset; reply channel cannot send "
-            "(infra not ready). Hook registered; it no-ops every call."
+            "hermes-smd-reply: AGENTMAIL_API_KEY unset; the AgentMail transport "
+            "cannot send (a msgraph seat is unaffected — it uses MSGRAPH_*)."
         )
-        ctx.register_hook("post_tool_call", on_post_tool_call)
-        return
 
     try:
         _CUSTOMER_SLUG = get_secret("SMD_CUSTOMER_SLUG")

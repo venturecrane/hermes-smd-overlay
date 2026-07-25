@@ -32,18 +32,36 @@ from email.utils import parseaddr
 from typing import Any
 
 # Live runtime tool names (mcp_<server>_<tool>) — the only form the agent emits.
-# Proactive sends whose recipient is in the call's own ``to`` arg:
+# Proactive sends whose recipient is in the call's own ``to`` arg. The msgraph
+# connector (ADR 0078) takes FLAT ``to`` args just like AgentMail, so
+# ``extract_to_recipients`` reads them the same way — a rostered internal
+# recipient on ``mcp_msgraph_mail_send_message`` must classify INTERNAL, not
+# silently degrade to OUTSIDE/draft (the dangerous shape-normalization
+# regression). ``mcp_msgraph_mail_reply_message`` is deliberately ABSENT — a
+# reply's recipient is the verified inbound sender, owned by the recipient-locked
+# reply path (like ``reply_to_message``), never a model-named recipient here.
 DIRECT_TO_SEND_TOOLS: frozenset[str] = frozenset(
-    {"mcp_agentmail_send_message", "mcp_agentmail_forward_message"}
+    {
+        "mcp_agentmail_send_message",
+        "mcp_agentmail_forward_message",
+        "mcp_msgraph_mail_send_message",
+    }
 )
 # Proactive send that resolves its recipient from a recorded draft_id:
 DRAFT_SEND_TOOLS: frozenset[str] = frozenset({"mcp_agentmail_send_draft"})
-# Draft authoring tools whose (result id, args ``to``) we record for later sends:
+# Draft authoring tools whose (result id, args ``to``) we record for later sends.
+# msgraph's create_draft is included for parity (its args carry a flat ``to``);
+# msgraph has no send_draft tool today, so the record is inert until one exists.
 DRAFT_RECORD_TOOLS: frozenset[str] = frozenset(
-    {"mcp_agentmail_create_draft", "mcp_agentmail_update_draft"}
+    {
+        "mcp_agentmail_create_draft",
+        "mcp_agentmail_update_draft",
+        "mcp_msgraph_mail_create_draft",
+    }
 )
-# Every proactive send this module classifies. reply_to_message is deliberately
-# absent — the reply plugin owns the recipient-locked reply-to-sender path.
+# Every proactive send this module classifies. reply_to_message / reply_message
+# are deliberately absent — the reply plugin owns the recipient-locked
+# reply-to-sender path.
 CLASSIFIED_SEND_TOOLS: frozenset[str] = DIRECT_TO_SEND_TOOLS | DRAFT_SEND_TOOLS
 
 

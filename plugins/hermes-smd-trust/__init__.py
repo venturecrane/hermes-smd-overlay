@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 _AUDIT_CLIENT: Any = None
 _AUDIT_CUSTOMER_SLUG: str | None = None
 
+# The msgraph proactive-send tool (ADR 0078). When an approved confirm send fired
+# this tool, the out-of-band dispatch routes through Graph rather than AgentMail.
+_MSGRAPH_SEND_TOOL = "mcp_msgraph_mail_send_message"
+
 
 def _attach_html_body(tool_name: str, args: dict) -> None:
     """Give a report send an html half, rendered from the markdown it already wrote.
@@ -320,15 +324,25 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     # the pending record was stored by the gate BEFORE the tool path's attach ran,
     # so a withheld-then-approved report arrives here as markdown-only.
     _attach_html_body(rec.tool_name, payload)
+    # Provider dispatch (ADR 0078), keyed on the tool that actually fired — which
+    # matches the payload shape (flat to/cc/subject/body_text for msgraph). A
+    # msgraph seat sends via Graph /sendMail (mailbox pinned from MSGRAPH_*), an
+    # agentmail seat via its REST send. Each fails closed on ITS missing
+    # credential; neither cross-falls.
+    is_msgraph = rec.tool_name == _MSGRAPH_SEND_TOOL
     try:
-        api_key = get_secret("AGENTMAIL_API_KEY")
+        if is_msgraph:
+            message_id = outbound_send.send_via_msgraph(payload)
+        else:
+            api_key = get_secret("AGENTMAIL_API_KEY")
+            inbox_id = outbound_send.resolve_inbox_id(api_key)
+            message_id = outbound_send.send_message(
+                api_key=api_key, inbox_id=inbox_id, payload=payload
+            )
     except KeyError:
         logger.error("hermes-smd-trust: AGENTMAIL_API_KEY unset; cannot dispatch approved send")
         return None
-    try:
-        inbox_id = outbound_send.resolve_inbox_id(api_key)
-        message_id = outbound_send.send_message(api_key=api_key, inbox_id=inbox_id, payload=payload)
-    except outbound_send.AgentMailSendError as exc:
+    except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
         _emit_confirm_event(
             "CONFIRM_SEND_FAILED",

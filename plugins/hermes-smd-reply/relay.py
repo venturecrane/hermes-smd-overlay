@@ -115,6 +115,14 @@ def draft_body(args: Any) -> tuple[str, str, str]:
     subject = args.get("subject") if isinstance(args.get("subject"), str) else ""
     text = args.get("text") if isinstance(args.get("text"), str) else ""
     html = args.get("html") if isinstance(args.get("html"), str) else ""
+    # msgraph-mail (ADR 0078) create_draft carries the body under ``body_text``
+    # (flat args, D4), not ``text``. Fold it into the plain-text body so the
+    # msgraph reply relays a real body and the floors scan it — without it,
+    # send_text was empty and an msgraph reply had nothing to relay.
+    if not text:
+        body_text = args.get("body_text")
+        if isinstance(body_text, str):
+            text = body_text
     # Scan subject + text + html UNCONDITIONALLY (EFF-01): a fabricated citation
     # in an html body must not slip past because a benign subject/text is present.
     parts = [p for p in (subject, text, html) if p.strip()]

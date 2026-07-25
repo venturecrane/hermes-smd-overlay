@@ -1359,6 +1359,20 @@ def main() -> int:
     # the (agent-stripped) MACHINE_HEARTBEAT_KEY. Daemon thread; fail-soft — a
     # heartbeat failure never perturbs the webhook/MCP surface.
     heartbeat.emitter_from_env(_audit_db_path).start()
+    # ADR 0078 email-channel-seam D1: the Microsoft Graph delta poller (inbound
+    # client-custody mail). Hosted here for the same reason as the heartbeat —
+    # the gate is the one non-agent process and holds the MSGRAPH_* /
+    # WEBHOOK_SECRET_MSGRAPH env. Daemon thread; fail-closed (does not start
+    # unless the seat's Email adapter is msgraph+enabled with creds present) and
+    # exception-safe (a poll failure never perturbs the webhook/MCP surface). It
+    # re-injects each new message through the SAME loopback the routes use, so
+    # fence/taint/roster apply identically to polled mail.
+    try:
+        from shared.msgraph_poller import poller_from_env
+
+        poller_from_env().start()
+    except Exception as exc:  # noqa: BLE001 — the poller must never break gate boot
+        logger.warning("gate: msgraph poller launch failed: %s", exc)
     # ADR 0062 (ss-console #1661): arm the inbound wake guard. The park audit
     # row goes through the broker audit client (best-effort; the park stands
     # regardless). The cap is live-read from customer.yaml per delivery.
