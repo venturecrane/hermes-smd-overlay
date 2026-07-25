@@ -74,8 +74,11 @@ BOOT_SUPPRESS_SECONDS = 900
 
 @dataclass(frozen=True)
 class SchedulerCheck:
-    """One tick's verdict. ``max_overdue_seconds`` is None when nothing is
-    overdue OR the boot window suppressed the math — the payload omits the
+    """One tick's verdict. ``max_overdue_seconds`` is 0 when the store was
+    readable and nothing is overdue (a real measurement — the console resolves
+    from it), and None ONLY when it could not be measured: the boot window
+    suppressed the math, the profiles dir was unreadable, or pre-materialize
+    boot — the payload omits the
     field either way and the console alerter holds rather than resolves."""
 
     ok: bool
@@ -172,7 +175,13 @@ def check(
 
     ok = True
     job_count = 0
-    max_overdue: float | None = None
+    # 0.0, not None: "no job is overdue" is a REAL measurement that must reach
+    # the wire — the console resolves an open work_overdue alert only from a
+    # reported number (NULL holds). Found live 2026-07-25: pilot-smokeball's
+    # work_overdue opened during a reprovision window, the job then fired, and
+    # the steady-state None held the alert open forever (no RECOVERED). None
+    # now means exactly one thing: the boot window suppressed the math.
+    max_overdue: float = 0.0
 
     profiles_dir = Path(home) / "profiles"
     try:
@@ -213,7 +222,7 @@ def check(
             overdue, job_error = _job_overdue_seconds(job, now, source)
             if job_error:
                 ok = False
-            if overdue is not None and (max_overdue is None or overdue > max_overdue):
+            if overdue is not None and overdue > max_overdue:
                 max_overdue = overdue
 
     authored = _authored_cron_count(yaml_path)
@@ -226,13 +235,12 @@ def check(
         ok = False
 
     if uptime_seconds is not None and uptime_seconds < BOOT_SUPPRESS_SECONDS:
-        max_overdue = None
+        # The one remaining None: post-restart staleness window (a just-booted
+        # store can look overdue while the scheduler catches up). The console
+        # holds — neither opens nor resolves — until the window passes.
+        return SchedulerCheck(ok=ok, job_count=job_count, max_overdue_seconds=None)
 
-    return SchedulerCheck(
-        ok=ok,
-        job_count=job_count,
-        max_overdue_seconds=int(max_overdue) if max_overdue is not None else None,
-    )
+    return SchedulerCheck(ok=ok, job_count=job_count, max_overdue_seconds=int(max_overdue))
 
 
 __all__ = [
