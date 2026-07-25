@@ -17,13 +17,14 @@ import types
 
 import pytest
 
-from shared import sentry_init
+from shared import sentry_init, sentry_ratelimit
 from shared.sentry_init import (
     SENSITIVE_HEADERS,
     init_sentry,
     redact_text,
     scrub_breadcrumb,
     scrub_event,
+    scrub_then_throttle,
 )
 
 # ---------------------------------------------------------------------------
@@ -180,7 +181,7 @@ def test_init_contract_with_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert init_sentry("gateway") is True
     assert captured["send_default_pii"] is False
-    assert captured["before_send"] is scrub_event
+    assert captured["before_send"] is scrub_then_throttle
     assert captured["before_breadcrumb"] is scrub_breadcrumb
     assert captured["traces_sample_rate"] == 0.0
     assert captured["release"] == "deadbeef"
@@ -194,3 +195,50 @@ def test_init_contract_with_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     assert init_sentry("gateway") is True
     assert captured == {}
     assert messages == []
+
+
+# ---------------------------------------------------------------------------
+# scrub_then_throttle — the throttle must not become a hole in the scrub gate
+# ---------------------------------------------------------------------------
+
+
+def test_composed_hook_scrubs_what_it_passes() -> None:
+    """An event the throttle lets through is still fully scrubbed."""
+    sentry_ratelimit.reset_for_tests()
+    out = scrub_then_throttle(
+        {
+            "message": "contact bob@example.com with sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAA",
+            "request": {"data": {"password": "hunter2"}, "headers": {"Authorization": "Bearer x"}},
+        }
+    )
+    assert out is not None
+    assert "bob@example.com" not in out["message"]
+    assert "sk-ant-api03" not in out["message"]
+    assert "data" not in out["request"]
+    assert out["request"]["headers"]["Authorization"] == "[redacted]"
+
+
+def test_composed_hook_suppresses_repeats_after_scrubbing() -> None:
+    """The 3rd identical event is dropped; the scrub still ran on 1 and 2."""
+    sentry_ratelimit.reset_for_tests()
+    event = {"logger": "cron.jobs", "message": "reach admin@example.com"}
+    first = scrub_then_throttle(dict(event))
+    second = scrub_then_throttle(dict(event))
+    third = scrub_then_throttle(dict(event))
+    assert first is not None and "admin@example.com" not in first["message"]
+    assert second is not None
+    assert third is None
+
+
+def test_composed_hook_passes_event_through_when_throttle_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A throttle bug must never silence monitoring — fail open, still scrubbed."""
+
+    def _boom(_event: object) -> object:
+        raise RuntimeError("throttle exploded")
+
+    monkeypatch.setattr(sentry_ratelimit._throttle, "should_send", _boom)
+    out = scrub_then_throttle({"message": "leak me: dev@example.com"})
+    assert out is not None
+    assert "dev@example.com" not in out["message"]

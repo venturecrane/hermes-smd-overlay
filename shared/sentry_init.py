@@ -20,6 +20,13 @@ Two properties this module guarantees:
   without the SDK. Do NOT widen what reaches Sentry without updating that suite —
   the regression suite is the merge gate that keeps a refactor from re-opening a
   leak.
+
+The registered ``before_send`` is :func:`scrub_then_throttle`: it scrubs first,
+then applies the logarithmic per-issue throttle in
+:mod:`shared.sentry_ratelimit` (see that module for the 2026-07-16 incident
+that motivated it). Scrub-before-throttle is deliberate — the throttle's key
+table then holds only redacted text, and redaction improves grouping by
+collapsing varying emails/keys into one key.
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ import logging
 import os
 import re
 from typing import Any
+
+from shared.sentry_ratelimit import throttle_event
 
 logger = logging.getLogger("hermes_smd.sentry")
 
@@ -134,6 +143,19 @@ def scrub_event(event: dict[str, Any], hint: dict[str, Any] | None = None) -> di
     return event
 
 
+def scrub_then_throttle(
+    event: dict[str, Any], hint: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """The registered ``before_send`` hook: scrub, then throttle.
+
+    Scrub runs unconditionally and first, so the throttle's key table only ever
+    holds redacted text. Returns ``None`` when the throttle suppresses the event
+    (a repeat of something already reported at this volume); see
+    :mod:`shared.sentry_ratelimit`.
+    """
+    return throttle_event(scrub_event(event, hint))
+
+
 def scrub_breadcrumb(
     crumb: dict[str, Any] | None, hint: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
@@ -188,7 +210,7 @@ def init_sentry(component: str) -> bool:
             environment=environment,
             release=release,
             send_default_pii=False,
-            before_send=scrub_event,
+            before_send=scrub_then_throttle,
             before_breadcrumb=scrub_breadcrumb,
             # Errors only. No performance tracing: it adds cost and widens the
             # PII surface (span data) for no fleet-ops value.
