@@ -519,6 +519,36 @@ def _sticky_stop_clear(req: dict) -> tuple[int, dict]:
         return 500, {"error": "clear failed", "detail": str(exc)}
 
 
+def _sticky_stop_set(req: dict) -> tuple[int, dict]:
+    """Pure core of the operator pause endpoint (ss#2003, the portal kill
+    switch's Machine leg).
+
+    Body: ``{actor_id, reason}`` — both required. Pins HARD_STOP on every
+    sticky_stop row (incl. the ``_machine`` row both spend meters assert
+    against) via shared.cost_breaker.pin_hard_stops. Effect is the full ADR
+    0062 stop surface: /mcp/turn + /webhooks/handoff 503, inbound wake guard
+    parks vendor webhooks, durable jobs dead-letter, and the trust plugin's
+    pause wall refuses every tool call — so cron-fired wakes act on nothing.
+    Sticky across reboot; the only way back is /sticky-stop/clear.
+
+    No Machine-ledger audit row for the same reason as the clear: the broker
+    PID-gates appends to the gateway process. The pause is audited
+    control-plane-side where the actor was authenticated.
+    """
+    actor_id = str(req.get("actor_id") or "").strip()
+    reason = str(req.get("reason") or "").strip()
+    if not actor_id or not reason:
+        return 400, {"error": "actor_id and reason are required"}
+    try:
+        from shared.cost_breaker import pin_hard_stops, read_level
+
+        pinned = pin_hard_stops(actor_id=actor_id, reason=reason)
+        return 200, {"pinned": pinned, "level": read_level() or "OK"}
+    except Exception as exc:  # noqa: BLE001 — surface the failure honestly
+        logger.error("sticky-stop set failed: %s", exc)
+        return 500, {"error": "set failed", "detail": str(exc)}
+
+
 MCP_ROUTE = "mcp"  # webhook route name; session id == webhook:mcp:<correlation_id>
 HANDOFF_ROUTE = "handoff"  # console→Machine async task handoff (Phase 2, ADR 0043)
 
@@ -1014,6 +1044,40 @@ class _Handler(BaseHTTPRequestHandler):
         status, body = _sticky_stop_clear(req if isinstance(req, dict) else {})
         self._json(status, body)
 
+    def _handle_sticky_stop_set(self) -> None:
+        """Operator pause endpoint (POST /sticky-stop/set, ss#2003).
+
+        AUTH: Bearer WEBHOOK_SECRET_MCP — the console-proxy key, identical to
+        /sticky-stop/clear: the console authenticates the client admin (portal
+        RBAC) or the Captain (admin console) and proxies the pause; the
+        Machine trusts the console's bearer. Deliberately NOT gated on
+        _breaker_hard_stopped — pausing an already-paused Machine is
+        idempotent, never an error.
+        """
+        secret = os.environ.get("WEBHOOK_SECRET_MCP")
+        if not secret:
+            logger.warning("gate: WEBHOOK_SECRET_MCP not set — /sticky-stop/set not configured")
+            self._json(503, {"error": "set route not configured"})
+            return
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or not hmac.compare_digest(
+            auth[len("Bearer ") :], secret
+        ):
+            self._json(401, {"error": "unauthorized"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > _MAX_BODY_BYTES:
+            self._json(413, {"error": "payload too large"})
+            return
+        raw = self.rfile.read(length) if length else b""
+        try:
+            req = json.loads(raw.decode("utf-8")) if raw else {}
+        except Exception:  # noqa: BLE001
+            self._json(400, {"error": "invalid json"})
+            return
+        status, body = _sticky_stop_set(req if isinstance(req, dict) else {})
+        self._json(status, body)
+
     def _handle_mcp_turn(self) -> None:
         """Console → Machine synchronous turn endpoint (/mcp/turn, ADR 0057
         amendment — console-sole door).
@@ -1160,6 +1224,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if post_path == "/sticky-stop/clear":
             self._handle_sticky_stop_clear()
+            return
+        if post_path == "/sticky-stop/set":
+            self._handle_sticky_stop_set()
             return
         if post_path == "/mcp":
             # Direct public JSON-RPC Claude door retired (ADR 0057 amendment —

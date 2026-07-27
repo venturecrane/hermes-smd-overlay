@@ -268,3 +268,65 @@ def test_clear_hard_stops_without_audit_client_still_resets(tmp_path):
     assert cleared == [{"customer": "acme", "persona": "_machine", "prior_level": "HARD_STOP"}]
     assert read_level(path) == "OK"
     b.assert_allowed()
+
+
+# ---------------------------------------------------------------------------
+# Operator pause surface (ss#2003 — the portal kill switch's Machine leg)
+# ---------------------------------------------------------------------------
+
+
+def test_pin_hard_stops_pins_machine_row_on_fresh_state(tmp_path):
+    from shared.cost_breaker import pin_hard_stops
+
+    path = str(tmp_path / "sticky_stop.db")
+    pinned = pin_hard_stops(actor_id="christa@firm.example", reason="firm pause", path=path)
+    assert pinned == [{"customer": "_machine", "persona": "_machine", "prior_level": "OK"}]
+    assert read_level(path) == "HARD_STOP"
+
+
+def test_pin_hard_stops_pins_every_existing_row_and_breaker_refuses(tmp_path):
+    import pytest as _pytest
+
+    from shared.cost_breaker import StickyStopError, pin_hard_stops
+
+    audit = FakeAuditClient()
+    b = _breaker(tmp_path, audit)
+    b.record_cost_cents(1)  # creates the (acme, _machine) row at OK
+    path = str(tmp_path / "sticky_stop.db")
+    assert read_level(path) == "OK"
+
+    pinned = pin_hard_stops(actor_id="portal-admin", reason="client pause", path=path)
+    assert {(p["customer"], p["persona"]) for p in pinned} == {("acme", "_machine")}
+    assert read_level(path) == "HARD_STOP"
+    with _pytest.raises(StickyStopError):
+        b.assert_allowed()
+
+
+def test_pin_then_clear_round_trip(tmp_path):
+    from shared.cost_breaker import clear_hard_stops, pin_hard_stops
+
+    audit = FakeAuditClient()
+    b = _breaker(tmp_path, audit)
+    b.record_cost_cents(1)
+    path = str(tmp_path / "sticky_stop.db")
+    pin_hard_stops(actor_id="portal-admin", reason="client pause", path=path)
+    assert read_level(path) == "HARD_STOP"
+
+    cleared = clear_hard_stops(
+        captain_id="portal-admin", reason="client resume", audit_client=None, path=path
+    )
+    assert cleared == [{"customer": "acme", "persona": "_machine", "prior_level": "HARD_STOP"}]
+    assert read_level(path) == "OK"
+    b.assert_allowed()
+
+
+def test_pin_hard_stops_requires_actor_and_reason(tmp_path):
+    import pytest as _pytest
+
+    from shared.cost_breaker import pin_hard_stops
+
+    path = str(tmp_path / "sticky_stop.db")
+    with _pytest.raises(ValueError):
+        pin_hard_stops(actor_id="", reason="r", path=path)
+    with _pytest.raises(ValueError):
+        pin_hard_stops(actor_id="a", reason="", path=path)

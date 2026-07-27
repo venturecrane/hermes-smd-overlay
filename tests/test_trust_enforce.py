@@ -920,3 +920,47 @@ def test_mixed_case_code_execution_blocked_via_evaluate(monkeypatch) -> None:
     result = enforce.evaluate_tool_call("Execute_Code", {}, "acme")
     assert isinstance(result, dict)
     assert result["action"] == "block"
+
+
+# ---------------------------------------------------------------------------
+# Operator-pause wall (ss#2003): at HARD_STOP every tool call refuses,
+# whatever woke the agent (the chokepoint covering cron-fired wakes).
+# ---------------------------------------------------------------------------
+
+
+def test_on_pre_tool_call_refuses_everything_while_paused(tmp_path, monkeypatch) -> None:
+    from shared.cost_breaker import pin_hard_stops
+
+    plugin = load_plugin("hermes-smd-trust")
+    db = str(tmp_path / "sticky_stop.db")
+    monkeypatch.setenv("SMD_STICKY_STOP_DB_PATH", db)
+    pin_hard_stops(actor_id="portal-admin", reason="client pause", path=db)
+    plugin._pause_cache["at"] = 0.0  # bust the TTL cache for the fresh db
+
+    # Even a plain READ refuses while paused — pause is total, not tiered.
+    result = plugin.on_pre_tool_call(
+        tool_name="email_list_messages",
+        args={},
+        task_id="t",
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "paused" in result["message"].lower()
+
+
+def test_on_pre_tool_call_pause_wall_fails_open_on_read_error(tmp_path, monkeypatch) -> None:
+    """A broken level read must not brick a healthy Machine — the wall is an
+    ADDITIONAL chokepoint; primary stop enforcement lives at the gate/jobs."""
+    plugin = load_plugin("hermes-smd-trust")
+    monkeypatch.setenv("SMD_STICKY_STOP_DB_PATH", str(tmp_path / "nonexistent" / "x.db"))
+    plugin._pause_cache["at"] = 0.0
+    result = plugin.on_pre_tool_call(
+        tool_name="email_list_messages",
+        args={},
+        task_id="t",
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert result is None
