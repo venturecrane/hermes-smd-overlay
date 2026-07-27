@@ -177,6 +177,9 @@ def test_init_contract_with_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SENTRY_DSN", "https://pub@o1.ingest.sentry.io/2")
     monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
     monkeypatch.setenv("SMD_OVERLAY_REF", "deadbeef")
+    # Seat-only gate: pytest sets PYTEST_CURRENT_TEST, so the contract test must
+    # opt in explicitly to exercise a real init.
+    monkeypatch.setenv("SMD_SENTRY_FORCE", "1")
     sentry_init._initialized.clear()
 
     assert init_sentry("gateway") is True
@@ -242,3 +245,48 @@ def test_composed_hook_passes_event_through_when_throttle_raises(
     out = scrub_then_throttle({"message": "leak me: dev@example.com"})
     assert out is not None
     assert "dev@example.com" not in out["message"]
+
+
+# ---------------------------------------------------------------------------
+# Seat-only gate — a laptop must never write to the shared production project
+# ---------------------------------------------------------------------------
+
+
+def test_no_init_off_a_fly_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 13%-of-volume laptop-noise defect: DSN present, but not a seat."""
+    monkeypatch.setenv("SENTRY_DSN", "https://pub@o1.ingest.sentry.io/2")
+    monkeypatch.delenv("FLY_MACHINE_ID", raising=False)
+    monkeypatch.delenv("SMD_SENTRY_FORCE", raising=False)
+    sentry_init._initialized.clear()
+    assert init_sentry("gateway") is False
+
+
+def test_init_allowed_on_a_fly_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """FLY_MACHINE_ID is the discriminator — the value Sentry logs as server_name."""
+    monkeypatch.delenv("SMD_SENTRY_FORCE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("FLY_MACHINE_ID", "2862965a4e7218")
+    assert sentry_init._is_real_seat() is True
+
+
+def test_pytest_never_reports_even_on_a_seat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test run executing ON a Machine still must not pollute the project."""
+    monkeypatch.delenv("SMD_SENTRY_FORCE", raising=False)
+    monkeypatch.setenv("FLY_MACHINE_ID", "2862965a4e7218")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_x.py::test_y (call)")
+    assert sentry_init._is_real_seat() is False
+
+
+def test_force_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deliberate local reproduction stays possible, but only opt-in."""
+    monkeypatch.delenv("FLY_MACHINE_ID", raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_x.py::test_y (call)")
+    monkeypatch.setenv("SMD_SENTRY_FORCE", "1")
+    assert sentry_init._is_real_seat() is True
+
+
+def test_blank_fly_machine_id_is_not_a_seat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SMD_SENTRY_FORCE", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("FLY_MACHINE_ID", "   ")
+    assert sentry_init._is_real_seat() is False

@@ -4,12 +4,16 @@ One shared ``smd-operator`` Sentry project. Every Machine process initializes
 with a ``tenant=<slug>`` tag and a ``component=<gate|gateway>`` tag so a single
 project surfaces per-customer, per-process error streams by tag filter.
 
-Two properties this module guarantees:
+Three properties this module guarantees:
 
 * **Disabled-safe.** No ``SENTRY_DSN`` in the environment -> ``init_sentry`` is a
   no-op that returns ``False``. The ``sentry_sdk`` import is lazy, so this module
   imports cleanly even where the SDK is not installed (e.g. the scrub-suite CI
   runner). Observability must never crash boot: every failure path fails soft.
+
+* **Seat-only.** Reporting requires a real Fly Machine (see
+  :func:`_is_real_seat`). A laptop or a test run never writes to the shared
+  production project, no matter what is in its environment.
 
 * **PII scrub is LOCKED here (ADR 0023 decision #11).** ``send_default_pii=False``
   plus ``before_send`` / ``before_breadcrumb`` hooks that (a) drop request bodies
@@ -181,17 +185,58 @@ def scrub_breadcrumb(
 
 _initialized: set[str] = set()
 
+#: Set to ``1`` to force init off a Fly Machine. For deliberately reproducing a
+#: reporting bug locally — never in a test run or a normal dev loop.
+_FORCE_ENV = "SMD_SENTRY_FORCE"
+
+
+def _is_real_seat() -> bool:
+    """True only inside a running Fly Machine.
+
+    Why this gate exists. Until 2026-07-27 any process with ``SENTRY_DSN`` in its
+    environment reported to the shared production project — including local runs
+    and the test suite on a developer laptop, where ``infisical run`` injects the
+    DSN. 919 of the project's 6,994 lifetime events (13%) came from one laptop,
+    tagged ``environment: prod``, and they were the *loudest*-looking issues in
+    the project: a 276-event "SMD OVERLAY ACTIVATION FAILED — refusing to serve
+    an ungoverned operator", a 65-event "audit_log immutability violation:
+    rejected SQL=UPDATE audit_log SET actor = 'forged'" (a unit test asserting
+    the guard works), and pytest fixtures reporting as ``RuntimeError: kaboom``.
+
+    That noise is not free: it trained the reader to treat Sentry mail as
+    meaningless, and it competes for a 5,000-event monthly budget with the real
+    seat signal it is drowning out.
+
+    ``FLY_MACHINE_ID`` is the discriminator — set by the platform inside every
+    Machine (and the value Sentry already records as ``server_name``), never set
+    on a laptop. ``PYTEST_CURRENT_TEST`` additionally keeps a test run that
+    happens to execute *on* a seat from reporting.
+    """
+    if (os.environ.get(_FORCE_ENV) or "").strip() == "1":
+        return True
+    if (os.environ.get("PYTEST_CURRENT_TEST") or "").strip():
+        return False
+    return bool((os.environ.get("FLY_MACHINE_ID") or "").strip())
+
 
 def init_sentry(component: str) -> bool:
     """Initialize Sentry for one Machine process.
 
-    Disabled-safe: returns ``False`` (no-op) when ``SENTRY_DSN`` is unset/empty or
-    the SDK is unavailable. Idempotent per ``component`` within a process. Tags the
+    Disabled-safe: returns ``False`` (no-op) when ``SENTRY_DSN`` is unset/empty,
+    when this is not a real seat (see :func:`_is_real_seat`), or when the SDK is
+    unavailable. Idempotent per ``component`` within a process. Tags the
     isolation scope with ``tenant=<slug>`` and ``component=<component>``.
     """
     dsn = (os.environ.get("SENTRY_DSN") or "").strip()
     if not dsn:
         logger.info("sentry: disabled (no SENTRY_DSN) for component=%s", component)
+        return False
+    if not _is_real_seat():
+        logger.info(
+            "sentry: disabled (not a Fly Machine; set %s=1 to override) for component=%s",
+            _FORCE_ENV,
+            component,
+        )
         return False
     if component in _initialized:
         return True
