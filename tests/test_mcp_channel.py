@@ -352,13 +352,13 @@ def _two_connector_customer() -> dict:
                 "source": "smokeball",
                 "event_type": "matter.updated",
                 "skill": "matter-memo-on-update",
-                "persona": "quinn",
+                "persona": "operator",
             },
             {
                 "source": "agentmail",
                 "event_type": "message.received",
                 "skill": "matter-inbox-router",
-                "persona": "quinn",
+                "persona": "operator",
             },
         ],
     }

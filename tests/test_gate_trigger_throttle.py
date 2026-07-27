@@ -26,7 +26,7 @@ _CONFIG = {
             "source": "smokeball",
             "event_type": "matter.updated",
             "skill": "matter-memo-on-update",
-            "persona": "quinn",
+            "persona": "operator",
             "throttle": {"cooldown_minutes": 30},
         },
         # No throttle block — platform default applies.

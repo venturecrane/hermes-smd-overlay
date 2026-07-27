@@ -108,7 +108,7 @@ def _setup(monkeypatch, enforce, *, exposure):
     monkeypatch.setattr(enforce, "_resolve_persona_exposure", lambda slug="": dict(exposure))
     monkeypatch.setattr(enforce, "_resolve_roster", lambda: list(ROSTER))
     monkeypatch.setattr(enforce, "_resolve_vertical_floors", lambda: {})
-    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "quinn")
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "operator")
 
 
 def _exposure(enforce):
@@ -191,7 +191,7 @@ def test_outside_send_still_content_floored_internal_is_not(monkeypatch):
         "_resolve_vertical_floors",
         lambda: {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.DRAFT_FOR_REVIEW},
     )
-    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "quinn")
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "operator")
     # Outside send: law floor draws autonomous → draft.
     outside = enforce.evaluate_tool_call(
         "mcp_agentmail_send_message", {"to": ["client@example.com"]}, "smd", session_id="s1"
@@ -222,7 +222,7 @@ def _setup_typed(monkeypatch, enforce, *, exposure, typed=TYPED_ROSTER, floors=N
     monkeypatch.setattr(enforce, "_resolve_roster", lambda: list(ROSTER))
     monkeypatch.setattr(enforce, "_resolve_typed_roster", lambda: list(typed))
     monkeypatch.setattr(enforce, "_resolve_vertical_floors", lambda: dict(floors or {}))
-    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "quinn")
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "operator")
 
 
 # ---- _reclassify_send: the recipient axis resolves to the right class ------

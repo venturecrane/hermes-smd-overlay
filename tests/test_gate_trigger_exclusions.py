@@ -21,7 +21,7 @@ _CONFIG = {
             "source": "smokeball",
             "event_type": "matter.updated",
             "skill": "matter-memo-on-update",
-            "persona": "quinn",
+            "persona": "operator",
             "exclude": {"matters": [_OPS_MATTER], "actors": [_CHRIS.upper()]},
         },
         # A second trigger with no exclude block — untouched.
