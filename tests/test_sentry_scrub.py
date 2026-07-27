@@ -187,6 +187,9 @@ def test_init_contract_with_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["before_send"] is scrub_then_throttle
     assert captured["before_breadcrumb"] is scrub_breadcrumb
     assert captured["traces_sample_rate"] == 0.0
+    # Frame locals are never captured: the scrub hooks cannot reach
+    # stacktrace vars, so the only safe value is off (see sentry_init).
+    assert captured["include_local_variables"] is False
     assert captured["release"] == "deadbeef"
     assert tags == {"tenant": "acme", "component": "gateway"}
     # Boot marker sent once, at info level, with a constant message (grouping key).
