@@ -1611,3 +1611,60 @@ def test_translate_omits_digest_home_when_unauthored(tmp_path):
     )
     soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
     assert "## Digest home" not in soul
+
+
+# ---------------------------------------------------------------------------
+# Orphaned profile-home reconciliation (ss-console#2009)
+# ---------------------------------------------------------------------------
+
+
+def test_translate_removes_orphaned_profile_home(tmp_path):
+    """A profile home whose persona is no longer authored is deleted —
+    including its cron store, so a slug rename can never leave a frozen
+    scheduler store behind on the volume (ss-console#2009)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    orphan = hermes_home / "profiles" / "zeta"
+    (orphan / "cron").mkdir(parents=True)
+    (orphan / "config.yaml").write_text("stale: true\n")
+    (orphan / "cron" / "jobs.json").write_text("[]\n")
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+
+    assert not orphan.exists()
+    assert (hermes_home / "profiles" / "marcus" / "config.yaml").exists()
+
+
+def test_translate_reconciler_spares_dotdirs_and_files(tmp_path):
+    """Only direct child DIRECTORIES are candidates: dot-prefixed entries
+    and stray files under profiles/ survive reconciliation."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    profiles = hermes_home / "profiles"
+    (profiles / ".snapshots").mkdir(parents=True)
+    (profiles / "README").write_text("not a profile\n")
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+
+    assert (profiles / ".snapshots").is_dir()
+    assert (profiles / "README").is_file()
+
+
+def test_translate_reconciler_is_idempotent(tmp_path):
+    """Second run with the same input removes nothing and leaves the
+    authored home in place."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    for _ in range(2):
+        slugs = translate_customer_yaml(
+            customer_yaml_path=str(customer_yaml),
+            hermes_home=str(hermes_home),
+            skills_dir=str(skills_dir),
+        )
+    assert slugs == ["marcus"]
+    assert (hermes_home / "profiles" / "marcus" / "SOUL.md").exists()

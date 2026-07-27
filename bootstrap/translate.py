@@ -1206,6 +1206,48 @@ def _relationship_soul_section(customer: dict[str, Any]) -> str:
     return "\n## Working relationships\n\n" + intro + "\n\n" + "\n\n".join(blocks) + "\n"
 
 
+def _reconcile_profile_homes(profiles_root: Path, authored_slugs: set[str]) -> list[str]:
+    """Delete profile homes whose persona is no longer authored.
+
+    Profile homes are DERIVED state, materialized from ``customer.yaml``
+    at bootstrap. A home under ``profiles_root`` with no authored persona
+    is dead by definition — nothing boots a gateway for it, nothing
+    serves its cron store — but until this reconciler existed it survived
+    on the persistent volume forever. That is exactly how the 2026-07-13
+    persona-slug rename left the retired slug's home behind: its frozen
+    cron store surfaced twelve days later as a ``work_overdue`` false
+    alarm through the scheduler monitoring (ss-console#2009), resurrecting
+    a name the repo-level rename had already retired. Renames are now
+    self-cleaning as a class.
+
+    Safety properties:
+
+    * Runs only after validation has guaranteed a non-empty persona set,
+      so a parse bug can never wipe every home.
+    * Touches only direct children of ``profiles_root``; skips
+      non-directories and dot-prefixed entries.
+    * Removal is loud — one WARNING per deleted home naming the slug.
+
+    Returns the sorted list of removed slugs (empty when nothing was
+    orphaned — the steady state).
+    """
+    if not profiles_root.is_dir() or not authored_slugs:
+        return []
+    removed: list[str] = []
+    for entry in sorted(profiles_root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if entry.name in authored_slugs:
+            continue
+        shutil.rmtree(entry)
+        removed.append(entry.name)
+        logger.warning(
+            "translate: removed orphaned profile home %s (persona not in customer.yaml)",
+            entry.name,
+        )
+    return removed
+
+
 def _write_if_changed(target: Path, content: bytes) -> bool:
     """Write ``content`` to ``target`` only if the current bytes differ.
 
@@ -1349,6 +1391,12 @@ def translate_customer_yaml(
       removed from this customer.yaml are deleted from disk so stale
       bundles do not accumulate.
 
+    After writing the authored set, profile homes under
+    ``<hermes_home>/profiles/`` whose slug is NOT in
+    ``customer.yaml.personas[]`` are DELETED — a persona rename or
+    removal leaves no orphaned home (and no orphaned cron store) on
+    the volume. See :func:`_reconcile_profile_homes`.
+
     The function is idempotent. Re-running with the same input
     produces the same on-disk bytes; unchanged files are not
     rewritten. Translation is preceded by schema validation
@@ -1444,6 +1492,12 @@ def translate_customer_yaml(
         else:
             logger.debug("translate: profile %s already up to date", slug)
         written_slugs.append(slug)
+
+    # Reconcile the volume against the authored persona set: any profile
+    # home left behind by a slug rename or persona removal is deleted here,
+    # before cron reconciliation, so a stale cron store can never outlive
+    # its persona (ss-console#2009). See _reconcile_profile_homes.
+    _reconcile_profile_homes(profiles_root, set(written_slugs))
 
     # ADR 0047 — reconcile personas[].cron[] into Hermes-native cron jobs.
     # Converge EVERY authored persona's cron store to exactly its authored set
