@@ -56,7 +56,7 @@ def _setup(monkeypatch, enforce, *, exposure):
     monkeypatch.setattr(enforce, "_resolve_roster", lambda: list(ROSTER))
     monkeypatch.setattr(enforce, "_resolve_typed_roster", lambda: [])
     monkeypatch.setattr(enforce, "_resolve_vertical_floors", lambda: {})
-    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "quinn")
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "operator")
 
 
 def _exposure(enforce):

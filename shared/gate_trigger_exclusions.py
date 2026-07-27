@@ -8,7 +8,7 @@ block::
       - source: smokeball
         event_type: matter.updated
         skill: matter-memo-on-update
-        persona: quinn
+        persona: operator
         exclude:
           matters:            # matter GUIDs this trigger never fires for
             - 3c191bed-...    #   (e.g. the internal ops/digest-home matter)
