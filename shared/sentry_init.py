@@ -260,6 +260,15 @@ def init_sentry(component: str) -> bool:
             # Errors only. No performance tracing: it adds cost and widens the
             # PII surface (span data) for no fleet-ops value.
             traces_sample_rate=0.0,
+            # Never capture stack-frame local VARIABLE VALUES. The SDK default
+            # (True) ships frame locals inside stacktraces, which the scrub
+            # hooks do not reach — in gate/gateway frames those locals can hold
+            # inbound mail or webhook payload content. Structural fix per the
+            # request-body posture above: what is never captured needs no
+            # scrubbing. This backs the customer-facing data-map representation
+            # that Sentry receives technical error data only (engagements
+            # DPA Exhibit B-1, 2026-07-27).
+            include_local_variables=False,
         )
         sentry_sdk.set_tag("tenant", slug)
         sentry_sdk.set_tag("component", component)
