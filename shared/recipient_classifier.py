@@ -171,7 +171,7 @@ def _canonicalize_address(raw: str) -> str | None:
 def _canonicalize_roster_entry(entry: str) -> str | None:
     """Canonicalize one roster entry to either ``@domain`` or ``local@domain``.
 
-    A roster entry is either a whole-domain grant (``@ashtonandprice.com``) or a
+    A roster entry is either a whole-domain grant (``@firm.example``) or a
     single address (``scott@smd.services``). Returns ``None`` for malformed
     entries so a junk roster line can never widen into an accidental match.
     """
