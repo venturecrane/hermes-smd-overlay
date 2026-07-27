@@ -322,3 +322,34 @@ def test_clerk_public_ids_are_not_flagged_as_secrets():
     # Clerk shape) is STILL flagged — the fix did not widen the net.
     assert scan_raw_yaml(f"some_key: {_BODY_HEX_64}\n") != []
     assert scan_parsed_value({"x": _BODY_HEX_64}) != []
+
+
+def test_exempts_case_alert_fallback_recipients_shape():
+    # ss#2004: the authored fallback list is a human-authored recipient path —
+    # email addresses must not trip shape heuristics (an address can brush the
+    # base64-ish heuristic), matching the two sibling recipient lists.
+    findings = scan_parsed_value(
+        {
+            "escalation": {
+                "case_alert_routing": {
+                    "mode": "matter_staff",
+                    "fallback_recipients": ["office.administrator+intake@firmdomain.example"],
+                }
+            }
+        }
+    )
+    assert not _categories(findings)
+
+
+def test_provider_checks_still_run_on_fallback_recipients():
+    findings = scan_parsed_value(
+        {
+            "escalation": {
+                "case_alert_routing": {
+                    "mode": "matter_staff",
+                    "fallback_recipients": [SYNTH["openai_key"]],
+                }
+            }
+        }
+    )
+    assert "openai_api_key" in _categories(findings)

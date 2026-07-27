@@ -116,6 +116,9 @@ _SHAPE_HEURISTIC_ALLOWLIST_PATHS: tuple[str, ...] = (
     "users[*].full_name",
     "escalation.red_flag_recipients",
     "escalation.failure_recipients",
+    # Case-alert fallback addresses (ss#2004) — human-authored recipient list,
+    # same posture as the two lists above.
+    "escalation.case_alert_routing.fallback_recipients",
     # token_ref is the ONE permitted secret-reference channel: an Infisical path
     # string, carrying no secret. Bypass shape heuristics so the path is not
     # flagged as base64-shaped or high-entropy.
