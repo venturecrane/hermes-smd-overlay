@@ -77,6 +77,36 @@ def _attach_html_body(tool_name: str, args: dict) -> None:
     args["html"] = report_render.render_markdown(text)
 
 
+_PAUSE_CACHE_TTL_S = 2.0
+_pause_cache: dict[str, Any] = {"at": 0.0, "hard": False}
+
+
+def _paused_hard() -> bool:
+    """True while the sticky-stop ladder reads HARD_STOP (ss#2003 pause wall).
+
+    Fail-open by design HERE ONLY: this wall is an additional chokepoint on
+    top of the ADR 0062 stop surface, and the breaker's own read fails toward
+    "unknown". A read failure must not brick every tool call on a healthy
+    Machine — the primary stop enforcement (gate 503s, wake guard, job
+    assert) stands regardless.
+    """
+    import time as _time
+
+    now = _time.monotonic()
+    if now - _pause_cache["at"] < _PAUSE_CACHE_TTL_S:
+        return bool(_pause_cache["hard"])
+    hard = False
+    try:
+        from shared.cost_breaker import read_level
+
+        hard = read_level() == "HARD_STOP"
+    except Exception:  # noqa: BLE001 — see docstring
+        hard = False
+    _pause_cache["at"] = now
+    _pause_cache["hard"] = hard
+    return hard
+
+
 def on_pre_tool_call(**kwargs: Any) -> dict | None:
     """Block a tool call that exceeds the per-customer trust ceiling.
 
@@ -135,6 +165,23 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         # A genuine current-turn approval must arrive via a human-tied channel, not
         # model-composed tool args.
         args.pop("_current_turn_approval", None)
+
+        # Operator-pause wall (ss#2003). While the sticky-stop ladder is at
+        # HARD_STOP — a system trip OR an operator-initiated pause — every
+        # tool call refuses, whatever woke the agent. The gate already 503s
+        # /mcp/turn + /webhooks/handoff and the wake guard parks vendor
+        # webhooks; this wall is the chokepoint that covers the remaining
+        # wake paths (Hermes-native cron above all): a paused Machine may
+        # wake, but it cannot ACT. Read is cached briefly — the level flips
+        # rarely and the read is a per-tool-call sqlite open otherwise.
+        if _paused_hard():
+            return {
+                "action": "block",
+                "message": (
+                    "The Operator is paused (sticky stop at HARD_STOP). No tools run "
+                    "until an authorized person resumes it. Do not retry; end the turn."
+                ),
+            }
 
         ceiling_block = enforce.evaluate_tool_call(
             tool_name, args, customer_slug, session_id=session_id

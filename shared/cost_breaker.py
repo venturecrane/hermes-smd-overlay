@@ -283,6 +283,67 @@ def clear_hard_stops(
         conn.close()
 
 
+def pin_hard_stops(
+    *,
+    actor_id: str,
+    reason: str,
+    path: str | None = None,
+) -> list[dict]:
+    """Operator-initiated pause (ss#2003): pin HARD_STOP on every row.
+
+    The sticky-stop module's own docstring names this path — "a human pinning
+    a stop" — as the operator-initiated twin of the system-initiated trips.
+    Pins the ``_machine`` row (the key both the interactive meter and the job
+    worker assert against) plus every other existing row, creating the
+    ``_machine`` row if the state file is fresh. Sticky by construction (same
+    persistence the system trips use; survives reboot); the ONLY way back is
+    ``clear_hard_stops`` — the state machine's sole backward transition.
+
+    No Machine-ledger audit row is written from here, for the same reason as
+    the gate-driven clear: the broker PID-gates ledger appends to the gateway
+    process, and the pause is a governance action audited control-plane-side
+    where the actor was authenticated. Returns the pinned rows
+    (customer, persona, prior level).
+
+    Caller responsibility (module contract, mirror of clear_hard_stops):
+    authenticate the actor BEFORE invoking.
+    """
+    if not actor_id or not reason:
+        raise ValueError("actor_id and reason are required")
+    resolved = Path(path or db_path())
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(resolved), check_same_thread=False)
+    conn.execute("PRAGMA busy_timeout = 5000")
+    try:
+        conn.execute(_CREATE_TABLE_SQL)
+        slug = os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG") or "_machine"
+        now = iso_utc()
+        stamped_reason = f"operator_pause by {actor_id}: {reason}"
+        rows = conn.execute("SELECT customer, persona, level FROM sticky_stop_state").fetchall()
+        pinned: list[dict] = []
+        seen_machine = False
+        for customer, persona, level in rows:
+            if persona == "_machine":
+                seen_machine = True
+            conn.execute(
+                "UPDATE sticky_stop_state SET level = ?, reason = ?, updated_at = ? "
+                "WHERE customer = ? AND persona = ?",
+                (StickyStopLevel.HARD_STOP.value, stamped_reason, now, customer, persona),
+            )
+            pinned.append({"customer": customer, "persona": persona, "prior_level": level})
+        if not seen_machine:
+            conn.execute(
+                "INSERT INTO sticky_stop_state (customer, persona, level, reason, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (slug, "_machine", StickyStopLevel.HARD_STOP.value, stamped_reason, now),
+            )
+            pinned.append({"customer": slug, "persona": "_machine", "prior_level": "OK"})
+        conn.commit()
+        return pinned
+    finally:
+        conn.close()
+
+
 def read_level(path: str | None = None) -> str | None:
     """Read the worst (max) persisted level across personas, read-only.
 
@@ -398,6 +459,7 @@ __all__ = [
     "StickyStopError",
     "build_breaker",
     "clear_hard_stops",
+    "pin_hard_stops",
     "db_path",
     "read_level",
     "run_boot_probe",

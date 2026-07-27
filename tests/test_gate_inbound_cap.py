@@ -147,3 +147,51 @@ def test_gate_sticky_stop_clear_core(tmp_path, monkeypatch):
     assert status == 200
     assert body["level"] == "OK"
     assert body["cleared"][0]["prior_level"] == "HARD_STOP"
+
+
+# ---------------------------------------------------------------------------
+# Gate pause endpoint core (ss#2003 — the portal kill switch's Machine leg).
+# Mirror of the clear-core test above: auth glue is the handler; this
+# exercises the pure core.
+# ---------------------------------------------------------------------------
+
+
+def test_gate_sticky_stop_set_core(tmp_path, monkeypatch):
+    import webhook_gate as gate
+    from shared.cost_breaker import build_breaker, read_level
+
+    db = str(tmp_path / "sticky_stop.db")
+    monkeypatch.setenv("SMD_STICKY_STOP_DB_PATH", db)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+
+    class _Client:
+        def execute(self, sql, *params):
+            pass
+
+    # Missing fields -> 400.
+    status, body = gate._sticky_stop_set({})
+    assert status == 400
+
+    # Pause on a healthy Machine: pins HARD_STOP (creating the state file if
+    # fresh), and the gate's own hard-stop read now parks every wake door.
+    status, body = gate._sticky_stop_set(
+        {"actor_id": "portal-admin@firm.example", "reason": "client pause"}
+    )
+    assert status == 200
+    assert body["level"] == "HARD_STOP"
+    assert gate._breaker_hard_stopped() is True
+
+    # Idempotent: pausing an already-paused Machine is 200, not an error.
+    status, body = gate._sticky_stop_set({"actor_id": "portal-admin", "reason": "again"})
+    assert status == 200
+    assert body["level"] == "HARD_STOP"
+
+    # Round trip: the existing clear endpoint is the resume.
+    status, body = gate._sticky_stop_clear({"captain_id": "portal-admin", "reason": "resume"})
+    assert status == 200
+    assert body["level"] == "OK"
+
+    # And a real breaker admits work again after resume.
+    b = build_breaker(customer="acme", persona="_machine", audit_client=_Client(), path=db)
+    b.assert_allowed()
+    assert read_level(db) == "OK"
