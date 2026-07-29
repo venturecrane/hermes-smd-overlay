@@ -62,10 +62,11 @@ SUPPORTED_KINDS: frozenset[str] = frozenset(
         "memory_export",
         "config_export",
         "jobs",
+        "entitlements",
     }
 )
 _REAL_KINDS: frozenset[str] = frozenset(
-    {"audit_log", "audit_export", "memory_export", "config_export", "jobs"}
+    {"audit_log", "audit_export", "memory_export", "config_export", "jobs", "entitlements"}
 )
 
 # config_export section allow-list (ADR 0048). Unlike ``config`` (a
@@ -267,6 +268,15 @@ def read_runtime(
         # has no job ledger configured returns an honest empty page (same
         # posture as a missing audit DB), never a 500.
         return _read_jobs()
+
+    if kind == "entitlements":
+        # Live runtime exposure overrides (ss#2003 Q7 — the entitlement dial).
+        # Serves the override store directly so the console and the live
+        # probes read the Machine's actual posture, never a projection. A
+        # missing store file is "no override was ever set" — honest empty.
+        from shared.exposure_override import read_all
+
+        return {"entries": read_all(), "cursor": None}
 
     if kind == "memory_export":
         if table not in MEMORY_EXPORT_TABLES:

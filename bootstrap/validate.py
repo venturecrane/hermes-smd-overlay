@@ -505,34 +505,37 @@ def _validate_send_identity(raw: Any, path: str, errors: list[str]) -> None:
         _err(f"{path}.address: must be a non-empty string", errors)
 
 
-def _validate_entitlements(raw: Any, path: str, errors: list[str]) -> None:
-    """Validate persona-level ``entitlements.exposure`` (ADR 0056).
+# Restrictiveness ordering for the exposure/exposure_ceiling coherence check.
+# Mirrors the trust plugin's _RESTRICTIVENESS (higher == more restrictive).
+_CEILING_RESTRICTIVENESS = {
+    "autonomous": 0,
+    "confirm": 1,
+    "draft_for_review": 2,
+    "refused": 3,
+}
 
-    Absent ⇒ valid (sparse, fail-closed at runtime). Rejects the retired
-    scalar fields, and validates each exposure entry: key in the authored
-    action-class set (``read`` is never authored), value a legal ceiling.
+
+def _validate_exposure_map(
+    exposure: Any, path: str, errors: list[str], *, field: str
+) -> dict[str, str]:
+    """Shared per-entry validation for ``exposure`` and ``exposure_ceiling``.
+
+    Returns the valid entries (for the cross-map coherence check); invalid
+    entries are reported and excluded.
     """
-    if raw is None:
-        return
-    if not isinstance(raw, dict):
-        _err(f"{path}: must be a mapping when present", errors)
-        return
-    for legacy in LEGACY_ENTITLEMENT_FIELDS:
-        if legacy in raw:
-            _err(f"{path}.{legacy}: retired (ADR 0056); use exposure", errors)
-    exposure = raw.get("exposure")
+    out: dict[str, str] = {}
     if exposure is None:
-        return
+        return out
     if not isinstance(exposure, dict):
-        _err(f"{path}.exposure: must be a mapping when present", errors)
-        return
+        _err(f"{path}.{field}: must be a mapping when present", errors)
+        return out
     for key, value in exposure.items():
-        ep = f"{path}.exposure.{key}"
+        ep = f"{path}.{field}.{key}"
         if key == "read":
-            _err(f"{ep}: read is always allowed and must not be authored as exposure", errors)
+            _err(f"{ep}: read is always allowed and must not be authored as {field}", errors)
         elif key not in AUTHORED_EXPOSURE_ACTION_CLASSES:
             _err(
-                f"{ep}: exposure key must be one of {sorted(AUTHORED_EXPOSURE_ACTION_CLASSES)}",
+                f"{ep}: {field} key must be one of {sorted(AUTHORED_EXPOSURE_ACTION_CLASSES)}",
                 errors,
             )
         elif value not in ACCEPTED_CEILINGS:
@@ -544,6 +547,44 @@ def _validate_entitlements(raw: Any, path: str, errors: list[str]) -> None:
             _err(
                 f"{ep}: 'confirm' is only valid for the send classes "
                 f"{sorted(SEND_ACTION_CLASSES)} (ADR 0071)",
+                errors,
+            )
+        else:
+            out[str(key)] = str(value)
+    return out
+
+
+def _validate_entitlements(raw: Any, path: str, errors: list[str]) -> None:
+    """Validate persona-level ``entitlements`` (ADR 0056; ss#2003 Q7).
+
+    Absent ⇒ valid (sparse, fail-closed at runtime). Rejects the retired
+    scalar fields, and validates each ``exposure`` / ``exposure_ceiling``
+    entry: key in the authored action-class set (``read`` is never authored),
+    value a legal ceiling. ``exposure_ceiling`` is the letter-commitment bound
+    for the runtime entitlement dial: the authored ``exposure`` must sit at or
+    below it (a config authoring a posture above its own ceiling is
+    incoherent, not sparse).
+    """
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        _err(f"{path}: must be a mapping when present", errors)
+        return
+    for legacy in LEGACY_ENTITLEMENT_FIELDS:
+        if legacy in raw:
+            _err(f"{path}.{legacy}: retired (ADR 0056); use exposure", errors)
+    exposure = _validate_exposure_map(raw.get("exposure"), path, errors, field="exposure")
+    ceiling = _validate_exposure_map(
+        raw.get("exposure_ceiling"), path, errors, field="exposure_ceiling"
+    )
+    for key, bound in ceiling.items():
+        authored = exposure.get(key)
+        if authored is not None and (
+            _CEILING_RESTRICTIVENESS[authored] < _CEILING_RESTRICTIVENESS[bound]
+        ):
+            _err(
+                f"{path}.exposure.{key}: authored value {authored!r} exceeds its own "
+                f"exposure_ceiling {bound!r} — raise the ceiling or lower the exposure",
                 errors,
             )
 
