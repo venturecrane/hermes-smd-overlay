@@ -496,24 +496,61 @@ def _parse_exposure_map(raw: object) -> dict[ActionClass, Ceiling]:
     return out
 
 
+def _overlay_runtime_overrides(
+    persona_slug: str,
+    authored: dict[ActionClass, Ceiling],
+    ceiling_map: dict[ActionClass, Ceiling],
+) -> dict[ActionClass, Ceiling]:
+    """Layer the client-set runtime overrides onto the authored exposure.
+
+    The entitlement dial (ss#2003 Q7): a Named Administrator's tier change is
+    persisted by the gate into ``shared.exposure_override``; the EFFECTIVE
+    exposure for each overridden class is the override value clamped to the
+    authored bound — ``exposure_ceiling`` when authored for the class, else the
+    authored exposure value, else REFUSED (ADR 0056: absence of an authored
+    ceiling is absence of permission to raise). The write path applies the same
+    clamp; this read-side clamp is defense in depth — a store row that exceeds
+    the bound is NARROWED, never honored.
+
+    Fault posture: a missing store file is "no override was ever set" (authored
+    stands). Any other store fault PROPAGATES, same as a customer.yaml read
+    fault — ``evaluate_tool_call``'s outer handler fails CLOSED for sensitive
+    actions. Falling back to authored on a broken read is not safe in either
+    direction: it could re-raise a posture the client lowered.
+    """
+    from shared.exposure_override import read_overrides  # local import, test-patchable
+
+    overrides = read_overrides(persona_slug)
+    if not overrides:
+        return authored
+    effective = dict(authored)
+    for action, ceiling in _parse_exposure_map(overrides).items():
+        bound = ceiling_map.get(action) or authored.get(action) or Ceiling.REFUSED
+        effective[action] = _most_restrictive(ceiling, bound)
+    return effective
+
+
 def _resolve_persona_exposure(persona_slug: str) -> dict[ActionClass, Ceiling]:
-    """Resolve the active persona's authored exposure from the trusted config.
+    """Resolve the active persona's EFFECTIVE exposure from the trusted config.
 
     Reads ``customer.yaml`` via ``shared.customer_config`` (the keystone seam
-    relocates it to a root-owned path) and returns the named persona's
-    ``entitlements.exposure`` parsed to typed enums. Returns ``{}`` (fail-closed
-    for every non-read class) when:
+    relocates it to a root-owned path), parses the named persona's
+    ``entitlements.exposure`` to typed enums, then layers the client-set
+    runtime overrides (``shared.exposure_override``) clamped to the authored
+    ``entitlements.exposure_ceiling`` — see :func:`_overlay_runtime_overrides`.
+    Returns ``{}`` (fail-closed for every non-read class) when:
 
       * no active persona is resolvable from the env;
       * there is no customer.yaml on the volume (dev / test — stub or absent);
       * the named persona is not present.
 
     Any OTHER read fault (unreadable / unparseable file, malformed personas on a
-    provisioned Machine) PROPAGATES so ``evaluate_tool_call``'s outer handler
-    fails CLOSED for sensitive actions rather than silently resolving an empty
-    map. An empty map is itself fail-closed (every non-read class REFUSED), so a
-    propagated fault and an empty map land on the same safe side — the propagate
-    path exists only to surface the fault loudly.
+    provisioned Machine, a broken override store) PROPAGATES so
+    ``evaluate_tool_call``'s outer handler fails CLOSED for sensitive actions
+    rather than silently resolving an empty map. An empty map is itself
+    fail-closed (every non-read class REFUSED), so a propagated fault and an
+    empty map land on the same safe side — the propagate path exists only to
+    surface the fault loudly.
     """
     if not persona_slug:
         return {}
@@ -533,7 +570,13 @@ def _resolve_persona_exposure(persona_slug: str) -> dict[ActionClass, Ceiling]:
         if isinstance(persona, dict) and persona.get("slug") == persona_slug:
             entitlements = persona.get("entitlements")
             raw = entitlements.get("exposure") if isinstance(entitlements, dict) else None
-            return _parse_exposure_map(raw)
+            raw_ceiling = (
+                entitlements.get("exposure_ceiling") if isinstance(entitlements, dict) else None
+            )
+            authored = _parse_exposure_map(raw)
+            return _overlay_runtime_overrides(
+                persona_slug, authored, _parse_exposure_map(raw_ceiling)
+            )
     logger.warning(
         "trust: active persona %r not found in customer.yaml; empty exposure (fail-closed)",
         persona_slug,

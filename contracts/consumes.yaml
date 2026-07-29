@@ -159,6 +159,13 @@ vars:
     requirement: optional
     consumed_by: [job-worker, webhook-gate]
     note: "test/dev override for the Machine-local sticky_stop state file; defaults to /opt/data/smd/sticky_stop.db (shared/cost_breaker.py). The job worker writes it (record_cost_cents ladder, agent uid); the gate and heartbeat read it read-only (HARD_STOP park + sticky_stop_level field)."
+  # ---- ss-console #2003 Q7: the entitlement dial (runtime exposure overrides) ----
+  SMD_EXPOSURE_OVERRIDE_DB_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate, hermes-smd-trust]
+    note: "test/dev override for the Machine-local exposure_override state file; defaults to /opt/data/smd/exposure_override.db (shared/exposure_override.py). The gate writes it (POST /entitlement/set, console-proxy bearer); the trust plugin reads it per tool call (effective exposure = authored overlaid by overrides, clamped to the authored exposure_ceiling)."
   SMD_GATE_CAP_DB_PATH:
     discovery: static
     stage: agent

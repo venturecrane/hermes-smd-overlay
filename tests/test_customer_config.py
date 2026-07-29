@@ -575,6 +575,36 @@ def test_validate_rejects_confirm_on_non_send_class(tmp_path):
     assert any("confirm" in e and "send classes" in e for e in errors)
 
 
+# ---- validate_customer_yaml: exposure_ceiling (ss#2003 Q7) ----------------
+
+
+def _with_ceiling(block: str) -> str:
+    """VALID_YAML with an exposure_ceiling block appended under entitlements."""
+    return VALID_YAML.replace(
+        "        external_send: draft_for_review\n",
+        "        external_send: draft_for_review\n" + block,
+    )
+
+
+def test_validate_accepts_exposure_ceiling(tmp_path):
+    good = _with_ceiling("      exposure_ceiling:\n        external_send: autonomous\n")
+    assert "exposure_ceiling" in good  # guard: replace landed
+    assert validate_customer_yaml(_write(tmp_path, good)) == []
+
+
+def test_validate_rejects_bad_exposure_ceiling_key(tmp_path):
+    bad = _with_ceiling("      exposure_ceiling:\n        read: autonomous\n")
+    errors = validate_customer_yaml(_write(tmp_path, bad))
+    assert any("read is always allowed" in e and "exposure_ceiling" in e for e in errors)
+
+
+def test_validate_rejects_exposure_above_own_ceiling(tmp_path):
+    # authored external_send: draft_for_review, ceiling refused → incoherent
+    bad = _with_ceiling("      exposure_ceiling:\n        external_send: refused\n")
+    errors = validate_customer_yaml(_write(tmp_path, bad))
+    assert any("exceeds its own" in e for e in errors)
+
+
 # ---------------------------------------------------------------------------
 # Cross-module parity: the accepted-exposure vocabulary must agree between the
 # validator, the translator filter, and the runtime ActionClass send members.
