@@ -61,7 +61,11 @@ from shared.customer_config import CustomerConfig, CustomerConfigError
 from shared.recipient_classifier import RecipientClass, classify_recipients_typed
 from shared.secrets import get_secret
 
-from . import relay  # noqa: F401 - surface for tests
+from . import (
+    held_store,
+    relay,  # noqa: F401 - surface for tests
+    sweeper,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,11 @@ _CUSTOMER_SLUG: str | None = None
 _D1_CLIENT: Any | None = None
 _LIMITER: relay.RateLimiter | None = None
 _YAML_PATH: Path = Path(_DEFAULT_CUSTOMER_YAML_PATH)
+# Held-reply auto-release (#2070). The store is register-time infra; whether
+# release is ON is a live per-call/per-pass question (send_policy), so the
+# sweeper thread starts unconditionally and no-ops while release is unauthored.
+_HELD_STORE: held_store.HeldReplyStore | None = None
+_SWEEPER: Any | None = None
 
 
 def _send_msgraph_reply(graph_message_id: str, comment: str) -> str:
@@ -167,6 +176,100 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
             **extra,
         },
     )
+
+
+def _notify_hold(
+    *,
+    reason: str,
+    sender: str,
+    sender_class: str,
+    adapter: str,
+    message_id: str,
+    body_digest: str,
+    pending: int | None = None,
+) -> None:
+    """Report a held/expired reply to Sentry — silence is never the failure mode.
+
+    Ops-only by design (#2070): the audit row is the record, this is the page.
+    Never carries the body or the raw address — the recipient rides as a digest
+    prefix, enough to correlate two events as the same person without putting a
+    client address in the monitoring stream.
+    """
+    try:
+        import hashlib
+
+        import sentry_sdk
+
+        digest = hashlib.sha256(sender.encode()).hexdigest()[:8] if sender else ""
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("reason", reason)
+            scope.set_tag("sender_class", sender_class or "unclassified")
+            scope.set_tag("adapter", adapter)
+            scope.set_extra("message_id", message_id)
+            scope.set_extra("body_digest", body_digest)
+            scope.set_extra("recipient_digest", digest)
+            if pending is not None:
+                scope.set_extra("pending_count", pending)
+            sentry_sdk.capture_message(f"reply_held: {reason}", level="warning")
+    except Exception as exc:  # noqa: BLE001 — monitoring must never break the hook
+        logger.debug("hermes-smd-reply: hold notification skipped (%s)", exc)
+
+
+def _held_pending_for(sender: str, policy: send_policy.SendPolicy) -> bool:
+    """True iff this sender has a reply already waiting for release."""
+    if not policy.held_release_enabled or _HELD_STORE is None:
+        return False
+    try:
+        return _HELD_STORE.has_pending(sender)
+    except Exception as exc:  # noqa: BLE001 — a broken store never blocks a send
+        logger.warning("hermes-smd-reply: held-reply pending check failed (%s)", exc)
+        return False
+
+
+def _pending_count() -> int | None:
+    if _HELD_STORE is None:
+        return None
+    try:
+        return _HELD_STORE.pending_count()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _enqueue_hold(
+    *,
+    reason: str,
+    origin: inbound.InboundOrigin,
+    sender_class: str,
+    adapter: str,
+    send_text: str,
+    send_html: str,
+    body_digest: str,
+    policy: send_policy.SendPolicy,
+) -> bool:
+    """Persist a rate-held reply for auto-release. True iff it was stored.
+
+    Only mechanical holds reach here (the caller decides): a rate window or a
+    queued-behind-held ordering hold clears with time, so the reply is still
+    wanted. Semantic refusals are decisions and stay dropped.
+    """
+    if not policy.held_release_enabled or _HELD_STORE is None:
+        return False
+    try:
+        _HELD_STORE.enqueue(
+            sender=origin.sender_address,
+            sender_class=sender_class,
+            adapter=adapter,
+            inbox_id=origin.inbox_id,
+            message_id=origin.message_id,
+            send_text=send_text,
+            send_html=send_html,
+            body_digest=body_digest,
+            hold_reason=reason,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — a broken store degrades to drop
+        logger.warning("hermes-smd-reply: held-reply enqueue failed (%s)", exc)
+        return False
 
 
 def on_post_tool_call(**kwargs: Any) -> None:
@@ -290,15 +393,48 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # classification comes from step (c)'s classifier — the same rosters the
         # content floor trusts.
         policy = send_policy.live_send_policy(str(_YAML_PATH))
+        sender_class = recipient_class.value if recipient_class else "unclassified"
+        adapter = _email_adapter(cfg)
+        body_digest = inbound.content_digest(scan_text)
         if _LIMITER is None:
             _held("rate_limited", origin)
             return
-        decision = _LIMITER.check(origin.sender_address, internal=internal, policy=policy)
+
+        # Ordering guard (#2070): if this sender ALREADY has a reply waiting for
+        # release, this one queues behind it — otherwise a later reply whose
+        # window has cleared would overtake the earlier held one (the client
+        # reads answer 5 before answer 4), and under sustained traffic the live
+        # path would keep eating the freed slots so the held row never releases.
+        if _held_pending_for(origin.sender_address, policy):
+            decision = relay.RateDecision(False, "queued_behind_held")
+        else:
+            decision = _LIMITER.check(origin.sender_address, internal=internal, policy=policy)
         if not decision.allowed:
+            reason = decision.reason or "rate_limited"
+            enqueued = _enqueue_hold(
+                reason=reason,
+                origin=origin,
+                sender_class=sender_class,
+                adapter=adapter,
+                send_text=send_text,
+                send_html=send_html,
+                body_digest=body_digest,
+                policy=policy,
+            )
             _held(
-                decision.reason or "rate_limited",
+                reason,
                 origin,
-                sender_class=recipient_class.value if recipient_class else "unclassified",
+                sender_class=sender_class,
+                held_for_release=enqueued,
+            )
+            _notify_hold(
+                reason=reason,
+                sender=origin.sender_address,
+                sender_class=sender_class,
+                adapter=adapter,
+                message_id=origin.message_id,
+                body_digest=body_digest,
+                pending=_pending_count(),
             )
             return
 
@@ -309,7 +445,6 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # redirected); agentmail via its REST reply endpoint. Fail-closed: a
         # msgraph seat with no MSGRAPH_* creds REFUSES (audited REPLY_FAILED),
         # never falls back to AgentMail.
-        adapter = _email_adapter(cfg)
         try:
             if adapter == _ADAPTER_MSGRAPH:
                 sent_id = _send_msgraph_reply(origin.message_id, send_text or send_html)
@@ -349,6 +484,100 @@ def on_post_tool_call(**kwargs: Any) -> None:
         )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-reply: post_tool_call handler error: %s", exc)
+
+
+def _release_send(row: held_store.HeldReply) -> str:
+    """Transmit one released reply through the same transports the live path uses."""
+    if row.adapter == _ADAPTER_MSGRAPH:
+        return _send_msgraph_reply(row.message_id, row.send_text or row.send_html)
+    return relay.send_reply(
+        api_key=_API_KEY or "",
+        inbox_id=row.inbox_id,
+        message_id=row.message_id,
+        text=row.send_text,
+        html=row.send_html,
+    )
+
+
+def _sender_is_internal(sender: str) -> bool:
+    """Re-apply the live roster classification at release time.
+
+    Read fresh (ADR 0044): a sender removed from the roster between hold and
+    release loses the exemption, and one added gains it — the release decision
+    is never made against a stale snapshot.
+    """
+    try:
+        cfg = CustomerConfig.from_volume(str(_YAML_PATH))
+        return (
+            classify_recipients_typed([sender], cfg.inbound_roster, cfg.outbound_roster)
+            is RecipientClass.INTERNAL
+        )
+    except Exception:  # noqa: BLE001 — unclassifiable is never exempt (fail closed)
+        return False
+
+
+def _sweep_once() -> sweeper.SweepResult:
+    """One release pass, with the policy resolved live."""
+    if _HELD_STORE is None or _LIMITER is None:
+        return sweeper.SweepResult()
+    return sweeper.run_sweep_once(
+        store=_HELD_STORE,
+        limiter=_LIMITER,
+        policy=send_policy.live_send_policy(str(_YAML_PATH)),
+        send_fn=_release_send,
+        emit_fn=_emit_reply_event,
+        notify_fn=_notify_hold,
+        internal_senders=_sender_is_internal,
+    )
+
+
+def _start_held_release() -> None:
+    """Open the held-reply store and start the sweeper (#2070).
+
+    Guarded end to end: if the store cannot be opened or the thread cannot
+    start, the relay degrades to the pre-#2070 behavior (rate holds are audited
+    and dropped) rather than failing registration — a broken release path must
+    never take the reply channel down with it.
+    """
+    global _HELD_STORE, _SWEEPER
+
+    _HELD_STORE = None
+    _SWEEPER = None
+    try:
+        store = held_store.HeldReplyStore(
+            os.environ.get("SMD_HELD_REPLY_DB_PATH") or held_store.DEFAULT_HELD_DB_PATH
+        )
+        interrupted = store.fail_interrupted_on_boot()
+        _HELD_STORE = store
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "hermes-smd-reply: held-reply store unavailable (%s); rate holds will drop", exc
+        )
+        return
+
+    if interrupted:
+        # A reply was mid-transmit when the process died. It is NOT resent (the
+        # send may have completed) — report it so a lost release is visible.
+        logger.warning(
+            "hermes-smd-reply: %d held repl(ies) were interrupted mid-send and will "
+            "not be auto-resent (rows %s)",
+            len(interrupted),
+            interrupted,
+        )
+        _notify_hold(
+            reason="hold_interrupted",
+            sender="",
+            sender_class="unclassified",
+            adapter="unknown",
+            message_id="",
+            body_digest="",
+            pending=len(interrupted),
+        )
+
+    try:
+        _SWEEPER = sweeper.start_sweeper_thread(sweep=_sweep_once)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("hermes-smd-reply: held-reply sweeper failed to start (%s)", exc)
 
 
 def register(ctx) -> None:
@@ -403,6 +632,7 @@ def register(ctx) -> None:
         )
 
     _LIMITER = relay.RateLimiter()
+    _start_held_release()
     _INFRA_READY = True
     ctx.register_hook("post_tool_call", on_post_tool_call)
     logger.info(

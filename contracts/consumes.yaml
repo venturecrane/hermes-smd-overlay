@@ -307,6 +307,12 @@ vars:
     requirement: optional
     consumed_by: [webhook-router]
     note: customer.yaml path; defaults to /opt/data/customer.yaml
+  SMD_HELD_REPLY_DB_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [reply]
+    note: held-reply queue db (#2070); defaults to /opt/data/held_replies.db
   SMD_WEBHOOK_SIGNING_SECRET:
     discovery: static
     stage: agent

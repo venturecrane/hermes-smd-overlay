@@ -110,6 +110,14 @@ def relay_mod(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_D1_CLIENT", fake_d1, raising=False)
     monkeypatch.setattr(mod, "_LIMITER", mod.relay.RateLimiter(), raising=False)
     monkeypatch.setattr(mod, "_YAML_PATH", yaml_path, raising=False)
+    # Held-reply store (#2070) is register-time infra; point it at a temp db so
+    # the live-path hold tests exercise real persistence, not a stub.
+    monkeypatch.setattr(
+        mod,
+        "_HELD_STORE",
+        mod.held_store.HeldReplyStore(str(tmp_path / "held.db")),
+        raising=False,
+    )
     monkeypatch.setattr(mod.relay, "send_reply", _fake_send)
     return mod, fake_d1, sent
 
@@ -720,3 +728,71 @@ def test_send_reply_builds_request() -> None:
     assert captured["method"] == "POST"
     assert captured["auth"] == "Bearer sek"
     assert captured["body"] == {"text": "hello", "html": "<p>hello</p>"}
+
+
+# ---------------------------------------------------------------------------
+# 5b. Held-reply persistence + ordering guard (#2070 O2)
+# ---------------------------------------------------------------------------
+
+_RELEASE_YAML = (
+    _ROSTERED_YAML
+    + "send_policy:\n"
+    + "  reply:\n"
+    + "    per_sender_max: 2\n"
+    + "  held_release:\n"
+    + "    enabled: true\n"
+)
+
+
+def test_rate_hold_enqueues_for_release(relay_mod) -> None:
+    """A rate hold now PERSISTS instead of vanishing (the burst-rehearsal fix)."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(_RELEASE_YAML)
+    _burst(mod, 3)
+    assert len(sent) == 2
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert len(held) == 1
+    assert held[0]["reason"] == "rate_limited_per_sender"
+    assert held[0]["held_for_release"] is True
+    assert mod._HELD_STORE.pending_count() == 1
+
+
+def test_queued_behind_held_preserves_order(relay_mod) -> None:
+    """Once a sender has a reply waiting, later replies queue behind it — a
+    cleared window must never let answer 5 overtake answer 4."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(_RELEASE_YAML)
+    _burst(mod, 4)
+    assert len(sent) == 2  # 3rd rate-held, 4th queued behind it
+    reasons = [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"]
+    assert reasons == ["rate_limited_per_sender", "queued_behind_held"]
+    assert mod._HELD_STORE.pending_count() == 2
+
+
+def test_hold_drops_when_release_unauthored(relay_mod) -> None:
+    """Without held_release, a rate hold behaves exactly as before #2070."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(_ROSTERED_YAML + "send_policy:\n  reply:\n    per_sender_max: 1\n")
+    _burst(mod, 3)
+    assert len(sent) == 1
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert len(held) == 2
+    assert all(m["held_for_release"] is False for m in held)
+    assert mod._HELD_STORE.pending_count() == 0
+
+
+def test_semantic_holds_never_enqueue(relay_mod) -> None:
+    """Roster/recipient-lock refusals are decisions, not delays — never queued."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(
+        _NO_ROSTER_YAML + "send_policy:\n  held_release:\n    enabled: true\n"
+    )
+    _record_origin(sender="greg@whitfield.example", session="sx")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="sx",
+    )
+    assert sent == []
+    assert any(m["reason"] == "sender_not_on_roster" for a, m in d1.events() if a == "REPLY_HELD")
+    assert mod._HELD_STORE.pending_count() == 0
