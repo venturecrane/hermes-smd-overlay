@@ -63,10 +63,19 @@ SUPPORTED_KINDS: frozenset[str] = frozenset(
         "config_export",
         "jobs",
         "entitlements",
+        "usage_export",
     }
 )
 _REAL_KINDS: frozenset[str] = frozenset(
-    {"audit_log", "audit_export", "memory_export", "config_export", "jobs", "entitlements"}
+    {
+        "audit_log",
+        "audit_export",
+        "memory_export",
+        "config_export",
+        "jobs",
+        "entitlements",
+        "usage_export",
+    }
 )
 
 # config_export section allow-list (ADR 0048). Unlike ``config`` (a
@@ -277,6 +286,15 @@ def read_runtime(
         from shared.exposure_override import read_all
 
         return {"entries": read_all(), "cursor": None}
+
+    if kind == "usage_export":
+        # Per-person token meter (ss-console #2070). Lives on the agent-state
+        # db beside the other agent-authored tables. SMD-only consumption: the
+        # console renders it on the admin cost plane, never to the client.
+        # A seat that has not metered anything yet is an honest empty page.
+        if not agent_state_db_path or not os.path.exists(agent_state_db_path):
+            return {"entries": [], "cursor": None}
+        return _read_table_export(agent_state_db_path, "usage_meter", cursor, clamp_limit(limit))
 
     if kind == "memory_export":
         if table not in MEMORY_EXPORT_TABLES:

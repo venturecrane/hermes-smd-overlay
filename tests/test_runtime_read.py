@@ -447,3 +447,47 @@ def test_config_export_absent_relationship_block_is_empty(tmp_path):
 def test_config_export_is_a_supported_real_kind():
     assert "config_export" in rr.SUPPORTED_KINDS
     assert "relationship" in rr.CONFIG_EXPORT_SECTIONS
+
+
+# ---------------------------------------------------------------------------
+# usage_export — per-person token meter (ss-console #2070)
+# ---------------------------------------------------------------------------
+
+
+def test_usage_export_is_a_supported_real_kind():
+    assert "usage_export" in rr.SUPPORTED_KINDS
+    assert "usage_export" in rr._REAL_KINDS
+
+
+def test_usage_export_honest_empty_without_a_meter(tmp_path):
+    """A seat that has never metered is an empty page, never a 500."""
+    assert rr.read_runtime("usage_export", db_path=None) == {"entries": [], "cursor": None}
+    assert rr.read_runtime(
+        "usage_export", db_path=None, agent_state_db_path=str(tmp_path / "absent.db")
+    ) == {"entries": [], "cursor": None}
+
+
+def test_usage_export_serves_meter_rows(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "agent_state.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE usage_meter (day TEXT, attributed_to TEXT, model TEXT, "
+        "attribution_source TEXT, input_tokens INTEGER, output_tokens INTEGER, "
+        "cache_read_tokens INTEGER, cache_write_tokens INTEGER, reasoning_tokens INTEGER, "
+        "requests INTEGER, updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO usage_meter VALUES ('2026-07-30','greg@x.test','claude-opus-5',"
+        "'inbound_origin',1000,200,0,0,0,3,'2026-07-30T12:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+
+    res = rr.read_runtime("usage_export", db_path=None, agent_state_db_path=str(path))
+    assert len(res["entries"]) == 1
+    row = res["entries"][0]
+    assert row["attributed_to"] == "greg@x.test"
+    assert row["requests"] == 3
+    assert row["attribution_source"] == "inbound_origin"

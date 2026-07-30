@@ -17,3 +17,4 @@ plugins:
   - plugins/hermes-smd-jobs
   - plugins/hermes-smd-escalation
   - plugins/hermes-smd-connector-health
+  - plugins/hermes-smd-usage

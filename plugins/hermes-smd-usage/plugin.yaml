@@ -1,0 +1,9 @@
+name: hermes-smd-usage
+version: "0.1.0"
+description: "Per-person token attribution (ss-console #2070): folds each post_api_request into a (day, person, model) meter row on the seat, attributed to the inbound sender when the turn was opened by email and to system:<platform> otherwise. Read by the console over runtime_read kind usage_export."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - post_api_request
+hooks:
+  - post_api_request
