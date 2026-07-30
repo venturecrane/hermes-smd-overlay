@@ -352,6 +352,22 @@ class CustomerConfig:
         return dict(raw)
 
     @property
+    def send_policy(self) -> dict[str, Any]:
+        """Return the ``send_policy`` mapping (reply-channel send caps, #2070).
+
+        Read live per call so authoring the policy applies on the next reply
+        without a restart (ADR 0044). Resolution and fail-closed defaulting
+        live in ``shared.send_policy.resolve_send_policy`` — this accessor only
+        guards the mapping shape. Absent ⇒ ``{}``.
+        """
+        raw = self._data.get("send_policy") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: send_policy must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    @property
     def sticky_stop(self) -> dict[str, Any]:
         """Return the ``safety.sticky_stop`` mapping (ADR 0062 cost breaker).
 

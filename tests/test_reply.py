@@ -505,25 +505,124 @@ def test_empty_body_held(relay_mod) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_per_sender_rate_limit(relay_mod) -> None:
-    mod, d1, sent = relay_mod
-    # Tight per-sender bound for the test.
-    mod._LIMITER = mod.relay.RateLimiter(per_sender_max=2, global_max=100)
-    _record_origin(sender="greg@whitfield.example", session="s1")
-    for i in range(4):
-        # Each call is a fresh session opened by the same inbound sender.
+def _burst(mod, n: int, sender: str = "greg@whitfield.example") -> None:
+    """n live-path replies, each a fresh session opened by the same sender."""
+    for i in range(n):
         sid = f"s{i}"
         inbound.SESSION_INBOUND_ORIGIN.record(
             sid,
-            inbound.InboundOrigin("greg@whitfield.example", f"msg_{i}", inbox_id="inbox_x"),
+            inbound.InboundOrigin(sender, f"msg_{i}", inbox_id="inbox_x"),
         )
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
-            args=_draft(["greg@whitfield.example"]),
+            args=_draft([sender]),
             session_id=sid,
         )
+
+
+def test_per_sender_rate_limit(relay_mod) -> None:
+    """The live path enforces the AUTHORED per-sender cap (send_policy is
+    live-read per call — the ctor caps only govern the legacy allow() path)."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(_ROSTERED_YAML + "send_policy:\n  reply:\n    per_sender_max: 2\n")
+    _burst(mod, 4)
     assert len(sent) == 2  # only the first two cleared the per-sender window
-    assert any(a == "REPLY_HELD" and m["reason"] == "rate_limited" for a, m in d1.events())
+    assert any(
+        a == "REPLY_HELD" and m["reason"] == "rate_limited_per_sender" for a, m in d1.events()
+    )
+
+
+def test_unauthored_policy_pins_current_defaults(relay_mod) -> None:
+    """No send_policy block ⇒ exactly the pre-#2070 behavior: 3 per sender
+    per window, granular hold reason, no exemption. The regression pin."""
+    mod, d1, sent = relay_mod
+    _burst(mod, 5)
+    assert len(sent) == 3
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert len(held) == 2 and all(m["reason"] == "rate_limited_per_sender" for m in held)
+
+
+def test_internal_exempt_sustains_dialogue(relay_mod) -> None:
+    """The #2070 headline: a rostered INTERNAL sender under an authored
+    exemption sustains a 10-exchange dialogue with zero rate holds, bounded
+    only by the reply backstop."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(
+        _ROSTERED_YAML
+        + "send_policy:\n"
+        + "  reply:\n"
+        + "    internal_exempt: true\n"
+        + "    backstop_max: 60\n"
+        + "    backstop_window_seconds: 3600\n"
+    )
+    _burst(mod, 10)
+    assert len(sent) == 10
+    assert not [m for a, m in d1.events() if a == "REPLY_HELD"]
+
+
+def test_backstop_bounds_exempt_senders(relay_mod) -> None:
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(
+        _ROSTERED_YAML
+        + "send_policy:\n"
+        + "  reply:\n"
+        + "    internal_exempt: true\n"
+        + "    backstop_max: 4\n"
+    )
+    _burst(mod, 6)
+    assert len(sent) == 4
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert len(held) == 2 and all(m["reason"] == "rate_limited_backstop" for m in held)
+
+
+def test_malformed_policy_falls_back_to_defaults(relay_mod) -> None:
+    """A typo in send_policy tightens back to the platform defaults — it can
+    never loosen (whole-block fail-closed)."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(
+        _ROSTERED_YAML
+        + "send_policy:\n"
+        + "  reply:\n"
+        + "    internal_exempt: true\n"
+        + "    backstop_max: -5\n"  # malformed ⇒ ENTIRE block defaults, exemption dropped
+    )
+    _burst(mod, 5)
+    assert len(sent) == 3  # platform default per-sender cap
+    assert any(
+        a == "REPLY_HELD" and m["reason"] == "rate_limited_per_sender" for a, m in d1.events()
+    )
+
+
+def test_classification_fault_keeps_caps_despite_exemption(relay_mod, monkeypatch) -> None:
+    """If recipient classification raises, the sender is NOT internal for
+    exemption purposes — the default caps still bind (fail-closed)."""
+    mod, d1, sent = relay_mod
+    mod._YAML_PATH.write_text(
+        _ROSTERED_YAML + "send_policy:\n  reply:\n    internal_exempt: true\n"
+    )
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("classifier fault")
+
+    monkeypatch.setattr(mod, "classify_recipients_typed", _boom)
+    _burst(mod, 5)
+    assert len(sent) == 3  # default per-sender cap still applied
+    assert any(
+        a == "REPLY_HELD" and m["reason"] == "rate_limited_per_sender" for a, m in d1.events()
+    )
+
+
+def test_policy_live_read_mid_flight(relay_mod) -> None:
+    """Authoring the exemption between calls takes effect with no restart
+    (ADR 0044): capped before, flowing after."""
+    mod, d1, sent = relay_mod
+    _burst(mod, 4)  # default policy: 3 sent, 1 held
+    assert len(sent) == 3
+    mod._YAML_PATH.write_text(
+        _ROSTERED_YAML + "send_policy:\n  reply:\n    internal_exempt: true\n"
+    )
+    _burst(mod, 3)
+    assert len(sent) == 6  # all three flowed under the authored exemption
 
 
 def test_rate_limiter_window_eviction() -> None:

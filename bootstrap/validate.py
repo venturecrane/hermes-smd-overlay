@@ -209,6 +209,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
 
     _validate_top_level(cfg, errors)
     _validate_personas(cfg, errors)
+    _validate_send_policy(cfg, errors)
     _validate_webhook_triggers(cfg, errors)
     _validate_scope_entitlements(cfg, errors)
     _validate_outbound_roster(cfg, errors)
@@ -630,6 +631,79 @@ def _skills_granting(skills: Any, flag: str) -> set[str]:
         ):
             out.add(name)
     return out
+
+
+_SEND_POLICY_REPLY_KEYS = frozenset(
+    {
+        "internal_exempt",
+        "per_sender_max",
+        "per_sender_window_seconds",
+        "global_max",
+        "global_window_seconds",
+        "backstop_max",
+        "backstop_window_seconds",
+    }
+)
+_SEND_POLICY_HELD_KEYS = frozenset({"enabled", "ttl_seconds"})
+
+
+def _validate_send_policy(cfg: dict[str, Any], errors: list[str]) -> None:
+    """``send_policy`` shape check (reply-channel send caps, ss-console #2070).
+
+    The runtime resolver (``shared.send_policy.resolve_send_policy``) tolerates
+    a malformed block by falling back to the platform defaults; the validator
+    surfaces the typo at provision/authoring time instead of silently changing
+    the authored intent (same split as ``_validate_trigger_throttle``). Mirrors
+    the console's ``checkSendPolicy`` — keep the two in lockstep (the parity
+    fixture contract pins agreement).
+    """
+    block = cfg.get("send_policy")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        _err(f"send_policy must be a mapping; got {type(block).__name__}", errors)
+        return
+    for key in sorted(set(block) - {"reply", "held_release"}):
+        _err(f"send_policy.{key}: unknown key", errors)
+
+    reply = block.get("reply")
+    if reply is not None:
+        if not isinstance(reply, dict):
+            _err(f"send_policy.reply must be a mapping; got {type(reply).__name__}", errors)
+        else:
+            for key in sorted(set(reply) - _SEND_POLICY_REPLY_KEYS):
+                _err(f"send_policy.reply.{key}: unknown key", errors)
+            v = reply.get("internal_exempt")
+            if v is not None and not isinstance(v, bool):
+                _err("send_policy.reply.internal_exempt: must be a boolean", errors)
+            for key in ("per_sender_max", "global_max", "backstop_max"):
+                v = reply.get(key)
+                if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+                    _err(f"send_policy.reply.{key}: must be a non-negative integer", errors)
+            for key in (
+                "per_sender_window_seconds",
+                "global_window_seconds",
+                "backstop_window_seconds",
+            ):
+                v = reply.get(key)
+                if v is not None and (
+                    isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0
+                ):
+                    _err(f"send_policy.reply.{key}: must be a positive number", errors)
+
+    held = block.get("held_release")
+    if held is not None:
+        if not isinstance(held, dict):
+            _err(f"send_policy.held_release must be a mapping; got {type(held).__name__}", errors)
+        else:
+            for key in sorted(set(held) - _SEND_POLICY_HELD_KEYS):
+                _err(f"send_policy.held_release.{key}: unknown key", errors)
+            v = held.get("enabled")
+            if v is not None and not isinstance(v, bool):
+                _err("send_policy.held_release.enabled: must be a boolean", errors)
+            v = held.get("ttl_seconds")
+            if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v <= 0):
+                _err("send_policy.held_release.ttl_seconds: must be a positive integer", errors)
 
 
 def _validate_webhook_triggers(cfg: dict[str, Any], errors: list[str]) -> None:

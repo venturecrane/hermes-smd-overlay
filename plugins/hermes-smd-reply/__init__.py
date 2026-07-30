@@ -53,7 +53,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, msgraph_client
+from shared import inbound, msgraph_client, send_policy
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -282,9 +282,24 @@ def on_post_tool_call(**kwargs: Any) -> None:
             _held("empty_body", origin)
             return
 
-        # (d) Rate-limit (per-sender + global).
-        if _LIMITER is None or not _LIMITER.allow(origin.sender_address):
+        # (d) Rate-limit under the authored send policy (#2070). Resolved LIVE
+        # per call (ADR 0044): authoring `send_policy` — e.g. exempting rostered
+        # INTERNAL senders so a sustained dialogue never rate-holds — applies on
+        # the next reply without a restart. Unauthored/malformed resolves to the
+        # platform defaults (today's exact caps), never fail-open. INTERNAL
+        # classification comes from step (c)'s classifier — the same rosters the
+        # content floor trusts.
+        policy = send_policy.live_send_policy(str(_YAML_PATH))
+        if _LIMITER is None:
             _held("rate_limited", origin)
+            return
+        decision = _LIMITER.check(origin.sender_address, internal=internal, policy=policy)
+        if not decision.allowed:
+            _held(
+                decision.reason or "rate_limited",
+                origin,
+                sender_class=recipient_class.value if recipient_class else "unclassified",
+            )
             return
 
         # (e) Send the threaded reply, keyed on the recorded message id (structural
