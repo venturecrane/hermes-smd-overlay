@@ -43,11 +43,69 @@ Exception-safe per AGENTS.md hard rule #3: any failure logs and returns ``None``
 """
 
 import logging
+import re
 from typing import Any
 
 from shared import inbound
 
 logger = logging.getLogger(__name__)
+
+
+# The delimiter every inbound-email prompt places between the fields WE
+# rendered and the sender-controlled body (bootstrap/translate.py, both the
+# agentmail and msgraph templates). Everything above it is trusted; everything
+# below is attacker-controlled data.
+_UNTRUSTED_DELIMITER = "--- untrusted email body below"
+# ``message_id: <id>`` on its own line. The templates render it as the LAST
+# field before the delimiter.
+_MESSAGE_ID_RE = re.compile(r"^message_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+
+
+def _bind_origin_from_prompt(session_id: str, user_message: Any) -> None:
+    """Bind this session to the inbound origin named in the turn prompt (#195).
+
+    The webhook router records the recipient-lock origin under the DISPATCH
+    session id, which is empty on the live email path — so the relay's
+    session-keyed lookup misses and it falls back to the address index. That
+    index is most-recent-wins per address, so two messages from the same person
+    in flight at once collapse to one origin and a reply threads into the wrong
+    conversation (3 of 12 in the 2026-07-30 burst rehearsal). The turn prompt
+    carries the inbound's own ``message_id``, which is unique — so binding here
+    makes the relay's lookup deterministic and demotes the address guess to a
+    last resort.
+
+    Injection defense, three layers:
+
+    * only the region ABOVE the untrusted-body delimiter is parsed, so a
+      ``message_id:`` line inside the email body is never read;
+    * the LAST match in that region wins — the templates render message_id
+      immediately above the delimiter, so a header-shaped injection smuggled
+      through an earlier field (a subject with an embedded newline) cannot
+      displace the real one;
+    * a prompt with NO delimiter is skipped entirely rather than treated as
+      all-trusted — MCP, skill, and cron prompts have no delimiter, and they
+      have no inbound origin to bind anyway.
+
+    Even a successful forgery binds only to an origin the router recorded after
+    Svix signature verification, and the relay's recipient-lock still requires
+    the draft to name exactly that sender.
+    """
+    if not session_id or not isinstance(user_message, str):
+        return
+    try:
+        cut = user_message.find(_UNTRUSTED_DELIMITER)
+        if cut < 0:
+            return
+        matches = _MESSAGE_ID_RE.findall(user_message[:cut])
+        if not matches:
+            return
+        if inbound.SESSION_INBOUND_ORIGIN.bind(session_id, matches[-1]):
+            logger.debug(
+                "hermes-smd-inbound: bound session %r to inbound origin by message id",
+                session_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — binding is an optimization, never a gate
+        logger.warning("hermes-smd-inbound: origin bind failed (%s)", exc)
 
 
 def on_pre_llm_call(**kwargs: Any) -> dict | None:
@@ -65,6 +123,11 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         session_id = kwargs.get("session_id")
         if not isinstance(session_id, str):
             session_id = ""
+
+        # Bind this turn to the specific inbound that opened it (#195), BEFORE
+        # anything else — an INTERNAL email skips the PENDING queue entirely, so
+        # this must not sit behind the drain. See _bind_origin_from_prompt.
+        _bind_origin_from_prompt(session_id, kwargs.get("user_message"))
 
         items = inbound.PENDING.drain(session_id)
         # Rendezvous for dispatch-unkeyed items (ss #1943): the live email

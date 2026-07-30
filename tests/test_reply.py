@@ -66,9 +66,11 @@ _NO_ROSTER_YAML = "customer_id: acme\nvertical: law-firm\n"
 def _clear_origin():
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
+    inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
     yield
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
+    inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
 
 
 @pytest.fixture
@@ -796,3 +798,32 @@ def test_semantic_holds_never_enqueue(relay_mod) -> None:
     assert sent == []
     assert any(m["reason"] == "sender_not_on_roster" for a, m in d1.events() if a == "REPLY_HELD")
     assert mod._HELD_STORE.pending_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Origin resolution after #195: the bound session wins over the address guess
+# ---------------------------------------------------------------------------
+
+
+def test_bound_session_beats_a_fresher_address_entry(relay_mod) -> None:
+    """The misattribution regression.
+
+    Two messages from the same sender are in flight; the address index holds
+    the LATER one. A session bound (by message id) to the EARLIER message must
+    reply into that earlier thread, not the address index's most-recent.
+    """
+    mod, d1, sent = relay_mod
+    reg = inbound.SESSION_INBOUND_ORIGIN
+    reg.record("", inbound.InboundOrigin("greg@whitfield.example", "msg_early", "", "inbox_x"))
+    reg.record("", inbound.InboundOrigin("greg@whitfield.example", "msg_late", "", "inbox_x"))
+    assert reg.bind("agent-1", "msg_early") is True
+
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="agent-1",
+    )
+    assert len(sent) == 1
+    assert sent[0]["message_id"] == "msg_early"  # not the fresher msg_late
+    _, meta = next((a, m) for a, m in d1.events() if a == "REPLY_SENT")
+    assert meta["in_reply_to"] == "msg_early"

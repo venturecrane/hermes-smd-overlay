@@ -471,6 +471,15 @@ class SessionInboundOrigin:
     # come only from Svix-verified From headers, never from message content.
     _unbound: "deque[tuple[float, InboundOrigin]]" = field(default_factory=deque)
     unbound_max: int = 8
+    # Message-id index — the DETERMINISTIC session binding (overlay #195).
+    # ``_by_address`` is most-recent-wins per address, so two inbounds from the
+    # SAME person in flight at once collapse to the latest: the relay then
+    # threaded a reply onto the wrong conversation of the right person (3 of 12
+    # in the 2026-07-30 burst rehearsal). Message ids are unique per inbound, so
+    # a consumer that can see the id (the inbound plugin, from the trusted
+    # prompt prefix) can bind session -> origin exactly, and the address-keyed
+    # guess becomes a last resort instead of the normal path.
+    _by_message: "OrderedDict[str, InboundOrigin]" = field(default_factory=OrderedDict)
 
     def record(self, session_id: str, origin: InboundOrigin) -> None:
         """Record the opening inbound's origin (recipient-lock anchor).
@@ -483,6 +492,12 @@ class SessionInboundOrigin:
         a session id is present and keeps first-inbound-wins semantics."""
         if not origin.sender_address:
             return
+        if origin.message_id:
+            # Unique per inbound — the deterministic binding key (#195).
+            self._by_message[origin.message_id] = origin
+            self._by_message.move_to_end(origin.message_id)
+            while len(self._by_message) > self.max_sessions:
+                self._by_message.popitem(last=False)
         addr = origin.sender_address.strip().lower()
         if addr:
             # Most-recent wins for a given address: a later inbound from the
@@ -507,6 +522,43 @@ class SessionInboundOrigin:
         self._origins.move_to_end(session_id)
         while len(self._origins) > self.max_sessions:
             self._origins.popitem(last=False)
+
+    def bind(self, session_id: str, message_id: str) -> bool:
+        """Bind a session to the origin of a SPECIFIC inbound message (#195).
+
+        The deterministic counterpart to :meth:`find_for_recipient`. The router
+        records under the dispatch-time session id, which is empty on the live
+        email path, so the relay's session-keyed lookup misses and falls back to
+        the address index — most-recent-wins, which collapses two concurrent
+        inbounds from the same person onto one origin and threads a reply into
+        the wrong conversation. A consumer that can see the inbound's own
+        message id (the inbound plugin, reading the trusted prompt prefix) calls
+        this to bind exactly.
+
+        Returns True iff a binding was made. Injection-safe by construction: the
+        id must match an origin the router already recorded AFTER signature
+        verification, so a forged id in message content binds nothing.
+        First-inbound-wins is preserved — an existing lock is never moved.
+        """
+        if not session_id or not message_id:
+            return False
+        origin = self._by_message.get(message_id)
+        if origin is None:
+            return False
+        if session_id in self._origins:
+            self._origins.move_to_end(session_id)
+            return False
+        self._origins[session_id] = origin
+        self._origins.move_to_end(session_id)
+        while len(self._origins) > self.max_sessions:
+            self._origins.popitem(last=False)
+        # This origin is now attributed; drop it from the claim-once queue so
+        # `claim_unbound` cannot hand the SAME inbound to a second turn.
+        for i, (_ts, queued) in enumerate(self._unbound):
+            if queued.message_id == message_id:
+                del self._unbound[i]
+                break
+        return True
 
     def get(self, session_id: str) -> InboundOrigin | None:
         """The recipient-lock origin for the session, or ``None`` if unset.
