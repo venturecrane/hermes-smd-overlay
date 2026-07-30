@@ -197,7 +197,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `pre_llm_call` | yes | voice sample injection + inbound quarantine (ADR 0027) |
 | `post_llm_call` | yes | LLM audit |
 | `pre_api_request` | no | gateway-level API request (not relevant) |
-| `post_api_request` | no | gateway-level API response (not relevant) |
+| `post_api_request` | yes | per-person token metering — `hermes-smd-usage` folds each request's `usage` into a (day, person, model) row, attributed via the session's inbound origin (ss-console #2070; kwargs verified against the pinned ref, `vfy_01KYT51JXBHNSSE99PCCXAA2M3`) |
 | `on_session_start` | no | per-turn session-start (not currently used; available if needed) |
 | `on_session_end` | yes | memory-mirror trigger |
 | `on_session_finalize` | no | session-end finalization |
