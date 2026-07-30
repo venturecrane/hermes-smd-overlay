@@ -166,6 +166,21 @@ def _emit_reply_event(*, action_type: str, metadata: dict) -> None:
         logger.warning("hermes-smd-reply: %s emission failed (%s)", action_type, exc)
 
 
+def _note_fallback_resolution() -> None:
+    """Tag Sentry when the relay resolves an origin by address (#195 alarm).
+
+    Carries no identifiers — the signal is the RATE, not the instance.
+    """
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("origin_resolution", "fallback_by_address")
+            sentry_sdk.capture_message("reply origin resolved by address fallback", level="warning")
+    except Exception as exc:  # noqa: BLE001 — telemetry never breaks the hook
+        logger.debug("hermes-smd-reply: fallback telemetry skipped (%s)", exc)
+
+
 def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
     _emit_reply_event(
         action_type="REPLY_HELD",
@@ -316,11 +331,23 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 relay.draft_recipients(args)
             )
             if recovered is not None:
-                logger.info(
+                # LAST RESORT since #195: the inbound plugin binds session ->
+                # origin by the inbound's unique message id at pre_llm_call, so
+                # the session-keyed lookup above should hit on every email turn.
+                # This path is address-keyed and most-recent-wins, which is
+                # exactly how concurrent messages from one person got their
+                # replies crossed. Reaching it means the binding did not happen
+                # (template drift, a non-email path, a parse miss) — so it is
+                # reported, not silently taken. A nonzero rate here is the
+                # regression alarm; without it the burst failure could only be
+                # rediscovered by a client.
+                logger.warning(
                     "hermes-smd-reply: session-keyed origin missed (session=%r); "
-                    "recovered verified inbound origin by recipient address",
+                    "recovered by recipient address — origin_resolution=fallback_by_address "
+                    "(expected ~never since #195)",
                     session_id,
                 )
+                _note_fallback_resolution()
                 origin = recovered
         if origin is None:
             # Fail closed: no verified inbound sender matches this draft, so
