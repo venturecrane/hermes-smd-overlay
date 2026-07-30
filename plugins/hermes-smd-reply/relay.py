@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +28,7 @@ from email.utils import parseaddr
 from typing import Any
 
 from shared import content_floor, outbound_gate
+from shared import send_policy as send_policy_mod
 
 logger = logging.getLogger(__name__)
 
@@ -199,14 +201,34 @@ def gate_body(
 # ---------------------------------------------------------------------------
 
 
-class RateLimiter:
-    """Rolling-window per-sender + global send limiter.
+@dataclass(frozen=True)
+class RateDecision:
+    """Outcome of a rate check: ``allowed`` plus a hold reason when refused."""
 
-    ``allow(sender)`` returns True and records the send iff neither the
-    per-sender nor the global window is full. Pure in-memory, bounded by the
-    window (old timestamps are evicted on each call). ``clock`` is injectable
-    for deterministic tests; defaults to ``time.monotonic`` (monotonic so a
-    wall-clock adjustment cannot widen or collapse a window)."""
+    allowed: bool
+    reason: str | None = None
+
+
+class RateLimiter:
+    """Rolling-window per-sender + global + backstop send limiter.
+
+    ``check(sender, internal=..., policy=...)`` evaluates the authored
+    :class:`~shared.send_policy.SendPolicy` per call: the reply backstop (when
+    authored) bounds every send; the per-sender and external-global windows are
+    skipped for rostered-INTERNAL senders when the policy exempts them.
+    Exempt sends are recorded ONLY in the backstop window, so internal
+    dialogue never consumes external senders' capacity.
+
+    ``allow(sender)`` is the legacy entry point and delegates to ``check``
+    with the constructor's own values as the policy (no exemption, no
+    backstop) — byte-for-byte the pre-#2070 behavior.
+
+    Pure in-memory, bounded by the windows (old timestamps evicted on each
+    call). ``clock`` is injectable for deterministic tests; defaults to
+    ``time.monotonic`` (monotonic so a wall-clock adjustment cannot widen or
+    collapse a window). One lock guards the whole of ``check`` — the held-
+    reply sweeper (#2070 O2) calls it from a second thread, and
+    evict-check-append must be atomic across ALL windows."""
 
     def __init__(
         self,
@@ -222,33 +244,61 @@ class RateLimiter:
 
             clock = time.monotonic
         self._clock = clock
-        self._per_sender_max = per_sender_max
-        self._per_sender_window_s = per_sender_window_s
-        self._global_max = global_max
-        self._global_window_s = global_window_s
+        self._ctor_policy = send_policy_mod.SendPolicy(
+            internal_exempt=False,
+            per_sender_max=per_sender_max,
+            per_sender_window_s=per_sender_window_s,
+            global_max=global_max,
+            global_window_s=global_window_s,
+            backstop_max=0,
+            backstop_window_s=global_window_s,
+            held_release_enabled=False,
+            held_ttl_s=send_policy_mod.DEFAULT_SEND_POLICY.held_ttl_s,
+        )
         self._per_sender: dict[str, deque[float]] = {}
         self._global: deque[float] = deque()
+        self._backstop: deque[float] = deque()
+        self._lock = threading.Lock()
 
     @staticmethod
     def _evict(window: deque[float], horizon: float) -> None:
         while window and window[0] < horizon:
             window.popleft()
 
+    def check(
+        self,
+        sender: str,
+        *,
+        internal: bool,
+        policy: send_policy_mod.SendPolicy,
+    ) -> RateDecision:
+        with self._lock:
+            now = self._clock()
+
+            # Reply backstop: bounds ALL classes when authored (0 = disabled).
+            self._evict(self._backstop, now - policy.backstop_window_s)
+            if policy.backstop_max > 0 and len(self._backstop) >= policy.backstop_max:
+                return RateDecision(False, "rate_limited_backstop")
+
+            exempt = internal and policy.internal_exempt
+            if not exempt:
+                self._evict(self._global, now - policy.global_window_s)
+                if len(self._global) >= policy.global_max:
+                    return RateDecision(False, "rate_limited_global")
+                bucket = self._per_sender.get(sender)
+                if bucket is None:
+                    bucket = deque()
+                    self._per_sender[sender] = bucket
+                self._evict(bucket, now - policy.per_sender_window_s)
+                if len(bucket) >= policy.per_sender_max:
+                    return RateDecision(False, "rate_limited_per_sender")
+                bucket.append(now)
+                self._global.append(now)
+            self._backstop.append(now)
+            return RateDecision(True, None)
+
     def allow(self, sender: str) -> bool:
-        now = self._clock()
-        self._evict(self._global, now - self._global_window_s)
-        if len(self._global) >= self._global_max:
-            return False
-        bucket = self._per_sender.get(sender)
-        if bucket is None:
-            bucket = deque()
-            self._per_sender[sender] = bucket
-        self._evict(bucket, now - self._per_sender_window_s)
-        if len(bucket) >= self._per_sender_max:
-            return False
-        bucket.append(now)
-        self._global.append(now)
-        return True
+        return self.check(sender, internal=False, policy=self._ctor_policy).allowed
 
 
 # ---------------------------------------------------------------------------
