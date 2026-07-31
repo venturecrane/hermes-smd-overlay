@@ -63,6 +63,10 @@ _EXPECTED = "expected"
 #: Fail reasons, carried into the audit row and the operator-facing message.
 _REASON_SPEC_NOT_READ = "spec_not_read"
 _REASON_GATE_ERROR = "gate_error"
+#: The output does not have the shape the customer authored. Distinct from
+#: `spec_not_read` on purpose: that one means the model never looked, this one
+#: means it looked and produced something else, and the fixes differ.
+_REASON_FORMAT_VIOLATION = "format_violation"
 
 
 def resolve_output_class(action_class_value: str) -> str | None:
@@ -77,6 +81,42 @@ def resolve_output_class(action_class_value: str) -> str | None:
         "external_send_vendor": "outbound_vendor",
         "external_send": "outbound_external",
     }.get(action_class_value)
+
+
+def _declared(output_class: str, prop: str) -> bool:
+    """True iff the seat declares ``<prop>_spec: expected`` for this class."""
+    try:
+        declared = CustomerConfig.from_volume().output_classes.get(output_class)
+    except Exception:  # noqa: BLE001 — unconfirmed => not declared => gate silent
+        logger.debug(
+            "spec gate: output_classes unresolved; treating as not declared (gate silent)",
+            exc_info=True,
+        )
+        return False
+    if not isinstance(declared, dict):
+        return False
+    return str(declared.get(f"{prop}_spec", "")).strip().lower() == _EXPECTED
+
+
+def _format_violations(output_class: str, body: str) -> list:
+    """Every way ``body`` breaks the class's authored shape rules.
+
+    Reads the assertions out of the ROOT-OWNED manifest — the same surface the
+    body digest comes from — so the agent cannot widen its own shape rules by
+    writing anywhere it can reach.
+
+    A class that declares `format_spec: expected` but whose installed spec
+    carries no assertions yields no violations HERE; the missing-spec case is
+    the declaration check's job, not this one. Two different failures, two
+    different reasons.
+    """
+    from shared import format_check, spec_manifest
+
+    entries = [e for e in spec_manifest.entries_for_class(output_class) if e.prop == "format"]
+    violations: list = []
+    for entry in entries:
+        violations.extend(format_check.check(body, entry.assertions))
+    return violations
 
 
 def _spec_expected(output_class: str) -> bool:
@@ -147,8 +187,15 @@ def _emit_spec_gate_audit(
     reason: str,
     session_id: str,
     tool_call_id: str,
+    detail: str = "",
 ) -> None:
-    """Write one ``SPEC_GATE_TRIGGERED`` row. Provenance only, never the body."""
+    """Write one ``SPEC_GATE_TRIGGERED`` row. Provenance only, never the body.
+
+    ``detail`` carries RULE NAMES for a format violation — never the offending
+    text. The audit row is durable and read by people who were not in the
+    session; the fragment that helps the model fix its draft has no business
+    persisting there.
+    """
     client, slug = _audit_client()
     if client is None or slug is None:
         _NO_AUDIT_WARNER.warn(
@@ -165,6 +212,8 @@ def _emit_spec_gate_audit(
             "output_class": output_class,
             "reason": reason,
         }
+        if detail:
+            metadata["rules"] = detail
         if session_id:
             metadata["session_id"] = session_id
         if tool_call_id:
@@ -201,6 +250,7 @@ def check_spec_gate(
     action_class_value: str,
     session_id: str = "",
     tool_call_id: str = "",
+    body: str = "",
 ) -> dict | None:
     """Gate an allowed autonomous send on having read its class's authored spec.
 
@@ -213,8 +263,42 @@ def check_spec_gate(
         return None
 
     try:
-        if not _spec_expected(output_class):
+        voice_bound = _spec_expected(output_class)
+        format_bound = _declared(output_class, "format")
+        if not voice_bound and not format_bound:
             return None  # not bound for this class on this seat
+
+        # FORMAT FIRST, and it is checked against the actual text. Voice asks
+        # whether the model consulted its spec; format asks whether the thing it
+        # produced has the authored shape. ADR 0083 §3: format is binary where
+        # voice is probabilistic, so this is the half that can be decided rather
+        # than graded — and a shape honoured only most of the time is worse than
+        # one never promised, because the reader stops trusting all of it.
+        if format_bound and body:
+            violations = _format_violations(output_class, body)
+            if violations:
+                from shared import format_check
+
+                detail = format_check.describe(violations)
+                _emit_spec_gate_audit(
+                    tool_name=tool_name,
+                    output_class=output_class,
+                    reason=_REASON_FORMAT_VIOLATION,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                    detail=format_check.rule_names(violations),
+                )
+                return {
+                    "action": "block",
+                    "message": (
+                        f"Refused: this output does not have the shape the firm authored for "
+                        f"the '{output_class}' class — {detail}. Fix the shape and send again, "
+                        "or create a draft for review. (ss ADR 0083 §3)"
+                    ),
+                }
+
+        if not voice_bound:
+            return None
         if SPEC_STATUS.was_read(session_id, output_class, "voice"):
             return None
         reason = _REASON_SPEC_NOT_READ

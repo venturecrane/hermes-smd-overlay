@@ -209,6 +209,10 @@ class ParsedSpec:
     prop: str
     body: bytes
     digest: str
+    #: Machine-checkable shape rules for this property, or {}. Carried verbatim
+    #: from the customer's vault object into the ROOT-OWNED manifest, which is
+    #: the only place the gate reads them from — the agent can write neither.
+    assertions: dict = field(default_factory=dict)
 
     @property
     def rel_path(self) -> str:
@@ -296,7 +300,19 @@ def _parse_one(slug: str, prop: str, raw: Any) -> tuple[ParsedSpec | None, list[
             f"body's actual digest {actual!r} — the document and its own integrity "
             "claim disagree, so the whole document is refused"
         ]
-    return ParsedSpec(output_class=slug, prop=prop, body=encoded, digest=actual or ""), []
+    # Assertions are OPTIONAL and, when present, must be an object. A malformed
+    # value refuses the whole document rather than being dropped: silently
+    # discarding shape rules would leave the customer believing a rule is
+    # enforced while nothing checks it — worse than refusing the write.
+    assertions = raw.get("assertions", {})
+    if not isinstance(assertions, dict):
+        return None, [f"{path}.assertions: must be an object when present"]
+    return (
+        ParsedSpec(
+            output_class=slug, prop=prop, body=encoded, digest=actual or "", assertions=assertions
+        ),
+        [],
+    )
 
 
 def _safe_slug(slug: str) -> bool:
@@ -440,6 +456,9 @@ def _install(
             # against itself.
             "sha256": sha256(spec.body),
             "bytes": len(spec.body),
+            # Root-recorded alongside the digest, so the gate reads shape rules
+            # from the same trusted surface it reads the hash from.
+            "assertions": spec.assertions,
         }
 
     manifest = {

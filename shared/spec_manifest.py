@@ -30,7 +30,7 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,10 @@ class SpecEntry:
     output_class: str
     prop: str
     sha256: str
+    #: Machine-checkable shape rules, or {}. Root-recorded by the applier from
+    #: the customer's vault object; the format gate reads them from here and
+    #: never from anything the agent can write.
+    assertions: dict = field(default_factory=dict)
 
     def path_under(self, spec_dir: Path) -> Path:
         return spec_dir / self.rel_path
@@ -105,7 +109,14 @@ def load_entries(directory: Path | None = None) -> dict[str, SpecEntry]:
             isinstance(output_class, str) and isinstance(prop, str) and isinstance(digest, str)
         ):
             continue
-        entries[rel] = SpecEntry(rel_path=rel, output_class=output_class, prop=prop, sha256=digest)
+        raw_assertions = meta.get("assertions")
+        entries[rel] = SpecEntry(
+            rel_path=rel,
+            output_class=output_class,
+            prop=prop,
+            sha256=digest,
+            assertions=raw_assertions if isinstance(raw_assertions, dict) else {},
+        )
     return entries
 
 
