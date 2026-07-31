@@ -71,7 +71,9 @@ def write_if_changed(target: Path, content: bytes) -> bool:
                 return False
         except OSError:
             pass  # unreadable existing file — fall through and replace it
-    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)

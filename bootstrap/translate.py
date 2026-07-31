@@ -1317,12 +1317,10 @@ def _yaml_bytes(data: dict[str, Any]) -> bytes:
 # installed. The refresh must run as hermes (this profile tree is hermes-owned
 # and the root applier writing here would recreate the 2026-07-16 root-owned
 # cron store), so it lives in shared/ where both callers reach it.
-# Aliased under the private names this module and its tests already use.
-from shared.spec_stamp import SPEC_STAMP_BEGIN as _SPEC_STAMP_BEGIN  # noqa: E402
-from shared.spec_stamp import SPEC_STAMP_END as _SPEC_STAMP_END  # noqa: E402
+# Aliased under the private names this module's call sites already use; the
+# stamp's own tests address shared.spec_stamp directly.
 from shared.spec_stamp import render_pointer_block as _spec_pointer_block  # noqa: E402
 from shared.spec_stamp import stamp_skill_md as _stamp_skill_md  # noqa: E402
-from shared.spec_stamp import strip_stamp as _strip_stamp  # noqa: E402
 
 
 def _install_persona_skills(
