@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 
 import pytest
 
@@ -207,6 +208,46 @@ def test_installed_files_are_group_and_world_readable_not_writable(tmp_path):
     mode = (tmp_path / "classes/staff/voice.md").stat().st_mode & 0o7777
     assert mode == 0o644
     assert (tmp_path / "classes").stat().st_mode & 0o7777 == 0o755
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o027, 0o077])
+def test_every_directory_is_traversable_whatever_the_umask(tmp_path, umask):
+    """The assertion above was right and passed for the wrong reason.
+
+    ``Path.mkdir(parents=True)`` creates INTERMEDIATE directories with
+    ``0o777 & ~umask`` and does not apply the caller's mode to them. The applier
+    hardened only the leaf, so ``classes/`` inherited the process umask. Under
+    the test runner's 0o022 that is 0o755 and the existing assertion passed —
+    it was measuring the runner's umask, not the code.
+
+    On a live seat the applier runs as ROOT, whose umask in the customer image
+    is 0o027, so ``classes/`` landed at 0o750: no world execute, agent gets
+    Permission denied, and the spec below it is unreachable however correct its
+    own mode is. Observed on hermes-smd-staging 2026-07-31
+    (``vfy_01KYWVR8PBBEP85W3F5SSNC9FD``) — manifest correct, digest matching,
+    applier logging APPLIED, feature dead.
+
+    Parametrising the umask is the whole point: a fixed-umask test cannot
+    distinguish "the code sets this" from "the environment happened to".
+    """
+    previous = os.umask(umask)
+    try:
+        apply(
+            s3_client=FakeS3({KEY: _doc({"staff": {"voice": "x\n"}})}),
+            bucket=BUCKET,
+            slug=SLUG,
+            spec_dir=tmp_path / "specs",
+        )
+    finally:
+        os.umask(previous)
+
+    root = tmp_path / "specs"
+    for path in (root, root / "classes", root / "classes/staff"):
+        mode = path.stat().st_mode & 0o7777
+        assert mode == 0o755, f"{path} is {mode:o}; the agent cannot traverse it"
+    # The file itself must be readable and NOT writable — the asymmetry is the
+    # security property, and it must not be sacrificed to fix traversal.
+    assert (root / "classes/staff/voice.md").stat().st_mode & 0o7777 == 0o644
 
 
 def test_a_rejected_document_leaves_the_previous_tree_standing(tmp_path):

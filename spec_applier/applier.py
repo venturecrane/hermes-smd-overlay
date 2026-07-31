@@ -337,6 +337,51 @@ def _harden(path: Path, mode: int) -> None:
         logger.warning("spec_applier: could not chmod %s to %o: %s", path, mode, exc)
 
 
+def _harden_ancestors(spec_dir: Path, leaf: Path) -> None:
+    """Harden EVERY directory from ``spec_dir`` down to ``leaf``, inclusive.
+
+    WHY THIS IS NOT ``_harden(leaf)``. ``Path.mkdir(parents=True)`` creates the
+    intermediate directories with ``0o777 & ~umask`` and does not apply the
+    caller's mode to them — only the final component is the caller's business
+    as far as pathlib is concerned. Hardening the leaf alone therefore leaves
+    every directory BETWEEN the spec root and the leaf at whatever this
+    process's umask produced.
+
+    That is not cosmetic. `spec_applier` runs as root, and root's umask in the
+    customer image yields ``0o750`` — no world execute. A single un-hardened
+    intermediate directory is not traversable by the agent uid, so the spec
+    below it is unreachable no matter how correct its own mode is.
+
+    OBSERVED ON A LIVE SEAT (`hermes-smd-staging`, 2026-07-31,
+    `vfy_01KYWVR8PBBEP85W3F5SSNC9FD`). Everything downstream looked right —
+    ``classes/staff`` 0755, ``voice.md`` 0644, the manifest naming it with a
+    matching digest, the applier logging ``APPLIED`` — while ``classes/`` sat
+    at 0750 and the agent got ``Permission denied`` on the read. The gate's
+    pass condition is a VERIFIED READ this turn, so the failure mode was: every
+    ``staff`` autonomous send downgraded to draft, permanently, with a fully
+    healthy-looking spec tree and no error anywhere. Exactly the shape that
+    survives a code review, because each individual line is correct.
+
+    Root ownership is the security property (an agent-writable spec is a
+    persistent self-authored injection channel); world-READ is what makes the
+    feature exist at all. This function is where both hold for the whole path.
+    """
+    try:
+        rel = leaf.relative_to(spec_dir)
+    except ValueError:  # leaf outside the spec root — harden nothing, refuse silently
+        logger.warning(
+            "spec_applier: refusing to harden %s; it is not under the spec root %s",
+            leaf,
+            spec_dir,
+        )
+        return
+    current = spec_dir
+    _harden(current, _DIR_MODE)
+    for part in rel.parts:
+        current = current / part
+        _harden(current, _DIR_MODE)
+
+
 def _read_installed_manifest(spec_dir: Path) -> dict[str, Any]:
     """Best-effort read of the currently installed manifest, or ``{}``.
 
@@ -382,7 +427,7 @@ def _install(
     for spec in specs:
         target = spec_dir / spec.rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        _harden(target.parent, _DIR_MODE)
+        _harden_ancestors(spec_dir, target.parent)
         atomic_write(target, spec.body)
         _harden(target, _FILE_MODE)
         installed.append(spec.rel_path)
