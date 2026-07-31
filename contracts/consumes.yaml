@@ -313,6 +313,25 @@ vars:
     requirement: optional
     consumed_by: [reply]
     note: held-reply queue db (#2070); defaults to /opt/data/held_replies.db
+  SMD_SPEC_DIR:
+    # indirect: shared/spec_manifest.py reads it through the module constant
+    # SPEC_DIR_ENV (exported so translate.py and the trust plugin name the same
+    # thing once), so the AST scan cannot tie the read to a literal.
+    discovery: indirect
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: >-
+      ss ADR 0083 / ss-console #2084. The ROOT-OWNED directory holding the
+      customer's authored per-output-class specs and root's manifest of them,
+      installed by the spec_applier before the privilege drop. Read-only to the
+      agent uid by construction: read_file is unfenced and does not taint, so an
+      agent-WRITABLE spec would be a persistent, untainted, self-authored
+      prompt-injection channel surviving restarts. Consumed by the trust
+      plugin's read-mark (verifies a spec read against root's manifest) and by
+      bootstrap/translate.py (renders the per-profile SKILL.md pointer stamp).
+      Unset ⇒ no installed spec tree ⇒ nothing verifiable, which every caller
+      reads as fail-closed, never as a pass.
   SMD_WEBHOOK_SIGNING_SECRET:
     discovery: static
     stage: agent

@@ -63,7 +63,18 @@ py-modules = ["webhook_gate"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["plugins*", "shared*", "bootstrap*", "contracts*", "config_applier*"]
+include = [
+    "plugins*",
+    "shared*",
+    "bootstrap*",
+    "contracts*",
+    "config_applier*",
+    # ss ADR 0083 / ss-console #2084 — the root-owned authored-spec applier.
+    # Must ship in the wheel: entrypoint.sh runs `python -m spec_applier --once`
+    # as root before the privilege drop, and an absent module would mean the
+    # seat boots with no spec tree and the pointer stamps name nothing.
+    "spec_applier*",
+]
 
 [tool.setuptools.package-data]
 shared = ["fabrication_markers.json", "anthropic_pricing.json"]
