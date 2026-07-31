@@ -209,3 +209,39 @@ def test_annotations_include_value_for_human_reviewer() -> None:
 def test_run_self_check_passes() -> None:
     ok, msg = run()
     assert ok, msg
+
+
+# ---------------------------------------------------------------------------
+# Matter numbers (added 2026-07-31).
+#
+# Before this, _CASE_RE could not see a practice-management matter number at
+# all. Every IDENTIFIER_UNVERIFIED row on the pilot seat carried only date
+# shapes, which reads as "no identifier problems" when the truth was "this
+# filter is blind to the identifiers this firm uses." Silence from a gate that
+# cannot see a class of value means nothing.
+# ---------------------------------------------------------------------------
+import pytest as _pytest
+
+from shared.identifier_filter import _CASE_RE as _CASE_RE_UNDER_TEST
+
+
+@_pytest.mark.parametrize("value", ["2026-PI-101", "2026-PI-107", "PI-2026-0001"])
+def test_case_re_sees_matter_numbers(value: str) -> None:
+    assert _CASE_RE_UNDER_TEST.search(value), f"{value} must be visible to the identifier gate"
+
+
+@_pytest.mark.parametrize("value", ["1:24-cv-01234", "No. 24-12345"])
+def test_case_re_still_sees_docket_numbers(value: str) -> None:
+    assert _CASE_RE_UNDER_TEST.search(value)
+
+
+@_pytest.mark.parametrize(
+    "value",
+    [
+        "2026-07-31",  # an ISO date is not a matter number
+        "24STCV18223",  # a court case number, different shape
+        "ACK-MP9RJH",  # an escalation token
+    ],
+)
+def test_case_re_does_not_over_match(value: str) -> None:
+    assert not _CASE_RE_UNDER_TEST.search(value), f"{value} must not read as a matter number"

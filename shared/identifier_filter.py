@@ -125,9 +125,26 @@ _A_NUMBER_RE = re.compile(r"\bA#?[-\s]?(?:\d[-\s]?){8,9}\b")
 _RECEIPT_RE = re.compile(r"\b[A-Z]{3}\d{10}\b")
 # SSN.
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-# Case / docket numbers: federal-style "1:24-cv-01234", or "No. 24-12345".
+# Case / docket numbers: federal-style "1:24-cv-01234", or "No. 24-12345", or a
+# practice-management MATTER number ("2026-PI-101", "PI-2026-0001").
+#
+# The matter-number alternation was added 2026-07-31. Before it, this pattern
+# could not see a matter number at all: probed live, "2026-PI-107" -> no hit,
+# "PI-2026-0001" -> no hit. Every IDENTIFIER_UNVERIFIED row on the pilot seat
+# showed only date shapes, which read as "no identifier problems found" when the
+# truth was "this filter is blind to the identifiers this firm uses." A gate that
+# cannot see a class of value is not reporting on it, and silence from it meant
+# nothing.
+#
+# Still REPORT-ONLY, deliberately. See the posture note in
+# plugins/hermes-smd-trust/outbound.py: enforcement flips only after the
+# false-positive rate is measured on real traffic, and that discipline is not
+# overridden here. What changes is that the signal now exists to measure.
 _CASE_RE = re.compile(
-    r"\b(?:\d{1,2}:\d{2}-[a-z]{2}-\d{3,6}|No\.?\s?\d{2,4}-\d{2,6})\b",
+    r"\b(?:\d{1,2}:\d{2}-[a-z]{2}-\d{3,6}"
+    r"|No\.?\s?\d{2,4}-\d{2,6}"
+    r"|\d{4}-[A-Z]{2}-\d{3,4}"
+    r"|[A-Z]{2}-\d{4}-\d{4})\b",
     re.IGNORECASE,
 )
 
