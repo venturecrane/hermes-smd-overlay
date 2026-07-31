@@ -68,7 +68,7 @@ from shared.customer_config import CustomerConfigMissingError
 from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
 from shared.pending_send import PENDING_SEND
 
-from . import voice_gate
+from . import spec_gate, voice_gate
 
 # Action classes that must never fire autonomously on a turn that ingested
 # untrusted (non-internal) inbound content — the taint-gate. READ and
@@ -1057,6 +1057,25 @@ def evaluate_tool_call(
             voice_block = voice_gate.check_voice_gate(tool_name=tool_name, session_id=session_id)
             if voice_block is not None:
                 return voice_block
+
+    # Authored-spec gate (ss ADR 0083, #2084). Distinct from the voice gate on
+    # both axes, which is why it is a separate block rather than another clause
+    # above. SCOPE: it covers external_send_internal too — the `staff` class,
+    # whose persona voice needs no customer corpus and is therefore the one
+    # provable from day one, and which is also the highest-volume output the
+    # firm forms its daily impression from. BINDING: it fires only where the
+    # seat DECLARES `output_classes.<class>.voice_spec: expected`, so a seat
+    # that authored nothing is untouched. A declared-but-never-read spec
+    # downgrades to draft; a declared-but-never-installed one does too, which is
+    # the entire purpose of the declaration existing.
+    if decision.allowed and decision.effective_ceiling == Ceiling.AUTONOMOUS:
+        spec_block = spec_gate.check_spec_gate(
+            tool_name=tool_name,
+            action_class_value=getattr(effective_action, "value", ""),
+            session_id=session_id,
+        )
+        if spec_block is not None:
+            return spec_block
 
     if decision.allowed:
         # A confirm-approved send has cleared the ceiling, the content-floor, and

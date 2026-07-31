@@ -23,9 +23,10 @@ from shared.audit_contract import agent_event_params
 from shared.broker_audit import write_decision
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
+from shared.spec_status import SPEC_STATUS
 from shared.workspace_broker import GRANT_ARG, authorize
 
-from . import approval, enforce, outbound, outbound_send
+from . import approval, enforce, outbound, outbound_send, spec_read
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,14 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
                     "until an authorized person resumes it. Do not retry; end the turn."
                 ),
             }
+
+        # Authored-spec read observation (ss ADR 0083 #2084). Runs BEFORE the
+        # ceiling check because it is pure observation on a READ-class tool that
+        # enforcement always allows, and because the ordering makes it obvious
+        # it can never influence a trust decision. It marks ONLY after verifying
+        # the file against the ROOT-OWNED manifest, so the agent cannot satisfy
+        # its own spec gate by reading something it wrote.
+        spec_read.observe_read(tool_name, args, session_id)
 
         ceiling_block = enforce.evaluate_tool_call(
             tool_name, args, customer_slug, session_id=session_id
@@ -439,6 +448,15 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         provenance.note_session(session_id)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: pre_llm_call session note failed", exc_info=True)
+    try:
+        # Clear the authored-spec read marks at the start of every turn (ss ADR
+        # 0083 #2084). A spec read three turns ago must not certify THIS turn's
+        # composition — the spec governs the text being written now, and a
+        # sticky mark would certify a draft the spec never touched. Cleared
+        # under the resolved id so producer and consumer agree on the key.
+        SPEC_STATUS.clear_turn(provenance.resolve_session(session_id))
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.debug("hermes-smd-trust: spec-read turn clear failed", exc_info=True)
     try:
         source = approval.maybe_capture_approval(
             kwargs.get("platform"),
