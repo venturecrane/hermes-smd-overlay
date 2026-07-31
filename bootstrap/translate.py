@@ -1309,125 +1309,18 @@ def _yaml_bytes(data: dict[str, Any]) -> bytes:
     ).encode()
 
 
-_SPEC_STAMP_BEGIN = "<!-- SMD-AUTHORED-SPEC-POINTER:BEGIN -->"
-_SPEC_STAMP_END = "<!-- SMD-AUTHORED-SPEC-POINTER:END -->"
-
-
-def _spec_pointer_block() -> str:
-    """Render the authored-spec POINTER stamp, or ``""`` when nothing is installed.
-
-    THE POINTER, NEVER THE PROSE. This block names the class, the property, the
-    on-disk path, and the sha256 root recorded — and stops. It does not embed
-    the spec text, and that restraint is the design, not thrift: SKILL.md is
-    rewritten from the catalog at every boot, while the spec tree is refreshed
-    under a RUNNING Machine by the root poller. A prose stamp would therefore be
-    frozen at boot against a spec that moves, and the two would disagree
-    silently. A confidently-served stale spec is worse than no read at all,
-    because nothing about it looks wrong. A pointer cannot go stale in a way
-    that matters: the file it names is read fresh, and the hash beside it is
-    what the root-owned manifest says right now.
-
-    THE STAMP IS NOT TRUSTED, and says so in its own text. ``<profile>/skills/``
-    is hermes-owned, so an agent can rewrite this block and forge both the path
-    and the hash. It is DELIVERY — it tells the model where to look. Enforcement
-    reads ``shared.spec_manifest`` (root-owned) and never this stamp.
-
-    Only INSTALLED specs are listed. A class the seat declares ``expected``
-    whose spec never arrived is deliberately absent here rather than named as
-    missing: a second, forgeable authority stating what an output must not do
-    invites the model to negotiate with it, and the gate at the send site
-    already refuses that class outright.
-    """
-    from shared import spec_manifest
-
-    entries = sorted(spec_manifest.load_entries().values(), key=lambda e: (e.output_class, e.prop))
-    if not entries:
-        return ""
-    base = spec_manifest.spec_dir()
-    if base is None:
-        return ""
-    lines = [
-        _SPEC_STAMP_BEGIN,
-        "",
-        "## Authored specs on this seat",
-        "",
-        "The firm authored these specifications for what you produce. Read the one",
-        "matching what you are about to write, BEFORE you write it. For an output class",
-        "the firm declared a spec for, an unread spec means the send is refused and",
-        "routed to a draft — reading it is not optional and not a formality.",
-        "",
-        "**Precedence: the drafting discipline outranks the voice.** Never invent, cite",
-        "the record, refuse rather than guess, escalate rather than nag. A spec shapes",
-        "how something is said; it never licenses saying something the record does not",
-        "support. Court-bound work takes the court register regardless of any spec here.",
-        "",
-        "| Output class | Property | Read this file | sha256 (root-recorded) |",
-        "| --- | --- | --- | --- |",
-    ]
-    for entry in entries:
-        lines.append(
-            f"| `{entry.output_class}` | {entry.prop} | `{base / entry.rel_path}` "
-            f"| `{entry.sha256[:16]}…` |"
-        )
-    lines += [
-        "",
-        "This block is regenerated at every boot from the root-owned spec manifest and",
-        "any edit to it is overwritten. It is a pointer, not an authority: the specs",
-        "themselves live in a directory this agent cannot write.",
-        "",
-        _SPEC_STAMP_END,
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def _stamp_skill_md(skill_md: Path, block: str) -> bool:
-    """Apply (or remove, or refresh) the spec pointer block in one ``SKILL.md``.
-
-    Returns True when the file changed. IDEMPOTENT AND NON-STACKING is the whole
-    contract: ``_install_persona_skills`` copytrees the catalog over the profile
-    on every boot, which restores an unstamped SKILL.md, and any stamp that
-    appended rather than replaced would grow a copy per boot. So the existing
-    sentinel-delimited region is excised first and the fresh block appended
-    once. An empty ``block`` excises without re-adding — a seat whose specs were
-    removed loses its pointers rather than keeping a stamp to files that are
-    gone. Uses ``_write_if_changed`` so an unchanged stamp does not churn the
-    volume.
-
-    Precedent: ``_send_posture_soul_section``, which exists because an agent
-    that cannot see its authored posture defaults BELOW it. Same failure shape:
-    an agent that cannot see its authored spec writes as though there were none.
-    """
-    try:
-        current = skill_md.read_text()
-    except OSError:
-        return False
-    stripped = _strip_stamp(current)
-    if not block:
-        desired = stripped
-    else:
-        desired = stripped.rstrip("\n") + "\n\n" + block
-    if desired == current:
-        return False
-    return _write_if_changed(skill_md, desired.encode())
-
-
-def _strip_stamp(text: str) -> str:
-    """Remove every sentinel-delimited stamp region from ``text``.
-
-    Loops rather than handling one region: a SKILL.md that somehow accumulated
-    two stamps (an interrupted boot, a hand-edit) must come out with none, not
-    with one fewer. An unterminated BEGIN truncates from the sentinel — the
-    remainder is a half-written stamp and keeping it would leave a pointer table
-    with no closing marker for the next boot to find.
-    """
-    while _SPEC_STAMP_BEGIN in text:
-        head, _, rest = text.partition(_SPEC_STAMP_BEGIN)
-        if _SPEC_STAMP_END in rest:
-            _, _, tail = rest.partition(_SPEC_STAMP_END)
-        else:
-            tail = ""
-        text = head.rstrip("\n") + ("\n" + tail.lstrip("\n") if tail.strip() else "\n")
-    return text
+# The pointer stamp moved to shared/spec_stamp.py so the trust plugin can
+# refresh it on a RUNNING Machine. It lived here, and this module runs once at
+# boot — so a client's FIRST authored spec did not reach the model until a
+# reboot: the root poller installed it and wrote the manifest, but nothing
+# re-rendered the pointer, and the renderer returns "" when nothing is
+# installed. The refresh must run as hermes (this profile tree is hermes-owned
+# and the root applier writing here would recreate the 2026-07-16 root-owned
+# cron store), so it lives in shared/ where both callers reach it.
+# Aliased under the private names this module's call sites already use; the
+# stamp's own tests address shared.spec_stamp directly.
+from shared.spec_stamp import render_pointer_block as _spec_pointer_block  # noqa: E402
+from shared.spec_stamp import stamp_skill_md as _stamp_skill_md  # noqa: E402
 
 
 def _install_persona_skills(
