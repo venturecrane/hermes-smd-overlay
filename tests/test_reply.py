@@ -20,6 +20,7 @@ Covers:
 
 from __future__ import annotations
 
+import itertools
 import json
 
 import pytest
@@ -111,6 +112,11 @@ def relay_mod(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_CUSTOMER_SLUG", "acme", raising=False)
     monkeypatch.setattr(mod, "_D1_CLIENT", fake_d1, raising=False)
     monkeypatch.setattr(mod, "_LIMITER", mod.relay.RateLimiter(), raising=False)
+    # One-reply-per-inbound register: process-wide in production, per-test here.
+    # ``load_plugin`` hands back the process-cached module, so without a fresh
+    # instance the reused ``msg_*`` ids from an earlier test would read as
+    # duplicates in a later one.
+    monkeypatch.setattr(mod, "_REPLIED", mod.relay.RepliedOnce(), raising=False)
     monkeypatch.setattr(mod, "_YAML_PATH", yaml_path, raising=False)
     # Held-reply store (#2070) is register-time infra; point it at a temp db so
     # the live-path hold tests exercise real persistence, not a stub.
@@ -515,9 +521,19 @@ def test_empty_body_held(relay_mod) -> None:
 # ---------------------------------------------------------------------------
 
 
+_burst_seq = itertools.count()
+
+
 def _burst(mod, n: int, sender: str = "greg@whitfield.example") -> None:
-    """n live-path replies, each a fresh session opened by the same sender."""
-    for i in range(n):
+    """n live-path replies, each a fresh session opened by the same sender.
+
+    Ids come from a process counter so two bursts inside one test are two runs
+    of DISTINCT inbound emails, which is what a real dialogue is. Replaying a
+    message id would now read as the same email answered twice and hold on the
+    one-reply-per-inbound guard, masking whatever the test is actually pinning.
+    """
+    for _ in range(n):
+        i = next(_burst_seq)
         sid = f"s{i}"
         inbound.SESSION_INBOUND_ORIGIN.record(
             sid,
@@ -827,3 +843,213 @@ def test_bound_session_beats_a_fresher_address_entry(relay_mod) -> None:
     assert sent[0]["message_id"] == "msg_early"  # not the fresher msg_late
     _, meta = next((a, m) for a, m in d1.events() if a == "REPLY_SENT")
     assert meta["in_reply_to"] == "msg_early"
+
+
+# ---------------------------------------------------------------------------
+# 9. Draft outcome + one-reply-per-inbound (leg-1 double-send)
+#
+# Live defect, 2026-07-30 (vfy_01KYTG0B88R3B5K0D7FKPACRZT): the relay acted on
+# the tool NAME alone. ``mcp_agentmail_create_draft`` returned "Message not
+# found (HTTP 404)" — no draft existed — and a real email went out anyway; the
+# agent retried, the retry succeeded, and the SAME answer was emailed a second
+# time. Every later turn of the dialogue then quoted a stale reply.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"status": "error"},
+        {"error_type": "Message not found (HTTP 404)"},
+        {"result": '{"error": "Message not found", "code": 404}'},
+        {"result": '{"ok": false}'},
+        {"result": '{"status": "failed"}'},
+    ],
+    ids=["status", "error_type", "result_error", "result_ok_false", "result_status"],
+)
+def test_failed_draft_call_never_relays(relay_mod, kw) -> None:
+    """Every shape in which the tool can say "no draft" refuses the send."""
+    mod, d1, sent = relay_mod
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "s1",
+        inbound.InboundOrigin("greg@whitfield.example", "msg_fail", inbox_id="inbox_x"),
+    )
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="s1",
+        **kw,
+    )
+    assert sent == []
+    # Not a hold either — nothing was ever draftable, so there is no reply to
+    # hold. The agent's own retry is the recovery path.
+    assert not [a for a, _ in d1.events() if a in {"REPLY_SENT", "REPLY_HELD"}]
+
+
+def test_unknown_result_shape_still_relays(relay_mod) -> None:
+    """Detection is positive-only: an unrecognised envelope must not silence
+    the channel. A future Hermes result shape degrades to today's behaviour,
+    with the one-reply guard as the structural backstop."""
+    mod, _d1, sent = relay_mod
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "s1",
+        inbound.InboundOrigin("greg@whitfield.example", "msg_odd", inbox_id="inbox_x"),
+    )
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="s1",
+        result="<not json at all>",
+        status="ok",
+    )
+    assert len(sent) == 1
+
+
+def test_retry_after_failed_draft_sends_exactly_once(relay_mod) -> None:
+    """The live sequence: failed draft, then the agent's successful retry —
+    one inbound, one email. Before the fix this produced two."""
+    mod, d1, sent = relay_mod
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "s1",
+        inbound.InboundOrigin("greg@whitfield.example", "msg_retry", inbox_id="inbox_x"),
+    )
+    args = _draft(["greg@whitfield.example"])
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=args,
+        session_id="s1",
+        error_type="Message not found (HTTP 404)",
+    )
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft", args=args, session_id="s1", status="ok"
+    )
+    assert len(sent) == 1
+    assert sent[0]["message_id"] == "msg_retry"
+    assert len([a for a, _ in d1.events() if a == "REPLY_SENT"]) == 1
+
+
+def test_second_successful_draft_for_one_inbound_is_held(relay_mod) -> None:
+    """One message in, at most one reply out — even when BOTH draft calls
+    succeed and no result envelope reveals the retry."""
+    mod, d1, sent = relay_mod
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "s1",
+        inbound.InboundOrigin("greg@whitfield.example", "msg_dup", inbox_id="inbox_x"),
+    )
+    for _ in range(2):
+        mod.on_post_tool_call(
+            tool_name="agentmail:create_draft",
+            args=_draft(["greg@whitfield.example"]),
+            session_id="s1",
+        )
+    assert len(sent) == 1
+    assert [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"] == ["duplicate_reply"]
+
+
+def test_distinct_inbounds_each_get_a_reply(relay_mod) -> None:
+    """The guard keys on the INBOUND message id, not the body — the same
+    answer to two different emails still goes out twice."""
+    mod, _d1, sent = relay_mod
+    for i in range(2):
+        sid = f"s{i}"
+        inbound.SESSION_INBOUND_ORIGIN.record(
+            sid,
+            inbound.InboundOrigin("greg@whitfield.example", f"msg_{i}", inbox_id="inbox_x"),
+        )
+        mod.on_post_tool_call(
+            tool_name="agentmail:create_draft",
+            args=_draft(["greg@whitfield.example"]),
+            session_id=sid,
+        )
+    assert [s["message_id"] for s in sent] == ["msg_0", "msg_1"]
+
+
+def test_rate_held_reply_commits_once_and_releases_once(relay_mod) -> None:
+    """A rate-held reply is enqueued exactly once. Without the commit-on-enqueue
+    a retry in the same turn would queue a SECOND row and the sweeper would
+    deliver the answer twice."""
+    mod, d1, _sent = relay_mod
+    mod._YAML_PATH.write_text(
+        _ROSTERED_YAML + "send_policy:\n"
+        "  reply:\n"
+        "    per_sender_max: 0\n"
+        "  held_release:\n"
+        "    enabled: true\n"
+    )
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "s1",
+        inbound.InboundOrigin("greg@whitfield.example", "msg_held", inbox_id="inbox_x"),
+    )
+    for _ in range(2):
+        mod.on_post_tool_call(
+            tool_name="agentmail:create_draft",
+            args=_draft(["greg@whitfield.example"]),
+            session_id="s1",
+        )
+    assert mod._HELD_STORE.pending_count() == 1
+    reasons = [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"]
+    assert reasons[-1] == "duplicate_reply"
+
+
+# ---------------------------------------------------------------------------
+# 10. Provenance captions on the reply channel
+#
+# Live defect, same rehearsal: the drafting path passes
+# ``allowed_case_names=provenance.register_for(session).captions()``; the relay
+# passed nothing. The trust gate allowed a draft naming matters read from
+# Smokeball, then this gate blocked the identical body as
+# fabrication:tier2_citation, and the sender got silence with no notice.
+# ---------------------------------------------------------------------------
+
+
+def test_caption_read_this_session_is_quotable(relay_mod) -> None:
+    """A case caption the agent READ this session clears the citation tier."""
+    from shared import provenance
+
+    mod, _d1, sent = relay_mod
+    provenance._reset_for_tests()
+    session_id = "s_prov"
+    provenance.note_session(session_id)
+    provenance.record_read(session_id, "Open matters: Alvarez v. Brightline Freight (active)")
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        session_id,
+        inbound.InboundOrigin("greg@whitfield.example", "msg_prov", inbox_id="inbox_x"),
+    )
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(
+            ["greg@whitfield.example"],
+            text="One of the open matters is Alvarez v. Brightline Freight.",
+        ),
+        session_id=session_id,
+    )
+    assert len(sent) == 1
+    provenance._reset_for_tests()
+
+
+def test_unread_caption_still_blocks(relay_mod) -> None:
+    """The exemption is provenance, not amnesty: a caption NOT read this
+    session is still refused. This is the ADR 0028 invariant, unchanged."""
+    from shared import provenance
+
+    mod, d1, sent = relay_mod
+    provenance._reset_for_tests()
+    session_id = "s_noprov"
+    provenance.note_session(session_id)
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        session_id,
+        inbound.InboundOrigin("greg@whitfield.example", "msg_noprov", inbox_id="inbox_x"),
+    )
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(
+            ["greg@whitfield.example"],
+            text="As held in Marbury v. Madison, the claim survives.",
+        ),
+        session_id=session_id,
+    )
+    assert sent == []
+    assert [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"] == [
+        "fabrication:tier2_citation"
+    ]
+    provenance._reset_for_tests()

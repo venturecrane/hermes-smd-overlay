@@ -53,7 +53,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, msgraph_client, send_policy
+from shared import inbound, msgraph_client, provenance, send_policy
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -121,6 +121,11 @@ _CUSTOMER_SLUG: str | None = None
 _D1_CLIENT: Any | None = None
 _LIMITER: relay.RateLimiter | None = None
 _YAML_PATH: Path = Path(_DEFAULT_CUSTOMER_YAML_PATH)
+# One reply per inbound message id. Process-wide and register-independent: the
+# invariant holds for every reply this Machine transmits, and a bounded ring
+# keeps it cheap. Not a rate limit — the send policy owns pacing; this owns
+# "the same email is never answered twice".
+_REPLIED: relay.RepliedOnce = relay.RepliedOnce()
 # Held-reply auto-release (#2070). The store is register-time infra; whether
 # release is ON is a live per-call/per-pass question (send_policy), so the
 # sweeper thread starts unconditionally and no-ops while release is unauthored.
@@ -300,6 +305,23 @@ def on_post_tool_call(**kwargs: Any) -> None:
         if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
             return
 
+        # (0) The draft must actually exist. ``post_tool_call`` fires after every
+        # dispatch, including one that returned an error, and the relay used to
+        # act on the tool NAME alone — so a create_draft that failed still put a
+        # real email in the sender's inbox, and the agent's retry sent the same
+        # answer again (leg-1 turn 2, vfy_01KYTG0B88R3B5K0D7FKPACRZT). Reply
+        # transmission is now strictly downstream of a draft the tool confirmed.
+        if relay.draft_call_failed(
+            result=kwargs.get("result"),
+            status=kwargs.get("status"),
+            error_type=kwargs.get("error_type"),
+        ):
+            logger.info(
+                "hermes-smd-reply: draft tool call reported failure; not relaying "
+                "(the agent's retry, if any, relays instead)"
+            )
+            return
+
         # Config is read LIVE (ADR 0044): the roster can be authored without a
         # restart, so the relay re-reads it here. Fail closed if customer.yaml is
         # unreadable — a relay that cannot confirm the roster never sends.
@@ -355,6 +377,17 @@ def on_post_tool_call(**kwargs: Any) -> None:
             # originate from an inbound email never relays.
             return
 
+        # (0b) One inbound message, at most one reply out. The hook fires per
+        # tool CALL, so an agent that drafts twice in a turn arrives here twice
+        # for the SAME email. The (0) outcome check catches the retry-after-error
+        # shape; this catches every other way a second draft could reach the
+        # transport, including shapes no result envelope would reveal. Committed
+        # only on a real send or a durable enqueue, so a gated reply stays
+        # deliverable by the release path.
+        if _REPLIED.committed(origin.message_id):
+            _held("duplicate_reply", origin)
+            return
+
         # (a) Roster authorization — the Operator replies autonomously only to a
         # colleague on the organization roster (ADR 0055). A verified inbound
         # sender NOT on the roster gets a drafted (not sent) reply: reaching
@@ -396,11 +429,29 @@ def on_post_tool_call(**kwargs: Any) -> None:
             )
             recipient_class = None
         internal = recipient_class is RecipientClass.INTERNAL
+        # Provenance exemption — the SAME one the drafting path applies
+        # (hermes-smd-trust/outbound.py). Case captions the agent READ from a
+        # system of record this session are quotable; without them the two
+        # channels disagreed, and the trust gate's approval of a draft naming
+        # matters read from Smokeball was overturned here as
+        # fabrication:tier2_citation, leaving the sender with silence. A fault
+        # degrades to the empty register — no exemption, today's behaviour.
+        try:
+            allowed_captions = provenance.register_for(
+                provenance.resolve_session(session_id)
+            ).captions()
+        except Exception:  # noqa: BLE001 — an unreadable register grants nothing
+            logger.debug(
+                "hermes-smd-reply: provenance register unavailable; no caption exemption",
+                exc_info=True,
+            )
+            allowed_captions = frozenset()
         gate = relay.gate_body(
             scan_text,
             vertical=vertical,
             cohort=_CUSTOMER_SLUG,
             internal_recipient=internal,
+            allowed_case_names=allowed_captions,
         )
         if not gate.allowed:
             _held(gate.reason, origin, categories=list(gate.categories))
@@ -448,6 +499,11 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 body_digest=body_digest,
                 policy=policy,
             )
+            if enqueued:
+                # Durably queued for release — the reply for this inbound is
+                # committed. Without this a retry in the same turn would enqueue
+                # a SECOND row and the sweeper would deliver the answer twice.
+                _REPLIED.commit(origin.message_id)
             _held(
                 reason,
                 origin,
@@ -495,7 +551,11 @@ def on_post_tool_call(**kwargs: Any) -> None:
             )
             return
 
-        # (f) Audit the send — digest + recipient + message ids, never the body.
+        # (f) The reply for this inbound is now committed — record it before the
+        # audit emission so a retry cannot race between the send and the mark.
+        _REPLIED.commit(origin.message_id)
+
+        # (g) Audit the send — digest + recipient + message ids, never the body.
         _emit_reply_event(
             action_type="REPLY_SENT",
             metadata={

@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from email.utils import parseaddr
 from typing import Any
@@ -146,12 +146,103 @@ class GateResult:
     categories: tuple[str, ...] = field(default_factory=tuple)
 
 
+# Tool-outcome vocabulary. ``post_tool_call`` fires after EVERY dispatch,
+# including one that returned an error string, so the relay must read the
+# outcome rather than the tool name alone.
+_FAILED_STATUSES: frozenset[str] = frozenset(
+    {"error", "errored", "failed", "failure", "refused", "blocked", "denied"}
+)
+
+
+def draft_call_failed(*, result: Any = None, status: Any = None, error_type: Any = None) -> bool:
+    """True when the draft tool call POSITIVELY reports it created no draft.
+
+    The relay turns a governed draft into a sent email. If the draft tool did
+    not actually produce a draft, there is nothing to relay — sending anyway
+    puts mail in a client's inbox on the strength of an intent the tool
+    rejected, and the agent's retry then sends the same answer a second time
+    (leg-1 turn 2: ``create_draft`` returned "Message not found (HTTP 404)",
+    the relay emailed, the retry succeeded, the relay emailed again —
+    vfy_01KYTG0B88R3B5K0D7FKPACRZT).
+
+    Detection is deliberately POSITIVE-only: an unrecognised result shape
+    returns False and the reply proceeds through the normal gates. Failing
+    closed on an unknown shape would silence every reply the day Hermes changes
+    its tool-result envelope, and the one-reply-per-inbound guard
+    (:class:`RepliedOnce`) is the structural backstop for the duplicate case.
+    """
+    if isinstance(status, str) and status.strip().lower() in _FAILED_STATUSES:
+        return True
+    if isinstance(error_type, str):
+        cleaned = error_type.strip()
+        if cleaned and cleaned.lower() not in {"none", "null"}:
+            return True
+    if not isinstance(result, str) or not result.strip():
+        return False
+    try:
+        parsed = json.loads(result)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("error"):
+        return True
+    if parsed.get("ok") is False or parsed.get("success") is False:
+        return True
+    parsed_status = parsed.get("status")
+    return isinstance(parsed_status, str) and parsed_status.strip().lower() in _FAILED_STATUSES
+
+
+class RepliedOnce:
+    """One reply per inbound message id — bounded, thread-safe.
+
+    ``post_tool_call`` fires once per tool CALL, not per turn, so an agent that
+    retries ``create_draft`` reaches the relay twice for a single inbound email.
+    Keying on the inbound message id states the invariant the way a client would:
+    one message in, at most one reply out.
+
+    ``commit`` is called only once a reply is actually SENT or durably ENQUEUED
+    for release — a gated or failed reply leaves the id free, so the held-release
+    path can still deliver it, and a genuine later inbound (a new message id)
+    is never suppressed.
+    """
+
+    def __init__(self, max_entries: int = 512) -> None:
+        self._max = max(1, int(max_entries))
+        self._seen: deque[str] = deque(maxlen=self._max)
+        self._index: set[str] = set()
+        self._lock = threading.Lock()
+
+    def committed(self, message_id: str) -> bool:
+        if not message_id:
+            return False
+        with self._lock:
+            return message_id in self._index
+
+    def commit(self, message_id: str) -> None:
+        if not message_id:
+            return
+        with self._lock:
+            if message_id in self._index:
+                return
+            if len(self._seen) == self._max and self._seen:
+                self._index.discard(self._seen[0])
+            self._seen.append(message_id)
+            self._index.add(message_id)
+
+    def _reset_for_tests(self) -> None:
+        with self._lock:
+            self._seen.clear()
+            self._index.clear()
+
+
 def gate_body(
     scan_text: str,
     *,
     vertical: str | None,
     cohort: str | None,
     internal_recipient: bool = False,
+    allowed_case_names: Iterable[str] | None = None,
 ) -> GateResult:
     """Re-run the content-sensitivity floor + fabrication gate on the draft body.
 
@@ -171,6 +262,15 @@ def gate_body(
       fabricated legal citations (Tier-2, law/indeterminate). Fails closed.
       Applies to EVERY reply, internal or not.
 
+    ``allowed_case_names`` is the SAME provenance exemption the drafting path
+    passes (``hermes-smd-trust/outbound.py``): case captions the agent actually
+    READ from a system of record this session are quotable. Omitting it is what
+    made the two channels disagree — the trust gate allowed a draft naming
+    matters read from Smokeball, then this gate blocked the identical body as
+    ``fabrication:tier2_citation`` and the sender got silence (leg-1 turn 5,
+    vfy_01KYTG0B88R3B5K0D7FKPACRZT). An empty/omitted register grants no
+    exemption, so the degradation direction is still fail-closed.
+
     Any exception is treated as a refuse (fail closed) — a body we cannot
     certify clean does not leave.
     """
@@ -186,7 +286,9 @@ def gate_body(
             )
 
     try:
-        decision = outbound_gate.evaluate(scan_text, cohort, vertical)
+        decision = outbound_gate.evaluate(
+            scan_text, cohort, vertical, allowed_case_names=allowed_case_names
+        )
     except Exception:  # noqa: BLE001 — fail closed on a raising gate
         logger.exception("reply-channel: outbound gate raised; refusing to reply")
         return GateResult(allowed=False, reason="outbound_gate_error")
