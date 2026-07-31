@@ -248,17 +248,41 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         # mutation reaches the tool; that is the established, live-proven path).
         _attach_html_body(tool_name, args)
         return None
-    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+    except Exception as exc:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.exception(
             "hermes-smd-trust: pre_tool_call raised; FAILING CLOSED — blocking "
             "the tool call (safety: an indeterminate trust decision must not "
             "allow a sensitive action; issue #12)"
         )
+        # NAME THE ACTUAL FAULT. This is the catch-all around the WHOLE hook —
+        # roughly a hundred lines spanning session resolution, the ceiling
+        # resolver, the content floor, the outbound scans, the workspace broker
+        # and the audit transport. It said "trust-ceiling evaluation failed" for
+        # every one of them, and the real exception went only to the log above.
+        #
+        # That wording has a measured cost, not a theoretical one. On
+        # 2026-07-31 it sent an agent to a production-severity bug report
+        # against a WORKING security control: the broker had correctly refused a
+        # caller that was not the gateway process, and the message named a
+        # subsystem that was never involved. Diagnosis, a wrong report relayed
+        # to the Captain, and a rebuild cycle, all spent on a message that
+        # described the wrong thing (ss#2103, vfy_01KYX1SHS2ZDCNNB6KR3PNSYQY).
+        #
+        # The exception TYPE and its origin are safe to surface: they name
+        # machinery, not payload. The message body is deliberately excluded —
+        # it can carry recipient or content fragments from whatever raised.
+        origin = "unknown"
+        tb = exc.__traceback__
+        while tb is not None:  # innermost frame — where it actually raised
+            origin = f"{Path(tb.tb_frame.f_code.co_filename).name}:{tb.tb_lineno}"
+            tb = tb.tb_next
         return {
             "action": "block",
             "message": (
-                "Refused: trust-ceiling evaluation failed; failing closed "
-                "(indeterminate decision blocked for safety)"
+                "Refused: the trust hook raised and failed closed — "
+                f"{type(exc).__name__} at {origin}. This is an indeterminate "
+                "decision blocked for safety, NOT necessarily a ceiling or "
+                "entitlement problem; see the seat log for the traceback."
             ),
         }
 
