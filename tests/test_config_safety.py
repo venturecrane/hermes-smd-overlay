@@ -451,3 +451,43 @@ def test_apply_floor_map_matches_enforce_runtime_map():
     # exposure, not a non-raisable pin.
     assert "law-firm" not in enforce._VERTICAL_FLOORS
     assert vertical_floors("law-firm") == {}
+
+
+# ---------------------------------------------------------------------------
+# ADR 0083 seam — seat / output_classes live-writable, persona tone never
+# ---------------------------------------------------------------------------
+
+
+def test_seat_and_output_classes_apply_live() -> None:
+    """Neither is baked into the profile, so a live write is COMPLETE on its own.
+
+    `seat` is not read by the running agent at all; it is listed so that an SMD
+    relabel bundled with a real behavioural edit cannot reject the whole diff and
+    silently block the edit. `output_classes` is read at draft time from the
+    volume yaml, never rendered into SOUL.md.
+    """
+    assert live_writable("seat.kind")
+    assert live_writable("seat.product")
+    assert live_writable("output_classes.staff.voice_spec")
+    assert live_writable("output_classes.outbound_client.format_spec")
+
+
+def test_persona_tone_is_never_live_writable() -> None:
+    """A live tone apply would report APPLIED while the agent kept the old register.
+
+    `tone` is rendered into SOUL.md by bootstrap/translate.py at BOOT, and the
+    config applier does not re-run translate. Admitting this path would update
+    the volume yaml and leave the system prompt stale — a silent partial apply,
+    worse than an honest rejection because the ledger would claim it landed.
+
+    Moving it to the allow-list requires building a translate-refresh on APPLIED
+    for persona-scoped paths first. This test exists so that move is deliberate.
+    """
+    assert not live_writable("personas.0.tone")
+    assert not live_writable("personas.0.tone.0")
+    assert not live_writable("personas.1.tone")
+    # And the whole-diff consequence is the point: a bundled edit is rejected.
+    assert non_live_writable_changes(
+        {"personas": [{"tone": ["old"], "skills": [{"enabled": False}]}]},
+        {"personas": [{"tone": ["new"], "skills": [{"enabled": True}]}]},
+    )

@@ -268,6 +268,18 @@ _LIVE_WRITABLE_PREFIXES: tuple[str, ...] = (
     # live 2026-07-14 when a cadence flip silently blocked a refire flip bundled
     # with it).
     "personas.*.skills.*.settings",
+    # The seat descriptor (ss ADR 0083 seam PR) — kind and product, what this
+    # Operator IS. Nothing in the running agent reads it; it exists for the
+    # console and for blast-radius decisions on the publishing side. Listed here
+    # not because it needs to apply live but because it must not REJECT a diff:
+    # one non-writable path rejects the whole apply, so an SMD relabel bundled
+    # with a real behavioural edit would silently block the edit (the 2026-07-14
+    # grain bug, in a new costume).
+    "seat",
+    # Per-output-class spec dispositions (ADR 0083). Read at draft time from the
+    # volume yaml by the spec loader, never baked into the profile — so unlike
+    # `tone` below, changing it live is complete on its own.
+    "output_classes",
 )
 
 # Rebuild-class paths that must NEVER apply live, even if a future allow-list
@@ -288,6 +300,24 @@ _NEVER_LIVE_WRITABLE_PREFIXES: tuple[str, ...] = (
     "personas.*.oauth",
     "personas.*.slug",
     "personas.*.status",
+    # The persona's authored register. Rebuild-class for a NON-OBVIOUS reason,
+    # recorded here because the obvious reading points the other way and a future
+    # agent will be tempted to "fix" this by moving it to the allow-list above.
+    #
+    # `tone` is rendered into SOUL.md by bootstrap/translate.py::_soul_body at
+    # BOOT. The config applier writes customer.yaml and does not re-run translate,
+    # so admitting this path live would update the volume yaml, report APPLIED,
+    # and leave the agent's actual system prompt carrying the OLD register — a
+    # silent partial application, which is strictly worse than an honest
+    # rejection because the ledger would say the change landed.
+    #
+    # The register still reaches the seat: the boot fetch in entrypoint.sh pulls
+    # customer.yaml from R2 unconditionally and translate regenerates SOUL.md, so
+    # a merged register lands on the next restart rather than the next poll.
+    # Moving this to the allow-list requires building a translate-refresh on
+    # APPLIED for persona-scoped paths FIRST, and that is a live rewrite of a
+    # running agent's profile — its own change, with its own blast-radius review.
+    "personas.*.tone",
 )
 
 

@@ -244,6 +244,50 @@ class CustomerConfig:
         return dict(raw)
 
     # ------------------------------------------------------------------
+    # Output classes (ss ADR 0083)
+    # ------------------------------------------------------------------
+
+    @property
+    def output_classes(self) -> dict[str, Any]:
+        """Per-class declaration of whether an authored spec is EXPECTED.
+
+        Returns ``{}`` when the block is unauthored, which callers MUST read as
+        "this customer declared nothing here", never as "no spec is expected".
+        The distinction is the whole point of the block: a class declaring
+        ``voice_spec: expected`` whose spec is missing or hash-mismatched is a
+        BROKEN CONTROL and fails closed, while a class declaring ``none`` is a
+        legitimate authored choice that hands the output to persona judgment.
+        Collapsing the two would let a failed sync read as a deliberate decision.
+        """
+        raw = self._data.get("output_classes") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: output_classes must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    # ------------------------------------------------------------------
+    # Seat descriptor (ss ADR 0083 seam PR)
+    # ------------------------------------------------------------------
+
+    @property
+    def seat(self) -> dict[str, Any]:
+        """What this seat IS — ``kind`` and ``product``, or ``{}`` when unauthored.
+
+        Carries NO lifecycle state by construction. Anything asking "is this seat
+        connected / serving" must probe the running system; this block answers
+        only "what kind of thing is this", and an absent block means nobody has
+        said. Callers deciding blast radius should treat an unauthored seat with
+        customer-grade caution rather than assuming it is a proving rig.
+        """
+        raw = self._data.get("seat") or {}
+        if not isinstance(raw, dict):
+            raise CustomerConfigError(
+                f"customer.yaml: seat must be a mapping; got {type(raw).__name__}"
+            )
+        return dict(raw)
+
+    # ------------------------------------------------------------------
     # Roster — the organization's people (scope.inbound_allow_from)
     # ------------------------------------------------------------------
 
