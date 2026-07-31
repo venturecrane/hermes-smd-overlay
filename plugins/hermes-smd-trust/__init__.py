@@ -14,9 +14,11 @@ this plugin does not cross-import the audit plugin.
 """
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
-from shared import provenance, report_render
+from shared import provenance, report_render, spec_stamp
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _AUDIT_INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -426,6 +428,18 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     return f"[Dispatched your approved send to {recipients} (message {message_id}). Do not send it again.]"
 
 
+def _profiles_root() -> Path:
+    """Where the per-persona profile trees live: ``$HERMES_HOME/profiles``.
+
+    Same derivation ``bootstrap/translate.py`` uses when it writes them, so the
+    turn-time refresh addresses exactly the files boot stamped. Falls back to
+    the image default rather than raising — a wrong path yields zero refreshed
+    files and a debug line, never a blocked turn, because delivery is
+    best-effort and the send-site gate is the actual guarantee.
+    """
+    return Path(os.environ.get("HERMES_HOME", "/opt/data")) / "profiles"
+
+
 def on_pre_llm_call(**kwargs: Any) -> dict | None:
     """Note the turn's REAL session id, and capture a current-turn send approval.
 
@@ -457,6 +471,31 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         SPEC_STATUS.clear_turn(provenance.resolve_session(session_id))
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: spec-read turn clear failed", exc_info=True)
+    try:
+        # Keep the authored-spec POINTER current on a RUNNING Machine.
+        #
+        # Without this, a client's FIRST spec did not reach the model until a
+        # reboot. The root poller installs it within seconds and writes the
+        # manifest, but the pointer was rendered only at boot by translate, and
+        # the renderer emits nothing when no specs are installed — so a Machine
+        # that booted with none carried no pointer at all and was never told the
+        # spec existed. That is the gap between "type it and from then on it
+        # comes out that way" and "type it, then reboot".
+        #
+        # HERE, not in the root applier, and the distinction is load-bearing:
+        # this hook runs as hermes in the agent's own process, and the profile
+        # tree is hermes-owned. A root re-stamp would leave root-owned SKILL.md
+        # files the next boot's hermes-run copytree cannot overwrite — the
+        # 2026-07-16 outage exactly, where a root-written cron store left the
+        # scheduler unable to read its own jobs for eight days while every
+        # health signal stayed green.
+        #
+        # Costs one manifest read on the common path: the refresh compares a
+        # fingerprint against the last one it stamped and returns immediately
+        # when unchanged.
+        spec_stamp.refresh_profile_stamps(_profiles_root())
+    except Exception:  # noqa: BLE001 — delivery is best-effort; the GATE is the guarantee
+        logger.debug("hermes-smd-trust: spec pointer refresh failed", exc_info=True)
     try:
         source = approval.maybe_capture_approval(
             kwargs.get("platform"),
