@@ -80,6 +80,12 @@ hooks:
 | `session_id` | `str` | session identifier |
 | `tool_call_id` | `str` | call identifier |
 | `duration_ms` | `int` | `time.monotonic()` delta in milliseconds (`model_tools.py:823`) |
+| `turn_id` | `str` | turn identifier |
+| `api_request_id` | `str` | provider request identifier |
+| `status` | `str` | dispatch outcome (`model_tools.py:895`) |
+| `error_type` | `str \| None` | failure classification, `None` on success (`model_tools.py:896`) |
+
+**Outcome kwargs are load-bearing, not telemetry.** Because this hook fires regardless of result, a plugin that acts on `tool_name` alone acts on tool calls that FAILED. That is how the reply channel emailed a client from a `create_draft` which returned "Message not found (HTTP 404)", then emailed again when the agent retried (vfy_01KYTG0B88R3B5K0D7FKPACRZT). `hermes-smd-reply` now reads `status` / `error_type` / `result` via `relay.draft_call_failed`. `status` and `error_type` are NOT in the upstream published callback signature (which documents only `tool_name`, `args`, `result`, `task_id`, `duration_ms`) — they are real at the pinned firing site, so treat them as pin-verified and re-check them at every Hermes rebase. Detection is positive-only for exactly this reason: an envelope change degrades to the old behaviour rather than silencing the channel.
 
 **Return-value semantics:** Observer only. Returns are collected but not interpreted by the firing site.
 
