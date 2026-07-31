@@ -1073,6 +1073,11 @@ def evaluate_tool_call(
             tool_name=tool_name,
             action_class_value=getattr(effective_action, "value", ""),
             session_id=session_id,
+            # The composed text. The gate used to ask only "did the model read
+            # its spec"; with the body it can also answer "does what it wrote
+            # have the authored shape" — the binary half of ADR 0083 §3, and
+            # the only half a machine can decide rather than grade.
+            body=_extract_send_body(args) or "",
         )
         if spec_block is not None:
             return spec_block
