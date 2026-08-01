@@ -18,3 +18,4 @@ plugins:
   - plugins/hermes-smd-escalation
   - plugins/hermes-smd-connector-health
   - plugins/hermes-smd-usage
+  - plugins/hermes-smd-drafting

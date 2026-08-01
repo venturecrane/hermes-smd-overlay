@@ -77,7 +77,9 @@ from shared.trust_decision import (
     TrustDecision,
 )
 
-from . import spec_gate, voice_gate
+from shared import spec_gate
+
+from . import voice_gate
 
 # Action classes that must never fire autonomously on a turn that ingested
 # untrusted (non-internal) inbound content — the taint-gate. READ and
