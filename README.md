@@ -60,7 +60,7 @@ MIT. See [LICENSE](LICENSE).
 
 - [`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent) — upstream Hermes (MIT).
 - `venturecrane/hermes-agent` — SMD's pin-only fork; no patches.
-- `venturecrane/ss-console` (private) — SMD admin backend; consumes the audit/voice/memory data this overlay emits.
+- `venturecrane/ss-console` (public) — SMD admin backend; consumes the audit/voice/memory data this overlay emits.
 
 ## Status
 
