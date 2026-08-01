@@ -181,6 +181,25 @@ def test_passes_when_governed(monkeypatch, no_real_exit):
     assert kwargs["session_id"] == "smd-activation-selfcheck"
 
 
+def test_selfcheck_probes_use_the_shared_session_id(monkeypatch, no_real_exit):
+    """ss-console #2122. The probe's session id is a CONTRACT: the interactive
+    cost meter recognizes the boot dispatch by this exact value and declines to
+    price it. A second copy of the literal here would drift, and the drift looks
+    like the bug it fixes — an INVARIANT_VIOLATION row on every boot."""
+    from shared.selfcheck import SELFCHECK_SESSION_ID, is_selfcheck_session
+
+    calls = _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK)
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))
+
+    _, _, block_kwargs = calls["block"][0]
+    assert block_kwargs["session_id"] == SELFCHECK_SESSION_ID
+    assert block_kwargs["tool_call_id"] == SELFCHECK_SESSION_ID
+    audit_dispatch = [c for c in calls["invoke"] if c[0] == "post_llm_call"]
+    assert audit_dispatch, "the audit self-check did not drive post_llm_call"
+    assert is_selfcheck_session(audit_dispatch[0][1]["session_id"])
+
+
 def test_fails_closed_when_no_hooks_registered(monkeypatch, no_real_exit):
     # The exact production failure: overlay registered nothing into the live singleton.
     _install_fake_plugins(monkeypatch, hooks=set(), invoke_results=_BLOCK)

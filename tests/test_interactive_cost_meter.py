@@ -7,6 +7,7 @@ from pathlib import Path
 
 import shared.interactive_cost_meter as m
 from shared.audit_contract import INSERT_SQL
+from shared.selfcheck import SELFCHECK_SESSION_ID
 
 
 class FakeAuditClient:
@@ -110,6 +111,45 @@ def test_meter_fail_alarms_and_keeps_going():
     assert breaker.recorded == []
     assert len(audit.rows) == 1
     assert audit.rows[0][0] == INSERT_SQL
+    assert audit.rows[0][1][2] == "INVARIANT_VIOLATION"
+
+
+def test_boot_selfcheck_dispatch_is_not_metered_and_does_not_alarm():
+    """ss-console #2122. The activation gate proves the audit write path by
+    driving a REAL post_llm_call (ss-console#1285 Q2) with a synthetic
+    ``model="boot-selfcheck"``. That reached the priced meter, which cannot
+    price it, and wrote an INVARIANT_VIOLATION on every boot — all 61 such rows
+    on the pilot seat were this alarm. The probe is not a turn."""
+    _reset()
+    breaker = RecordingBreaker()
+    audit = FakeAuditClient()
+    m.meter_interactive_turn(
+        model="boot-selfcheck",
+        conversation_history=[{"role": "user", "content": "overlay activation self-check"}],
+        assistant_response="overlay active",
+        session_id=SELFCHECK_SESSION_ID,
+        breaker=breaker,
+        audit_client=audit,
+    )
+    assert audit.rows == []  # no INVARIANT_VIOLATION
+    assert breaker.recorded == []  # and no fabricated spend either
+
+
+def test_a_real_turn_on_an_unpriced_model_still_alarms():
+    """The suppression is scoped to the probe, never to the signal. A REAL turn
+    whose model is unpriced means the seat is running uncapped, which is the
+    only reason the alarm exists."""
+    _reset()
+    audit = FakeAuditClient()
+    m.meter_interactive_turn(
+        model="boot-selfcheck",  # same unpriced model — the SESSION is what differs
+        conversation_history=[{"role": "user", "content": "hi"}],
+        assistant_response="ok",
+        session_id="a-real-session",
+        breaker=RecordingBreaker(),
+        audit_client=audit,
+    )
+    assert len(audit.rows) == 1
     assert audit.rows[0][1][2] == "INVARIANT_VIOLATION"
 
 

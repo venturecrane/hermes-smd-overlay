@@ -81,9 +81,19 @@ _REQUIRED_HOOKS = {
 # deterministic "this MUST be gated" probe — and a READ-ONLY one (no audit write).
 _BANNED_PROBE_TOOL = "email_send"
 
-# Distinct session id for the boot-time audit self-check row, so it is trivially
-# distinguishable from real-turn audit rows when read back (via the runtime seam).
-_AUDIT_SELFCHECK_SESSION = "smd-activation-selfcheck"
+# The distinct session id for the boot self-check dispatches lives in
+# ``shared.selfcheck`` and is imported inside ``handle()``. It is a CONTRACT, not
+# a local label: the audit probe drives the REAL post_llm_call fan-out, so every
+# consumer that must not mistake the probe for a real turn — the interactive cost
+# meter above all — recognizes it by this exact id. Two copies of the string
+# would drift, and the drift looks exactly like the bug the shared constant
+# fixes: a synthetic model priced as a turn, alarming INVARIANT_VIOLATION on
+# every boot until the signal means nothing.
+#
+# Imported lazily (like every other shared import here) rather than at module
+# scope, because HookRegistry swallows a load-time failure: a top-level import
+# that raised would leave this gate silently unloaded, which is the one outcome
+# the whole file exists to prevent. Lazily, an import fault reaches ``_die``.
 
 _REQUIRED_WORKSPACE_TOOLS = {
     "workspace_gmail_search",
@@ -217,6 +227,16 @@ async def handle(event_type: str, context: dict | None = None) -> None:
         )
         return
 
+    try:
+        from shared.selfcheck import SELFCHECK_SESSION_ID
+    except Exception as e:  # noqa: BLE001
+        _die(
+            f"cannot import shared.selfcheck ({type(e).__name__}: {e}) — the "
+            "self-check probes cannot identify themselves to the consumers that "
+            "must not score them as real turns"
+        )
+        return
+
     # 1. Force the live gateway singleton to (re)load plugins from disk, now that
     #    bootstrap has placed + enabled the overlay on the volume. force=True clears
     #    _hooks first, so this is idempotent (no double-registration on re-runs).
@@ -268,8 +288,8 @@ async def handle(event_type: str, context: dict | None = None) -> None:
         block_message = get_pre_tool_call_block_message(
             tool_name=_BANNED_PROBE_TOOL,
             args={},
-            session_id="smd-activation-selfcheck",
-            tool_call_id="smd-activation-selfcheck",
+            session_id=SELFCHECK_SESSION_ID,
+            tool_call_id=SELFCHECK_SESSION_ID,
         )
     except Exception as e:  # noqa: BLE001
         _die(f"get_pre_tool_call_block_message self-check raised: {type(e).__name__}: {e}")
@@ -297,7 +317,7 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     try:
         invoke_hook(
             "post_llm_call",
-            session_id=_AUDIT_SELFCHECK_SESSION,
+            session_id=SELFCHECK_SESSION_ID,
             user_message="overlay activation self-check",
             assistant_response="overlay active",
             model="boot-selfcheck",

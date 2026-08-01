@@ -52,6 +52,7 @@ from shared.audit_contract import build_audit_params
 from shared.ids import iso_utc as _iso_utc
 from shared.ids import sha256 as _sha256
 from shared.ids import ulid as _ulid
+from shared.trust_decision import MATCH_NONE, TRUST_DECISIONS, TrustDecision
 
 from .schemas import (
     ACCEPTED_ACTION_TYPES,
@@ -278,6 +279,8 @@ def build_per_tool_metadata(
     arguments: dict | None = None,
     unmapped: bool = False,
     banned_reason: str | None = None,
+    trust: TrustDecision | None = None,
+    trust_decision_match: str = MATCH_NONE,
 ) -> dict:
     """Build the canonical ``metadata`` dict for one per-tool audit row.
 
@@ -288,17 +291,40 @@ def build_per_tool_metadata(
     - skill:                str | None
     - skill_version:        str | None
     - tool:                 str
-    - action_class:         str (HookActionClass value)
-    - ceiling_level:        str | None
+    - action_class:         str (HookActionClass value) — the COARSE class, from
+                            the tool name alone
+    - ceiling_level:        str | None (the EFFECTIVE ceiling actually applied)
     - outcome:              str ("ok" | "error" | "blocked")
     - error_type:           str | None
     - duration_ms:          float | None
     - trace_id:             str | None
+    - trust_decision_match: str ("tool_call_id" | "sequential" | "none")
     - unmapped_tool:        True iff the tool was not in the registry
     - banned_tool:          True iff the tool was banned
     - banned_reason:        str (set when banned_tool is True)
     - matter_id:            str (set when arguments has one)
     - customer_segment:     str (set when arguments has one)
+
+    The trust trail (present only when ``trust`` is supplied — i.e. when the
+    gate's decision for this exact call was found):
+
+    - resolved_action_class: str — the class after recipient reclassification.
+      ``action_class`` above is what the tool NAME resolves to; this is what the
+      entitlement was actually evaluated against, and for a send they differ
+      (``external_send`` vs ``external_send_client`` / ``_vendor`` / ``_internal``).
+      Both are recorded because they answer different questions.
+    - authored_ceiling:      str | None — what the persona authored for the class
+    - vertical_floor:        str | None — the pack floor, when one is declared
+    - trust_decision:        str — allow | draft | refuse | await_approval
+    - trust_allowed:         bool — whether the call was permitted to dispatch
+    - trust_reason:          str — the gate's own words for why
+    - trust_persona:         str — the persona the exposure resolved for
+
+    ``trust.effective_ceiling`` wins over the ``ceiling_level`` argument when a
+    decision is supplied: the gate's resolution is authoritative, and the
+    argument exists for callers that have a ceiling but no decision. Ceiling
+    fields stay ``None`` rather than becoming a placeholder string, because
+    "unauthored" and "indeterminate" are different facts about authorization.
     """
     metadata: dict = {
         "per_tool_audit": True,
@@ -307,12 +333,24 @@ def build_per_tool_metadata(
         "skill_version": skill_version,
         "tool": tool_name,
         "action_class": action_class.value,
-        "ceiling_level": ceiling_level,
+        "ceiling_level": trust.effective_ceiling if trust is not None else ceiling_level,
         "outcome": outcome,
         "error_type": error_type,
         "duration_ms": duration_ms,
         "trace_id": trace_id,
+        # Always stamped, including "none": a row with no trust provenance must
+        # SAY it has none rather than look like a row that predates the field.
+        "trust_decision_match": trust_decision_match,
     }
+
+    if trust is not None:
+        metadata["resolved_action_class"] = trust.action_class
+        metadata["authored_ceiling"] = trust.authored_ceiling
+        metadata["vertical_floor"] = trust.vertical_floor
+        metadata["trust_decision"] = trust.audit_action
+        metadata["trust_allowed"] = trust.allowed
+        metadata["trust_reason"] = trust.reason
+        metadata["trust_persona"] = trust.persona
 
     if unmapped:
         metadata["unmapped_tool"] = True
@@ -433,9 +471,28 @@ def emit_tool_event(
       * Unknown tool → fail-closed action class is REFUSED (issue #1327);
         metadata is tagged ``unmapped_tool=true`` so the dashboard surfaces it.
 
+    PROVENANCE (#2122). The row also carries WHAT AUTHORIZED the call, not only
+    what it was: the trust gate's decision for this exact call is collected from
+    ``shared.trust_decision`` (the pre→post seam — the two hooks live in
+    different plugins, which cannot import each other) and lands as the
+    effective ``ceiling_level``, the ``trust_ceiling`` COLUMN, the resolved typed
+    action class, and the rest of the trail. ``matter_ref`` is populated from the
+    matter id the arguments already carried; the column had been NULL on every
+    row while the id sat in metadata.
+
     Returns the inserted ULID, or ``None`` if the write failed (the writer
     raised ``AuditWriteError`` and the hook wrapper swallowed it).
     """
+    # Single-use: taken here so exactly one row can ever claim this decision.
+    # Guarded because provenance is an ENRICHMENT of the row and the row itself
+    # is the obligation — a register fault must degrade to a row with no trust
+    # trail, never to no row at all.
+    try:
+        trust, trust_match = TRUST_DECISIONS.take(tool_call_id or "", tool_name)
+    except Exception:  # noqa: BLE001 — never lose an audit row over its enrichment
+        logger.warning("audit: trust-decision lookup failed; row emitted without the trail")
+        trust, trust_match = None, MATCH_NONE
+
     try:
         classification = classify_tool(tool_name)
         action_class = classification.action_class
@@ -460,13 +517,14 @@ def emit_tool_event(
         action_class=action_class,
         outcome=outcome,
         skill_name=skill_name,
-        ceiling_level=None,
         error_type=error_type,
         duration_ms=float(duration_ms) if duration_ms is not None else None,
         trace_id=tool_call_id or None,
         arguments=args,
         unmapped=unmapped,
         banned_reason=banned_reason,
+        trust=trust,
+        trust_decision_match=trust_match,
     )
 
     # Carry session/task identifiers in metadata so the dashboard can
@@ -485,6 +543,22 @@ def emit_tool_event(
         actor=actor,
         actor_role=actor_role,
         skill_name=skill_name,
+        # The two COLUMNS the schema has always had for exactly these facts, and
+        # which every live row left NULL (#2122). Neither is a schema change:
+        # both already exist in ``shared.audit_contract.COLUMNS`` and in the
+        # hash-chain input, so populating them changes the canonical body of NEW
+        # rows only — every existing row's stored hash keeps verifying against
+        # its own stored values, exactly as before.
+        #
+        # matter_ref: the matter id the scope extractor already lifted into
+        # metadata. The value was captured all along; it just never reached the
+        # column an auditor filters and indexes on. ``or None`` because that
+        # extractor coerces with str(), so a blank id would land as "" — which
+        # the chain canonicalizes distinctly from NULL and which reads as a
+        # matter reference that is present but empty. Absent is absent.
+        matter_ref=metadata.get("matter_id") or None,
+        # trust_ceiling: the effective ceiling the gate actually applied.
+        trust_ceiling=trust.effective_ceiling if trust is not None else None,
         metadata=metadata,
     )
     return writer.write(event)

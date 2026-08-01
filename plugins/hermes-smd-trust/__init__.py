@@ -194,8 +194,17 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         # its own spec gate by reading something it wrote.
         spec_read.observe_read(tool_name, args, session_id)
 
+        # tool_call_id is the key the audit plugin's post_tool_call looks the
+        # decision up under (#2122). It may be absent — core drops session_id on
+        # this path (#141) and the same fire sites carry tool_call_id — so the
+        # register falls back to the sequential slot and the row declares which
+        # way it matched. Nothing here depends on the kwarg being populated.
         ceiling_block = enforce.evaluate_tool_call(
-            tool_name, args, customer_slug, session_id=session_id
+            tool_name,
+            args,
+            customer_slug,
+            session_id=session_id,
+            tool_call_id=kwargs.get("tool_call_id") or "",
         )
         if ceiling_block is not None:
             # The trust ceiling already refuses this call; no need to scan a
