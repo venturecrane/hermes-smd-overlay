@@ -57,7 +57,7 @@ tests/                 — pytest suite; one file per plugin
 
 ## What lives elsewhere
 
-- **SMD admin backend** (audit dashboards, voice training UI, customer console) lives in private `venturecrane/ss-console`. The plugins here emit data that backend consumes via HTTP/D1.
+- **SMD admin backend** (audit dashboards, voice training UI, customer console) lives in `venturecrane/ss-console` (public). The plugins here emit data that backend consumes via HTTP/D1. Client engagement material is NOT there — it lives in the private `venturecrane/engagements` repo.
 - **customer.yaml authoring + validation** lives in `ss-console/src/lib/operator/customer-yaml/`. The `bootstrap/translate.py` here re-implements the materialization to per-profile config.yaml, not the validation.
 - **Skill catalog** lives in `ss-console/operator/skills/`. Published into Machine images at build time; not part of this overlay.
 - **Hermes fork pin** is `venturecrane/hermes-agent`. No patches; tag-promotion scheme documented in `ss-console/docs/adr/0015-hermes-fork-vs-upstream.md`.
