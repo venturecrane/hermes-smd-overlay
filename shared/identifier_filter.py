@@ -78,6 +78,7 @@ from __future__ import annotations
 import datetime
 import enum
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,7 @@ class IdKind(str, enum.Enum):
     CASE_NUMBER = "case_number"  # docket / case number
     DATE = "date"
     NAME = "name"  # recipient name in a greeting slot
+    PAIR = "pair"  # a (case number, date) asserted together on one line
 
 
 # ---------------------------------------------------------------------------
@@ -125,9 +127,26 @@ _A_NUMBER_RE = re.compile(r"\bA#?[-\s]?(?:\d[-\s]?){8,9}\b")
 _RECEIPT_RE = re.compile(r"\b[A-Z]{3}\d{10}\b")
 # SSN.
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-# Case / docket numbers: federal-style "1:24-cv-01234", or "No. 24-12345".
+# Case / docket numbers: federal-style "1:24-cv-01234", or "No. 24-12345", or a
+# practice-management MATTER number ("2026-PI-101", "PI-2026-0001").
+#
+# The matter-number alternation was added 2026-07-31. Before it, this pattern
+# could not see a matter number at all: probed live, "2026-PI-107" -> no hit,
+# "PI-2026-0001" -> no hit. Every IDENTIFIER_UNVERIFIED row on the pilot seat
+# showed only date shapes, which read as "no identifier problems found" when the
+# truth was "this filter is blind to the identifiers this firm uses." A gate that
+# cannot see a class of value is not reporting on it, and silence from it meant
+# nothing.
+#
+# Still REPORT-ONLY, deliberately. See the posture note in the overlay's
+# plugins/hermes-smd-trust/outbound.py: enforcement flips only after the
+# false-positive rate is measured on real traffic, and that discipline is not
+# overridden here. What changes is that the signal now exists to measure.
 _CASE_RE = re.compile(
-    r"\b(?:\d{1,2}:\d{2}-[a-z]{2}-\d{3,6}|No\.?\s?\d{2,4}-\d{2,6})\b",
+    r"\b(?:\d{1,2}:\d{2}-[a-z]{2}-\d{3,6}"
+    r"|No\.?\s?\d{2,4}-\d{2,6}"
+    r"|\d{4}-[A-Z]{2}-\d{3,4}"
+    r"|[A-Z]{2}-\d{4}-\d{4})\b",
     re.IGNORECASE,
 )
 
@@ -135,7 +154,15 @@ _CASE_RE = re.compile(
 _DATE_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"),
     re.compile(r"\b\d{1,2}-\d{1,2}-\d{2,4}\b"),
-    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    # ISO date, and the date half of an ISO *datetime*. The trailing \b this
+    # replaced could not match "2026-08-12T09:00:00Z": between the final "2" and
+    # the "T" there is no word boundary, both being word chars. Smokeball events
+    # carry ISO datetimes (create_event start_time/end_time), so a digest that
+    # correctly read a hearing and wrote its date was flagged unverified — a
+    # false positive at daily volume, and one that would have been measured as
+    # the model's fabrication rate. The negative lookahead also declines
+    # "2026-08-12-99", which the old \b form wrongly matched as a date.
+    re.compile(r"\b\d{4}-\d{2}-\d{2}(?![\d-])"),
     re.compile(
         r"\b(?:January|February|March|April|May|June|July|August|September|"
         r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|"
@@ -159,6 +186,17 @@ _DATE_RES: tuple[re.Pattern[str], ...] = (
 _GREETING_RE = re.compile(
     r"(?:^|\n)\s*(?:Dear|Hi|Hello|Greetings)\s+([A-Z][A-Za-z'.\-]+(?:\s+[A-Z][A-Za-z'.\-]+){0,2})\s*[,:]",
 )
+
+# Bound the (case x date) cross-product on a pathological line. A real digest
+# row carries one matter and one or two dates; anything past this is noise, and
+# an unbounded product on a paragraph-length "line" would be a cheap DoS on the
+# gate itself.
+_MAX_PAIRS_PER_LINE = 8
+
+# Bound the pair register the same way the session registers are bounded
+# elsewhere. A seeded record contributes a handful of pairs; a runaway seeder
+# must not grow this without limit on a long-lived Machine.
+_MAX_REGISTERED_PAIRS = 4096
 
 _DATE_STRPTIME_FORMATS: tuple[str, ...] = (
     "%m/%d/%Y",
@@ -292,6 +330,61 @@ def _extract(text: str, include_names: bool = True) -> list[IdentifierHit]:
     return hits
 
 
+def pair_key(case_canonical: str, date_canonical: str) -> str:
+    """The register key for one (case number, date) assertion."""
+    return f"{case_canonical}|{date_canonical}"
+
+
+def _extract_pairs(text: str) -> list[IdentifierHit]:
+    """Return the (case number, date) co-occurrences asserted **per line**.
+
+    Why this exists: atom-level provenance cannot see a *mispairing*. On
+    2026-08-01 the Operator wrote "matter 2026-PI-105, deposition of plaintiff
+    Alvarez, August 6, 2026" when the deposition event carried
+    ``matterNumber=2026-PI-101``. Both "2026-PI-105" and "2026-08-06" had been
+    legitimately read that session — one from the Okafor trial tasks, the other
+    from the Alvarez event — so every atom verified and the line passed clean.
+    What was never read is the two of them *together*.
+
+    Line-scoped because a line is the unit of assertion in the artifacts this
+    guards: one digest row, one ledger row, one escalation item. Two identifiers
+    on the same line are being claimed about each other; two identifiers three
+    paragraphs apart are not.
+    """
+    hits: list[IdentifierHit] = []
+    if not isinstance(text, str) or not text:
+        return hits
+
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        cases = [(m, _canon_digits(m.group(0))) for m in _CASE_RE.finditer(line)]
+        if cases:
+            dates: list[tuple[re.Match[str], str]] = []
+            for pat in _DATE_RES:
+                for m in pat.finditer(line):
+                    canon = _canon_date(m.group(0))
+                    if canon:
+                        dates.append((m, canon))
+            emitted = 0
+            for cm, ccanon in cases:
+                for dm, dcanon in dates:
+                    if emitted >= _MAX_PAIRS_PER_LINE:
+                        break
+                    start = offset + min(cm.start(), dm.start())
+                    end = offset + max(cm.end(), dm.end())
+                    hits.append(
+                        IdentifierHit(
+                            IdKind.PAIR,
+                            f"{cm.group(0)} ↔ {dm.group(0)}",
+                            pair_key(ccanon, dcanon),
+                            (start, end),
+                        )
+                    )
+                    emitted += 1
+        offset += len(line)
+    return hits
+
+
 # ---------------------------------------------------------------------------
 # Provenance register
 # ---------------------------------------------------------------------------
@@ -314,15 +407,69 @@ class ProvenanceRegister:
     def __init__(self) -> None:
         self._canon: set[str] = set()
         self._names: set[str] = set()
+        self._pairs: set[str] = set()
         self._captions: set[str] = set()
 
     def add_read_text(self, text: str) -> None:
         """Register the structured-shape identifiers found in a blob the agent
         read (dates, A-numbers, receipts, SSNs, case numbers). Names are NOT
         scanned from read text — register them via :meth:`add_name` from
-        structured matter/contact metadata."""
+        structured matter/contact metadata.
+
+        **Deliberately registers no pairs.** A tool result is a *collection* of
+        records: pairing every case number in the blob with every date in the
+        blob would register the cross-product and verify exactly the mispairings
+        this is meant to catch. Pairs come from :meth:`add_record`, one record
+        at a time, where the association is a fact rather than an inference.
+        """
         for hit in _extract(text, include_names=False):
             self.add(hit.kind, hit.canonical)
+
+    def add_record(self, case_number: str | None, dates: Iterable[str]) -> None:
+        """Register one record's identifiers **and the associations within it**.
+
+        This is the structured seam: the caller holds a single record (a task, an
+        event) whose matter binding was resolved in code, so "this date belongs
+        to this matter" is known rather than guessed. Callers pass raw values;
+        canonicalization happens here so a seeder cannot register a key shaped
+        differently from the one :func:`check` will look up.
+        """
+        case_canon = _canon_digits(case_number) if case_number else ""
+        if case_canon:
+            self._canon.add(case_canon)
+        for raw in dates:
+            if not raw:
+                continue
+            # Route through _extract rather than _canon_date so the seeder and
+            # check() canonicalize identically BY CONSTRUCTION. _canon_date alone
+            # parses only date-shaped strings, and a record's date field is
+            # routinely an ISO *datetime* ("2026-08-06T10:00:00Z") — seeding that
+            # directly registered nothing, so every pair on that record silently
+            # failed to verify. A key the checker will never look up is worse
+            # than no key: it reads as a mispairing.
+            for hit in _extract(str(raw), include_names=False):
+                if hit.kind is not IdKind.DATE:
+                    continue
+                self._canon.add(hit.canonical)
+                if case_canon and len(self._pairs) < _MAX_REGISTERED_PAIRS:
+                    self._pairs.add(pair_key(case_canon, hit.canonical))
+
+    def add_pair(self, case_canonical: str, date_canonical: str) -> None:
+        """Register one already-canonical association directly."""
+        if case_canonical and date_canonical and len(self._pairs) < _MAX_REGISTERED_PAIRS:
+            self._pairs.add(pair_key(case_canonical, date_canonical))
+
+    @property
+    def has_pairs(self) -> bool:
+        """True once anything has seeded an association.
+
+        :func:`check` consults this before reporting any pair: a register with no
+        associations cannot judge one, and a gate that cannot see must not claim
+        to have seen. Reporting pairs from an unseeded register would flag every
+        line carrying a matter and a date — which is every line of a deadline
+        digest, and marking everything is how a reader learns to ignore the mark.
+        """
+        return bool(self._pairs)
 
     def add(self, kind: IdKind, canonical: str) -> None:
         """Register one canonical identifier directly (e.g. from structured
@@ -357,10 +504,12 @@ class ProvenanceRegister:
     def verifies(self, hit: IdentifierHit) -> bool:
         if hit.kind is IdKind.NAME:
             return hit.canonical in self._names
+        if hit.kind is IdKind.PAIR:
+            return hit.canonical in self._pairs
         return hit.canonical in self._canon
 
     def __bool__(self) -> bool:
-        return bool(self._canon or self._names or self._captions)
+        return bool(self._canon or self._names or self._pairs or self._captions)
 
 
 # ---------------------------------------------------------------------------
@@ -387,10 +536,18 @@ class IdentifierResult:
         """Human-facing review notes (FLAG mode). Includes the raw value so the
         reviewer can judge it — this is surfaced to the firm's reviewer, not an
         audit log."""
-        return [
-            f"unverified {h.kind.value}: {h.raw!r} — not found in anything read this session"
-            for h in self.unverified
-        ]
+        notes: list[str] = []
+        for h in self.unverified:
+            if h.kind is IdKind.PAIR:
+                notes.append(
+                    f"unverified pair: {h.raw} — both values were read this session, "
+                    "but never together on one record"
+                )
+            else:
+                notes.append(
+                    f"unverified {h.kind.value}: {h.raw!r} — not found in anything read this session"
+                )
+        return notes
 
     def audit_metadata(self) -> dict:
         """Audit-row metadata: KINDS and REDACTED shapes only, never the raw
@@ -431,6 +588,11 @@ def check(body: str, register: ProvenanceRegister, mode: Mode = Mode.REPORT) -> 
     posture.
     """
     hits = _extract(body)
+    # Pairs only when the register carries associations to judge them against.
+    # An unseeded register cannot distinguish a mispairing from a correct one, so
+    # it reports neither — see ProvenanceRegister.has_pairs.
+    if register.has_pairs:
+        hits.extend(_extract_pairs(body))
     unverified = tuple(h for h in hits if not register.verifies(h))
     return IdentifierResult(
         mode=mode,

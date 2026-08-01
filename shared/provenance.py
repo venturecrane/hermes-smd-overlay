@@ -24,12 +24,24 @@ from free read-text (the whole reason body name-checks are greeting-slot only),
 so names are out of the runtime register v1; the gate reports on the
 structured-shape kinds it can verify from reads (dates, A-numbers, receipts,
 SSNs, case numbers) and leaves names to a structured-metadata seeding follow-on.
+
+It DOES hold associations (2026-08-01). Atom provenance answers "was this value
+read?", which cannot catch a *mispairing*: on 2026-08-01 the Operator wrote
+"matter 2026-PI-105, deposition of plaintiff Alvarez, August 6, 2026" when the
+event carried ``matterNumber=2026-PI-101``. Both values had been read that
+session, so every atom verified and the line passed clean. :func:`_record_associations`
+seeds (matter, date) pairs one record at a time — per record, never per blob,
+because pairing everything in a listing registers the cross-product and verifies
+exactly the defect this catches.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import OrderedDict
+from collections.abc import Iterator
+from typing import Any
 
 from shared.identifier_filter import ProvenanceRegister
 
@@ -91,8 +103,78 @@ def record_read(session_id: str, text: str) -> None:
             _registers.move_to_end(session_id)  # LRU touch
         reg.add_read_text(text)
         _record_captions(reg, text)
+        _record_associations(reg, text)
     except Exception:  # noqa: BLE001 — recording is best-effort, never fatal
         logger.debug("provenance: record_read failed for session %s", session_id, exc_info=True)
+
+
+# Bound the per-blob walk. A listing returns at most a few hundred rows and the
+# gate must not become the expensive part of a read.
+_MAX_SEEDED_RECORDS = 200
+
+
+def _iter_records(payload: Any, depth: int = 0) -> Iterator[dict]:
+    """Yield the record-shaped dicts in a decoded tool result.
+
+    Handles the three shapes the connectors actually return: a HATEOAS envelope
+    (``{"value": [...]}``), a bare list, and a single record. Depth-bounded so a
+    pathological payload cannot walk forever.
+    """
+    if depth > 3:
+        return
+    if isinstance(payload, dict):
+        inner = payload.get("value")
+        if isinstance(inner, list):
+            for item in inner:
+                yield from _iter_records(item, depth + 1)
+            return
+        yield payload
+    elif isinstance(payload, list):
+        for item in payload:
+            yield from _iter_records(item, depth + 1)
+
+
+def _record_associations(reg: ProvenanceRegister, text: str) -> None:
+    """Seed (matter, date) associations from a read blob, ONE RECORD AT A TIME.
+
+    This is what turns pair-keyed provenance on: until something seeds an
+    association the gate reports no pairs at all, by design (an unseeded register
+    cannot judge a pairing, and flagging every matter+date line would be worse
+    than silence).
+
+    **Per record is the whole point.** ``add_read_text`` deliberately registers
+    no pairs because a tool result is a *collection*: pairing every matter in the
+    blob with every date in the blob registers the cross-product and verifies
+    precisely the mispairings this exists to catch. Here the matter binding was
+    resolved in connector code (``matterNumber``, attached by the smokeball
+    connector's ``_attach_matter_ref``), so "this date belongs to this matter" is
+    a fact about one object rather than an inference across a page.
+
+    Every string field of the record is offered as a date candidate rather than a
+    hardcoded field list. Two reasons: the vendor's date fields differ per entity
+    (``dueDate`` on a task, ``startTime``/``endTime`` on an event) and a guessed
+    field name that does not exist is the authored-not-captured failure this
+    codebase has already been bitten by. ``add_record`` extracts what is actually
+    a date and ignores the rest.
+
+    Over-registering a true association is the safe direction here: it makes the
+    gate more permissive, never wrong. Under-registering would flag correct lines,
+    and a gate that flags correct lines is worse than no gate.
+    """
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return  # not JSON — atoms and captions already handled the text form
+    seeded = 0
+    for record in _iter_records(payload):
+        if seeded >= _MAX_SEEDED_RECORDS:
+            return
+        number = record.get("matterNumber")
+        if not isinstance(number, str) or not number:
+            continue
+        candidates = [v for v in record.values() if isinstance(v, str)]
+        reg.add_record(number, candidates)
+        seeded += 1
 
 
 def _record_captions(reg: ProvenanceRegister, text: str) -> None:
