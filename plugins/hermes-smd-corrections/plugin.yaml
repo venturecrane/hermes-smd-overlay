@@ -1,0 +1,12 @@
+name: hermes-smd-corrections
+version: "0.1.0"
+description: "Correction capture (ss-console #2091, ADR 0083 §4): correction_capture records a customer's stated correction through the broker's uid-gated correction_propose verb, which stamps status='proposed' broker-side and writes to the append-only ledger the agent uid cannot open. The agent is a witness, never an author — promotion into the vault is portal-side by a Named Administrator. Closes the execute_code dependency the verb shipped with (the path WP-D found dead for the escalation ledger, ss #1915). Refuses capture on a tainted turn via pre_tool_call, and nudges the write side via pre_llm_call so the lane does not repeat overlay #170's zero rows."
+requires_env:
+  - SMD_WORKSPACE_BROKER_SOCKET
+hooks:
+  # pre_tool_call — refuses capture on a tainted turn. It is here rather than in
+  # the handler because Hermes hands a tool handler only task_id/user_task, never
+  # session_id, and it is the one hook that can block.
+  - pre_tool_call
+  # pre_llm_call — the capture nudge, on sender-attributed untainted turns only.
+  - pre_llm_call

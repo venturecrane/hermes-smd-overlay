@@ -553,6 +553,16 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # skills never need a code_execution exposure to run the escalation loop.
     "escalation_append": ActionClass.INTERNAL_WRITE,
     "escalation_state": ActionClass.READ,
+    # Correction capture (hermes-smd-corrections, ss-console #2091, ADR 0083 §4).
+    # INTERNAL_WRITE for the same reason the escalation append is: it appends one
+    # validated row to the broker's append-only ledger and reaches nothing
+    # client-facing. That class matters — every seat authors `internal_write` at
+    # `draft_for_review` or better, and an internal write at draft_for_review is
+    # ALLOWED (enforce._enforce_resolved), so capture works on every seat with no
+    # entitlement widening. It cannot be READ: it writes. And leaving it unmapped
+    # would make it REFUSED by design, which is exactly how the execute_code gap
+    # this plugin closes stayed invisible until a live probe (ss #1915).
+    "correction_capture": ActionClass.INTERNAL_WRITE,
     # Durable-job tools (hermes-smd-jobs, ss #1916 — these were unmapped, so the
     # fail-closed REFUSED default made durable jobs inert at runtime).
     # start_background_job launches a budgeted background agent turn with tools:
