@@ -23,7 +23,7 @@ from shared import spec_manifest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "plugins" / "hermes-smd-trust"))
 
-import spec_gate  # noqa: E402
+from shared import spec_gate  # noqa: E402
 
 FOUR_RULES = {
     "opening_line_prefix": "Bottom line:",

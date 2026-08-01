@@ -36,6 +36,34 @@ which the ADR 0028 voice gate deliberately does not: that gate protects the
 principal's voice from leaving the firm un-reviewed, while this one enforces that
 an authored spec was consulted at all.
 
+INTERNAL ARTIFACTS RESOLVE NOWHERE, and that is why ``output_class`` exists
+-------------------------------------------------------------------------
+The map above covers the four classes whose recipient is in the tool call. The
+two INTERNAL-artifact classes — ``work_product`` and ``record`` — have no
+recipient, so nothing in a tool call resolves them. Probed 2026-08-01
+(ss-console ``vfy_01KYZF6CYFRQ9SJDWQF0FDNX7W``): ``pre_tool_call`` carries only
+``tool_name, args, task_id, session_id, tool_call_id``; ``content_ceiling``,
+which ss-console's ``output-classes.yaml`` names as ``work_product``'s
+``declared_by``, has no runtime counterpart anywhere in this overlay; and the
+one skill-name resolver is dead code documented "never an entitlement input".
+``mcp_smokeball_create_memo`` carrying a demand letter is indistinguishable here
+from the same call carrying a chronology row, and the two classes share every
+seam.
+
+So a caller that GENUINELY KNOWS the class passes it. Today that is
+``hermes-smd-drafting``'s ``smd_deliver_draft``, a mediated tool whose whole
+purpose is to be the drafting lane's declared exit: the class stops being
+inferred from a generic write and becomes a property of which tool was called.
+
+The trust boundary does not move. An explicit class only ever selects WHICH
+authored declaration is consulted; it cannot manufacture one. A caller naming a
+class the seat never declared gets ``None`` from ``_spec_expected`` and the gate
+stays silent, exactly as it would for an unbound recipient class — and a caller
+naming a class the seat DID declare has asked for a stricter check, not a
+weaker one. There is no value of ``output_class`` that turns a refusal into a
+pass, which is what makes accepting it from a tool handler safe where accepting
+``_skill_name`` from model-composed args would not be.
+
 Fail behavior
 -------------
 Downgrade to draft through the same block-directive plumbing the content floor
@@ -230,13 +258,31 @@ def _emit_spec_gate_audit(
         )
 
 
+# Classes with no recipient. Their refusal cannot say "create a draft for review"
+# — the artifact already IS a draft, and offering that as the remedy would send
+# the model looking for an escape hatch instead of reading the spec.
+_INTERNAL_ARTIFACT_CLASSES = frozenset({"work_product", "record"})
+
+
 def _draft_message(output_class: str, reason: str) -> str:
+    internal = output_class in _INTERNAL_ARTIFACT_CLASSES
     if reason == _REASON_SPEC_NOT_READ:
+        remedy = (
+            "Read the spec named in your skill's authored-spec pointer, compose against "
+            "it, and deliver again."
+            if internal
+            else "Read the spec named in your skill's authored-spec pointer, compose "
+            "against it, then send — or create a draft for review."
+        )
         return (
             f"Refused: this seat declares an authored voice spec for the '{output_class}' "
-            "output class, and this turn did not read it. Read the spec named in your "
-            "skill's authored-spec pointer, compose against it, then send — or create a "
-            "draft for review. (ss ADR 0083)"
+            f"output class, and this turn did not read it. {remedy} (ss ADR 0083)"
+        )
+    if internal:
+        return (
+            f"Refused: the authored-spec gate could not certify this '{output_class}' "
+            f"artifact (reason={reason}). Nothing is delivered. Resolve the fault and "
+            "deliver again rather than routing around this."
         )
     return (
         f"Refused: the authored-spec gate could not certify this '{output_class}' send "
@@ -251,14 +297,22 @@ def check_spec_gate(
     session_id: str = "",
     tool_call_id: str = "",
     body: str = "",
+    output_class: str | None = None,
 ) -> dict | None:
-    """Gate an allowed autonomous send on having read its class's authored spec.
+    """Gate an output on having read its class's authored spec.
 
-    The caller invokes this ONLY for an allowed send whose effective ceiling is
-    ``autonomous``. Returns a draft-routing block directive to downgrade, or
-    ``None`` to let the send proceed.
+    For a SEND, the caller invokes this only for an allowed send whose effective
+    ceiling is ``autonomous``, and leaves ``output_class`` unset so the class
+    derives from the resolved recipient.
+
+    For an INTERNAL ARTIFACT there is no recipient to derive from, so a caller
+    that knows the class states it. See the module docstring for why that is
+    safe: an explicit class selects which authored declaration is consulted and
+    can only ever make the check stricter.
+
+    Returns a block directive to refuse, or ``None`` to let the output proceed.
     """
-    output_class = resolve_output_class(action_class_value)
+    output_class = output_class or resolve_output_class(action_class_value)
     if output_class is None:
         return None
 

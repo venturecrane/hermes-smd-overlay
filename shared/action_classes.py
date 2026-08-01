@@ -478,6 +478,17 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # Connector lifecycle — read-only here.
     "connector_get_status": ActionClass.READ,
     "connector_list_bindings": ActionClass.READ,
+    # The drafting lane's declared exit (ss ADR 0083). READ by blast radius, and
+    # the classification is the point rather than an afterthought: this tool
+    # writes nothing, sends nothing, and touches no provider. It DECIDES whether
+    # a draft the lane already composed may be delivered, and the skill performs
+    # the write afterwards through its own already-classified connector call.
+    # Classing it anything heavier would put a ceiling between the lane and its
+    # own safety check — a seat could then be configured such that the gate
+    # cannot run, which is the inverse of what it is for. Unmapped would be
+    # worse still: an unmapped tool resolves to REFUSED, so the gate would fail
+    # closed by never executing, and every draft would route around it.
+    "smd_deliver_draft": ActionClass.READ,
     # Mediated Google Workspace tools. Every privileged provider operation is
     # explicit and classified; no general-purpose tool receives a credential.
     "workspace_gmail_search": ActionClass.READ,

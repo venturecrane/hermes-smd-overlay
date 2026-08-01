@@ -1,0 +1,5 @@
+name: hermes-smd-drafting
+version: "0.1.0"
+description: "The drafting lane's declared exit — gates an internal draft on its output class's authored spec."
+requires_env:
+  - SMD_SPEC_DIR
