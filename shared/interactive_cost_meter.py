@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from shared.audit_contract import INSERT_SQL, agent_event_params
+from shared.selfcheck import is_selfcheck_session
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,21 @@ def meter_interactive_turn(
     — a HARD_STOP transition emits AGENT_STOPPED through the breaker's own audit
     sink, and the gate halts the next interactive driver. Never raises: a meter
     fault alarms and keeps going (Captain decision 2026-07-04).
+
+    The boot self-check is not a turn and is not metered. The activation gate
+    proves the audit write path by driving a REAL ``post_llm_call`` dispatch
+    (ss-console#1285 Q2), which reaches this meter carrying a synthetic model
+    name; pricing it produced a ``model_unpriced`` alarm and an
+    ``INVARIANT_VIOLATION`` row on every single boot. Skipping it here — at the
+    consumer that would fabricate the alarm, keyed on the id the probe already
+    declares (``shared.selfcheck``) — leaves the alarm intact for the case it
+    exists for: a REAL turn whose model is unpriced, i.e. a seat running
+    uncapped.
     """
+    if is_selfcheck_session(session_id):
+        logger.debug("interactive_cost_meter: boot self-check dispatch; not a turn, not metered")
+        return
+
     try:
         cents, ok, reason = estimate_turn_cents(
             model=model,

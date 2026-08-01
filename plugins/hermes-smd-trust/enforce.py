@@ -39,9 +39,13 @@ Decision audit
 
 Every decision is logged with the action class, the authored ceiling, the
 vertical floor, the effective ceiling, the decision, and the reason — the trust
-trail the audit review reads. The plugin's ``pre_tool_call`` hook expects either
-``None`` (allow) or ``{"action": "block", "message": "Refused: <reason>"}``;
-``evaluate_tool_call`` returns exactly that shape.
+trail the audit review reads — and the same six fields are handed to
+``shared.trust_decision`` so the audit row this call produces carries them too
+(#2122). The log is for a human reading the seat; the register is for the
+ledger, which is where a compliance review actually looks. The plugin's
+``pre_tool_call`` hook expects either ``None`` (allow) or
+``{"action": "block", "message": "Refused: <reason>"}``; ``evaluate_tool_call``
+returns exactly that shape.
 """
 
 import copy
@@ -67,6 +71,11 @@ from shared.action_classes import (
 from shared.customer_config import CustomerConfigMissingError
 from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
 from shared.pending_send import PENDING_SEND
+from shared.trust_decision import (
+    ACTION_CLASS_BANNED,
+    TRUST_DECISIONS,
+    TrustDecision,
+)
 
 from . import spec_gate, voice_gate
 
@@ -783,6 +792,52 @@ def _audit_decision(tool_name: str, persona_slug: str, decision: EnforcementDeci
         logger.debug("trust: decision audit log failed", exc_info=True)
 
 
+def _record_decision(
+    tool_call_id: str,
+    tool_name: str,
+    persona_slug: str,
+    *,
+    action_class: str,
+    audit_action: str,
+    allowed: bool,
+    reason: str,
+    authored_ceiling: Ceiling | None = None,
+    vertical_floor: Ceiling | None = None,
+    effective_ceiling: Ceiling | None = None,
+) -> None:
+    """Hand this decision to the audit plugin's ``post_tool_call`` (#2122).
+
+    The log line above is for a human reading the seat; this is for the ledger.
+    Until it existed the trail was computed on every call and written to none of
+    them, which is why ``ceiling_level`` was null on every live row.
+
+    ``None`` ceilings are carried through as ``None``, never as the
+    ``"unauthored"`` placeholder ``_ceiling_str`` renders for the log — the row
+    must distinguish "no exposure was authored for this class" from "the
+    resolver could not decide", and only the first is fail-closed by design.
+
+    Best-effort and never raises: the ledger is downstream of the decision, and
+    a register fault must not change what the gate returns.
+    """
+    try:
+        TRUST_DECISIONS.record(
+            tool_call_id,
+            tool_name,
+            TrustDecision(
+                action_class=action_class,
+                audit_action=audit_action,
+                allowed=allowed,
+                authored_ceiling=authored_ceiling.value if authored_ceiling else None,
+                vertical_floor=vertical_floor.value if vertical_floor else None,
+                effective_ceiling=effective_ceiling.value if effective_ceiling else None,
+                persona=persona_slug,
+                reason=reason,
+            ),
+        )
+    except Exception:  # noqa: BLE001 — the ledger handoff must never break the path
+        logger.debug("trust: decision handoff to the audit row failed", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Hook entry point
 # ---------------------------------------------------------------------------
@@ -895,6 +950,7 @@ def evaluate_tool_call(
     args: dict,
     customer_slug: str,
     session_id: str = "",
+    tool_call_id: str = "",
 ) -> dict | None:
     """Decide whether a tool call may proceed.
 
@@ -906,6 +962,14 @@ def evaluate_tool_call(
       2. The active persona's exposure refuses the action class via ``enforce()``.
          The per-session taint (``SESSION_TAINT``) is read by ``session_id`` and
          passed to ``enforce()`` as the taint-gate input.
+
+    Every one of those outcomes — including the banned refusal and the
+    fail-closed one — is handed to ``shared.trust_decision`` under
+    ``tool_call_id`` so the audit row this call produces can state what
+    authorized it (#2122). ``tool_call_id`` is optional because the out-of-band
+    confirmed-send dispatch re-authorizes a stored payload with no tool call
+    behind it; that path records under the empty key, which no ``post_tool_call``
+    can collect ahead of its own pre-hook decision.
 
     Exception safety: any exception here is caught at the hook boundary; this
     function may raise internally and the caller's try/except in ``__init__.py``
@@ -921,11 +985,25 @@ def evaluate_tool_call(
         classification = classify_tool(tool_name)
     except BannedToolError as err:
         message = _BANNED_REFUSAL_MESSAGE.get(err.tool_name, err.reason)
+        banned_persona = _resolve_active_persona()
         logger.info(
             "trust-decision tool=%s persona=%s action_class=banned decision=refuse reason=%s",
             tool_name,
-            _resolve_active_persona() or "(none)",
+            banned_persona or "(none)",
             message,
+        )
+        # The audit plugin has its own defense-in-depth banned path at
+        # post_tool_call; if a banned name ever reaches it, the INVARIANT_VIOLATION
+        # row should carry the refusal that was actually made here.
+        _record_decision(
+            tool_call_id,
+            tool_name,
+            banned_persona,
+            action_class=ACTION_CLASS_BANNED,
+            audit_action="refuse",
+            allowed=False,
+            reason=message,
+            effective_ceiling=Ceiling.REFUSED,
         )
         return {"action": "block", "message": f"Refused: {message}"}
 
@@ -1004,12 +1082,33 @@ def evaluate_tool_call(
                 tool_name,
                 exc_info=True,
             )
+            # An allow the resolver did not actually decide. The row says so —
+            # effective_ceiling stays None (indeterminate, not "authored
+            # autonomous"), which is exactly the distinction an auditor needs.
+            _record_decision(
+                tool_call_id,
+                tool_name,
+                persona_slug,
+                action_class=ActionClass.READ.value,
+                audit_action="allow",
+                allowed=True,
+                reason="read allowed despite an indeterminate exposure resolution",
+            )
             return None
         logger.exception(
             "trust: exposure resolution failed for sensitive tool %r (action=%s); "
             "FAILING CLOSED — refusing the call",
             tool_name,
             classification.action_class,
+        )
+        _record_decision(
+            tool_call_id,
+            tool_name,
+            persona_slug,
+            action_class=classification.action_class.value,
+            audit_action="refuse",
+            allowed=False,
+            reason="trust decision unavailable; failing closed",
         )
         return {
             "action": "block",
@@ -1020,6 +1119,22 @@ def evaluate_tool_call(
         }
 
     _audit_decision(tool_name, persona_slug, decision)
+    # The same six fields the line above logs, handed to the row this call
+    # produces (#2122). ``decision.action_class`` is the RESOLVED class — after
+    # recipient reclassification — so the typed send classes entitlements
+    # actually govern reach the ledger instead of stopping at the gate.
+    _record_decision(
+        tool_call_id,
+        tool_name,
+        persona_slug,
+        action_class=decision.action_class.value,
+        audit_action=decision.audit_action,
+        allowed=decision.allowed,
+        reason=decision.reason,
+        authored_ceiling=decision.authored_ceiling,
+        vertical_floor=decision.vertical_floor,
+        effective_ceiling=decision.effective_ceiling,
+    )
 
     # Capture a send withheld at the confirm ceiling so a later current-turn
     # approval releases exactly THIS payload (ADR 0071 #1806). A new compose
