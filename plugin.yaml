@@ -16,6 +16,7 @@ plugins:
   - plugins/hermes-smd-mcp-result-sink
   - plugins/hermes-smd-jobs
   - plugins/hermes-smd-escalation
+  - plugins/hermes-smd-corrections
   - plugins/hermes-smd-connector-health
   - plugins/hermes-smd-usage
   - plugins/hermes-smd-drafting
