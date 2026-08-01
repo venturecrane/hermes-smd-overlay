@@ -56,7 +56,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from shared import content_floor
+from shared import content_floor, spec_gate
 from shared.action_classes import (
     BANNED_TOOLS,
     TOOL_ACTION_CLASS_MAP,
@@ -76,8 +76,6 @@ from shared.trust_decision import (
     TRUST_DECISIONS,
     TrustDecision,
 )
-
-from shared import spec_gate
 
 from . import voice_gate
 

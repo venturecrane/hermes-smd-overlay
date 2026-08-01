@@ -26,8 +26,9 @@ from shared.spec_status import SPEC_STATUS
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "plugins" / "hermes-smd-trust"))
 
-from shared import spec_gate  # noqa: E402
 import spec_read  # noqa: E402
+
+from shared import spec_gate  # noqa: E402
 
 SESSION = "sess-1"
 
