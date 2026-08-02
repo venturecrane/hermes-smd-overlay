@@ -806,6 +806,13 @@ class EstablishIntake:
         else. The write is atomic so the broker can never read a torn result."""
         self.results_dir.mkdir(parents=True, exist_ok=True)
         self._harden_down(self.spool_dir, self.results_dir, dir_mode=0o750, gid=self.broker_gid)
+        # The results DIRECTORY itself is 0770, not 0750: unlink requires write
+        # on the containing directory, and the one-shot contract ("broker
+        # deletes after first read") is dead letter at 0750 — the broker could
+        # read but never delete, so every result would survive to the TTL sweep.
+        # Found in cross-half reconciliation (ss-console PR #2181). Result FILES
+        # stay 0640 so the broker cannot rewrite root-authored verdicts.
+        self._harden_path(self.results_dir, 0o770, gid=self.broker_gid)
         path = self.results_dir / f"{result['run_id']}.json"
         atomic_write(path, json.dumps(result, sort_keys=True).encode("utf-8") + b"\n")
         self._harden_path(path, 0o640, gid=self.broker_gid)
