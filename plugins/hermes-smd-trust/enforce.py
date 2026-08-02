@@ -1160,16 +1160,24 @@ def evaluate_tool_call(
         if floor_block is not None:
             return floor_block
 
-        # Voice live-gate (ADR 0028 §2, #855). ONLY an AUTONOMOUS send that LEAVES
-        # the firm (outside, or the typed client / records-vendor classes)
-        # impersonates the principal's voice with no human review — confirm /
-        # draft / refused already route to a human, and external_send_internal is
-        # ops traffic, so it is out of scope. The gate itself adds the
-        # voice-authored BINDING check (silent on a non-voice seat); when bound it
-        # downgrades to draft (same block-directive plumbing as the content floor)
-        # unless the voice transform demonstrably ran on this turn.
+        # Voice live-gate (ADR 0028 §2, #855; repointed per-class by ss#2086
+        # step 1). ONLY an AUTONOMOUS send that LEAVES the firm (outside, or the
+        # typed client / records-vendor classes) impersonates the principal's
+        # voice with no human review — confirm / draft / refused already route to
+        # a human, and external_send_internal is ops traffic, so it is out of
+        # scope. The gate resolves its binding regime per (seat × output class),
+        # ADDITIVELY: a class declared `output_classes.<class>.voice_spec:
+        # expected` is governed by the authored-spec binding (installed +
+        # hash-verified + read this turn), and every OTHER class keeps the
+        # original voice_library / transform-ran binding — silent only on a seat
+        # that authored neither. When bound it downgrades to draft (same
+        # block-directive plumbing as the content floor).
         if decision.effective_ceiling == Ceiling.AUTONOMOUS:
-            voice_block = voice_gate.check_voice_gate(tool_name=tool_name, session_id=session_id)
+            voice_block = voice_gate.check_voice_gate(
+                tool_name=tool_name,
+                action_class_value=getattr(effective_action, "value", ""),
+                session_id=session_id,
+            )
             if voice_block is not None:
                 return voice_block
 

@@ -1,0 +1,45 @@
+{
+  "_comment": "Snapshot of every REAL seat's voice-gate-relevant config fields, generated from ss-console operator/customers/*/customer.yaml (underscore-prefixed template dirs excluded). Consumed by tests/test_voice_gate_binding_coverage.py to assert the ss#2086 per-class gate repoint is ADDITIVE: no (seat x class) loses its downgrade relative to the pre-repoint voice_library binding. REGENERATION IS CONSOLE-SIDE: ss-console's drift test (ss#2086 plan C3, following the validator_parity_fixtures precedent) regenerates this file when seat configs change; do not hand-edit.",
+  "generated_from": "venturecrane/ss-console@b69a76483b68ba2d895edc3f163f49366b11d63a",
+  "excluded_template_dirs": [
+    "_hosted-template",
+    "_template"
+  ],
+  "seats": {
+    "ashton-price": {
+      "voice_library_authored": true,
+      "output_classes": {}
+    },
+    "pilot-law": {
+      "voice_library_authored": true,
+      "output_classes": {}
+    },
+    "pilot-smokeball": {
+      "voice_library_authored": true,
+      "output_classes": {
+        "staff": {
+          "voice_spec": "expected"
+        },
+        "work_product": {
+          "voice_spec": "expected"
+        }
+      }
+    },
+    "scott": {
+      "voice_library_authored": true,
+      "output_classes": {}
+    },
+    "smd": {
+      "voice_library_authored": true,
+      "output_classes": {}
+    },
+    "smd-staging": {
+      "voice_library_authored": true,
+      "output_classes": {
+        "staff": {
+          "voice_spec": "expected"
+        }
+      }
+    }
+  }
+}
