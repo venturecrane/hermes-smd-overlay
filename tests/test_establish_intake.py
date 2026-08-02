@@ -573,3 +573,20 @@ def test_install_run_purges_the_staging_set_too(tmp_path):
     (staging / "approved_strings.json").write_text('{"approved": []}')
     intake.process_run(build_run(spool))
     assert not (spool / "staging" / "set-1").exists()
+
+
+def test_results_dir_is_group_writable_so_the_broker_can_unlink(tmp_path):
+    """One-shot delivery: the broker deletes a result after first read, and
+    unlink requires WRITE on the containing directory. At 0750 the one-shot
+    contract is dead letter (broker reads, can never delete; every result
+    survives to the TTL sweep). Found in cross-half reconciliation (ss-console
+    PR #2181). Falsifier: this test fails at dir mode 0750. Result FILES stay
+    0640 — the broker must not be able to rewrite a root-authored verdict."""
+    intake, _s3, spool = make_intake(tmp_path)
+    run_dir = build_run(spool)
+    intake.process_run(run_dir)
+    results = spool / "results"
+    assert (results.stat().st_mode & 0o777) == 0o770
+    result_files = list(results.glob("*.json"))
+    assert result_files, "a result file must exist after process_run"
+    assert (result_files[0].stat().st_mode & 0o777) == 0o640
