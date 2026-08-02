@@ -49,6 +49,7 @@ from shared.audit_contract import CREATE_INDEX_SQL as _CREATE_INDEX_SQL
 from shared.audit_contract import CREATE_TABLE_SQL as _CREATE_TABLE_SQL
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import build_audit_params
+from shared.cron_attribution import resolve_routine
 from shared.ids import iso_utc as _iso_utc
 from shared.ids import sha256 as _sha256
 from shared.ids import ulid as _ulid
@@ -459,6 +460,7 @@ def emit_tool_event(
     actor: str = "agent",
     actor_role: ActorRole = ActorRole.AGENT,
     skill_name: str | None = None,
+    hermes_home_for_attribution: str | None = None,
 ) -> str | None:
     """Write one ``TOOL_CALL_COMPLETED`` audit row for a post_tool_call event.
 
@@ -492,6 +494,19 @@ def emit_tool_event(
     except Exception:  # noqa: BLE001 — never lose an audit row over its enrichment
         logger.warning("audit: trust-decision lookup failed; row emitted without the trail")
         trust, trust_match = None, MATCH_NONE
+
+    # ATTRIBUTION (#2122). A cron-fired session's id embeds the live job id;
+    # resolve it to the stable managed routine name NOW, while the id → name
+    # mapping still exists (job ids rotate on re-materialization). Resolution
+    # never raises; a non-cron session leaves skill_name as passed (honest
+    # NULL for interactive/inbound turns, which no routine fired).
+    routine = (
+        resolve_routine(session_id, hermes_home=hermes_home_for_attribution)
+        if skill_name is None
+        else None
+    )
+    if routine is not None and routine.skill:
+        skill_name = routine.skill
 
     try:
         classification = classify_tool(tool_name)
@@ -533,6 +548,12 @@ def emit_tool_event(
         metadata["session_id"] = session_id
     if task_id:
         metadata["task_id"] = task_id
+    if routine is not None:
+        # The durable routine identity + the ephemeral job id it resolved
+        # from. The name survives id rotation; the id lets an auditor tie the
+        # row to a specific materialization epoch while it lived.
+        metadata["routine"] = routine.job_name
+        metadata["cron_job_id"] = routine.job_id
     # Stamp the outcome-semantics version so an auditor can distinguish
     # error-detecting rows (v2+) from the legacy always-"ok" rows (v1). No
     # historical row is ever rewritten — the version is the changepoint marker.
@@ -575,6 +596,7 @@ def emit_llm_event(
     platform: str,
     actor: str = "agent",
     actor_role: ActorRole = ActorRole.AGENT,
+    hermes_home_for_attribution: str | None = None,
 ) -> str | None:
     """Write one ``LLM_TURN_COMPLETED`` audit row for a post_llm_call event.
 
@@ -598,10 +620,18 @@ def emit_llm_event(
         "platform": platform,
     }
 
+    # ATTRIBUTION (#2122): same emission-time resolution as the tool path —
+    # a cron session's turn rows carry the routine that fired them.
+    routine = resolve_routine(session_id, hermes_home=hermes_home_for_attribution)
+    if routine is not None:
+        metadata["routine"] = routine.job_name
+        metadata["cron_job_id"] = routine.job_id
+
     event = AuditEvent(
         action_type="LLM_TURN_COMPLETED",
         actor=actor,
         actor_role=actor_role,
+        skill_name=routine.skill if routine is not None else None,
         input_payload=user_bytes,
         output_payload=assistant_bytes,
         metadata=metadata,
