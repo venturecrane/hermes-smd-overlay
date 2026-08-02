@@ -268,6 +268,45 @@ def test_unread_date_is_still_flagged_after_the_iso_fix() -> None:
     assert result.unverified[0].kind is IdKind.DATE
 
 
+def test_ordinal_date_read_verifies_written_plain_form() -> None:
+    """Ordinal day suffixes fold away in canonicalization: a read "August 5th,
+    2026" verifies a written "August 5, 2026" and vice versa (ss#2171 — the
+    evasive rewrite a refusal induces must not be regex-invisible)."""
+    reg = ProvenanceRegister()
+    reg.add_read_text("hearing set for August 5, 2026")
+    assert not check("Reminder: the hearing on August 5th, 2026.", reg).has_unverified
+    reg2 = ProvenanceRegister()
+    reg2.add_read_text("continuance granted to 22nd June 2026")
+    assert not check("New date: June 22, 2026.", reg2).has_unverified
+
+
+def test_unread_ordinal_date_is_flagged() -> None:
+    """FALSE CONTROL (Law 12): widening extraction to ordinals must not widen
+    verification — an ordinal date the agent never read stays flagged."""
+    reg = ProvenanceRegister()
+    reg.add_read_text("hearing set for August 5, 2026")
+    result = check("Filing due September 9th, 2026.", reg)
+    assert result.has_unverified
+    assert result.unverified[0].kind is IdKind.DATE
+    assert result.unverified[0].canonical == "2026-09-09"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "version 2.4th",
+        "the 4th of the month",
+        "5th grade in 2026",
+        "on the 3rd we met",
+        "root 66th Ave, 2026 sqft",
+    ],
+)
+def test_ordinal_suffix_alone_is_not_a_date(text: str) -> None:
+    """Ordinal-bearing prose that is not a month-name date extracts nothing."""
+    reg = ProvenanceRegister()
+    assert not check(text, reg).has_unverified
+
+
 def test_iso_pattern_declines_a_longer_digit_run() -> None:
     """The ISO branch must not read "2026-08-12" out of "2026-08-12-99".
 

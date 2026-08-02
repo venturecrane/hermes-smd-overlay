@@ -163,16 +163,22 @@ _DATE_RES: tuple[re.Pattern[str], ...] = (
     # the model's fabrication rate. The negative lookahead also declines
     # "2026-08-12-99", which the old \b form wrongly matched as a date.
     re.compile(r"\b\d{4}-\d{2}-\d{2}(?![\d-])"),
+    # Month-name forms accept an ordinal day suffix ("August 5th, 2026",
+    # "5th August 2026"). Without it, the evasive rewrite a refusal induces —
+    # the model rephrasing a blocked "August 5, 2026" as "August 5th, 2026" —
+    # would be invisible to both blocking and reporting (#2171). The suffix is
+    # accepted on BOTH the scan side and the seeding side (add_read_text uses
+    # these same patterns), so a correctly-read ordinal date also verifies.
     re.compile(
         r"\b(?:January|February|March|April|May|June|July|August|September|"
         r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|"
-        r"Nov|Dec)\.?\s+\d{1,2},?\s+\d{4}\b",
+        r"Nov|Dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|"
-        r"September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|"
-        r"Sept|Oct|Nov|Dec)\.?\s+\d{4}\b",
+        r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June"
+        r"|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun"
+        r"|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{4}\b",
         re.IGNORECASE,
     ),
 )
@@ -238,6 +244,11 @@ def _canon_date(raw: str) -> str | None:
     """
     s = re.sub(r"\s+", " ", raw.strip()).rstrip(".")
     s = s.replace(".", "")  # "Jun." -> "Jun"
+    # Strip ordinal day suffixes ("5th" -> "5") BEFORE strptime: the extraction
+    # patterns accept them (#2171), strptime does not — and stripping here is
+    # what makes a read "August 5, 2026" verify a written "August 5th, 2026"
+    # (both fold to 2026-08-05).
+    s = re.sub(r"\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", s, flags=re.IGNORECASE)
     for fmt in _DATE_STRPTIME_FORMATS:
         try:
             return datetime.datetime.strptime(s, fmt).strftime("%Y-%m-%d")

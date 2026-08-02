@@ -517,6 +517,131 @@ def test_names_alone_do_not_report(trust_plugin, env_autonomous, monkeypatch) ->
     assert _identifier_rows(fake) == []
 
 
+# ---------------------------------------------------------------------------
+# Layer 3c — structured-arg identifier scan (#2132 / ss#2171 PR 1a)
+#
+# Before _DRAFT_SCAN_KEYS, mcp_smokeball_create_event matched zero body keys
+# and exited the gate unscanned, and create_task's scan truncated at `note` —
+# a fabricated hearing date in start_time or a fabricated matter number in a
+# subject line was invisible. These tests pin the widened identifier surface
+# AND that the Tier-1/2 evaluate() scope did NOT widen with it.
+# ---------------------------------------------------------------------------
+
+
+def test_create_event_structured_args_reach_identifier_scan(
+    trust_plugin, env_autonomous, monkeypatch
+) -> None:
+    """A structured-only create_event with an unread start_time date is still
+    ALLOWED (report mode) but now emits an IDENTIFIER_UNVERIFIED row — the
+    #2132 surface is visible."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="mcp_smokeball_create_event",
+        args={
+            "subject": "Hearing",
+            "start_time": "2026-09-14T09:00:00",
+            "end_time": "2026-09-14T10:00:00",
+            "attendees": ["s-1"],
+            "time_zone": "America/Los_Angeles",
+        },
+        task_id="t",
+        session_id="sess-2132-event",
+        tool_call_id="c",
+    )
+    assert result is None  # report mode never blocks
+    rows = _identifier_rows(fake)
+    assert len(rows) == 1
+    metadata_json = rows[0][1][-1]
+    assert "date" in metadata_json
+    # redaction: the raw date value must not appear in the audit row
+    assert "2026-09-14" not in metadata_json
+
+
+def test_create_task_subject_and_due_date_scanned_past_note(
+    trust_plugin, env_autonomous, monkeypatch
+) -> None:
+    """create_task carries a `note` (the old first-match scan stopped there);
+    the unread due_date must still be seen and reported."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="mcp_smokeball_create_task",
+        args={
+            "staff_id": "s-1",
+            "subject": "Serve responses",
+            "note": "No identifiers here.",
+            "due_date": "2026-10-02",
+        },
+        task_id="t",
+        session_id="sess-2132-task",
+        tool_call_id="c",
+    )
+    assert result is None
+    rows = _identifier_rows(fake)
+    assert len(rows) == 1
+    assert "date" in rows[0][1][-1]
+
+
+def test_structured_args_all_read_do_not_report(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """FALSE CONTROL (Law 12): the same structured create_event whose date the
+    agent actually READ this session emits NO row — the widened scan must be
+    able to pass, or the report above measures nothing."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    trust_plugin.on_post_tool_call(
+        tool_name="email_list_messages",
+        result="Hearing scheduled 2026-09-14T09:00:00 per the court notice.",
+        session_id="sess-2132-read",
+        tool_call_id="r",
+    )
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="mcp_smokeball_create_event",
+        args={
+            "subject": "Hearing",
+            "start_time": "2026-09-14T09:00:00",
+            "end_time": "2026-09-14T10:00:00",
+            "attendees": ["s-1"],
+            "time_zone": "America/Los_Angeles",
+        },
+        task_id="t",
+        session_id="sess-2132-read",
+        tool_call_id="c",
+    )
+    assert result is None
+    assert _identifier_rows(fake) == []
+
+
+def test_evaluate_scope_stays_prose_only(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """The Tier-1/2 marker/citation gate keeps scanning the PROSE BODY alone —
+    the #2132 widening feeds only the identifier check. Widening an
+    already-blocking gate to subject lines would be a separate, measured
+    decision (ss#2171 critique issue 2)."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    ob = trust_plugin.outbound
+    seen: list[str] = []
+    real_evaluate = ob.evaluate
+
+    def spy(body, *a, **kw):
+        seen.append(body)
+        return real_evaluate(body, *a, **kw)
+
+    monkeypatch.setattr(ob, "evaluate", spy)
+    trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"subject": "Re: status", "body": "All quiet this week."},
+        task_id="t",
+        session_id="sess-scope",
+        tool_call_id="c",
+    )
+    assert seen == ["All quiet this week."]  # body only — no subject concatenation
+
+
 def test_post_tool_call_ignores_non_read_tools(trust_plugin, monkeypatch) -> None:
     """Only READ tools establish provenance — a write tool's result is not
     recorded into the register."""

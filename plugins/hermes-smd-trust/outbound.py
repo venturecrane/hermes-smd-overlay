@@ -170,6 +170,64 @@ def _extract_body(args: dict | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Identifier scan text (#2132 / ss#2171)
+#
+# The identifier provenance check must see MORE than the prose body: Smokeball
+# structured writes carry their fabrication surface in structured args — a
+# hearing date in create_event's start_time, a deadline in create_task's
+# due_date, a matter number in a subject line. Before this existed,
+# mcp_smokeball_create_event matched zero body keys and exited the gate
+# unscanned (ss#2132), which is exactly where a fabricated hearing date would
+# land on the firm's calendar.
+#
+# Mirrors _extract_send_body's concatenate-everything approach (first-match
+# _BODY_ARG_KEYS semantics truncated create_task scanning at `note`). This
+# text feeds ONLY the identifier check — the Tier-1/2 marker/citation gate
+# (`evaluate`) keeps scanning the prose body alone, deliberately: widening an
+# already-blocking gate to subject lines is a separate, measured decision.
+# ---------------------------------------------------------------------------
+
+_DRAFT_SCAN_KEYS: tuple[str, ...] = (
+    # prose bodies (superset of _BODY_ARG_KEYS)
+    "body",
+    "body_plain",
+    "body_text",
+    "content",
+    "html_body",
+    "html",
+    "text",
+    "note",
+    "message",
+    # structured, identifier-bearing args (#2132)
+    "subject",
+    "title",
+    "name",
+    "description",
+    "location",
+    "due_date",
+    "start_time",
+    "end_time",
+)
+
+
+def _extract_draft_scan_text(args: dict | None) -> str:
+    """Concatenate every present ``_DRAFT_SCAN_KEYS`` value for the identifier
+    scan. Returns ``""`` when nothing scannable is present (a structured-only
+    call carrying no identifier-bearing args has no fabrication surface)."""
+    if not isinstance(args, dict):
+        return ""
+    parts: list[str] = []
+    for key in _DRAFT_SCAN_KEYS:
+        value = args.get(key)
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else str(value)
+        if text.strip():
+            parts.append(text)
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Vertical resolution
 #
 # Source order:
@@ -431,9 +489,22 @@ def check_outbound_draft(
     body = _extract_body(args)
     if body is None or not body.strip():
         if not _body_is_required(tool_name):
-            # Body-optional tool with no prose body (structured-only call:
-            # a calendar time, a matter-field date). No fabrication surface —
-            # allow rather than brick a legitimate structured operation.
+            # Body-optional tool with no prose body (structured-only call: a
+            # calendar time, a matter-field date). The Tier-1/2 marker/citation
+            # gate has no prose to scan — but the structured args are still an
+            # identifier surface (#2132: a fabricated hearing date in
+            # create_event.start_time was invisible here). Run the identifier
+            # check over the concatenated scannable args, then allow.
+            scan_text = _extract_draft_scan_text(args)
+            if scan_text.strip():
+                _report_identifiers(
+                    body=scan_text,
+                    session_id=session_id,
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    vertical=_resolve_vertical(),
+                    cohort=_resolve_cohort(),
+                )
             return None
         # A BODY-REQUIRED draft tool with no recognizable / empty body. We
         # cannot scan what we can't find — BLOCK rather than skip (fail-closed).
@@ -472,10 +543,12 @@ def check_outbound_draft(
         allowed_case_names=provenance.register_for(session_id).captions(),
     )
     if decision.allowed:
-        # A1 report-only identifier gate: signal (never block) any identifier in
-        # the body not traceable to a source read this session.
+        # A1 report-only identifier gate: signal (never block) any identifier
+        # not traceable to a source read this session. Scans the concatenated
+        # draft surface (prose body PLUS structured args, #2132) — a wider net
+        # than the evaluate() call above, which deliberately stays prose-only.
         _report_identifiers(
-            body=body,
+            body=_extract_draft_scan_text(args) or body,
             session_id=session_id,
             tool_name=tool_name,
             tool_call_id=tool_call_id,
