@@ -43,6 +43,7 @@ from spec_applier.applier import (
     apply,
     spec_object_key,
 )
+from spec_applier.preferences import apply_preferences, preferences_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class SpecPollLoop:
     poll_seconds: float = _DEFAULT_POLL_SECONDS
     _last_etag: str | None = None
     _logged_missing: bool = False
+    _last_prefs_signature: str | None = None
 
     def _head_etag(self) -> str | None:
         """HEAD the spec object; ``None`` on any fault (including 'absent').
@@ -95,12 +97,86 @@ class SpecPollLoop:
         etag = head.get("ETag") if isinstance(head, dict) else getattr(head, "ETag", None)
         return etag if isinstance(etag, str) else None
 
+    def _prefs_signature(self) -> str | None:
+        """A cheap signature of the preferences prefix, or ``None`` on a fault.
+
+        One ``list_objects_v2`` call: the listing carries ETags, so no
+        per-object HEAD is needed. ``None`` means 'no actionable change this
+        tick' — an R2 outage must never read as an emptied prefix, which is why
+        a list fault skips rather than signing empty.
+        """
+        prefix = preferences_prefix(self.slug)
+        parts: list[str] = []
+        token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
+            if token:
+                kwargs["ContinuationToken"] = token
+            try:
+                page = self.s3_client.list_objects_v2(**kwargs)
+            except Exception as exc:  # noqa: BLE001 — any list fault is a skip-this-tick
+                logger.debug("spec_applier: preference list failed (%s); skipping tick", exc)
+                return None
+            if not isinstance(page, dict):
+                return None
+            for entry in page.get("Contents") or []:
+                if not isinstance(entry, dict):
+                    continue
+                key = entry.get("Key")
+                if isinstance(key, str):
+                    parts.append(f"{key}:{entry.get('ETag')}")
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+            if not token:
+                break
+        return "|".join(sorted(parts))
+
+    def _run_preferences_once(self) -> SpecApplyOutcome | None:
+        """Apply per-person preferences when the prefix moved. Same posture as
+        the class-spec tick: rejections and faults are logged, the installed
+        tree stands, and only a HANDLED signature is cached (a fault retries).
+        """
+        signature = self._prefs_signature()
+        if signature is None or signature == self._last_prefs_signature:
+            return None
+        logger.info("spec_applier: preference prefix changed; applying")
+        try:
+            result = apply_preferences(
+                s3_client=self.s3_client,
+                bucket=self.bucket,
+                slug=self.slug,
+                spec_dir=self.spec_dir,
+            )
+        except SpecApplyError as exc:
+            logger.error("spec_applier: preference apply failed (%s); retrying next tick", exc)
+            return None
+        if result.outcome is SpecApplyOutcome.APPLIED:
+            logger.info(
+                "spec_applier: APPLIED %d preference file(s) %s (pruned %s, source=%s)",
+                len(result.installed),
+                list(result.installed),
+                list(result.pruned),
+                result.source_digest,
+            )
+        elif result.outcome is SpecApplyOutcome.REJECTED:
+            logger.warning(
+                "spec_applier: preferences REJECTED — %s; keeping the installed "
+                "preference tree (fail-static)",
+                "; ".join(result.reasons) or "(no reason given)",
+            )
+        self._last_prefs_signature = signature
+        return result.outcome
+
     def run_once(self) -> SpecApplyOutcome | None:
-        """One tick. Returns the outcome when an apply ran, else ``None``.
+        """One tick. Returns the class-spec outcome when an apply ran, else
+        ``None``. The per-person preference apply runs on the same tick with
+        its own change detection; its outcome is logged, not returned.
 
         Never raises on a rejection or an R2/write fault — all are caught,
         logged, and the installed tree is left as it stands.
         """
+        self._run_preferences_once()
         etag = self._head_etag()
         if etag is None:
             return None
@@ -247,6 +323,28 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if once:
+        # Preferences boot fetch first, same fail-open-to-boot posture: an
+        # un-adoptable preference tree must not brick a boot any more than an
+        # un-adoptable spec may.
+        try:
+            pref_result = apply_preferences(
+                s3_client=loop.s3_client,
+                bucket=loop.bucket,
+                slug=loop.slug,
+                spec_dir=loop.spec_dir,
+            )
+        except SpecApplyError as exc:
+            logger.error(
+                "spec_applier: preference boot fetch failed (%s); keeping the "
+                "installed preference tree",
+                exc,
+            )
+        else:
+            logger.info(
+                "spec_applier: preference boot fetch %s (%d file(s) installed)",
+                pref_result.outcome.value,
+                len(pref_result.installed),
+            )
         try:
             result = apply(
                 s3_client=loop.s3_client,

@@ -69,6 +69,13 @@ from typing import Any
 from config_applier.applier import atomic_write
 from establish_intake import gates
 from shared.ids import iso_utc, sha256
+from shared.person_prefs import (
+    MAX_PREF_BODY_BYTES,
+    PREFS_MANIFEST_NAME,
+    normalize_person_address,
+    person_slug,
+)
+from spec_applier.preferences import person_pref_key, previous_person_pref_key
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +228,12 @@ class EstablishIntake:
                 result = self._result(
                     run_id, "?", STATUS_REJECTED, reasons=[f"unsafe run id {run_id!r}"]
                 )
-            elif degraded:
+            elif degraded and self._submission_scope(run_dir) != "person":
+                # Person-scoped runs deliberately survive a degraded daemon:
+                # they run NO compiler gates (see _install_person), so an
+                # absent compiler cannot mean a skipped gate for them — while
+                # for firm runs the refusal stands (Law 12: a run the gates
+                # could not examine must not read as one they passed).
                 logger.error(
                     "establish_intake: DEGRADED — compiler(s) missing, refusing run %s: %s",
                     run_id,
@@ -384,6 +396,22 @@ class EstablishIntake:
     # Phases
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _submission_scope(run_dir: Path) -> str:
+        """Best-effort read of the submission's scope, for the degraded gate.
+
+        Any fault reads as ``"firm"`` — the fail-closed direction, because a
+        firm-scoped run on a degraded daemon is refused while a person-scoped
+        one proceeds. ``_process`` re-reads and fully validates the submission;
+        this peek decides only which degraded posture applies.
+        """
+        try:
+            sub = json.loads((run_dir / "submission.json").read_text())
+            scope = sub.get("scope") if isinstance(sub, dict) else None
+            return scope if scope == "person" else "firm"
+        except (OSError, json.JSONDecodeError):
+            return "firm"
+
     def _process(self, run_dir: Path) -> dict[str, Any]:
         run_id = run_dir.name
         submission_path = run_dir / "submission.json"
@@ -400,11 +428,30 @@ class EstablishIntake:
                 run_id, "?", STATUS_REJECTED, reasons=["submission is not an object"]
             )
         phase = str(sub.get("phase") or "")
-        staging_id = str(sub.get("staging_id") or "")
         if phase not in ("analyze", "install"):
             return self._result(
                 run_id, phase, STATUS_REJECTED, reasons=[f"unknown phase {phase!r}"]
             )
+        scope = str(sub.get("scope") or "firm")
+        if scope == "person":
+            # Person-scoped establishment: no staging set, no corpus, no
+            # compiler gates. The uid problems list still applies — a
+            # submission that did not come from the broker uid is refused.
+            if phase != "install":
+                return self._result(
+                    run_id,
+                    phase,
+                    STATUS_REJECTED,
+                    reasons=["person-scoped establishment supports only phase 'install'"],
+                )
+            if problems:
+                return self._result(run_id, phase, STATUS_REJECTED, reasons=problems)
+            return self._install_person(run_id, sub)
+        if scope != "firm":
+            return self._result(
+                run_id, phase, STATUS_REJECTED, reasons=[f"unknown scope {scope!r}"]
+            )
+        staging_id = str(sub.get("staging_id") or "")
         if not _SAFE_SEGMENT.match(staging_id):
             return self._result(
                 run_id, phase, STATUS_REJECTED, reasons=["unsafe or missing staging_id"]
@@ -747,6 +794,198 @@ class EstablishIntake:
             try:
                 manifest = json.loads((self.spec_dir / "manifest.json").read_text())
                 if isinstance(manifest, dict) and manifest.get("source_digest") == source_digest:
+                    return True
+            except (OSError, json.JSONDecodeError):
+                pass
+            if self.now_fn() >= deadline:
+                return False
+            self.sleep_fn(self.converge_interval)
+
+    # ------------------------------------------------------------------
+    # Person-scoped install (ADR 0085 §6, ss#2067) — no gates, by design
+    # ------------------------------------------------------------------
+
+    def _install_person(self, run_id: str, sub: dict[str, Any]) -> dict[str, Any]:
+        """Install one person's preference artifact into the vault.
+
+        WHY NO COMPILER GATES RUN HERE. The gates exist to bound what a firm
+        CORPUS can smuggle into a firm-wide spec: the leak check stops client
+        prose retention, the digit invariant stops asserted numbers, the
+        selftest checks rules against exemplars. A person-scoped establishment
+        has no corpus — the artifact is the subject's OWN authored instruction
+        about their OWN work (the ss#2067 "project instructions" shape), its
+        verbatim retention is the feature, and a number in it ("keep my emails
+        under 150 words") is a preference, not an asserted fact. What holds
+        instead: the seat-side sender==subject predicate (authorization), the
+        broker's provenance path (mediation), the roster check below
+        (defense in depth), and the byte ceiling.
+
+        AUTHORITY RECAP: the hook-side predicate already refused any submit
+        whose subject is not the attributed sender. This function re-validates
+        shape and ROSTER only — it structurally cannot see the sender, same as
+        the firm path cannot see the admin (module header).
+        """
+        phase = "install"
+        problems: list[str] = []
+        person = normalize_person_address(sub.get("person"))
+        if person is None:
+            problems.append("person is not a valid person address")
+        body = sub.get("spec_body")
+        if not isinstance(body, str) or not body.strip():
+            problems.append("spec_body missing or empty")
+            body = ""
+        encoded = body.encode("utf-8")
+        if len(encoded) > MAX_PREF_BODY_BYTES:
+            problems.append(
+                f"spec_body {len(encoded)} bytes exceeds the {MAX_PREF_BODY_BYTES}-byte ceiling"
+            )
+        digest = sha256(encoded)
+        declared = sub.get("spec_sha256")
+        if isinstance(declared, str) and declared.strip().lower() != digest:
+            problems.append("spec_body does not rehash to the broker-computed spec_sha256")
+        assertions = sub.get("assertions")
+        if assertions is not None and not isinstance(assertions, (dict, list)):
+            problems.append("assertions must be an object or list when present")
+        if person is not None:
+            self._person_on_roster(person, problems)
+        if problems:
+            return self._result(run_id, phase, STATUS_REJECTED, reasons=problems)
+
+        pslug = person_slug(person)
+        key = person_pref_key(self.slug, pslug)
+        try:
+            current = self._get_object(key)
+        except Exception as exc:  # noqa: BLE001 — an unreadable vault refuses the write
+            return self._result(
+                run_id,
+                phase,
+                STATUS_ERROR,
+                reasons=[f"could not read the current preference object: {exc}"],
+            )
+        previous_key: str | None = None
+        if current is not None:
+            previous_key = previous_person_pref_key(self.slug, pslug)
+            try:
+                self.s3_client.put_object(
+                    Bucket=self.bucket,
+                    Key=previous_key,
+                    Body=current,
+                    ContentType="application/json",
+                )
+            except Exception as exc:  # noqa: BLE001
+                # No recovery copy ⇒ no install (firm-path parity).
+                return self._result(
+                    run_id,
+                    phase,
+                    STATUS_ERROR,
+                    reasons=[f"could not write the previous-preference recovery copy: {exc}"],
+                )
+
+        doc: dict[str, Any] = {
+            "schema_version": 1,
+            "customer": self.slug,
+            "person": person,
+            "person_slug": pslug,
+            "body": body,
+            "sha256": digest,
+            "updated_at": iso_utc(),
+        }
+        if assertions:
+            doc["assertions"] = assertions
+        instructed_by = sub.get("instructed_by")
+        if isinstance(instructed_by, str) and instructed_by:
+            doc["instructed_by"] = instructed_by
+        source_ref = sub.get("source_ref")
+        if isinstance(source_ref, str) and source_ref:
+            doc["source_ref"] = source_ref
+        raw = json.dumps(doc, sort_keys=True).encode("utf-8")
+        try:
+            self.s3_client.put_object(
+                Bucket=self.bucket, Key=key, Body=raw, ContentType="application/json"
+            )
+            back = self._get_object(key)
+        except Exception as exc:  # noqa: BLE001
+            return self._result(
+                run_id,
+                phase,
+                STATUS_ERROR,
+                reasons=[f"preference vault write failed: {exc}"],
+                extra={"previous_key": previous_key},
+            )
+        if back != raw:
+            return self._result(
+                run_id,
+                phase,
+                STATUS_ERROR,
+                reasons=["read-back after the preference write does not match what was written"],
+                extra={"previous_key": previous_key},
+            )
+
+        object_digest = sha256(raw) or ""
+        converged = self._wait_for_prefs_converge(pslug, object_digest)
+        status = STATUS_INSTALLED if converged else STATUS_ACCEPTED_PENDING
+        warnings: list[str] = []
+        if not converged:
+            warnings.append(
+                "the spec applier has not yet installed this preference object; it "
+                "applies on the applier's next successful poll (fail-static — "
+                "nothing is lost)"
+            )
+        return self._result(
+            run_id,
+            phase,
+            status,
+            warnings=warnings,
+            extra={
+                "scope": "person",
+                "person": person,
+                "person_slug": pslug,
+                "previous_key": previous_key,
+                "source_digest": object_digest,
+            },
+        )
+
+    def _person_on_roster(self, person: str, problems: list[str]) -> bool:
+        """Roster check, FAIL-CLOSED on every fault.
+
+        Unlike ``_class_declared`` (a soft warning about sequencing hygiene),
+        this is a trust-boundary backstop: a subject who is not on the
+        organization roster has no standing to hold a preference artifact on
+        this seat, and a config that cannot be read must refuse rather than
+        wave through — "cannot evaluate" must not read as "permitted".
+        """
+        if self.customer_config_fn is None:
+            problems.append(
+                "no customer-config reader wired; refusing a person-scoped install "
+                "(roster cannot be checked)"
+            )
+            return False
+        try:
+            if self.customer_config_fn().sender_on_roster(person):
+                return True
+            problems.append(
+                f"{person} is not on the organization roster (scope.inbound_allow_from)"
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001 — an unreadable roster refuses
+            problems.append(f"roster unreadable ({exc}); refusing a person-scoped install")
+            return False
+
+    def _wait_for_prefs_converge(self, pslug: str, object_digest: str) -> bool:
+        """Poll the preferences manifest until it records this object's digest.
+
+        The manifest hash is root-computed over the installed file bytes, and
+        the applier installs the object VERBATIM — so equality with the digest
+        of the bytes just written is exactly "the applier adopted this write".
+        Purely observational, same as the firm converge-wait.
+        """
+        deadline = self.now_fn() + self.converge_timeout
+        while True:
+            try:
+                manifest = json.loads((self.spec_dir / PREFS_MANIFEST_NAME).read_text())
+                prefs = manifest.get("preferences") if isinstance(manifest, dict) else None
+                entry = prefs.get(pslug) if isinstance(prefs, dict) else None
+                if isinstance(entry, dict) and entry.get("sha256") == object_digest:
                     return True
             except (OSError, json.JSONDecodeError):
                 pass

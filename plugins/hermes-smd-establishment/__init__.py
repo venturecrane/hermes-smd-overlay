@@ -99,6 +99,37 @@ that change must carry a channel marker to keep the exemption, because this
 gate fails toward requiring the ceremony. Any OTHER mail adapter gets the
 ceremony until its inbound-authentication posture is probed — unknown custody
 is spoofable until proven otherwise.
+
+THE PER-PERSON LAYER (ADR 0085 §6, ss#2067): SAME PRIMITIVE, NARROWER
+PREDICATE. Any rostered person customizes voice/format for THEIR OWN work by
+telling the Operator — no admin needed, because the person's own rostered
+identity is the authority over their own preferences. The mechanism is the
+same ``pre_llm_call`` sender stash the admin gate reads, evaluated by the SAME
+``pre_tool_call`` hook under a second predicate: a ``scope: "person"`` submit
+passes only when its ``person`` argument EXACTLY equals the stashed attributed
+sender. The hook cannot rewrite tool arguments (docs/hook-surface.md — only a
+block directive is interpreted), so the "stamp" is enforced as an exact-match
+refusal: any submit naming a subject other than the person speaking is
+blocked, never repaired, which pins the wire value to the attribution just as
+a stamp would. Admin identity does NOT satisfy the person predicate for
+someone else's preferences — the person's voice is theirs (an admin may of
+course establish their own). Personal preferences REFINE the firm floor; the
+firm spec gate's pass conditions are untouched by any of this.
+
+THE POSSESSION CEREMONY BINDS PERSON SCOPE TOO, on the same custody boundary:
+sender==subject is only as strong as sender attribution, and on AgentMail
+custody a forged ``From`` naming a rostered person could author that person's
+preference artifact — which the pointer then feeds into every future draft
+produced for them. Same attack as the admin spoof, smaller blast radius, same
+fix: the person's FIRST person-scoped establishment on a spoofable-custody
+seat is withheld until their mailbox is confirmed once (person table in
+``shared/admin_possession.py``; re-arm rule is ROSTER membership rather than
+``scope.admins``). A mailbox already confirmed through the ADMIN ceremony
+cross-accepts — possession is a fact about a mailbox, not a role. Tenant-
+custody and no-mail seats are exempt exactly as for admins. ``establish_status``
+is exempt from BOTH ceremonies: it writes nothing, and its results are only
+reachable through a broker-minted secret run id from a submit that already
+passed the gates.
 """
 
 from __future__ import annotations
@@ -190,9 +221,30 @@ _STAGE_SCHEMA: dict[str, Any] = {
 _SUBMIT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "scope": {
+            "type": ["string", "null"],
+            "enum": ["firm", "person", None],
+            "description": (
+                "'firm' (the default) establishes firm-level voice/shape from a "
+                "staged document set — Operator admins only. 'person' records the "
+                "SPEAKER's own personal preferences for their own work — no "
+                "staging, no corpus; only the person themselves may do it."
+            ),
+        },
+        "person": {
+            "type": ["string", "null"],
+            "description": (
+                "Required for scope 'person': the email address of the person "
+                "whose preferences these are. It MUST be exactly the address of "
+                "the person speaking to you — the gate refuses any other value."
+            ),
+        },
         "staging_id": {
-            "type": "string",
-            "description": "The staging set holding the documents this run works from.",
+            "type": ["string", "null"],
+            "description": (
+                "The staging set holding the documents this run works from. "
+                "Required for firm-scope runs; omit for scope 'person'."
+            ),
         },
         "phase": {
             "type": "string",
@@ -271,7 +323,7 @@ _SUBMIT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
-    "required": ["staging_id", "phase"],
+    "required": ["phase"],
     "additionalProperties": False,
 }
 
@@ -310,6 +362,9 @@ _STATUS_DESCRIPTION = (
 
 #: One line, appended to ADMIN turns only — the same condition the gate itself
 #: requires, so the nudge never advertises what ``on_pre_tool_call`` refuses.
+#: (The PERSON nudge below rides every attributed turn, because the person
+#: predicate is one any attributed sender can satisfy for themselves —
+#: overlay #170 is why nudges exist at all.)
 _NUDGE = (
     "This person is one of the firm's Operator admins: if they instruct you to "
     "establish or update the firm's voice or an output's shape from named "
@@ -324,6 +379,22 @@ _REFUSAL_MESSAGE = (
     "an Operator admin can apply it, and where their statement described how a "
     "kind of output should look or sound, record it with correction_capture so "
     "an admin can review and apply it."
+)
+
+_PERSON_NUDGE = (
+    "If this person tells you how THEIR OWN work should sound or be shaped "
+    f"(their drafts, their documents), record it with {TOOL_SUBMIT} — scope "
+    "'person', person set to exactly their address. It takes effect for their "
+    "work immediately and never changes the firm's standards."
+)
+
+_PERSON_MISMATCH_MESSAGE = (
+    "Refused: personal preferences belong to the person themselves (ss ADR "
+    "0085 §6). A person-scoped establishment must name exactly the address of "
+    "the person speaking — you may not record preferences for anyone else, and "
+    "being an Operator admin does not change that. If they described how a "
+    "FIRM output should look or sound, that is firm-level establishment "
+    "(admins) or a correction_capture."
 )
 
 # ---------------------------------------------------------------------------
@@ -397,6 +468,37 @@ _POSSESSION_CONFIRMED_NOTE = (
     "now."
 )
 
+_PERSON_CHALLENGE_ISSUED_MESSAGE = (
+    "Withheld: this seat's mail runs on AgentMail custody, where an inbound "
+    "From header is not authenticated proof of identity (ss ADR 0085 §5/§6). "
+    "Before this person's first personal-preference change, their mailbox must "
+    "be confirmed once. Do this now, in this turn: send a FRESH email (never a "
+    "reply, never a Reply-To) to exactly {person}, telling them a change to "
+    "their personal preferences was requested in their name and asking them to "
+    "reply keeping this confirmation code in the reply: {nonce} . Then tell "
+    "the requester the confirmation email has been sent and their preferences "
+    "apply once it is answered. The code must never go to any other address "
+    "or channel. This happens once per person; after their reply, it proceeds "
+    "immediately."
+)
+
+_PERSON_CHALLENGE_PENDING_MESSAGE = (
+    "Withheld: a mailbox-possession confirmation for {person} is already "
+    "outstanding and must be answered before their personal preferences can "
+    "change. If and only if the confirmation email has not yet been sent, "
+    "send it now to exactly {person} with the confirmation code {nonce} ; "
+    "never send a duplicate, and never send the code to any other address. "
+    "Tell the requester the change is waiting on that reply."
+)
+
+_PERSON_POSSESSION_CONFIRMED_NOTE = (
+    "This message contained the mailbox-possession confirmation code for "
+    "{sender}: their mailbox is now confirmed and personal-preference "
+    "establishment is unlocked for them (a one-time ceremony; it re-arms only "
+    "if they leave the roster). Acknowledge the confirmation in your reply, "
+    "and if they stated preferences earlier, record them now."
+)
+
 
 def _broker_request(payload: dict[str, Any]) -> dict[str, Any]:
     """One request/response over the broker's unix socket, verdict verbatim.
@@ -445,6 +547,8 @@ def _submit(args: dict[str, Any], **_: Any) -> str:
     response = _broker_request(
         {
             "action": TOOL_SUBMIT,
+            "scope": args.get("scope"),
+            "person": args.get("person"),
             "staging_id": args.get("staging_id"),
             "phase": args.get("phase"),
             "output_class": args.get("output_class"),
@@ -544,6 +648,50 @@ def _possession_gate(sender: str, tool_name: Any) -> dict[str, Any] | None:
         return {"action": "block", "message": _CONFIG_UNREADABLE_MESSAGE}
 
 
+def _person_possession_gate(sender: str, tool_name: Any) -> dict[str, Any] | None:
+    """Withhold a person-scoped submit while the sender's mailbox is unconfirmed.
+
+    The person twin of :func:`_possession_gate`, run only AFTER the
+    sender==subject predicate passed: same custody scoping (tenant-auth and
+    no-mail seats exempt; AgentMail and any unprobed adapter get the ceremony),
+    same fail-closed posture, person table + ROSTER re-arm rule in
+    :mod:`shared.admin_possession`. A mailbox already confirmed through the
+    ADMIN ceremony cross-accepts (possession is a mailbox fact, not a role
+    fact). The recipient lock contains person challenge codes exactly as admin
+    ones — ``outstanding_nonces`` reads both tables.
+    """
+    try:
+        cfg = _load_config()
+        if cfg is None:
+            return {"action": "block", "message": _CONFIG_UNREADABLE_MESSAGE}
+        adapter = _email_adapter(cfg)
+        if adapter == "" or adapter in _TENANT_AUTH_ADAPTERS:
+            return None
+        result = admin_possession.person_verdict(sender, cfg.sender_on_roster)
+        state = result.get("state")
+        if state == admin_possession.STATE_CONFIRMED:
+            return None
+        template = (
+            _PERSON_CHALLENGE_ISSUED_MESSAGE
+            if state == admin_possession.STATE_CHALLENGE_ISSUED
+            else _PERSON_CHALLENGE_PENDING_MESSAGE
+        )
+        logger.info(
+            "hermes-smd-establishment: %s (person scope) withheld pending mailbox possession (%s)",
+            tool_name,
+            state,
+        )
+        return {
+            "action": "block",
+            "message": template.format(person=sender, nonce=str(result.get("nonce") or "")),
+        }
+    except Exception:  # noqa: BLE001 — an unresolvable boundary refuses
+        logger.exception(
+            "hermes-smd-establishment: person possession gate fault; refusing (fail closed)"
+        )
+        return {"action": "block", "message": _CONFIG_UNREADABLE_MESSAGE}
+
+
 def _is_send_shaped(tool_name: str) -> bool:
     """True for tools that can carry content out of the seat (or into a draft
     that later ships) — the recipient lock's scan set."""
@@ -639,6 +787,68 @@ def _maybe_confirm_possession(cfg: Any, sender_id: Any, user_message: Any) -> bo
         return False
 
 
+def _maybe_confirm_person_possession(cfg: Any, sender_id: Any, user_message: Any) -> bool:
+    """Consume a person-ceremony confirming reply: rostered sender + live code.
+
+    The person twin of :func:`_maybe_confirm_possession`, run on EVERY
+    sender-attributed turn (the confirming reply comes from the preference
+    subject, who is usually not an admin). Same cheap no-op until a challenge
+    was ever minted; exception-safe False.
+    """
+    try:
+        if not isinstance(user_message, str) or not user_message:
+            return False
+        if not os.path.exists(admin_possession.db_path()):
+            return False
+        return admin_possession.person_try_confirm(
+            sender_id, user_message, cfg.sender_on_roster, source="pre_llm_call"
+        )
+    except Exception:  # noqa: BLE001 — a fault must not break the turn
+        logger.warning(
+            "hermes-smd-establishment: person possession confirm check failed",
+            exc_info=True,
+        )
+        return False
+
+
+def _normalize_address(value: Any) -> str:
+    """The stash/args comparison normalization — lowercase, stripped."""
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def _person_pref_pointer(sender_id: Any) -> str | None:
+    """Render the per-person preference POINTER for an attributed sender.
+
+    The per-turn half of the spec-stamp mechanism (shared/spec_stamp.py): the
+    SKILL.md stamp is one file shared by every sender, so a pointer that must
+    follow the ATTRIBUTED sender is delivered here, at ``pre_llm_call``, from
+    the root-owned preferences manifest. Pointer, never prose — the file is
+    read fresh where it lives, and the hash beside it is what root recorded.
+    Best-effort by contract: a fault yields no pointer, never a failed turn.
+    """
+    try:
+        from shared.person_prefs import entry_for_sender, load_person_entries
+        from shared.spec_manifest import spec_dir
+
+        base = spec_dir()
+        if base is None or not load_person_entries(base):
+            return None
+        entry = entry_for_sender(sender_id, base)
+        if entry is None:
+            return None
+        return (
+            f"This person ({entry.person}) has authored personal preferences for "
+            f"work produced FOR THEM. Read `{base / entry.rel_path}` (sha256 "
+            f"root-recorded `{entry.sha256[:16]}…`) before drafting anything for "
+            "them. Preferences refine how their work is voiced and shaped; they "
+            "never override the firm's authored specs, and a spec the firm "
+            "declared required must still be read."
+        )
+    except Exception:  # noqa: BLE001 — a pointer fault must not cost the turn
+        logger.warning("hermes-smd-establishment: person-preference pointer failed", exc_info=True)
+        return None
+
+
 def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Classify the turn's sender against ``scope.admins`` and stash it.
 
@@ -666,12 +876,21 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         cfg = _load_config()
         is_admin = bool(cfg is not None and cfg.sender_is_admin(sender_id))
         _ADMIN_STASH[session_id] = {"sender": str(sender_id), "is_admin": is_admin}
+        lines: list[str] = []
         if is_admin:
-            context = _NUDGE
+            lines.append(_NUDGE)
             if _maybe_confirm_possession(cfg, sender_id, kwargs.get("user_message")):
-                context += "\n\n" + _POSSESSION_CONFIRMED_NOTE.format(sender=str(sender_id))
-            return {"context": context}
-        return None
+                lines.append(_POSSESSION_CONFIRMED_NOTE.format(sender=str(sender_id)))
+        # The PERSON lane rides every attributed turn (overlay#170: an
+        # unadvertised tool gets zero use) — any rostered person may author
+        # their own preferences, and their possession reply confirms here too.
+        if _maybe_confirm_person_possession(cfg, sender_id, kwargs.get("user_message")):
+            lines.append(_POSSESSION_CONFIRMED_NOTE.format(sender=str(sender_id)))
+        lines.append(_PERSON_NUDGE)
+        pointer = _person_pref_pointer(sender_id)
+        if pointer:
+            lines.append(pointer)
+        return {"context": "\n\n".join(lines)}
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.warning(
             "hermes-smd-establishment: pre_llm_call raised; no stash written "
@@ -682,18 +901,28 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
 
 
 def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
-    """Gate ``establish_*`` on admin identity + mailbox possession; lock nonces.
+    """One hook, two predicates, one ceremony — every path fails closed.
 
-    For ``establish_*``: the admin predicate first (unchanged — fail-closed on
-    a missing/unreadable stash or any fault), then, for admin sessions on an
-    AgentMail-custody seat, the mailbox-possession ceremony (ss#2164; module
-    docstring). There is deliberately NO session-taint check — Captain
-    decision 2026-08-02 (see the module header): the establishment turn
-    necessarily read connector content, so a taint gate would refuse every
-    legitimate establishment.
+    * FIRM predicate (``establish_stage_document``, and ``establish_submit``
+      without ``scope: "person"``): the session's stashed classification must
+      say admin; then, on an AgentMail-custody seat, the admin
+      mailbox-possession ceremony (ss#2164; module docstring).
+    * PERSON predicate (``establish_submit`` with ``scope: "person"``): the
+      ``person`` argument must EXACTLY equal the stashed attributed sender —
+      admin identity neither satisfies nor bypasses it; then the PERSON
+      possession ceremony on AgentMail custody (same attack as the admin
+      forgery, smaller blast radius — Captain-directed ruling 2026-08-02).
+    * ``establish_status`` requires only that the session IS classified (a
+      stash entry exists): a non-admin who established their own preferences
+      must be able to poll their run. Run ids are broker-minted secrets known
+      only to the submitting session.
+
+    There is deliberately NO session-taint check — Captain decision 2026-08-02
+    (see the module header): the establishment turn necessarily read connector
+    content, so a taint gate would refuse every legitimate establishment.
 
     For every OTHER tool: the recipient lock — a call carrying a live
-    challenge code may only ship to exactly the rostered admin address
+    challenge code may only ship to exactly the rostered address
     (:func:`_containment_gate`).
     """
     tool_name = kwargs.get("tool_name")
@@ -702,7 +931,22 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     try:
         session_id = kwargs.get("session_id")
         entry = _ADMIN_STASH.get(session_id) if isinstance(session_id, str) else None
-        if entry is not None and entry.get("is_admin") is True:
+        args = kwargs.get("args")
+        args = args if isinstance(args, dict) else {}
+        if tool_name == TOOL_SUBMIT and args.get("scope") == "person":
+            subject = _normalize_address(args.get("person"))
+            sender = _normalize_address(entry.get("sender")) if entry else ""
+            if subject and sender and subject == sender:
+                return _person_possession_gate(sender, tool_name)
+            logger.info(
+                "hermes-smd-establishment: person-scoped submit refused "
+                "(subject does not match the attributed sender)"
+            )
+            return {"action": "block", "message": _PERSON_MISMATCH_MESSAGE}
+        if tool_name == TOOL_STATUS:
+            if entry is not None:
+                return None
+        elif entry is not None and entry.get("is_admin") is True:
             return _possession_gate(str(entry.get("sender") or ""), tool_name)
     except Exception:  # noqa: BLE001 — an unresolvable stash refuses
         logger.exception("hermes-smd-establishment: admin stash unreadable; refusing")

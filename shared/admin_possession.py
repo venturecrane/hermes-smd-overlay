@@ -85,6 +85,27 @@ CREATE TABLE IF NOT EXISTS admin_possession (
 )
 """
 
+#: The per-person twin of the admin table (ss ADR 0085 §6 / O5). A SEPARATE
+#: table, not extra rows in ``admin_possession``, because the two re-arm rules
+#: differ and :func:`reconcile` deletes every admin-table row whose address is
+#: not on ``scope.admins`` — a person's row stored there would be revoked by
+#: the very next admin ceremony. Person rows re-arm against ROSTER membership
+#: (a predicate, because roster entries may be ``@domain`` grants that cannot
+#: be enumerated into an address list).
+_PERSON_CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS person_possession (
+  customer            TEXT NOT NULL,
+  admin_address       TEXT NOT NULL,
+  nonce               TEXT,
+  nonce_issued_at     TEXT,
+  nonce_expires_epoch REAL,
+  confirmed           INTEGER NOT NULL DEFAULT 0,
+  confirmed_at        TEXT,
+  confirmed_via       TEXT,
+  PRIMARY KEY (customer, admin_address)
+)
+"""
+
 STATE_CONFIRMED = "confirmed"
 STATE_CHALLENGE_ISSUED = "challenge_issued"
 STATE_CHALLENGE_PENDING = "challenge_pending"
@@ -105,6 +126,7 @@ def _connect(path: str | None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(resolved), check_same_thread=False)
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute(_CREATE_TABLE_SQL)
+    conn.execute(_PERSON_CREATE_TABLE_SQL)
     return conn
 
 
@@ -262,12 +284,173 @@ def try_confirm(
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Person possession (ss ADR 0085 §6 / O5) — same ceremony, roster re-arm rule
+# ---------------------------------------------------------------------------
+
+
+def person_reconcile(is_member, path: str | None = None) -> None:
+    """Delete every person-possession row that no longer satisfies ``is_member``.
+
+    The person twin of :func:`reconcile`, with a PREDICATE instead of a list
+    because roster entries may be ``@domain`` grants: pass
+    ``CustomerConfig.sender_on_roster``. A person who leaves the roster is
+    revoked and re-runs the ceremony if re-added. A raising predicate deletes
+    nothing (the verdict path fails toward challenging, never toward passing,
+    so keeping a possibly-stale row is the harmless direction).
+    """
+    conn = _connect(path)
+    try:
+        rows = conn.execute(
+            "SELECT admin_address FROM person_possession WHERE customer = ?",
+            (_customer_slug(),),
+        ).fetchall()
+        for (address,) in rows:
+            try:
+                if is_member(address):
+                    continue
+            except Exception:  # noqa: BLE001 — an unreadable roster deletes nothing
+                logger.warning(
+                    "person_possession: roster predicate raised during reconcile; "
+                    "leaving rows in place",
+                    exc_info=True,
+                )
+                return
+            conn.execute(
+                "DELETE FROM person_possession WHERE customer = ? AND admin_address = ?",
+                (_customer_slug(), address),
+            )
+            logger.info(
+                "person_possession: %s left the roster; possession state revoked (re-armed)",
+                address,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def person_verdict(
+    person_address: object,
+    is_member,
+    *,
+    path: str | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Resolve one person's possession state, minting a challenge when none stands.
+
+    Same contract as :func:`verdict` (CONFIRMED / CHALLENGE_ISSUED /
+    CHALLENGE_PENDING), over the person table with the roster predicate as the
+    re-arm rule. CROSS-ACCEPTS a confirmed ADMIN-table row for the same
+    address: possession is a fact about a mailbox, not about a role, and an
+    admin whose mailbox was confirmed for firm-level establishment has already
+    proven exactly what the person ceremony would ask them to prove — running
+    it again for their own preferences would be ceremony for its own sake.
+    (The reverse is deliberately NOT true: the admin gate consults only the
+    admin table, whose lifecycle is bound to ``scope.admins``.)
+    """
+    person_reconcile(is_member, path=path)
+    address = _normalize(person_address)
+    if not address:
+        return {"state": STATE_CHALLENGE_PENDING, "nonce": ""}
+    ts = time.time() if now is None else now
+    conn = _connect(path)
+    try:
+        admin_row = conn.execute(
+            "SELECT confirmed FROM admin_possession WHERE customer = ? AND admin_address = ?",
+            (_customer_slug(), address),
+        ).fetchone()
+        if admin_row is not None and admin_row[0]:
+            return {"state": STATE_CONFIRMED}
+        row = conn.execute(
+            "SELECT nonce, nonce_expires_epoch, confirmed FROM person_possession "
+            "WHERE customer = ? AND admin_address = ?",
+            (_customer_slug(), address),
+        ).fetchone()
+        if row is not None and row[2]:
+            return {"state": STATE_CONFIRMED}
+        if (
+            row is not None
+            and isinstance(row[0], str)
+            and row[0]
+            and isinstance(row[1], float)
+            and ts <= row[1]
+        ):
+            return {"state": STATE_CHALLENGE_PENDING, "nonce": row[0]}
+        nonce = new_nonce()
+        conn.execute(
+            "INSERT INTO person_possession "
+            "(customer, admin_address, nonce, nonce_issued_at, nonce_expires_epoch, confirmed) "
+            "VALUES (?, ?, ?, ?, ?, 0) "
+            "ON CONFLICT(customer, admin_address) DO UPDATE SET "
+            "nonce = excluded.nonce, nonce_issued_at = excluded.nonce_issued_at, "
+            "nonce_expires_epoch = excluded.nonce_expires_epoch",
+            (_customer_slug(), address, nonce, iso_utc(), ts + NONCE_TTL_SECONDS),
+        )
+        conn.commit()
+        return {"state": STATE_CHALLENGE_ISSUED, "nonce": nonce}
+    finally:
+        conn.close()
+
+
+def person_try_confirm(
+    sender_address: object,
+    message_text: object,
+    is_member,
+    *,
+    source: str = "",
+    path: str | None = None,
+    now: float | None = None,
+) -> bool:
+    """Confirm person possession iff a rostered sender's message carries their
+    live person-table nonce. Same single-use / exact-address rules as
+    :func:`try_confirm`; membership is the roster predicate."""
+    person_reconcile(is_member, path=path)
+    address = _normalize(sender_address)
+    if not address:
+        return False
+    try:
+        if not is_member(address):
+            return False
+    except Exception:  # noqa: BLE001 — an unreadable roster confirms nothing
+        return False
+    if not isinstance(message_text, str) or not message_text:
+        return False
+    ts = time.time() if now is None else now
+    conn = _connect(path)
+    try:
+        row = conn.execute(
+            "SELECT nonce, nonce_expires_epoch, confirmed FROM person_possession "
+            "WHERE customer = ? AND admin_address = ?",
+            (_customer_slug(), address),
+        ).fetchone()
+        if row is None or row[2]:
+            return False
+        nonce, expires = row[0], row[1]
+        if not isinstance(nonce, str) or not nonce or nonce not in message_text:
+            return False
+        if not isinstance(expires, float) or ts > expires:
+            return False
+        conn.execute(
+            "UPDATE person_possession SET confirmed = 1, confirmed_at = ?, confirmed_via = ?, "
+            "nonce = NULL, nonce_issued_at = NULL, nonce_expires_epoch = NULL "
+            "WHERE customer = ? AND admin_address = ?",
+            (iso_utc(), str(source or ""), _customer_slug(), address),
+        )
+        conn.commit()
+        logger.info("person_possession: mailbox possession confirmed for %s", address)
+        return True
+    finally:
+        conn.close()
+
+
 def outstanding_nonces(*, path: str | None = None, now: float | None = None) -> dict[str, str]:
-    """Every live (unexpired, unconsumed) nonce → its admin address.
+    """Every live (unexpired, unconsumed) nonce → its address, BOTH tables.
 
     The recipient lock's read surface: an outbound tool call carrying one of
-    these strings may only ship to exactly the mapped address. Missing state
-    file ⇒ ``{}`` (nothing outstanding, nothing to contain).
+    these strings may only ship to exactly the mapped address. Person-table
+    nonces are included so a person's challenge code is contained by the same
+    mechanical lock as an admin's. Missing state file ⇒ ``{}`` (nothing
+    outstanding, nothing to contain).
     """
     resolved = Path(path or db_path())
     if not resolved.exists():
@@ -277,16 +460,18 @@ def outstanding_nonces(*, path: str | None = None, now: float | None = None) -> 
     conn.execute("PRAGMA busy_timeout = 5000")
     try:
         conn.execute(_CREATE_TABLE_SQL)
-        rows = conn.execute(
-            "SELECT nonce, admin_address, nonce_expires_epoch FROM admin_possession "
-            "WHERE customer = ? AND confirmed = 0 AND nonce IS NOT NULL",
-            (_customer_slug(),),
-        ).fetchall()
-        return {
-            str(nonce): str(address)
-            for nonce, address, expires in rows
-            if nonce and isinstance(expires, float) and ts <= expires
-        }
+        conn.execute(_PERSON_CREATE_TABLE_SQL)
+        out: dict[str, str] = {}
+        for table in ("admin_possession", "person_possession"):
+            rows = conn.execute(
+                f"SELECT nonce, admin_address, nonce_expires_epoch FROM {table} "  # noqa: S608 — table names are module constants
+                "WHERE customer = ? AND confirmed = 0 AND nonce IS NOT NULL",
+                (_customer_slug(),),
+            ).fetchall()
+            for nonce, address, expires in rows:
+                if nonce and isinstance(expires, float) and ts <= expires:
+                    out[str(nonce)] = str(address)
+        return out
     finally:
         conn.close()
 
@@ -300,6 +485,9 @@ __all__ = [
     "db_path",
     "new_nonce",
     "outstanding_nonces",
+    "person_reconcile",
+    "person_try_confirm",
+    "person_verdict",
     "reconcile",
     "try_confirm",
     "verdict",

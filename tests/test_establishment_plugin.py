@@ -118,13 +118,18 @@ def test_registers_three_tools_and_both_hooks(establishment):
 
 
 def test_non_admin_is_refused_and_told_who_can(establishment):
+    """Firm-level establishment stays admin-only. ``establish_status`` is the
+    O5 exception (ADR 0085 §6): a classified non-admin session may poll — a
+    person who established their own preferences must be able to read their
+    run's result, and run ids are broker-minted secrets."""
     plugin, _ = establishment
     _turn(plugin, "sarah@firm.com")
-    for tool in plugin.ESTABLISH_TOOLS:
+    for tool in (plugin.TOOL_STAGE, plugin.TOOL_SUBMIT):
         verdict = _gate(plugin, tool)
         assert verdict is not None and verdict["action"] == "block"
         assert "Operator admins" in verdict["message"]
         assert "correction_capture" in verdict["message"]
+    assert _gate(plugin, plugin.TOOL_STATUS) is None
 
 
 def test_unclassified_session_is_refused_fail_closed(establishment):
@@ -214,9 +219,17 @@ def test_unattributed_turn_leaves_the_classification(establishment):
 
 
 def test_nudge_rides_admin_turns_only(establishment):
+    """The ADMIN nudge stays admin-only (it advertises what the gate would
+    refuse anyone else). Since O5, every attributed turn also carries the
+    person-scope nudge — that gate any attributed sender can satisfy for
+    themselves, so advertising it to everyone is correct (overlay #170)."""
     plugin, _ = establishment
-    assert _turn(plugin, "chris@firm.com") == {"context": plugin._NUDGE}
-    assert _turn(plugin, "sarah@firm.com") is None
+    admin_context = _turn(plugin, "chris@firm.com")["context"]
+    assert plugin._NUDGE in admin_context
+    assert plugin._PERSON_NUDGE in admin_context
+    non_admin_context = _turn(plugin, "sarah@firm.com")["context"]
+    assert plugin._NUDGE not in non_admin_context
+    assert plugin._PERSON_NUDGE in non_admin_context
     assert _turn(plugin, "") is None
 
 
@@ -259,6 +272,8 @@ def test_submit_marshals_exactly_the_design_fields(establishment):
     assert requests[0]["action"] == "establish_submit"
     assert set(requests[0]) == {
         "action",
+        "scope",
+        "person",
         "staging_id",
         "phase",
         "output_class",
