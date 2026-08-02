@@ -154,6 +154,35 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         # token_ref / secret material). If a parallel ss-console action-type
         # registry also gates this, add CONFIG_WRITE there too.
         "CONFIG_WRITE",
+        # ------------------------------------------------------------------
+        # Declared 2026-08-02 (ss-console #2122 vocabulary-integrity pass).
+        # Every type below was ALREADY BEING WRITTEN to live ledgers through
+        # the unvalidated writer path (shared.audit_contract.agent_event_params
+        # + raw execute — which never checks this set), so the rows exist on
+        # both seats while the vocabulary denied them. Declaring is the only
+        # correct direction: blocking would break live reply/webhook paths,
+        # and the ss-console viewer vocabulary must gain the same members in
+        # its paired PR (parity is cross-repo, human-enforced — see
+        # tests/test_audit_vocabulary_completeness.py for the in-repo guard).
+        # Producers, by file:
+        #   plugins/hermes-smd-reply/__init__.py + sweeper.py
+        "REPLY_SENT",
+        "REPLY_HELD",
+        "REPLY_FAILED",
+        #   plugins/hermes-smd-trust/__init__.py (confirm-send seam)
+        "CONFIRM_SEND_DISPATCHED",
+        "CONFIRM_SEND_FAILED",
+        #   shared/spec_gate.py (authored-format gate, overlay #207)
+        "SPEC_GATE_TRIGGERED",
+        #   plugins/hermes-smd-trust/voice_gate.py (report-only voice gate)
+        "VOICE_GATE_TRIGGERED",
+        #   webhook_gate.py (suppression audit)
+        "WEBHOOK_SUPPRESSED",
+        # Broker-side writer (ss-console operator/workspace_broker/corrections.py)
+        # appends this directly to the ledger; declared here so the vocabulary
+        # names every type a ledger can contain, not only the ones this repo
+        # writes (ss-console #2091 correction capture).
+        "CORRECTION_PROPOSED",
     }
 )
 
