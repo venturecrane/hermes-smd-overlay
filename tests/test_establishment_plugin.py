@@ -30,8 +30,13 @@ from tests.conftest import load_plugin
 
 
 class _FakeConfig:
-    def __init__(self, admins):
+    def __init__(self, admins, connectors=None):
         self._admins = admins
+        self.connectors = dict(connectors or {})
+
+    @property
+    def admins(self):
+        return list(self._admins)
 
     def sender_is_admin(self, sender):
         return isinstance(sender, str) and sender.strip().lower() in self._admins
@@ -39,14 +44,19 @@ class _FakeConfig:
 
 class _FakeCustomerConfig:
     admins: list[str] = []
+    #: No Email connector by default — no mail channel, so the possession
+    #: ceremony (ss#2164) never binds and the pre-ceremony gate behavior below
+    #: is asserted unchanged. Custody-specific behavior is covered in
+    #: tests/test_admin_possession.py.
+    connectors: dict = {}
 
     @classmethod
     def from_volume(cls, path=None):
-        return _FakeConfig(cls.admins)
+        return _FakeConfig(cls.admins, cls.connectors)
 
 
 @pytest.fixture
-def establishment(monkeypatch):
+def establishment(monkeypatch, tmp_path):
     plugin = load_plugin("hermes-smd-establishment")
     requests: list[dict] = []
 
@@ -55,7 +65,9 @@ def establishment(monkeypatch):
         return {"ok": True, "staging_id": "set-1", "doc_id": "doc-1", "run_id": "run-1"}
 
     monkeypatch.setattr(plugin, "_broker_request", fake_broker_request)
+    monkeypatch.setenv("SMD_ADMIN_POSSESSION_DB_PATH", str(tmp_path / "possession.db"))
     _FakeCustomerConfig.admins = ["chris@firm.com"]
+    _FakeCustomerConfig.connectors = {}
     monkeypatch.setattr(plugin, "CustomerConfig", _FakeCustomerConfig)
     plugin._ADMIN_STASH.clear()
     return plugin, requests
