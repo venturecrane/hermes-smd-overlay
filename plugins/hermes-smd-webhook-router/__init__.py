@@ -45,6 +45,10 @@ from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
 from shared.customer_config import CustomerConfig
 from shared.secrets import get_secret, require
+from shared.webhook_read_surface import (
+    WEBHOOK_READ_TOOLSET,
+    register_webhook_read_toolset,
+)
 
 from . import router, verify  # noqa: F401 - surface for tests
 
@@ -603,8 +607,32 @@ def register(ctx) -> None:
     every dispatch (ADR 0044 WS2), so editing ``webhook_triggers`` takes effect
     on the next inbound webhook with no restart. A one-shot build runs here only
     to log the table size at boot; it is not retained.
+
+    Also creates the read-only webhook toolset (ss-console#2145). This is the
+    RUNTIME half of a two-process fix whose config half lives in
+    ``bootstrap/translate.py``; it belongs here because this plugin already owns
+    the webhook platform's concerns, and it runs at plugin LOAD rather than on
+    first dispatch because ``get_tool_definitions`` memoizes on
+    ``registry._generation`` and creating a toolset does not bump it — a late
+    registration can land behind a stale memo and never be seen.
     """
     global _YAML_PATH, _CUSTOMER_SLUG, _D1_CLIENT, _SIGNING_SECRET
+
+    # Before anything env-dependent: a seat whose secrets are unset still needs
+    # the toolset to exist, or the activation gate refuses the boot for the
+    # wrong reason. Exception-safe — the gate is what turns a miss into a
+    # refusal to serve, and it reads the RESOLVED surface, so a failure here
+    # cannot pass silently.
+    try:
+        register_webhook_read_toolset()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "hermes-smd-webhook-router: could not create the %r toolset; read_file "
+            "will be absent from webhook turns and the activation gate will refuse "
+            "to serve (ss-console#2145)",
+            WEBHOOK_READ_TOOLSET,
+            exc_info=True,
+        )
 
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")

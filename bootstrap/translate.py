@@ -84,6 +84,7 @@ from bootstrap.cron_materialize import (
 from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
 from bootstrap.validate import validate_customer_yaml
 from shared.secrets import get_secret
+from shared.webhook_read_surface import webhook_platform_toolsets
 
 logger = logging.getLogger(__name__)
 
@@ -913,6 +914,21 @@ def _persona_config(
     webhook_platform = _materialize_webhook_platform(customer)
     if webhook_platform:
         config["platforms"] = webhook_platform
+        # ss-console#2145, CONFIG half. Webhook turns fall back to Hermes'
+        # `hermes-webhook` composite — web_search/web_extract/vision_analyze/
+        # clarify, no `file` toolset — so `read_file` is absent on exactly the
+        # platform inbound email arrives on, and the trust plugin's spec
+        # read-mark can never be set there. Name the safe toolsets explicitly
+        # (an explicit list REPLACES the default composite, so dropping them
+        # would trade read_file for the four tools webhook turns already had)
+        # plus the overlay's one-tool read-only toolset. The name is inert
+        # until the webhook-router plugin creates it at load —
+        # `shared/webhook_read_surface.py` carries both halves' contract and
+        # the activation gate refuses to serve when the resolved surface
+        # disagrees, because the config-only failure is otherwise silent.
+        # NEVER the `file` toolset: write_file/patch/search_files on an
+        # untrusted inbound turn is what the safe default exists to deny.
+        config["platform_toolsets"] = {"webhook": webhook_platform_toolsets()}
 
     # Telegram: author the allowlist (and tuning) as reviewable config. The bot
     # token is a Fly secret that auto-enables the native polling platform; this
