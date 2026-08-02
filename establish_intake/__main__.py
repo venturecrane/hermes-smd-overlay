@@ -56,7 +56,20 @@ _ENV_SPOOL_DIR = "SMD_ESTABLISH_SPOOL_DIR"
 _ENV_POLL_SECONDS = "SMD_ESTABLISH_POLL_SECONDS"
 
 _DEFAULT_SPEC_DIR = "/var/lib/smd-config/specs"
-_DEFAULT_SPOOL_DIR = "/opt/data/establish-spool"
+#: NOT under ``/opt/data``. The Hermes gateway chmods its home (``/opt/data``)
+#: to 0700 MID-BOOT, which strips every group-traverse the entrypoint granted
+#: before it — so a spool under that tree is reachable by root (which ignores
+#: modes) and unreachable by the workspace-broker uid, which is the principal
+#: that must create staging sets and run dirs. The failure is invisible from
+#: the spool's own permissions: the dirs read 0770 root:workspace-broker and
+#: are correct; the ANCESTOR is what severs them. Live-caught on
+#: hermes-pilot-smokeball 2026-08-02, first establishment call:
+#: ``PermissionError: '/opt/data/establish-spool/staging'`` with the leaf at
+#: 0770 and ``/opt/data`` at 0700 hermes. The audit ledger solved the same
+#: problem with a bind mount (entrypoint.sh); the spool is transient (30-min
+#: TTL, runs are short-lived) so it simply lives outside the agent's home, the
+#: same place the broker's other state lives (``/var/lib/smd-*``).
+_DEFAULT_SPOOL_DIR = "/var/lib/smd-establish-spool"
 _DEFAULT_POLL_SECONDS = 5.0
 
 HEARTBEAT_BASENAME = "intake-heartbeat.json"
