@@ -547,6 +547,23 @@ def test_poll_once_skips_runs_without_a_submission(tmp_path):
     assert half.exists()
 
 
+def test_poll_once_never_reads_a_dot_prefixed_assembly_dir(tmp_path):
+    """The broker assembles the COMPLETE run — submission.json included —
+    inside runs/.tmp-<run_id>/ and atomically renames it into place (ss-console
+    workspace_broker/establishment.py contract). A dot-dir therefore LOOKS
+    ready by the submission.json test alone; consuming it would gate a partial
+    corpus under the wrong run id and purge the path out from under the
+    broker's rename. Caught in cross-half reconciliation before first deploy;
+    this test fails on the pre-fix scan (iterdir + submission.json only)."""
+    intake, _s3, spool = make_intake(tmp_path)
+    assembling = spool / "runs" / ".tmp-run-race"
+    (assembling / "docs").mkdir(parents=True)
+    (assembling / "submission.json").write_text("{}", encoding="utf-8")
+    assert intake.poll_once() == []
+    assert assembling.exists()
+    assert (assembling / "submission.json").is_file()
+
+
 def test_install_run_purges_the_staging_set_too(tmp_path):
     """Corpus discard: after an install run — pass or fail — the staging set,
     including the root-side analysis artifacts, is gone."""

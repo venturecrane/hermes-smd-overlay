@@ -195,6 +195,14 @@ class EstablishIntake:
         if not self.runs_dir.is_dir():
             return processed
         for run_dir in sorted(p for p in self.runs_dir.iterdir() if p.is_dir()):
+            if run_dir.name.startswith("."):
+                # Broker assembly area: runs are built complete (INCLUDING
+                # submission.json) inside a dot-prefixed temp dir and atomically
+                # renamed into place. Processing one mid-assembly would run the
+                # gates against a partial corpus under the wrong run id, and
+                # the broker's rename would then hit a purged path. The rename
+                # is the publish; a dot-dir is never ours to read.
+                continue
             if not (run_dir / "submission.json").is_file():
                 continue  # broker still writing — submission.json lands last
             self.process_run(run_dir)
