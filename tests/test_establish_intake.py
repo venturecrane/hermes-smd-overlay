@@ -590,3 +590,16 @@ def test_results_dir_is_group_writable_so_the_broker_can_unlink(tmp_path):
     result_files = list(results.glob("*.json"))
     assert result_files, "a result file must exist after process_run"
     assert (result_files[0].stat().st_mode & 0o777) == 0o640
+
+
+def test_default_spool_dir_is_outside_the_agent_home():
+    """The Hermes gateway chmods /opt/data to 0700 mid-boot, so a spool under
+    that tree is unreachable by the workspace-broker uid — the principal that
+    creates staging sets and run dirs — while its own dirs read a correct 0770.
+    Live-caught on hermes-pilot-smokeball 2026-08-02 (first establishment call
+    returned PermissionError on a 0770 staging dir). Falsifier: this test fails
+    on the pre-fix default."""
+    from establish_intake.__main__ import _DEFAULT_SPOOL_DIR
+
+    assert not _DEFAULT_SPOOL_DIR.startswith("/opt/data")
+    assert _DEFAULT_SPOOL_DIR == "/var/lib/smd-establish-spool"
