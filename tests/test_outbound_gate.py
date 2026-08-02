@@ -585,9 +585,7 @@ def test_create_task_subject_and_due_date_scanned_past_note(
     assert "date" in rows[0][1][-1]
 
 
-def test_structured_args_all_read_do_not_report(
-    trust_plugin, env_autonomous, monkeypatch
-) -> None:
+def test_structured_args_all_read_do_not_report(trust_plugin, env_autonomous, monkeypatch) -> None:
     """FALSE CONTROL (Law 12): the same structured create_event whose date the
     agent actually READ this session emits NO row — the widened scan must be
     able to pass, or the report above measures nothing."""
