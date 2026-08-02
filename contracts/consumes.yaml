@@ -121,7 +121,7 @@ vars:
     stage: agent
     requirement: optional
     consumed_by: [webhook-gate, overlay-activation-hook]
-    note: "shared smd-operator Sentry project DSN, staged at provision when customer.yaml observability.sentry.enabled (ADR 0023 #11). Both boot processes init from shared/sentry_init.py: the gate (component=gate) and the gateway activation hook (component=gateway), each tagged tenant=<slug>. Absent => Sentry disabled-safe (init is a no-op); errors go unreported but boot is unaffected. PII scrub (send_default_pii=False + before_send/before_breadcrumb) is locked in sentry_init.py and gated by tests/test_sentry_scrub.py. A DSN alone is NOT sufficient to report — see FLY_MACHINE_ID (seat-only gate)."
+    note: "shared smd-operator Sentry project DSN, staged at provision UNCONDITIONALLY per-Machine (ADR 0023 #11) — no customer.yaml key gates it; no seat authors observability.sentry.enabled and the provisioner never reads one (reconciled with shipped behavior 2026-08-02, audit 2026-07-31 §3.12). Both boot processes init from shared/sentry_init.py: the gate (component=gate) and the gateway activation hook (component=gateway), each tagged tenant=<slug>. Absent => Sentry disabled-safe (init is a no-op); errors go unreported but boot is unaffected. PII scrub (send_default_pii=False + before_send/before_breadcrumb) is locked in sentry_init.py and gated by tests/test_sentry_scrub.py. A DSN alone is NOT sufficient to report — see FLY_MACHINE_ID (seat-only gate)."
   FLY_MACHINE_ID:
     discovery: static
     stage: agent

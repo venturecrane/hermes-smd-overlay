@@ -61,6 +61,50 @@ def test_redact_text_plain_untouched() -> None:
 
 
 # ---------------------------------------------------------------------------
+# redact_text — client-record identifier shapes (ss-console #2150)
+# ---------------------------------------------------------------------------
+
+
+def test_redact_text_guid() -> None:
+    # The literal SMD-OPERATOR-5 payload shape: a live matter GUID in a gate log.
+    line = "gate: suppression stands: reason=excluded-matter:3c191bed-cdda-48b9-a6ed-a51a349f3f94"
+    out = redact_text(line)
+    assert "3c191bed" not in out
+    assert "[redacted-guid]" in out
+
+
+@pytest.mark.parametrize(
+    "matter",
+    [
+        "2026-PI-101",  # year-first, the pilot scheme
+        "PI-2026-0001",  # prefix-first, the webhook-fixture scheme
+        "2026-OPS-001",
+    ],
+)
+def test_redact_text_matter_number_shapes(matter: str) -> None:
+    out = redact_text(f"escalation on matter {matter} pending")
+    assert matter not in out
+    assert "[redacted-matter]" in out
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        # The false controls: strings a lazy shape WOULD catch. If one of these
+        # starts being redacted, the shapes over-widened and triage text dies.
+        "2026-08-02",  # ISO date
+        "2026-08-02T10:00:00Z",  # ISO datetime
+        "v1.2.3",  # version
+        "deployment-01KYZM8HJ8S7WD706HBBDYM97K",  # ULID-ish id, no dashes inside
+        "SMD-OPERATOR-5",  # Sentry short id (prefix > 6 letters)
+        "sha256 11eca2c0",  # bare hex ref
+    ],
+)
+def test_redact_text_identifier_controls_untouched(benign: str) -> None:
+    assert redact_text(f"see {benign} for detail") == f"see {benign} for detail"
+
+
+# ---------------------------------------------------------------------------
 # scrub_event — request body, headers, message, exception, breadcrumbs
 # ---------------------------------------------------------------------------
 
@@ -112,6 +156,60 @@ def test_scrub_event_never_raises_on_malformed() -> None:
     # Non-dict request/exception/breadcrumbs must not blow up the safety net.
     for bad in ({}, {"request": "not-a-dict"}, {"exception": 5}, {"breadcrumbs": "x"}):
         assert isinstance(scrub_event(bad), dict)
+
+
+# ---------------------------------------------------------------------------
+# scrub_event — extra / contexts / logentry.params walking (ss-console #2150)
+# ---------------------------------------------------------------------------
+
+
+def test_extra_walked_and_redacted() -> None:
+    # SMD-OPERATOR-10's class: set_extra payloads previously shipped verbatim.
+    event = {
+        "extra": {
+            "note": "matter 2026-PI-101 (f220c8e4-1111-2222-3333-444455556666)",
+            "nested": {"deep": ["owner@example.com", 42]},
+        }
+    }
+    out = scrub_event(event)
+    assert "2026-PI-101" not in str(out["extra"])
+    assert "f220c8e4" not in str(out["extra"])
+    assert out["extra"]["nested"]["deep"] == ["[redacted-email]", 42]
+
+
+def test_contexts_walked_and_redacted() -> None:
+    event = {"contexts": {"job": {"matter": "PI-2026-0001"}}}
+    out = scrub_event(event)
+    assert out["contexts"]["job"]["matter"] == "[redacted-matter]"
+
+
+def test_logentry_params_redacted() -> None:
+    # Only the %s template was scrubbed before; the params carry the values.
+    event = {
+        "logentry": {
+            "message": "chase failed for %s on %s",
+            "params": ["client@firm.com", "2026-PI-106"],
+        }
+    }
+    out = scrub_event(event)
+    assert out["logentry"]["params"] == ["[redacted-email]", "[redacted-matter]"]
+
+
+def test_scrub_value_depth_bound() -> None:
+    # A pathological tree is replaced, not walked forever.
+    tree: dict = {"k": "leaf"}
+    for _ in range(20):
+        tree = {"k": tree}
+    out = scrub_event({"extra": tree})
+    assert "[redacted]" in str(out["extra"])
+
+
+def test_breadcrumb_nested_data_redacted() -> None:
+    crumb = {"data": {"payload": {"to": ["a@b.com"], "matter": "2026-OPS-001"}}}
+    out = scrub_breadcrumb(crumb)
+    assert out is not None
+    assert out["data"]["payload"]["to"] == ["[redacted-email]"]
+    assert out["data"]["payload"]["matter"] == "[redacted-matter]"
 
 
 # ---------------------------------------------------------------------------

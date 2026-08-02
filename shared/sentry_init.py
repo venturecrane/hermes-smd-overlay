@@ -18,12 +18,16 @@ Three properties this module guarantees:
 * **PII scrub is LOCKED here (ADR 0023 decision #11).** ``send_default_pii=False``
   plus ``before_send`` / ``before_breadcrumb`` hooks that (a) drop request bodies
   entirely, (b) redact named sensitive headers, (c) redact email-shaped tokens
-  from messages and breadcrumbs, and (d) redact provider key shapes
-  (``sk-…`` / ``pk_(live|test)_…`` / AWS ``AKIA…``). The scrub functions are pure
-  (dict-in/dict-out, str-in/str-out) so ``tests/test_sentry_scrub.py`` gates them
-  without the SDK. Do NOT widen what reaches Sentry without updating that suite —
-  the regression suite is the merge gate that keeps a refactor from re-opening a
-  leak.
+  from messages and breadcrumbs, (d) redact provider key shapes
+  (``sk-…`` / ``pk_(live|test)_…`` / AWS ``AKIA…``), and (e) redact client-record
+  identifier shapes — dashed GUIDs and matter-number formats — from every walked
+  surface, including ``extra``, ``contexts``, and ``logentry.params``
+  (ss-console #2150; a live matter GUID reached the shared project via a
+  ``set_extra``-adjacent path the hooks never walked, SMD-OPERATOR-5). The scrub
+  functions are pure (dict-in/dict-out, str-in/str-out) so
+  ``tests/test_sentry_scrub.py`` gates them without the SDK. Do NOT widen what
+  reaches Sentry without updating that suite — the regression suite is the merge
+  gate that keeps a refactor from re-opening a leak.
 
 The registered ``before_send`` is :func:`scrub_then_throttle`: it scrubs first,
 then applies the logarithmic per-issue throttle in
@@ -81,19 +85,68 @@ _KEY_RES: tuple[re.Pattern[str], ...] = (
     re.compile(r"AKIA[0-9A-Z]{16}"),
 )
 
+_REDACTED_GUID = "[redacted-guid]"
+_REDACTED_MATTER = "[redacted-matter]"
+
+#: Dashed-GUID shape. Smokeball record ids (matters, tasks, events, contacts,
+#: files) are all GUIDs, and a matter GUID in the shared project is client data
+#: under DPA Exhibit B-1 (SMD-OPERATOR-5 shipped one; audit 2026-07-31 §3.12).
+#: ALL dashed GUIDs are redacted, not only ones known to be matters, because a
+#: GUID's referent is indistinguishable by shape — over-redacting an internal id
+#: costs a little triage convenience; under-redacting breaches the DPA.
+_GUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+
+#: Matter-number shapes observed across the fleet: year-first (``2026-PI-101``)
+#: and prefix-first (``PI-2026-0001``). Uppercase-only and year-anchored so ISO
+#: dates (all digits) and version strings never match. A firm with a scheme
+#: outside these shapes needs a shape added HERE and a case added to the suite.
+_MATTER_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:19|20)\d{2}-[A-Z]{1,6}-\d{1,6}\b"),
+    re.compile(r"\b[A-Z]{1,6}-(?:19|20)\d{2}-\d{1,6}\b"),
+)
+
 
 def redact_text(text: str) -> str:
-    """Redact email addresses and provider key shapes from a string.
+    """Redact email addresses, provider key shapes, dashed GUIDs, and
+    matter-number shapes from a string.
 
     Order matters: key shapes are redacted after emails so an ``sk-``-prefixed
-    token embedded in a longer string is still caught.
+    token embedded in a longer string is still caught; identifier shapes run
+    last so a GUID inside an already-redacted span is not resurrected.
     """
     if not text:
         return text
     out = _EMAIL_RE.sub(_REDACTED_EMAIL, text)
     for rx in _KEY_RES:
         out = rx.sub(_REDACTED_KEY, out)
+    out = _GUID_RE.sub(_REDACTED_GUID, out)
+    for rx in _MATTER_RES:
+        out = rx.sub(_REDACTED_MATTER, out)
     return out
+
+
+#: Recursion bound for the tree walk. Sentry event sections are shallow in
+#: practice; anything deeper is pathological and gets replaced wholesale.
+_MAX_SCRUB_DEPTH = 8
+
+
+def _scrub_value(value: Any, depth: int = 0) -> Any:
+    """Redact every string leaf of an arbitrarily nested dict/list value.
+
+    Non-string scalars pass through; a tree deeper than the bound is replaced
+    with the redaction marker rather than walked forever.
+    """
+    if depth > _MAX_SCRUB_DEPTH:
+        return _REDACTED
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {k: _scrub_value(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub_value(v, depth + 1) for v in value]
+    return value
 
 
 def _scrub_headers(headers: Any) -> None:
@@ -125,8 +178,24 @@ def scrub_event(event: dict[str, Any], hint: dict[str, Any] | None = None) -> di
             event["message"] = redact_text(msg)
 
         logentry = event.get("logentry")
-        if isinstance(logentry, dict) and isinstance(logentry.get("message"), str):
-            logentry["message"] = redact_text(logentry["message"])
+        if isinstance(logentry, dict):
+            if isinstance(logentry.get("message"), str):
+                logentry["message"] = redact_text(logentry["message"])
+            # The %s params carry the actual values the template interpolates —
+            # scrubbing only the template left them verbatim, and a client
+            # address in SMD-OPERATOR-10 was caught by Sentry's server-side
+            # scrubbing, not ours (ss-console #2150).
+            params = logentry.get("params")
+            if isinstance(params, (list, tuple, dict)):
+                logentry["params"] = _scrub_value(params)
+
+        # ``set_extra`` / ``set_context`` payloads ship verbatim and were never
+        # walked before (SMD-OPERATOR-10 shipped an unredacted filesystem path
+        # this way). Walk every string leaf of both sections.
+        for section in ("extra", "contexts"):
+            sec = event.get(section)
+            if isinstance(sec, dict):
+                event[section] = _scrub_value(sec)
 
         exc = event.get("exception")
         if isinstance(exc, dict):
@@ -175,8 +244,7 @@ def scrub_breadcrumb(
         data = crumb.get("data")
         if isinstance(data, dict):
             for key, value in list(data.items()):
-                if isinstance(value, str):
-                    data[key] = redact_text(value)
+                data[key] = _scrub_value(value)
     except Exception:  # noqa: BLE001
         logger.exception("sentry: scrub_breadcrumb raised; dropping breadcrumb")
         return None
