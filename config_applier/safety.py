@@ -253,6 +253,14 @@ _LIVE_WRITABLE_PREFIXES: tuple[str, ...] = (
     # (ADR 0055 / ADR 0044), so authoring who the Operator may autonomously reply
     # to takes effect on the next message with no restart.
     "scope.inbound_allow_from",
+    # The Operator-admin allow list (ss ADR 0085 §2) — who may establish or
+    # update firm-level voice/shape by instructing the Operator. Read LIVE by
+    # the establishment plugin on every sender-attributed turn, so authoring an
+    # admin takes effect on the next message with no restart — same contract as
+    # the roster above. Listed here for the same reason `seat` is: one
+    # non-writable path rejects the WHOLE diff (the 2026-07-14 grain bug), so an
+    # admins edit bundled with any other live change would silently block both.
+    "scope.admins",
     "escalation",
     "webhook_triggers",
     # Persona skill enablement is live-writable. The array index segment

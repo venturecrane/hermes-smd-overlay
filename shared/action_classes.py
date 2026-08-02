@@ -563,6 +563,19 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # would make it REFUSED by design, which is exactly how the execute_code gap
     # this plugin closes stayed invisible until a live probe (ss #1915).
     "correction_capture": ActionClass.INTERNAL_WRITE,
+    # Conversational establishment (hermes-smd-establishment, ss ADR 0085).
+    # Stage + submit are INTERNAL_WRITE on the correction_capture argument: each
+    # is one broker-validated write into a spool the agent uid cannot open, and
+    # nothing client-facing happens directly — the install is performed root-side
+    # behind the compiler gates, and the AUTHORIZATION gate is the admin hook
+    # (pre_tool_call), never the exposure ceiling. That class is load-bearing:
+    # every seat authors `internal_write` at draft_for_review or better, so
+    # establishment works on every seat with no entitlement widening, and an
+    # unmapped name would be REFUSED terminally (the ss #1915 invisibility).
+    # Status is READ: root-authored run metadata only, no corpus text.
+    "establish_stage_document": ActionClass.INTERNAL_WRITE,
+    "establish_submit": ActionClass.INTERNAL_WRITE,
+    "establish_status": ActionClass.READ,
     # Durable-job tools (hermes-smd-jobs, ss #1916 — these were unmapped, so the
     # fail-closed REFUSED default made durable jobs inert at runtime).
     # start_background_job launches a budgeted background agent turn with tools:

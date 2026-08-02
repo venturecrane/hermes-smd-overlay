@@ -212,6 +212,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_send_policy(cfg, errors)
     _validate_webhook_triggers(cfg, errors)
     _validate_scope_entitlements(cfg, errors)
+    _validate_scope_admins(cfg, errors)
     _validate_outbound_roster(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
@@ -840,6 +841,51 @@ def _canonical_inbound_keys(scope: dict[str, Any]) -> set[str]:
                 if canon is not None:
                     out.add(canon)
     return out
+
+
+def _validate_scope_admins(cfg: dict[str, Any], errors: list[str]) -> None:
+    """Validate ``scope.admins`` — the Operator-admin allow list (ss ADR 0085 §2).
+
+    Each entry must be an EXACT person email address (``local@domain``),
+    canonicalized lowercase. ``@domain`` grants are rejected outright: an admin
+    is a person, and a domain grant would make every colleague on the firm's
+    domain an establishment authority — precisely the widening §2 exists to
+    prevent. Duplicates (after canonicalization) are rejected so the authored
+    list stays reviewable as the literal set of people who speak for the firm.
+    """
+    scope = cfg.get("scope")
+    if not isinstance(scope, dict):
+        return
+    raw = scope.get("admins")
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        _err(f"scope.admins must be a list; got {type(raw).__name__}", errors)
+        return
+    seen: set[str] = set()
+    for i, entry in enumerate(raw):
+        prefix = f"scope.admins[{i}]"
+        if not isinstance(entry, str) or not entry.strip():
+            _err(f"{prefix}: must be a non-empty string email address", errors)
+            continue
+        canon = _canon_roster_address(entry)
+        if canon is None:
+            _err(
+                f"{prefix}: {entry!r} must be an exact person address (local@domain)",
+                errors,
+            )
+            continue
+        if canon.startswith("@"):
+            _err(
+                f"{prefix}: {entry!r} is a domain grant; an Operator admin is a "
+                "person, not a domain (ss ADR 0085 §2) — author the exact address",
+                errors,
+            )
+            continue
+        if canon in seen:
+            _err(f"{prefix}: duplicate admin address {canon!r}", errors)
+            continue
+        seen.add(canon)
 
 
 def _validate_outbound_roster(cfg: dict[str, Any], errors: list[str]) -> None:
