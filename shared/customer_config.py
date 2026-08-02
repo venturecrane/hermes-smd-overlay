@@ -376,6 +376,68 @@ class CustomerConfig:
         return False
 
     # ------------------------------------------------------------------
+    # Operator admins — the establishment allow list (ss ADR 0085 §2)
+    # ------------------------------------------------------------------
+
+    @property
+    def admins(self) -> list[str]:
+        """Return ``scope.admins`` — the Operator-admin allow list — normalized.
+
+        The third instance of the authored allow-list shape (beside
+        ``scope.inbound_allow_from`` and ``mcp_connector.access[]``): the people
+        who may establish or update FIRM-LEVEL voice and output shape by
+        instructing the Operator (ss ADR 0085 §2). Exact person addresses only —
+        an admin is a person, so ``@domain`` grants are dropped here even if one
+        survives authoring (the validator rejects them; this accessor is the
+        runtime backstop). Entries are lowercased + stripped; non-string, empty,
+        and non-address entries are dropped.
+
+        FAIL-CLOSED TO ``[]`` on any malformed shape, deliberately unlike the
+        raising accessors above: this list is read inside a per-turn hook, and
+        the safe direction for a broken read is "nobody is an admin" (every
+        establishment refused) rather than an exception a hook wrapper would
+        swallow into an undefined state. Absent or empty ⇒ ``[]`` — no admins
+        authored means no firm-level establishment, ever, until a PR authors one.
+        """
+        scope = self._data.get("scope")
+        if not isinstance(scope, dict):
+            return []
+        raw = scope.get("admins")
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        for entry in raw:
+            if not isinstance(entry, str):
+                continue
+            norm = entry.strip().lower()
+            # A person, not a domain: exactly one "@" with non-empty local part
+            # and a dotted domain. Anything else is dropped, never widened.
+            if norm.count("@") != 1 or norm.startswith("@"):
+                continue
+            local, _, domain = norm.partition("@")
+            if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+                continue
+            if norm not in out:
+                out.append(norm)
+        return out
+
+    def sender_is_admin(self, sender_address: object) -> bool:
+        """True iff ``sender_address`` exactly matches an entry in ``scope.admins``.
+
+        EXACT match only — no ``@domain`` widening, unlike
+        :meth:`sender_on_roster`, because establishment authority is
+        person-shaped (ss ADR 0085 §2): being on the firm's domain makes you a
+        colleague, not an admin. Fail-closed: a non-string, empty, or unmatched
+        sender is not an admin, and an empty list matches no one.
+        """
+        if not isinstance(sender_address, str):
+            return False
+        addr = sender_address.strip().lower()
+        if not addr:
+            return False
+        return addr in self.admins
+
+    # ------------------------------------------------------------------
     # Live-read config blocks (ADR 0044 — read fresh per use, no restart)
     # ------------------------------------------------------------------
 

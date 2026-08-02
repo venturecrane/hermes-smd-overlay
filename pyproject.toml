@@ -74,6 +74,10 @@ include = [
     # as root before the privilege drop, and an absent module would mean the
     # seat boots with no spec tree and the pointer stamps name nothing.
     "spec_applier*",
+    # ss ADR 0085 — the root-side establishment intake. Must ship in the wheel:
+    # entrypoint.sh launches `python -m establish_intake` as root (gated on the
+    # import succeeding, so an absent module degrades to a LOUD not-launched).
+    "establish_intake*",
 ]
 
 [tool.setuptools.package-data]

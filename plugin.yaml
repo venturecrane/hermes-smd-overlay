@@ -20,3 +20,4 @@ plugins:
   - plugins/hermes-smd-connector-health
   - plugins/hermes-smd-usage
   - plugins/hermes-smd-drafting
+  - plugins/hermes-smd-establishment
