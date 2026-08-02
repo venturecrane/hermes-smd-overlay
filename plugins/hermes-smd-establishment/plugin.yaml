@@ -1,12 +1,16 @@
 name: hermes-smd-establishment
-version: "0.1.0"
-description: "Conversational establishment (ss ADR 0085): an Operator admin (scope.admins) instructs the Operator to establish or update the firm's voice / output shape from named documents. Three broker-marshalled tools — establish_stage_document / establish_submit / establish_status — feed the root-side establish_intake daemon, which runs the distillation compilers as write gates before merge-installing the vault object. Admin-only via a pre_tool_call gate fed by a pre_llm_call sender stash; deliberately NO session-taint gate (Captain decision 2026-08-02 — the establishment turn necessarily reads connector content; the admin allow-list is the gate). Correction promotion is a USE of this path (source_ref cites the captured correction), never an automatic conversion."
+version: "0.2.0"
+description: "Conversational establishment (ss ADR 0085): an Operator admin (scope.admins) instructs the Operator to establish or update the firm's voice / output shape from named documents. Three broker-marshalled tools — establish_stage_document / establish_submit / establish_status — feed the root-side establish_intake daemon, which runs the distillation compilers as write gates before merge-installing the vault object. Admin-only via a pre_tool_call gate fed by a pre_llm_call sender stash; deliberately NO session-taint gate (Captain decision 2026-08-02 — the establishment turn necessarily reads connector content; the admin allow-list is the gate). On AgentMail-custody seats (ss#2164 probe: WEAK — no per-message SPF/DKIM/DMARC verdict), an admin's first establishment additionally requires a one-time mailbox-possession confirmation: a challenge code emailed to the rostered scope.admins address, confirmed by the admin's reply, durable across restarts (shared/admin_possession.py); msgraph/tenant-custody seats and sessions with no mail channel are exempt. Correction promotion is a USE of this path (source_ref cites the captured correction), never an automatic conversion."
 requires_env:
   - SMD_WORKSPACE_BROKER_SOCKET
 hooks:
   # pre_tool_call — refuses establish_* on any session not currently classified
-  # admin. Admin predicate ONLY; no taint check by decision (2026-08-02).
+  # admin (admin predicate; no taint check by decision, 2026-08-02); withholds
+  # establish_* behind the mailbox-possession ceremony on AgentMail custody;
+  # and recipient-locks any outbound call carrying a live challenge code to
+  # exactly the rostered admin address.
   - pre_tool_call
   # pre_llm_call — resolves sender_id against live scope.admins, stashes the
-  # classification per session (last-writer-wins), and nudges on admin turns.
+  # classification per session (last-writer-wins), nudges on admin turns, and
+  # consumes a possession-confirming reply (rostered admin + live code).
   - pre_llm_call
