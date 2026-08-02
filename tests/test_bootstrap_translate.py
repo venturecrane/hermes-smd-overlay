@@ -1362,6 +1362,48 @@ def test_telegram_block_lands_in_persona_config():
     assert config["telegram"]["require_mention"] is False
 
 
+def test_webhook_platform_toolsets_emitted_with_the_platform(monkeypatch):
+    """ss-console#2145 CONFIG half. Without this block the webhook platform
+    falls back to Hermes' ``hermes-webhook`` composite, which carries no
+    ``file`` toolset — so ``read_file`` was absent on exactly the platform
+    inbound email arrives on, and the trust plugin's spec read-mark could never
+    be set there."""
+    from shared.webhook_read_surface import WEBHOOK_READ_TOOLSET
+
+    monkeypatch.setenv("WEBHOOK_SECRET_AGENTMAIL", "shh")
+    persona = {"slug": "crane", "name": "Crane", "status": "active", "skills": []}
+    cust = {"customer_id": "smd", **_WH_CUSTOMER}
+    config = _wh._persona_config(persona, cust, {})
+
+    emitted = config["platform_toolsets"]["webhook"]
+    assert emitted == ["web", "vision", "clarify", WEBHOOK_READ_TOOLSET]
+    # The safe toolsets must ride along: naming a platform REPLACES its default
+    # composite, so omitting them would trade read_file for the four tools
+    # webhook turns already had.
+    assert emitted[:3] == ["web", "vision", "clarify"]
+    # Never the whole ``file`` toolset — write_file/patch/search_files on an
+    # untrusted inbound turn is what the webhook-safe default exists to deny.
+    assert "file" not in emitted
+
+
+def test_no_platform_toolsets_without_a_webhook_platform():
+    """Seats with no inbound webhook stay byte-identical: no webhook platform,
+    no toolset override for one."""
+    persona = {"slug": "crane", "name": "Crane", "status": "active", "skills": []}
+    config = _wh._persona_config(persona, {"customer_id": "smd"}, {})
+    assert "platform_toolsets" not in config
+    assert "platforms" not in config
+
+
+def test_no_platform_toolsets_when_the_webhook_secret_is_absent(monkeypatch):
+    """The platform fails closed without its signing secret; the toolset
+    override must not outlive the platform it configures."""
+    monkeypatch.delenv("WEBHOOK_SECRET_AGENTMAIL", raising=False)
+    persona = {"slug": "crane", "name": "Crane", "status": "active", "skills": []}
+    config = _wh._persona_config(persona, {"customer_id": "smd", **_WH_CUSTOMER}, {})
+    assert "platform_toolsets" not in config
+
+
 # ---------------------------------------------------------------------------
 # Cron materialization: pre_run_decides staging (ADR 0047 phase 2)
 # ---------------------------------------------------------------------------

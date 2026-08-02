@@ -42,7 +42,18 @@ NOT a core file — is the overlay using Hermes' public API:
      by inference. The row carries a distinct session id so it is separable from
      real-turn rows when read back via the runtime seam. Degrades to skipped only when
      the audit DB cannot be resolved; a definitive "wrote nothing" fails closed.
-  5. FAIL-CLOSED: HookRegistry swallows handler exceptions (gateway/hooks.py:19), so a
+  5. A WEBHOOK READ-SURFACE assertion (ss-console#2145): resolve the webhook platform's
+     tool surface the way a real webhook turn does and require ``read_file``. Inbound
+     email arrives on the webhook platform, whose default toolset deliberately excludes
+     ``file`` — so the trust plugin's spec read-mark could never be set there and
+     ``spec_gate`` refused every voice-gated delivery. The fix has a half in this process
+     (the webhook-router plugin creates a one-tool custom toolset) and a half in the
+     provisioning process (``bootstrap/translate.py`` names it in ``platform_toolsets``),
+     and shipping the config half alone is SILENT: the unknown name survives
+     ``explicit_passthrough``, ``validate_toolset`` returns False, and the warning is
+     suppressed under ``quiet_mode=True``. Only a resolved-surface check catches that.
+     Skipped on seats that do not serve the webhook platform.
+  6. FAIL-CLOSED: HookRegistry swallows handler exceptions (gateway/hooks.py:19), so a
      failed self-check cannot rely on raising — the handler calls ``os._exit(1)``.
      ``gateway:startup`` fires before steady-state turns, so exiting prevents the gateway
      from ever serving ungoverned. Better visibly down (crash-loop; Fly restarts) than
@@ -165,6 +176,76 @@ async def _cost_breaker_self_check() -> None:
     ok, reason = await run_boot_probe()
     if not ok:
         _die(f"COST BREAKER INERT on this boot: {reason} (ADR 0062 §6, #1701)")
+
+
+def _gateway_config() -> dict:
+    """The config dict a webhook TURN resolves its tools from.
+
+    The gateway does not use ``hermes_cli.config.load_config``: every turn-path
+    call site reads ``gateway.run._load_gateway_config()``
+    (``gateway/run.py:12577``), which overlays administrator-pinned managed
+    scope on top of ``$HERMES_HOME/config.yaml``. The two normally agree, and a
+    check built on "normally agree" is a check that can be right about the wrong
+    dict — so prefer the gateway's own loader (this handler runs inside that
+    process, so the module is already imported) and fall back only if it moves.
+    """
+    try:
+        from gateway.run import _load_gateway_config
+
+        return _load_gateway_config()
+    except Exception:  # noqa: BLE001
+        from hermes_cli.config import load_config
+
+        return load_config()
+
+
+def _webhook_read_self_check() -> None:
+    """Prove ``read_file`` reaches webhook turns, or refuse to serve (#2145).
+
+    Runs AFTER ``discover_plugins(force=True)``, so the webhook-router plugin
+    has already created the custom toolset in this process — this reads the
+    result of that registration rather than assuming it. Skipped on seats whose
+    config does not enable the webhook platform: they have no webhook surface to
+    be wrong about. Synchronous (no I/O beyond reading the config Hermes has
+    already loaded)."""
+    try:
+        from shared.webhook_read_surface import (
+            WebhookReadSurfaceError,
+            assert_read_file_on_webhook,
+            webhook_platform_enabled,
+        )
+    except Exception as e:  # noqa: BLE001
+        _die(
+            f"cannot import the webhook read-surface contract ({type(e).__name__}: {e}) "
+            "— whether inbound turns can read files is unverifiable (ss-console#2145)"
+        )
+        return
+
+    try:
+        config = _gateway_config()
+    except Exception as e:  # noqa: BLE001
+        _die(f"cannot load config for the webhook read-surface check: {type(e).__name__}: {e}")
+        return
+
+    if not webhook_platform_enabled(config):
+        logger.info(
+            "webhook read-surface check skipped: this seat does not serve the webhook platform"
+        )
+        return
+
+    try:
+        assert_read_file_on_webhook(config)
+    except WebhookReadSurfaceError as e:
+        _die(f"WEBHOOK TURNS CANNOT READ FILES: {e}")
+        return
+    except Exception as e:  # noqa: BLE001
+        _die(f"webhook read-surface check raised: {type(e).__name__}: {e}")
+        return
+
+    logger.info(
+        "webhook read-surface check passed: read_file is offered on webhook turns "
+        "(config half + toolset registration both live)"
+    )
 
 
 def _die(reason: str) -> None:
@@ -342,6 +423,18 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     #    the guard does not refuse. This is the recurring prod-boot probe that
     #    earns sticky_stop_cost_cap its enforced status.
     await _cost_breaker_self_check()
+
+    # 5. WEBHOOK READ-SURFACE assertion (ss-console#2145). `read_file` reaches
+    #    webhook turns only when TWO halves in TWO processes both shipped: the
+    #    platform_toolsets block bootstrap/translate.py writes, and the custom
+    #    toolset the webhook-router plugin creates at load. Config-half-only
+    #    fails SILENTLY — _get_platform_tools keeps the unknown name via
+    #    explicit_passthrough, validate_toolset returns False, and gateway
+    #    callers pass quiet_mode=True so even the warning is suppressed. This
+    #    re-derives the surface exactly as a webhook turn does and fails closed,
+    #    so the only way to be wrong about it is to be visibly down. Scoped to
+    #    seats that actually serve the webhook platform.
+    _webhook_read_self_check()
 
     logger.info(
         "SMD overlay ACTIVE + AUDITING + SPEND-CAPPED on the live gateway: %d hook "

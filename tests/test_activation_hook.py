@@ -91,9 +91,14 @@ def _install_fake_plugins(
     discover_raises: Exception | None = None,
     invoke_raises: Exception | None = None,
     workspace_tools: set[str] | None = None,
+    config: dict | None = None,
 ) -> dict:
     """Inject a fake ``hermes_cli.plugins`` exposing the three fns the handler
-    imports. Returns a dict recording the ``force`` flag and invoke calls."""
+    imports. Returns a dict recording the ``force`` flag and invoke calls.
+
+    ``config`` is what the fake ``hermes_cli.config.load_config`` returns for the
+    webhook read-surface check (step 5). It defaults to a config with no webhook
+    platform, so that check skips and these tests stay about governance."""
     calls: dict = {"force": None, "invoke": [], "block": []}
     parent = types.ModuleType("hermes_cli")
     mod = types.ModuleType("hermes_cli.plugins")
@@ -123,8 +128,11 @@ def _install_fake_plugins(
     mod.get_pre_tool_call_block_message = get_pre_tool_call_block_message  # type: ignore[attr-defined]
     mod.get_plugin_manager = get_plugin_manager  # type: ignore[attr-defined]
     mod.invoke_hook = invoke_hook  # type: ignore[attr-defined]
+    config_mod = types.ModuleType("hermes_cli.config")
+    config_mod.load_config = lambda: config if config is not None else {}  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hermes_cli", parent)
     monkeypatch.setitem(sys.modules, "hermes_cli.plugins", mod)
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", config_mod)
     tools_parent = types.ModuleType("tools")
     registry_mod = types.ModuleType("tools.registry")
 
@@ -406,3 +414,100 @@ def test_full_handle_runs_cost_breaker_check(monkeypatch, no_real_exit):
     handler = _load_handler()
     with pytest.raises(_Exit):
         asyncio.run(handler.handle("gateway:startup", {}))
+
+
+# ---------------------------------------------------------------------------
+# Webhook read-surface assertion (ss-console#2145). Step 5 of the boot gate:
+# read_file reaches webhook turns only when the config half and the runtime
+# half BOTH shipped, and config-half-only is silent at runtime — so the gate
+# reads the RESOLVED surface and refuses to serve when it disagrees.
+# ---------------------------------------------------------------------------
+
+_WEBHOOK_CONFIG = {"platforms": {"webhook": {"enabled": True}}}
+
+
+def _fake_surface(monkeypatch, *, offers_read_file: bool):
+    """Point the handler's read-surface contract at a known answer, so these
+    tests are about the gate's WIRING; the contract's own resolution is covered
+    against faithful Hermes fakes in tests/test_webhook_read_surface.py."""
+    import shared.webhook_read_surface as wrs
+
+    def _assert(_config):
+        if not offers_read_file:
+            raise wrs.WebhookReadSurfaceError("webhook tool surface is missing ['read_file']")
+
+    monkeypatch.setattr(wrs, "assert_read_file_on_webhook", _assert)
+
+
+def test_boot_fails_closed_when_webhook_turns_cannot_read_files(monkeypatch, no_real_exit):
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_WEBHOOK_CONFIG
+    )
+    _fake_surface(monkeypatch, offers_read_file=False)
+    handler = _load_handler()
+    with pytest.raises(_Exit) as ei:
+        asyncio.run(handler.handle("gateway:startup", {}))
+    assert ei.value.code == 1
+
+
+def test_boot_passes_when_webhook_turns_can_read_files(monkeypatch, no_real_exit):
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_WEBHOOK_CONFIG
+    )
+    _fake_surface(monkeypatch, offers_read_file=True)
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))
+
+
+def test_check_skipped_on_a_seat_without_the_webhook_platform(monkeypatch, no_real_exit):
+    # A seat that serves no webhook has no webhook surface to be wrong about,
+    # and must not be refused a boot over a platform it never serves. The
+    # broken-surface fake would _die if the check ran.
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config={"platforms": {}}
+    )
+    _fake_surface(monkeypatch, offers_read_file=False)
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))
+
+
+def test_check_fails_closed_when_the_config_cannot_be_loaded(monkeypatch, no_real_exit):
+    # Unverifiable is not the same as fine.
+    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK)
+    import sys as _sys
+
+    def _boom():
+        raise OSError("config.yaml unreadable")
+
+    _sys.modules["hermes_cli.config"].load_config = _boom
+    handler = _load_handler()
+    with pytest.raises(_Exit) as ei:
+        asyncio.run(handler.handle("gateway:startup", {}))
+    assert ei.value.code == 1
+
+
+def test_config_check_prefers_the_gateway_loader(monkeypatch):
+    """The turn path reads gateway.run._load_gateway_config (which overlays
+    managed scope), not hermes_cli.config.load_config. Reading the wrong dict
+    would let the gate be right about a config no turn uses."""
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config={"from": "hermes_cli"}
+    )
+    gateway_parent = types.ModuleType("gateway")
+    run_mod = types.ModuleType("gateway.run")
+    run_mod._load_gateway_config = lambda: {"from": "gateway"}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "gateway", gateway_parent)
+    monkeypatch.setitem(sys.modules, "gateway.run", run_mod)
+
+    handler = _load_handler()
+    assert handler._gateway_config() == {"from": "gateway"}
+
+
+def test_config_check_falls_back_when_the_gateway_loader_moves(monkeypatch):
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config={"from": "hermes_cli"}
+    )
+    monkeypatch.delitem(sys.modules, "gateway.run", raising=False)
+    monkeypatch.delitem(sys.modules, "gateway", raising=False)
+    handler = _load_handler()
+    assert handler._gateway_config() == {"from": "hermes_cli"}

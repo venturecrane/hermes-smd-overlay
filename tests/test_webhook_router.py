@@ -313,6 +313,72 @@ def test_register_wires_pre_gateway_dispatch(fake_ctx, monkeypatch, with_custome
     assert mod.router.build_routing_table(mod._YAML_PATH).size() == 2
 
 
+def _fake_toolsets(monkeypatch) -> dict[str, list[str]]:
+    """Install a fake ``toolsets`` module capturing ``create_custom_toolset``.
+
+    Hermes is not installed here, and ``register`` must reach the real Hermes
+    API — so the fake stands in for that module rather than for the overlay's
+    call to it. Returns the created-toolsets dict."""
+    import sys
+    import types
+
+    created: dict[str, list[str]] = {}
+    mod = types.ModuleType("toolsets")
+    mod.create_custom_toolset = (  # type: ignore[attr-defined]
+        lambda name, description, tools=None, includes=None: created.__setitem__(
+            name, list(tools or [])
+        )
+    )
+    monkeypatch.setitem(sys.modules, "toolsets", mod)
+    return created
+
+
+def test_register_creates_the_read_only_webhook_toolset(fake_ctx, monkeypatch, with_customer_yaml):
+    """ss-console#2145 RUNTIME half: at plugin LOAD (not first dispatch — the
+    tool-definition memo keys on registry._generation, which creating a toolset
+    does not bump), with exactly read_file and never the ``file`` toolset."""
+    created = _fake_toolsets(monkeypatch)
+    with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-webhook-router")
+    mod.register(fake_ctx)
+    assert created == {mod.WEBHOOK_READ_TOOLSET: ["read_file"]}
+
+
+def test_register_creates_the_toolset_even_when_env_missing(
+    fake_ctx, monkeypatch, with_customer_yaml
+):
+    """The seat's audit env is unrelated to whether inbound turns can read
+    files; if the toolset creation rode behind that env the activation gate
+    would refuse the boot for the wrong reason."""
+    created = _fake_toolsets(monkeypatch)
+    with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
+    monkeypatch.delenv("SMD_CUSTOMER_SLUG", raising=False)
+    monkeypatch.delenv("SMD_D1_AUDIT_BINDING", raising=False)
+    mod = load_plugin("hermes-smd-webhook-router")
+    mod.register(fake_ctx)
+    assert created == {mod.WEBHOOK_READ_TOOLSET: ["read_file"]}
+
+
+def test_register_survives_an_unavailable_toolsets_module(
+    fake_ctx, monkeypatch, with_customer_yaml
+):
+    """A creation failure must not take the plugin down — the activation gate
+    reads the RESOLVED surface, so the miss still fails the boot loudly."""
+    with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-webhook-router")
+    monkeypatch.setattr(mod, "register_webhook_read_toolset", _raise_toolsets_unavailable)
+    mod.register(fake_ctx)
+    assert "pre_gateway_dispatch" in fake_ctx.registered
+
+
+def _raise_toolsets_unavailable() -> None:
+    raise ImportError("no toolsets module in this environment")
+
+
 def test_register_no_ops_when_env_missing(fake_ctx, monkeypatch, with_customer_yaml):
     with_customer_yaml(YAML_WITH_TWO_TRIGGERS)
     monkeypatch.delenv("SMD_CUSTOMER_SLUG", raising=False)
