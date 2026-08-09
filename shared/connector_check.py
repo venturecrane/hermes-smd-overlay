@@ -99,6 +99,49 @@ def _shape_entry(raw: object, *, now: float) -> dict | None:
     return entry
 
 
+# ---------------------------------------------------------------------------
+# Durable-credential age (ss#2148). Some connectors hold a durable credential
+# on the volume whose lifetime is finite (Smokeball refresh token: 30 days,
+# vendor-confirmed). The file's mtime is the last write — initial consent or a
+# rotation persist — so its age IS the credential's age. The console's
+# pre-expiry condition (connector_token_expiring) fires on this field.
+#
+# Shipped as a SEPARATE heartbeat field, never synthesized into the health
+# map: fabricating a ``consecutive_failures: 0`` entry for an idle connector
+# would falsely RESOLVE an open connector_down alert (resolve only on proven
+# success — ADR 0080). Ages, not timestamps, same as everything here.
+# ---------------------------------------------------------------------------
+
+_TOKEN_FILE_ENV: dict[str, tuple[str, str]] = {
+    # server name → (env var override, default path)
+    "smokeball": ("SMOKEBALL_REFRESH_TOKEN_FILE", "/opt/data/.smokeball-mcp/refresh_token"),
+}
+
+
+def token_ages(*, now: float | None = None) -> dict[str, int]:
+    """Age in seconds of each connector's durable credential file.
+
+    A server appears only when its token file exists and stats cleanly —
+    absence means "nothing to report" (hold), never zero. Read-only,
+    fail-soft: a stat error drops the key.
+    """
+    import os
+    from pathlib import Path
+
+    reference = time.time() if now is None else now
+    ages: dict[str, int] = {}
+    for server, (env_var, default) in _TOKEN_FILE_ENV.items():
+        path = Path(os.environ.get(env_var) or default)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        age = _age(reference, mtime)
+        if age is not None:
+            ages[server] = age
+    return ages
+
+
 def check(*, now: float | None = None) -> ConnectorCheck:
     """Read the ledger and shape the heartbeat's connector map."""
     reference = time.time() if now is None else now
@@ -151,4 +194,4 @@ def check(*, now: float | None = None) -> ConnectorCheck:
     return ConnectorCheck(ok=True, servers=servers)
 
 
-__all__ = ["ConnectorCheck", "check"]
+__all__ = ["ConnectorCheck", "check", "token_ages"]

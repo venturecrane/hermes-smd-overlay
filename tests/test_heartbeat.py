@@ -83,6 +83,29 @@ def test_uptime_zero_is_sent_not_dropped():
     assert p["process_uptime_seconds"] == 0
 
 
+def test_payload_carries_connector_token_age_and_omits_empty():
+    # ss#2148: token ages ride a SEPARATE field from the health map, and an
+    # empty/absent map is omitted (nothing to report is a hold, never zero).
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        connector_token_age={"smokeball": 86400},
+    )
+    assert p["connector_token_age"] == {"smokeball": 86400}
+    p2 = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        connector_token_age=None,
+    )
+    assert "connector_token_age" not in p2
+
+
 # ---------------------------------------------------------------------------
 # read_audit_timestamps
 # ---------------------------------------------------------------------------
