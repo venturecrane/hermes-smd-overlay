@@ -30,6 +30,7 @@ not the row.
 
 import logging
 import os
+from datetime import date, timedelta
 from typing import Any
 
 from shared import identifier_filter, provenance
@@ -388,7 +389,7 @@ def _emit_fabrication_audit(
 
 
 # ---------------------------------------------------------------------------
-# A1 identifier-integrity gate — REPORT-ONLY (never blocks)
+# A1 identifier-integrity gate — REFUSING (ss #2171)
 #
 # Distinct from the blocking Tier-1/Tier-2 fabrication gate above. After a draft
 # body clears that gate, scan it for identifier-shaped tokens (dates, A-numbers,
@@ -397,67 +398,220 @@ def _emit_fabrication_audit(
 # runtime signature of a fabricated/garbled identifier, and the never-computes
 # backstop for a computed legal date (a computed SOL won't be in the register).
 #
-# REPORT-ONLY: emits an IDENTIFIER_UNVERIFIED audit signal and ALLOWS the draft.
-# It never blocks — a mismatched identifier is what a human reviewer should SEE
-# (these are draft_for_review tools; the draft already reaches a human). Names
-# are excluded (the runtime register holds none — structured-name seeding is a
-# follow-on). Enforcement (report -> flag) flips only after the false-positive
-# rate is measured on real traffic (the plan's tune-on-traffic discipline).
+# The gate REFUSES (Captain directive 2026-08-02: every seat blocking, pre-live)
+# with these deliberate carve-outs:
+#
+#   * NAME hits never block or report — the runtime register holds no names
+#     (structured-name seeding is a follow-on), so every NAME hit would be an FP.
+#   * Ambient dates: today's and yesterday's UTC date verify against the system
+#     clock rather than a read ("As of <today>..." is legitimate composition; a
+#     US-local "today" is always utc-today or utc-today-1). Ambience is
+#     DATE-kind only — a (matter, date) PAIR claim is never ambient.
+#   * Empty register, DRAFT gate only: allow + report. A refusal with no source
+#     to re-read is a brick for conversational work, and drafts reach a human.
+#     The SEND gate gets NO such carve: an autonomous external send composed
+#     with an empty register is exactly "cannot verify" — it blocks.
+#
+# Rollback lever: SMD_IDENTIFIER_GATE_MODE=report downgrades to report-only
+# (operator-only env, never client-authorable; unset or any other value =
+# block, fail-closed). The gate keeps emitting IDENTIFIER_UNVERIFIED rows in
+# either mode — telemetry continuity through an incident.
 # ---------------------------------------------------------------------------
 
 
-def _report_identifiers(
+# Every kind except NAME blocks. Defined by exclusion so a future IdKind added
+# to the vendored filter defaults to BLOCKING (fail-closed), not report-only.
+_BLOCKING_KINDS: frozenset[identifier_filter.IdKind] = frozenset(identifier_filter.IdKind) - {
+    identifier_filter.IdKind.NAME
+}
+
+
+def _identifier_gate_mode() -> str:
+    """Resolve the gate mode from env, failing closed.
+
+    ONLY the literal string ``report`` (case-insensitive) downgrades; unset,
+    typos, ``off``, ``disabled`` — anything else — mean BLOCK.
+    """
+    if os.getenv("SMD_IDENTIFIER_GATE_MODE", "").strip().lower() == "report":
+        return "report"
+    return "block"
+
+
+def _ambient_dates() -> frozenset[str]:
+    """Canonical dates verified by the system clock rather than a session read.
+
+    UTC today and yesterday: a US-local "today" is always one of the two, and
+    "as of today" composition is legitimate without a read. Anything further
+    out (a computed deadline, a hearing date) must come from a read — a
+    computed date is a true positive under the read-not-compute doctrine
+    (ss #2115), not an FP.
+    """
+    today = date.today()
+    return frozenset({today.isoformat(), (today - timedelta(days=1)).isoformat()})
+
+
+def _days_from_today_bucket(canonical: str) -> str:
+    """Value-free distance bucket for a canonical YYYY-MM-DD (FP triage axis)."""
+    try:
+        delta = (date.fromisoformat(canonical) - date.today()).days
+    except ValueError:
+        return "unparsed"
+    if delta < 0:
+        return "past"
+    if delta == 0:
+        return "today"
+    if delta <= 7:
+        return "1-7d"
+    if delta <= 30:
+        return "8-30d"
+    if delta <= 365:
+        return "31-365d"
+    return ">365d"
+
+
+def _identifier_refusal_message(unverified: list) -> str:
+    """What the model sees on a refusal. Names kinds only — never raw values,
+    never scan mechanics (which would teach evasion routes)."""
+    kinds = sorted({h.kind.value for h in unverified})
+    return (
+        "Refused: this content contains identifier(s) not traceable to anything "
+        f"read this session ({', '.join(kinds)}). Re-read the source record that "
+        "contains the correct value and include it exactly as it appears there — "
+        "or remove the unverified value and state that it needs confirmation. "
+        "Do not guess, derive, or reformat identifiers."
+    )
+
+
+def _emit_identifier_audit(
     *,
-    body: str,
+    unverified: list,
+    mode: str,
+    blocked: bool,
+    block_bypass: str | None,
+    register_was_empty: bool,
     session_id: str,
     tool_name: str,
     tool_call_id: str,
     vertical: str | None,
     cohort: str | None,
 ) -> None:
-    """Report (never block) outbound identifiers not traceable to a session read.
+    """Write the IDENTIFIER_UNVERIFIED row. Raises to the caller's guard — the
+    caller treats emission as best-effort and a failure NEVER rescinds a block."""
+    client, slug = _audit_client()
+    if client is None or slug is None:
+        _NO_AUDIT_WARNER.warn(logger, f"IDENTIFIER_UNVERIFIED on tool={tool_name} not recorded")
+        return
+    by_kind: dict[str, int] = {}
+    date_distance: dict[str, int] = {}
+    for h in unverified:
+        by_kind[h.kind.value] = by_kind.get(h.kind.value, 0) + 1
+        if h.kind is identifier_filter.IdKind.DATE:
+            bucket = _days_from_today_bucket(h.canonical)
+            date_distance[bucket] = date_distance.get(bucket, 0) + 1
+    metadata: dict = {
+        "gate_tier": "tier3_identifier",
+        "mode": mode,
+        "blocked": blocked,
+        "customer": slug,
+        "tool": tool_name,
+        "vertical": vertical or "(unknown)",
+        "register_was_empty": register_was_empty,
+        "unverified_counts": by_kind,
+        # redacted shapes only — never the raw identifier value
+        "shapes": sorted({identifier_filter._redact(h) for h in unverified}),
+    }
+    if block_bypass:
+        metadata["block_bypass"] = block_bypass
+    if date_distance:
+        # value-free: distance buckets, not dates (post-flip FP triage axis)
+        metadata["date_distance"] = date_distance
+    if cohort:
+        metadata["cohort"] = cohort
+    if session_id:
+        metadata["session_id"] = session_id
+    if tool_call_id:
+        metadata["tool_call_id"] = tool_call_id
+    params = agent_event_params(action_type="IDENTIFIER_UNVERIFIED", metadata=metadata)
+    client.execute(_INSERT_SQL, *params)
 
-    Best-effort: any failure is swallowed — the report must never perturb the
-    allowed draft path or raise out of the hook.
+
+def _check_identifiers(
+    *,
+    body: str,
+    gate: str,
+    session_id: str,
+    tool_name: str,
+    tool_call_id: str,
+    vertical: str | None,
+    cohort: str | None,
+) -> dict | None:
+    """Identifier-integrity check: block directive on an unverified identifier.
+
+    ``gate`` is ``"draft"`` or ``"send"`` — the empty-register carve applies to
+    the draft gate only (see the section comment above).
+
+    Three zones, deliberately separated:
+      1. scan   — guarded: a scanner CRASH is an infra fault, not evidence of
+                  fabrication; allow loudly (the Tier-1/2 gate already ran).
+      2. decide — pure, unguarded: nothing to swallow.
+      3. audit  — best-effort: an emission failure never rescinds a block.
     """
+    # -- zone 1: scan --
     try:
         register = provenance.register_for(session_id)
-        result = identifier_filter.check(body, register)  # mode=REPORT default
-        unverified = [h for h in result.unverified if h.kind is not identifier_filter.IdKind.NAME]
-        if not unverified:
-            return
-        client, slug = _audit_client()
-        if client is None or slug is None:
-            _NO_AUDIT_WARNER.warn(logger, f"IDENTIFIER_UNVERIFIED on tool={tool_name} not recorded")
-            return
-        by_kind: dict[str, int] = {}
-        for h in unverified:
-            by_kind[h.kind.value] = by_kind.get(h.kind.value, 0) + 1
-        metadata: dict = {
-            "gate_tier": "tier3_identifier",
-            "mode": "report",
-            "customer": slug,
-            "tool": tool_name,
-            "vertical": vertical or "(unknown)",
-            "register_was_empty": result.register_was_empty,
-            "unverified_counts": by_kind,
-            # redacted shapes only — never the raw identifier value
-            "shapes": sorted({identifier_filter._redact(h) for h in unverified}),
-        }
-        if cohort:
-            metadata["cohort"] = cohort
-        if session_id:
-            metadata["session_id"] = session_id
-        if tool_call_id:
-            metadata["tool_call_id"] = tool_call_id
-        params = agent_event_params(action_type="IDENTIFIER_UNVERIFIED", metadata=metadata)
-        client.execute(_INSERT_SQL, *params)
-    except Exception as exc:  # noqa: BLE001 — report is best-effort; never block the allow
-        logger.debug(
-            "outbound gate: identifier report failed (tool=%s err=%s); draft still allowed",
+        result = identifier_filter.check(body, register)
+        ambient = _ambient_dates()
+        unverified = [
+            h
+            for h in result.unverified
+            if h.kind is not identifier_filter.IdKind.NAME
+            and not (h.kind is identifier_filter.IdKind.DATE and h.canonical in ambient)
+        ]
+        register_was_empty = result.register_was_empty
+    except Exception as exc:  # noqa: BLE001 — infra fault, not fabrication evidence
+        logger.error(
+            "outbound gate: identifier scan CRASHED (tool=%s err=%s); allowing",
             tool_name,
             exc,
         )
+        return None
+    if not unverified:
+        return None
+
+    # -- zone 2: decide --
+    mode = _identifier_gate_mode()
+    empty_carve = register_was_empty and gate == "draft"
+    should_block = (
+        mode == "block" and not empty_carve and any(h.kind in _BLOCKING_KINDS for h in unverified)
+    )
+    block_bypass = (
+        "register_empty" if (mode == "block" and empty_carve and not should_block) else None
+    )
+
+    # -- zone 3: audit --
+    try:
+        _emit_identifier_audit(
+            unverified=unverified,
+            mode=mode,
+            blocked=should_block,
+            block_bypass=block_bypass,
+            register_was_empty=register_was_empty,
+            session_id=session_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            vertical=vertical,
+            cohort=cohort,
+        )
+    except Exception as exc:  # noqa: BLE001 — audit is best-effort vs the decision
+        logger.warning(
+            "outbound gate: identifier audit emit failed (tool=%s err=%s); decision stands",
+            tool_name,
+            exc,
+        )
+
+    if should_block:
+        return {"action": "block", "message": _identifier_refusal_message(unverified)}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -494,17 +648,21 @@ def check_outbound_draft(
             # gate has no prose to scan — but the structured args are still an
             # identifier surface (#2132: a fabricated hearing date in
             # create_event.start_time was invisible here). Run the identifier
-            # check over the concatenated scannable args, then allow.
+            # gate over the concatenated scannable args — an unverified
+            # identifier here REFUSES the write (ss #2171).
             scan_text = _extract_draft_scan_text(args)
             if scan_text.strip():
-                _report_identifiers(
+                directive = _check_identifiers(
                     body=scan_text,
+                    gate="draft",
                     session_id=session_id,
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
                     vertical=_resolve_vertical(),
                     cohort=_resolve_cohort(),
                 )
+                if directive is not None:
+                    return directive
             return None
         # A BODY-REQUIRED draft tool with no recognizable / empty body. We
         # cannot scan what we can't find — BLOCK rather than skip (fail-closed).
@@ -543,19 +701,19 @@ def check_outbound_draft(
         allowed_case_names=provenance.register_for(session_id).captions(),
     )
     if decision.allowed:
-        # A1 report-only identifier gate: signal (never block) any identifier
-        # not traceable to a source read this session. Scans the concatenated
-        # draft surface (prose body PLUS structured args, #2132) — a wider net
-        # than the evaluate() call above, which deliberately stays prose-only.
-        _report_identifiers(
+        # A1 identifier gate: refuse any identifier not traceable to a source
+        # read this session (ss #2171). Scans the concatenated draft surface
+        # (prose body PLUS structured args, #2132) — a wider net than the
+        # evaluate() call above, which deliberately stays prose-only.
+        return _check_identifiers(
             body=_extract_draft_scan_text(args) or body,
+            gate="draft",
             session_id=session_id,
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             vertical=vertical,
             cohort=cohort,
         )
-        return None
 
     _emit_fabrication_audit(
         tool_name=tool_name,
@@ -692,15 +850,18 @@ def check_outbound_send(
         allowed_case_names=provenance.register_for(session_id).captions(),
     )
     if decision.allowed:
-        _report_identifiers(
+        # A1 identifier gate on the send surface — NO empty-register carve
+        # here: an autonomous external send composed with nothing read is
+        # exactly "cannot verify", and no human sits downstream (ss #2171).
+        return _check_identifiers(
             body=body,
+            gate="send",
             session_id=session_id,
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             vertical=vertical,
             cohort=cohort,
         )
-        return None
     _emit_fabrication_audit(
         tool_name=tool_name,
         decision=decision,

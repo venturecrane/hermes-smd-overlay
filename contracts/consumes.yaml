@@ -248,6 +248,16 @@ vars:
     requirement: optional
     consumed_by: [trust]
     note: cohort identifier used in the provenance gate
+  SMD_IDENTIFIER_GATE_MODE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: >-
+      operator-only rollback lever for the A1 identifier gate (ss #2171). Unset
+      = BLOCK (the enforcing state). Only the literal "report" downgrades to
+      report-only; any other value blocks (fail-closed). Never client-authorable
+      — integrity controls do not appear in customer.yaml.
   CUSTOMER_SLUG:
     discovery: static
     stage: agent

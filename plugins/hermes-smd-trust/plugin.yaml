@@ -1,6 +1,6 @@
 name: hermes-smd-trust
 version: "0.3.0"
-description: "Content-class trust ceilings + outbound fabrication gate (ADR 0028) + A1 identifier-integrity gate (report-only)."
+description: "Content-class trust ceilings + outbound fabrication gate (ADR 0028) + A1 identifier-integrity gate (refusing, ss #2171)."
 author: VentureCrane
 requires_env:
   - SMD_CUSTOMER_SLUG

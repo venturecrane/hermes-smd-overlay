@@ -47,15 +47,18 @@ Two deliberate choices, both from the plan's design review:
    dates fold to a canonical ``YYYY-MM-DD``, identifiers strip punctuation, and
    names match on last-name + first-initial before being called "unverified".
 
-2. **Report-only first; flag-to-review, never block.** This module returns the
-   unverified identifiers; the *caller* decides the action by ``Mode``. In
-   ``REPORT`` mode (the default until the false-positive rate is measured on
-   real traffic) it emits an audit signal and passes the draft. In ``FLAG`` mode
-   it routes the draft to human review with the unverified identifiers
-   annotated. It is never a hard block — a mismatched identifier is precisely
-   what a human reviewer should *see*, not something to hide behind a refusal.
-   Under a draft-for-review posture the draft already reaches a human; the
-   gate's job there is to annotate, not to stop.
+2. **The filter reports; the caller sets the posture.** This module returns the
+   unverified identifiers; the *caller* decides the action by ``Mode`` and its
+   own policy. In ``REPORT`` mode it emits an audit signal only. In ``FLAG``
+   mode it routes the draft to human review with the unverified identifiers
+   annotated. The module itself never hard-blocks — but the deployed overlay
+   caller REFUSES on unverified identifiers (ss #2171, Captain directive
+   2026-08-02): the draft-class surface includes structured INTERNAL_WRITEs
+   (a ``create_event`` lands on the firm calendar with no reviewer between),
+   so annotation alone cannot back the "refuses rather than guesses"
+   commitment. The refusal decision, its carve-outs (ambient dates,
+   empty-register draft carve, NAME exclusion), and its rollback lever live
+   in the overlay caller, not here.
 
 This module is pure (no I/O, no state beyond the register the caller passes).
 The overlay wires it onto the live output path (Tier-3 of ``outbound_gate``) and
