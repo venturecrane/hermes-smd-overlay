@@ -46,7 +46,9 @@ vars:
     note: >-
       ADR 0054. Override for where the Machine-hosted Smokeball OAuth callback
       writes the firm-delegated refresh token (and the connector reads it).
-      Defaults to /opt/data/.smokeball-mcp/refresh_token when unset.
+      Defaults to /opt/data/.smokeball-mcp/refresh_token when unset. Also read
+      by connector_check.token_ages (ss#2148): the file's mtime age rides the
+      heartbeat as connector_token_age.smokeball for pre-expiry alerting.
   # ---- Required: the overlay genuinely needs these (no graceful degradation) ----
   SMD_CUSTOMER_SLUG:
     discovery: static

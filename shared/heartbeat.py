@@ -122,6 +122,7 @@ def build_payload(
     scheduler_max_overdue_seconds: int | None = None,
     connector_check_ok: bool | None = None,
     connectors: dict[str, dict] | None = None,
+    connector_token_age: dict[str, int] | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -159,6 +160,12 @@ def build_payload(
         payload["connector_check_ok"] = 1 if connector_check_ok else 0
     if connectors is not None:
         payload["connectors"] = connectors
+    # Durable-credential ages (ss#2148). A separate field from the health map
+    # by design: it must never synthesize a health entry (a fabricated
+    # consecutive_failures=0 would falsely resolve an open alert). Absent map
+    # or absent server = nothing to report (hold), never zero.
+    if connector_token_age:
+        payload["connector_token_age"] = connector_token_age
     return payload
 
 
@@ -379,6 +386,13 @@ class HeartbeatEmitter:
             logger.debug("heartbeat: sticky_stop level read failed: %s", exc)
         sched = self._read_scheduler_check()
         conn = self._read_connector_check()
+        token_age: dict[str, int] | None = None
+        try:
+            from shared.connector_check import token_ages
+
+            token_age = token_ages() or None
+        except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
+            logger.debug("heartbeat: token-age read failed: %s", exc)
         payload = build_payload(
             heartbeat_ts=_iso_utc_now(),
             last_audit_ts=last_audit_ts,
@@ -393,6 +407,7 @@ class HeartbeatEmitter:
             ),
             connector_check_ok=conn.ok if conn is not None else None,
             connectors=conn.servers if conn is not None else None,
+            connector_token_age=token_age,
         )
         import json
 

@@ -128,3 +128,56 @@ def test_clock_regression_clamps_age_to_zero(_ledger_in_tmp):
     cl.record_call("smokeball", ok=False, now=1000.0)
     entry = check(now=900.0).servers["smokeball"]  # reader clock behind writer
     assert entry["run_age_seconds"] == 0
+
+
+# ---------------------------------------------------------------------------
+# token_ages (ss#2148) — durable-credential age for pre-expiry alerting
+# ---------------------------------------------------------------------------
+
+
+def test_token_ages_reports_file_age(tmp_path, monkeypatch):
+    import os
+
+    from shared.connector_check import token_ages
+
+    token = tmp_path / "refresh_token"
+    token.write_text("not-a-real-value")
+    os.utime(token, (1000.0, 1000.0))
+    monkeypatch.setenv("SMOKEBALL_REFRESH_TOKEN_FILE", str(token))
+    ages = token_ages(now=1600.0)
+    assert ages == {"smokeball": 600}
+
+
+def test_token_ages_missing_file_reports_nothing(tmp_path, monkeypatch):
+    # Absence is "nothing to report" (the console holds), never zero — a zero
+    # would read as freshly-rotated on a seat that has never connected.
+    from shared.connector_check import token_ages
+
+    monkeypatch.setenv("SMOKEBALL_REFRESH_TOKEN_FILE", str(tmp_path / "absent"))
+    assert token_ages(now=1600.0) == {}
+
+
+def test_token_ages_clock_regression_clamps_to_zero(tmp_path, monkeypatch):
+    import os
+
+    from shared.connector_check import token_ages
+
+    token = tmp_path / "refresh_token"
+    token.write_text("x")
+    os.utime(token, (2000.0, 2000.0))
+    monkeypatch.setenv("SMOKEBALL_REFRESH_TOKEN_FILE", str(token))
+    assert token_ages(now=1000.0) == {"smokeball": 0}
+
+
+def test_token_ages_never_synthesizes_health_entries(tmp_path, monkeypatch):
+    # The whole reason this is a separate field: a token file's existence must
+    # not create a servers-map entry (a fabricated consecutive_failures=0
+    # would falsely RESOLVE an open connector_down alert).
+    from shared.connector_check import token_ages
+
+    token = tmp_path / "refresh_token"
+    token.write_text("x")
+    monkeypatch.setenv("SMOKEBALL_REFRESH_TOKEN_FILE", str(token))
+    result = check(now=1000.0)
+    assert result.servers == {}  # no ledger writes → no health entries
+    assert "smokeball" in token_ages(now=1000.0)
