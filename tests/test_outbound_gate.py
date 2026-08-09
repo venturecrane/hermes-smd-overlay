@@ -418,7 +418,13 @@ def test_block_emits_fabrication_audit_row(trust_plugin, env_autonomous, monkeyp
 
 
 # ---------------------------------------------------------------------------
-# Layer 3b — A1 identifier-integrity gate (REPORT-ONLY, never blocks)
+# Layer 3b — A1 identifier-integrity gate (REFUSING, ss #2171)
+#
+# The gate BLOCKS an unverified identifier (every kind except NAME). Carves:
+# ambient dates (utc today/yesterday verify against the clock), and the
+# empty-register carve on the DRAFT gate only — the SEND gate blocks even with
+# an empty register. SMD_IDENTIFIER_GATE_MODE=report is the operator-only
+# downgrade; anything else (including garbage) blocks.
 # ---------------------------------------------------------------------------
 
 
@@ -434,27 +440,43 @@ def _identifier_rows(fake: "_FakeD1Client") -> list:
     return [c for c in fake.calls if "IDENTIFIER_UNVERIFIED" in c[1]]
 
 
-def test_unverified_identifier_allows_and_reports(
-    trust_plugin, env_autonomous, monkeypatch
-) -> None:
-    """A clean draft carrying an identifier the agent never read is ALLOWED
-    (report-only never blocks) and emits one IDENTIFIER_UNVERIFIED row."""
+def _seed_unrelated_read(trust_plugin, session_id: str) -> None:
+    """Put ONE unrelated identifier in the session register so it is non-empty
+    (the empty-register carve must not be what a blocking test exercises)."""
+    trust_plugin.on_post_tool_call(
+        tool_name="email_list_messages",
+        result="Unrelated matter; alien number A555555555 on file.",
+        session_id=session_id,
+        tool_call_id="seed",
+    )
+
+
+def test_unverified_identifier_blocks(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """A clean draft carrying an identifier the agent never read is REFUSED
+    (register non-empty) and emits one IDENTIFIER_UNVERIFIED row with
+    mode=block / blocked=true."""
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     provenance._reset_for_tests()
     fake = _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-blk")
 
     result = trust_plugin.on_pre_tool_call(
         tool_name="email_create_draft",
         args={"body": "Your alien number on file is A123456789."},
         task_id="t",
-        session_id="sess-rep",
+        session_id="sess-blk",
         tool_call_id="c",
     )
-    assert result is None  # report-only NEVER blocks
+    assert result is not None and result["action"] == "block"
+    # The refusal instructs re-read-or-remove and names the kind, not the value's mechanics.
+    assert "a_number" in result["message"]
+    assert "Re-read" in result["message"]
     rows = _identifier_rows(fake)
     assert len(rows) == 1
     metadata_json = rows[0][1][-1]
     assert "tier3_identifier" in metadata_json
+    assert '"mode":"block"' in metadata_json
+    assert '"blocked":true' in metadata_json
     # redaction: the raw A-number must NOT be in the row
     assert "A123456789" not in metadata_json
     assert "a_number" in metadata_json
@@ -485,10 +507,13 @@ def test_verified_identifier_does_not_report(trust_plugin, env_autonomous, monke
     assert _identifier_rows(fake) == []  # verified → nothing reported
 
 
-def test_report_never_blocks_with_empty_register(trust_plugin, env_autonomous, monkeypatch) -> None:
+def test_empty_register_draft_allows_and_reports(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """The DRAFT-gate empty-register carve: nothing read this session → a draft
+    with unverified identifiers is allowed (a refusal with no source to re-read
+    is a brick) but the row records the bypass so the carve stays measurable."""
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     provenance._reset_for_tests()
-    _wire_fake_audit(trust_plugin.outbound)
+    fake = _wire_fake_audit(trust_plugin.outbound)
     result = trust_plugin.on_pre_tool_call(
         tool_name="practice_management_create_note",
         args={"note": "Hearing set for June 8, 2026; ref A999999999."},
@@ -496,7 +521,139 @@ def test_report_never_blocks_with_empty_register(trust_plugin, env_autonomous, m
         session_id="sess-empty",
         tool_call_id="c",
     )
-    assert result is None  # never blocks even with everything unverified
+    assert result is None  # draft-gate carve: empty register allows
+    rows = _identifier_rows(fake)
+    assert len(rows) == 1
+    metadata_json = rows[0][1][-1]
+    assert '"register_was_empty":true' in metadata_json
+    assert '"blocked":false' in metadata_json
+    assert '"block_bypass":"register_empty"' in metadata_json
+
+
+def test_send_gate_blocks_with_empty_register(trust_plugin, monkeypatch) -> None:
+    """The SEND gate gets NO empty-register carve: an autonomous external send
+    composed with nothing read is exactly 'cannot verify' → block."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    ob = trust_plugin.outbound
+    result = ob.check_outbound_send(
+        tool_name="mcp_agentmail_send_message",
+        args={"subject": "Update", "text": "Your hearing is set for June 8, 2026."},
+        session_id="sess-send-empty",
+        tool_call_id="c",
+    )
+    assert result is not None and result["action"] == "block"
+    rows = _identifier_rows(fake)
+    assert len(rows) == 1
+    metadata_json = rows[0][1][-1]
+    assert '"blocked":true' in metadata_json
+    assert '"register_was_empty":true' in metadata_json
+
+
+def test_send_gate_blocks_unread_identifier(trust_plugin, monkeypatch) -> None:
+    """The send path blocks an unread identifier with a NON-empty register too —
+    the highest-stakes surface gets its own pin, not a ride on the draft tests."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-send-blk")
+    ob = trust_plugin.outbound
+    result = ob.check_outbound_send(
+        tool_name="mcp_agentmail_send_message",
+        args={"subject": "Update", "text": "Your case number is 1:24-cv-01234."},
+        session_id="sess-send-blk",
+        tool_call_id="c",
+    )
+    assert result is not None and result["action"] == "block"
+
+
+def test_env_report_mode_downgrades(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """SMD_IDENTIFIER_GATE_MODE=report is the operator rollback lever: the gate
+    keeps reporting (telemetry continuity) but allows."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    monkeypatch.setenv("SMD_IDENTIFIER_GATE_MODE", "report")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-dwn")
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "Your alien number on file is A123456789."},
+        task_id="t",
+        session_id="sess-dwn",
+        tool_call_id="c",
+    )
+    assert result is None
+    rows = _identifier_rows(fake)
+    assert len(rows) == 1
+    metadata_json = rows[0][1][-1]
+    assert '"mode":"report"' in metadata_json
+    assert '"blocked":false' in metadata_json
+
+
+@pytest.mark.parametrize("value", ["disabled", "off", "false", "0", "no", "block"])
+def test_env_garbage_value_still_blocks(trust_plugin, env_autonomous, monkeypatch, value) -> None:
+    """Fail-closed parse: ONLY the literal 'report' downgrades. Typos and
+    would-be disables keep blocking."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    monkeypatch.setenv("SMD_IDENTIFIER_GATE_MODE", value)
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, f"sess-garb-{value}")
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "Your alien number on file is A123456789."},
+        task_id="t",
+        session_id=f"sess-garb-{value}",
+        tool_call_id="c",
+    )
+    assert result is not None and result["action"] == "block"
+
+
+def test_ambient_today_date_does_not_flag(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """Today's date verifies against the system clock, not a read — 'as of
+    today' composition is legitimate and must neither block nor report."""
+    from datetime import date
+
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-amb")
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": f"As of {date.today().isoformat()}, no response has been received."},
+        task_id="t",
+        session_id="sess-amb",
+        tool_call_id="c",
+    )
+    assert result is None
+    assert _identifier_rows(fake) == []
+
+
+def test_identifier_audit_failure_never_rescinds_block(
+    trust_plugin, env_autonomous, monkeypatch
+) -> None:
+    """An identifier-audit emission failure must not rescind the refusal."""
+
+    class _RaisingD1Client:
+        def execute(self, sql: str, *params):
+            raise RuntimeError("d1 down")
+
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    ob = trust_plugin.outbound
+    ob._AUDIT_CLIENT = _RaisingD1Client()
+    ob._AUDIT_CUSTOMER_SLUG = "acme"
+    ob._AUDIT_WIRED = True
+    _seed_unrelated_read(trust_plugin, "sess-adf")
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "Your alien number on file is A123456789."},
+        task_id="t",
+        session_id="sess-adf",
+        tool_call_id="c",
+    )
+    assert result is not None and result["action"] == "block"
 
 
 def test_names_alone_do_not_report(trust_plugin, env_autonomous, monkeypatch) -> None:
@@ -528,15 +685,16 @@ def test_names_alone_do_not_report(trust_plugin, env_autonomous, monkeypatch) ->
 # ---------------------------------------------------------------------------
 
 
-def test_create_event_structured_args_reach_identifier_scan(
+def test_create_event_structured_args_block_unread_date(
     trust_plugin, env_autonomous, monkeypatch
 ) -> None:
-    """A structured-only create_event with an unread start_time date is still
-    ALLOWED (report mode) but now emits an IDENTIFIER_UNVERIFIED row — the
-    #2132 surface is visible."""
+    """A structured-only create_event with an unread start_time date is REFUSED
+    — the #2132 surface is not just visible, it enforces. The write would land
+    on the firm calendar with no reviewer between."""
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     provenance._reset_for_tests()
     fake = _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-2132-event")
     result = trust_plugin.on_pre_tool_call(
         tool_name="mcp_smokeball_create_event",
         args={
@@ -550,23 +708,23 @@ def test_create_event_structured_args_reach_identifier_scan(
         session_id="sess-2132-event",
         tool_call_id="c",
     )
-    assert result is None  # report mode never blocks
+    assert result is not None and result["action"] == "block"
     rows = _identifier_rows(fake)
     assert len(rows) == 1
     metadata_json = rows[0][1][-1]
     assert "date" in metadata_json
+    assert '"blocked":true' in metadata_json
     # redaction: the raw date value must not appear in the audit row
     assert "2026-09-14" not in metadata_json
 
 
-def test_create_task_subject_and_due_date_scanned_past_note(
-    trust_plugin, env_autonomous, monkeypatch
-) -> None:
+def test_create_task_due_date_blocks_past_note(trust_plugin, env_autonomous, monkeypatch) -> None:
     """create_task carries a `note` (the old first-match scan stopped there);
-    the unread due_date must still be seen and reported."""
+    the unread due_date must still be seen — and now refuses the write."""
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     provenance._reset_for_tests()
     fake = _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-2132-task")
     result = trust_plugin.on_pre_tool_call(
         tool_name="mcp_smokeball_create_task",
         args={
@@ -579,7 +737,7 @@ def test_create_task_subject_and_due_date_scanned_past_note(
         session_id="sess-2132-task",
         tool_call_id="c",
     )
-    assert result is None
+    assert result is not None and result["action"] == "block"
     rows = _identifier_rows(fake)
     assert len(rows) == 1
     assert "date" in rows[0][1][-1]
@@ -613,6 +771,36 @@ def test_structured_args_all_read_do_not_report(trust_plugin, env_autonomous, mo
     )
     assert result is None
     assert _identifier_rows(fake) == []
+
+
+def test_structured_args_read_mismatch_blocks(trust_plugin, env_autonomous, monkeypatch) -> None:
+    """MUTATION COMPANION to the false control above (Law 12): identical
+    fixture except the read says 09-15 while the draft says 09-14 → BLOCK.
+    Executable proof the control passes because verification HAPPENED, not
+    because the gate is dead — a one-character mutation flips the outcome."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    trust_plugin.on_post_tool_call(
+        tool_name="email_list_messages",
+        result="Hearing scheduled 2026-09-15T09:00:00 per the court notice.",
+        session_id="sess-2132-mut",
+        tool_call_id="r",
+    )
+    result = trust_plugin.on_pre_tool_call(
+        tool_name="mcp_smokeball_create_event",
+        args={
+            "subject": "Hearing",
+            "start_time": "2026-09-14T09:00:00",
+            "end_time": "2026-09-14T10:00:00",
+            "attendees": ["s-1"],
+            "time_zone": "America/Los_Angeles",
+        },
+        task_id="t",
+        session_id="sess-2132-mut",
+        tool_call_id="c",
+    )
+    assert result is not None and result["action"] == "block"
 
 
 def test_evaluate_scope_stays_prose_only(trust_plugin, env_autonomous, monkeypatch) -> None:
