@@ -231,8 +231,9 @@ def test_gate_passes_once_the_spec_is_read(monkeypatch, spec_tree):
 
 
 def test_gate_refuses_when_the_spec_was_never_installed(monkeypatch, tmp_path):
-    """Declared expected + nothing installed is a BROKEN CONTROL wearing an
-    unauthored costume. Refusing is the entire reason the declaration exists."""
+    """Declared expected + nothing installed is a BROKEN CONTROL, and for an
+    OUTBOUND class the cost of that is still a refusal: the persona's register
+    is the wrong voice to the world, not a neutral one."""
     monkeypatch.setenv(spec_manifest.SPEC_DIR_ENV, str(tmp_path))
     _declare(monkeypatch, {"outbound_client": {"voice_spec": "expected", "format_spec": "none"}})
     block = spec_gate.check_spec_gate(
@@ -241,6 +242,11 @@ def test_gate_refuses_when_the_spec_was_never_installed(monkeypatch, tmp_path):
         session_id=SESSION,
     )
     assert block is not None and block["action"] == "block"
+    # It must NOT tell the model to read a spec that does not exist. That
+    # instruction is unfollowable, and following it is what the seat spent six
+    # days attempting (ss-console #2228).
+    assert "no such spec is installed" in block["message"]
+    assert "Read the spec named in your skill" not in block["message"]
 
 
 def test_a_config_read_failure_leaves_the_gate_silent(monkeypatch, spec_tree):

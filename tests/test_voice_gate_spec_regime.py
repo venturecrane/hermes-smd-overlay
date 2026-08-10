@@ -174,9 +174,41 @@ def test_declared_class_tampered_spec_downgrades_hash_mismatch(voice_gate, monke
     assert calls[0]["reason"] == "spec_hash_mismatch"
 
 
-def test_declared_class_with_no_installed_spec_downgrades_no_spec(voice_gate, monkeypatch):
-    """Declared ``expected`` but no voice spec installed ⇒ draft(no_spec). The
-    broken-control case: refusing is the entire point of the declaration."""
+def test_declared_class_with_no_installed_spec_downgrades_no_spec(
+    voice_gate, monkeypatch, tmp_path
+):
+    """Declared ``expected`` and the manifest names no voice spec ⇒
+    draft(no_spec). An outbound class refuses on a broken control either way,
+    but the REASON has to be right: it is what tells an operator whether the
+    firm has authoring left to do.
+
+    The spec dir is a real, readable, empty tree — not an unset env var. Those
+    were the same thing to this gate until ss-console #2234; now an unset
+    ``SMD_SPEC_DIR`` reports ``spec_unprovable``, because a process that cannot
+    look has not established that anything is absent.
+    """
+    from shared import spec_manifest
+
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "customer": "t", "specs": {}})
+    )
+    monkeypatch.setenv(spec_manifest.SPEC_DIR_ENV, str(tmp_path))
+    _set_config(monkeypatch, voice_library={"samples_path": "r2://x/"}, output_classes=_DECLARING)
+    calls = _capture_audit(monkeypatch, voice_gate)
+    result = _gate(voice_gate)
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert len(calls) == 1
+    assert calls[0]["reason"] == "no_spec"
+
+
+def test_an_unresolvable_spec_dir_downgrades_spec_unprovable_not_no_spec(voice_gate, monkeypatch):
+    """The distinction #2234 introduced, pinned from the outbound side.
+
+    Reporting ``no_spec`` here would blame the firm for our own blindness — and
+    the two want opposite responses: one is authoring work, the other is an
+    env-propagation bug on the seat.
+    """
     from shared import spec_manifest
 
     monkeypatch.delenv(spec_manifest.SPEC_DIR_ENV, raising=False)
@@ -185,8 +217,7 @@ def test_declared_class_with_no_installed_spec_downgrades_no_spec(voice_gate, mo
     result = _gate(voice_gate)
     assert isinstance(result, dict)
     assert result["action"] == "block"
-    assert len(calls) == 1
-    assert calls[0]["reason"] == "no_spec"
+    assert calls[0]["reason"] == "spec_unprovable"
 
 
 def test_declared_class_register_error_downgrades_gate_error(voice_gate, monkeypatch, spec_tree):
@@ -305,10 +336,20 @@ def test_wholly_unreadable_config_keeps_gate_silent(voice_gate, monkeypatch):
 # ===========================================================================
 
 
-def test_spec_regime_audit_row_shape_is_unchanged(voice_gate, monkeypatch):
+def test_spec_regime_audit_row_shape_is_unchanged(voice_gate, monkeypatch, tmp_path):
     """A spec-regime downgrade emits through the SAME emitter: action_type
     VOICE_GATE_TRIGGERED and the same metadata keys the fallback emits — the
     new reason strings ride the existing ``reason`` field."""
+    from shared import spec_manifest
+
+    # A real, readable, empty spec tree so the reason under test is `no_spec`.
+    # Leaving SMD_SPEC_DIR to the ambient environment made this assert on
+    # whatever the machine happened to have; since #2234 an unset var reports
+    # `spec_unprovable`, which is a different claim about a different fault.
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "customer": "t", "specs": {}})
+    )
+    monkeypatch.setenv(spec_manifest.SPEC_DIR_ENV, str(tmp_path))
     _set_config(monkeypatch, voice_library={"samples_path": "r2://x/"}, output_classes=_DECLARING)
 
     executed: list[tuple] = []

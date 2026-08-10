@@ -123,6 +123,8 @@ def build_payload(
     connector_check_ok: bool | None = None,
     connectors: dict[str, dict] | None = None,
     connector_token_age: dict[str, int] | None = None,
+    spec_control_ok: bool | None = None,
+    spec_control: dict[str, dict] | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -166,6 +168,18 @@ def build_payload(
     # or absent server = nothing to report (hold), never zero.
     if connector_token_age:
         payload["connector_token_age"] = connector_token_age
+    # Authored-spec control health (ss-console #2234). Same is-not-None
+    # discipline for the same reason: an empty map is a REAL "checked, every
+    # declared spec is installed" state, and it is the state that RESOLVES an
+    # open alert — truthiness-omitting it would leave a repaired control paging
+    # forever. `spec_control_ok=False` means the check could not read the config
+    # or the manifest, which pages on its own rather than being reported as a
+    # missing spec: the firm's authoring gap and our own blindness want opposite
+    # responses.
+    if spec_control_ok is not None:
+        payload["spec_control_ok"] = 1 if spec_control_ok else 0
+    if spec_control is not None:
+        payload["spec_control"] = spec_control
     return payload
 
 
@@ -237,6 +251,8 @@ class HeartbeatEmitter:
         scheduler_check_debounce: int = 3,
         connector_check_fn=None,
         connector_check_debounce: int = 3,
+        spec_control_check_fn=None,
+        spec_control_check_debounce: int = 3,
     ) -> None:
         self._slug = slug
         self._key = key
@@ -261,6 +277,13 @@ class HeartbeatEmitter:
         self._conn_debounce = max(1, connector_check_debounce)
         self._conn_fail_count = 0
         self._conn_last_good = None
+        # Authored-spec control self-check (shared.spec_control_check, #2234).
+        # Same injectable + debounce shape again: three checks behaving alike is
+        # the point — an operator should not have to learn each one's moods.
+        self._spec_control_check_fn = spec_control_check_fn or _default_spec_control_check
+        self._spec_debounce = max(1, spec_control_check_debounce)
+        self._spec_fail_count = 0
+        self._spec_last_good = None
 
     def start(self) -> bool:
         """Launch the daemon thread. Returns False (and logs) when the
@@ -372,6 +395,34 @@ class HeartbeatEmitter:
         self._conn_last_good = result
         return result
 
+    def _read_spec_control_check(self):
+        """Run the authored-spec control self-check, debounced like the others.
+
+        Same shape as ``_read_connector_check`` and for the same reason: an
+        entries MAP has no natural degraded value, so a persistent crash reports
+        ``SpecControlCheck(ok=False, entries=None)`` — the boolean IS the
+        reported failure, and the console pages ``spec_control_unprovable``
+        rather than the class going dark. Returns None only before the
+        first-ever success (console holds on absence).
+        """
+        from shared.spec_control_check import SpecControlCheck
+
+        try:
+            result = self._spec_control_check_fn()
+        except Exception as exc:  # noqa: BLE001 — the check must never kill the beat
+            self._spec_fail_count += 1
+            logger.warning(
+                "heartbeat: spec control check failed (%d consecutive): %s",
+                self._spec_fail_count,
+                exc,
+            )
+            if self._spec_fail_count >= self._spec_debounce:
+                return SpecControlCheck(ok=False, entries=None)
+            return self._spec_last_good
+        self._spec_fail_count = 0
+        self._spec_last_good = result
+        return result
+
     def _post_control_plane(self) -> None:
         last_audit_ts, last_skill_ts = read_audit_timestamps(self._audit_db_path_fn())
         # ADR 0062: surface the cost-breaker ladder level so the fleet view
@@ -386,6 +437,7 @@ class HeartbeatEmitter:
             logger.debug("heartbeat: sticky_stop level read failed: %s", exc)
         sched = self._read_scheduler_check()
         conn = self._read_connector_check()
+        spec = self._read_spec_control_check()
         token_age: dict[str, int] | None = None
         try:
             from shared.connector_check import token_ages
@@ -408,6 +460,8 @@ class HeartbeatEmitter:
             connector_check_ok=conn.ok if conn is not None else None,
             connectors=conn.servers if conn is not None else None,
             connector_token_age=token_age,
+            spec_control_ok=spec.ok if spec is not None else None,
+            spec_control=spec.entries if spec is not None else None,
         )
         import json
 
@@ -448,6 +502,15 @@ def _default_connector_check():
     return check()
 
 
+def _default_spec_control_check():
+    """The real authored-spec control check (ss-console #2234). Lazy import for
+    the same reason as the other two: a missing module surfaces through the
+    emitter's debounce as spec_control_ok=0, reported not omitted."""
+    from shared.spec_control_check import check
+
+    return check()
+
+
 def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
     """Build a :class:`HeartbeatEmitter` from the gate process environment.
 
@@ -468,6 +531,10 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         conn_debounce = int(os.environ.get("CONNECTOR_CHECK_DEBOUNCE", "3"))
     except ValueError:
         conn_debounce = 3
+    try:
+        spec_debounce = int(os.environ.get("SPEC_CONTROL_CHECK_DEBOUNCE", "3"))
+    except ValueError:
+        spec_debounce = 3
     return HeartbeatEmitter(
         slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG"),
         key=os.environ.get("MACHINE_HEARTBEAT_KEY"),
@@ -478,6 +545,7 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         period_seconds=period,
         scheduler_check_debounce=debounce,
         connector_check_debounce=conn_debounce,
+        spec_control_check_debounce=spec_debounce,
     )
 
 

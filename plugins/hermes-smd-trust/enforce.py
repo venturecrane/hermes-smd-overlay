@@ -1188,19 +1188,30 @@ def evaluate_tool_call(
     # provable from day one, and which is also the highest-volume output the
     # firm forms its daily impression from. BINDING: it fires only where the
     # seat DECLARES `output_classes.<class>.voice_spec: expected`, so a seat
-    # that authored nothing is untouched. A declared-but-never-read spec
-    # downgrades to draft; a declared-but-never-installed one does too, which is
-    # the entire purpose of the declaration existing.
+    # that authored nothing is untouched. A declared-but-never-READ spec
+    # downgrades to draft. A declared-but-never-INSTALLED one is a broken
+    # control, and since 2026-08-10 what that costs depends on who is waiting:
+    # `staff` proceeds in the persona's own register (a person is waiting on ops
+    # mail, and six days of silent refusals proved that refusing costs them the
+    # message — ss-console #2228), outbound routes to a human, work_product and
+    # record still refuse. Tamper and an unreadable manifest refuse everywhere.
+    # The gate owns that fan-out; this call site does not need to know it.
     if decision.allowed and decision.effective_ceiling == Ceiling.AUTONOMOUS:
         spec_block = spec_gate.check_spec_gate(
             tool_name=tool_name,
             action_class_value=getattr(effective_action, "value", ""),
             session_id=session_id,
-            # The composed text. The gate used to ask only "did the model read
+            # The composed text, or None meaning INDETERMINATE — passed through
+            # UNCOERCED. It used to arrive here as `or ""`, which made the gate
+            # skip its format check on exactly the sends the content floor
+            # treats as most suspect: one value, two adjacent call sites,
+            # opposite dispositions (ss-console #2234).
+            #
+            # The gate used to ask only "did the model read
             # its spec"; with the body it can also answer "does what it wrote
             # have the authored shape" — the binary half of ADR 0083 §3, and
             # the only half a machine can decide rather than grade.
-            body=_extract_send_body(args) or "",
+            body=_extract_send_body(args),
         )
         if spec_block is not None:
             return spec_block

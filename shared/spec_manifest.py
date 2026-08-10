@@ -74,12 +74,63 @@ def spec_dir() -> Path | None:
     return path if path.is_dir() else None
 
 
+#: ``manifest_state`` results. See that function for why the distinction exists.
+STATE_OK = "ok"
+STATE_ABSENT = "absent"
+STATE_UNREADABLE = "unreadable"
+
+
+def manifest_state(directory: Path | None = None) -> str:
+    """Can this process PROVE what is installed? ``ok`` / ``absent`` / ``unreadable``.
+
+    ``load_entries`` deliberately collapses every failure into ``{}`` because its
+    consumers all fail closed on empty. One consumer now needs the opposite
+    question — not "what is installed" but "is an empty answer EVIDENCE of
+    nothing installed, or evidence of nothing readable" — and the collapse
+    cannot express it (ss-console #2234).
+
+    The distinction is load-bearing, not pedantic. ``spec_gate`` lets a `staff`
+    send proceed when a declared spec was never installed; if a process that
+    simply cannot SEE the spec tree reported the same state, a lost
+    ``SMD_SPEC_DIR`` would silently unlock autonomous sends. That failure would
+    be invisible: ``operator/safety-substrate/invariants/spec_dir_ownership.py``
+    documents that an ABSENT directory PASSES the boot gate, and the heartbeat
+    that reports seat health runs in the gateway process while this gate runs in
+    the agent process — so the two can disagree about the env with every health
+    signal green. Hence:
+
+    * ``unreadable`` — ``SMD_SPEC_DIR`` unset, or not a directory, or the
+      manifest is present but unparseable. **This process cannot prove
+      anything.** Never treat it as absence.
+    * ``absent`` — the spec dir exists and holds no manifest. The applier writes
+      ``manifest.json`` LAST as its commit point and ``entrypoint.sh`` creates
+      the dir on every boot, so a dir with no manifest is the ordinary
+      nothing-was-ever-installed state.
+    * ``ok`` — the manifest parsed. An entry's absence from a parsed manifest is
+      affirmative evidence that spec is not installed.
+    """
+    base = directory if directory is not None else spec_dir()
+    if base is None:
+        return STATE_UNREADABLE
+    try:
+        doc = json.loads((base / _MANIFEST_NAME).read_text())
+    except FileNotFoundError:
+        return STATE_ABSENT
+    except (OSError, json.JSONDecodeError):
+        return STATE_UNREADABLE
+    if not isinstance(doc, dict) or not isinstance(doc.get("specs"), dict):
+        return STATE_UNREADABLE
+    return STATE_OK
+
+
 def load_entries(directory: Path | None = None) -> dict[str, SpecEntry]:
     """Load the manifest, keyed by manifest-relative path.
 
     Returns ``{}`` on any absence or malformation — an unreadable manifest is
-    indistinguishable from no manifest for every purpose either consumer has,
-    and both of them fail closed on an empty result rather than open.
+    indistinguishable from no manifest for every purpose THIS function's
+    consumers have, and all of them fail closed on an empty result rather than
+    open. A caller that needs to tell those apart calls ``manifest_state``
+    alongside this, and must not infer the difference from emptiness here.
     """
     base = directory if directory is not None else spec_dir()
     if base is None:
@@ -172,10 +223,14 @@ def entries_for_class(output_class: str, directory: Path | None = None) -> list[
 
 __all__ = [
     "SPEC_DIR_ENV",
+    "STATE_ABSENT",
+    "STATE_OK",
+    "STATE_UNREADABLE",
     "SpecEntry",
     "entries_for_class",
     "entry_for_path",
     "load_entries",
+    "manifest_state",
     "spec_dir",
     "verify",
 ]

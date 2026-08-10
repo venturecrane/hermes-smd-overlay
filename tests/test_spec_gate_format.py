@@ -10,10 +10,18 @@ Two failures that must stay distinct, because their fixes differ:
 * ``format_violation`` — it consulted it and produced something else.
 
 Collapsing them would tell a writer to go read a document they already read.
+
+The fixture builds a REAL on-disk spec tree rather than monkeypatching
+``entries_for_class``. It used to patch the helper, which bypassed ``spec_dir``,
+``load_entries`` and ``verify`` — the exact seam that decides whether a control
+is installed, tampered, or unprovable (ss-console #2234). A test that skips it
+cannot tell a working format spec from a missing one.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -37,26 +45,50 @@ TWO_CLOSERS = "Bottom line: it holds.\n\nNext: early.\n\nThe body.\n\nNext: conf
 
 
 @pytest.fixture
-def gate(monkeypatch):
+def gate(monkeypatch, tmp_path):
     g = spec_gate
 
     # Declared: format expected, voice not — so only the shape rules bind and
     # the assertions below are what decides.
     monkeypatch.setattr(g, "_spec_expected", lambda _c: False)
     monkeypatch.setattr(g, "_declared", lambda _c, prop: prop == "format")
-    monkeypatch.setattr(
-        spec_manifest,
-        "entries_for_class",
-        lambda _c, directory=None: [
-            spec_manifest.SpecEntry(
-                rel_path="classes/staff/format.md",
-                output_class="staff",
-                prop="format",
-                sha256="0" * 64,
-                assertions=FOUR_RULES,
-            )
-        ],
+
+    # A real INSTALLED format spec: real bytes, a real digest, and the four
+    # rules recorded the way root records them. `verify` has to pass here or the
+    # gate reads the control as tampered and refuses before any shape is checked.
+    # The VOICE spec is installed too, though `_spec_expected` is False by
+    # default so it does not bind here. It matters for the one test that flips
+    # voice on: since #2234, "declared voice with nothing installed" is a broken
+    # control that a staff send passes through, so a test about an UNREAD spec
+    # has to have a spec there to leave unread.
+    specs = {
+        "classes/staff/format.md": ("format", FOUR_RULES),
+        "classes/staff/voice.md": ("voice", {}),
+    }
+    entries = {}
+    for rel, (prop, assertions) in specs.items():
+        body = f"The authored {prop} for staff mail.\n"
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        entries[rel] = {
+            "class": "staff",
+            "property": prop,
+            "sha256": hashlib.sha256(body.encode()).hexdigest(),
+            "bytes": len(body),
+            "assertions": assertions,
+        }
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "customer": "smd-staging",
+                "source_digest": "deadbeef",
+                "specs": entries,
+            }
+        )
     )
+    monkeypatch.setenv(spec_manifest.SPEC_DIR_ENV, str(tmp_path))
     # Audit is best-effort and needs no transport in a unit test.
     monkeypatch.setattr(g, "_emit_spec_gate_audit", lambda **_k: None)
     return g
@@ -98,7 +130,12 @@ def test_the_refusal_names_the_broken_rule(gate):
 
 
 def test_format_and_not_read_are_different_refusals(gate, monkeypatch):
-    """Same class, same send, two causes — and they must not read alike."""
+    """Same class, same send, two causes — and they must not read alike.
+
+    Both halves need their spec INSTALLED (the fixture installs both): a
+    declared spec that was never installed is a broken control, and a staff send
+    passes through those rather than refusing (ss-console #2234).
+    """
     shape = gate.check_spec_gate(
         tool_name="email_send",
         action_class_value="external_send_internal",

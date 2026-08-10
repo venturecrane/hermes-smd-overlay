@@ -205,6 +205,12 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: "consecutive connector self-check crashes before the heartbeat reports connector_check_ok=0 (ADR 0080; a map has no natural degraded value — the boolean is the reported failure state). Default 3."
+  SPEC_CONTROL_CHECK_DEBOUNCE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "consecutive authored-spec control self-check crashes before the heartbeat reports spec_control_ok=0 (ss-console #2234; same shape as the connector check — the boolean is the reported failure state, and it means 'cannot read config or manifest', never 'no spec installed'). Default 3."
   SMD_CONNECTOR_LEDGER_PATH:
     discovery: static
     stage: agent
