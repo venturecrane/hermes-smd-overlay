@@ -18,12 +18,22 @@ for manual-initiation skills; admin-reserved skills additionally require the
 authored ``scope.admins`` list; forwarded/embedded content stays tainted.
 Disposition authored, not model-judged.
 
-HOW IT IS WIRED. ``pre_llm_call`` receives the gateway-attributed
-``sender_id`` (the same server-side attribution hermes-smd-establishment's
-admin stash rides — the model cannot forge it). On every sender-attributed
-turn this plugin resolves the sender against the LIVE authored config
+HOW IT IS WIRED. ``pre_llm_call``'s ``sender_id`` kwarg is NOT the person on
+webhook-dispatched turns — the gateway threads the ROUTE
+(``webhook:agentmail``), a channel identity (the ss#1941 live-probe finding,
+re-confirmed by this plugin's own first live run on 2026-08-10: registered,
+kwarg present, zero injections, because a channel never matches a roster).
+The verified person is the Svix-verified inbound sender the webhook router
+records in :data:`shared.inbound.SESSION_INBOUND_ORIGIN` — the reply
+channel's recipient-lock anchor. :func:`_resolve_attributed_sender` prefers
+that recorded origin, using the claim-once unbound handoff on the live email
+path (dispatch carries no session id), and RE-KEYS the claimed origin under
+the turn's session id so downstream resolvers (peer-memory) find it via
+``get()`` instead of starving — which is why this plugin registers BEFORE
+hermes-smd-peer-memory in the root ``plugin.yaml``. With the person
+resolved, the sender is checked against the LIVE authored config
 (:class:`shared.customer_config.CustomerConfig`, read fresh from the volume
-per ADR 0044) and injects a per-turn authority statement naming what the
+per ADR 0044) and a per-turn authority statement is injected naming what the
 platform — not the message, not the model — determined:
 
 * rostered (``scope.inbound_allow_from``, same domain-widening match that
@@ -64,6 +74,7 @@ import logging
 from typing import Any
 
 from shared.customer_config import CustomerConfig
+from shared.inbound import SESSION_INBOUND_ORIGIN
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +131,40 @@ def _load_config() -> Any | None:
         return None
 
 
+def _resolve_attributed_sender(session_id: str, sender_id: str) -> str:
+    """The verified person behind this turn — never a channel identity.
+
+    Mirrors peer-memory's ``_resolve_peer`` (the ss#1941 finding): on
+    webhook-dispatched turns ``sender_id`` is the route (``webhook:...``),
+    so the Svix-verified sender recorded by the webhook router is the real
+    attribution. Preference order:
+
+    1. ``SESSION_INBOUND_ORIGIN.get(session_id)`` — already session-keyed.
+    2. The claim-once unbound handoff, ONLY for channel-shaped sender ids
+       (a real per-user id, e.g. Telegram's, must never be overridden by a
+       coincidentally pending email origin). The claim declines under
+       ambiguity rather than guessing. A claimed origin is immediately
+       RE-KEYED under this turn's session id, so later resolvers in the
+       same ``pre_llm_call`` pass (peer-memory) find it via ``get()`` —
+       the claim-once handoff becomes cooperative instead of first-wins.
+    3. Fall back to ``sender_id`` unchanged; a channel identity then simply
+       fails the roster match and no authority is injected (fail-safe).
+    """
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id) if session_id else None
+        if origin is None and sender_id.startswith("webhook:"):
+            origin = SESSION_INBOUND_ORIGIN.claim_unbound()
+            if origin is not None and session_id:
+                SESSION_INBOUND_ORIGIN.record(session_id, origin)
+    except Exception:  # noqa: BLE001 — resolution must never break the hook
+        origin = None
+    if origin is not None and origin.sender_address:
+        addr = origin.sender_address.strip().lower()
+        if addr:
+            return addr
+    return sender_id
+
+
 def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Inject the authored initiation-authority statement on rostered turns.
 
@@ -135,7 +180,9 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         cfg = _load_config()
         if cfg is None:
             return None
-        sender = sender_id.strip()
+        session_id = kwargs.get("session_id")
+        session_id = session_id if isinstance(session_id, str) else ""
+        sender = _resolve_attributed_sender(session_id, sender_id.strip())
         if not cfg.sender_on_roster(sender):
             # Fence + taint (hermes-smd-inbound) govern non-rostered inbound;
             # this plugin never speaks about senders the roster does not trust.

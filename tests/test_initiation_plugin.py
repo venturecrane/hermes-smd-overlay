@@ -22,12 +22,21 @@ behavior would have mishandled (Law 12 — every check names its falsifier):
     embedded-content wall.
  8. THE NO-IMPROVISATION RULE RIDES EVERY INJECTION (the R1 command-2
     false "self-test complete" shape).
+ 9. WEBHOOK-ROUTE TURNS RESOLVE THE VERIFIED SENDER (the ss#1941 shape,
+    re-found live 2026-08-10): sender_id is ``webhook:agentmail``; the
+    authority must come from the recorded SESSION_INBOUND_ORIGIN, and a
+    claimed unbound origin must be RE-KEYED under the session so a later
+    resolver (peer-memory) still finds it. Falsifier: zero injections on
+    every live email turn — the exact first-live-run failure.
+10. AMBIGUITY DECLINES: two pending unbound origins → no claim, no
+    injection (misattribution is worse than not resolving).
 """
 
 from __future__ import annotations
 
 import pytest
 
+from shared.inbound import SESSION_INBOUND_ORIGIN, InboundOrigin
 from tests.conftest import load_plugin
 
 
@@ -140,6 +149,75 @@ def test_no_improvisation_rule_rides_every_injection(initiation):
         assert out is not None
         assert "Never approximate a skill's work" in out["context"]
         assert "steps that actually ran" in out["context"]
+
+
+@pytest.fixture(autouse=True)
+def _clean_origin_register():
+    SESSION_INBOUND_ORIGIN._origins.clear()
+    SESSION_INBOUND_ORIGIN._unbound.clear()
+    SESSION_INBOUND_ORIGIN._by_address.clear()
+    SESSION_INBOUND_ORIGIN._by_message.clear()
+    yield
+    SESSION_INBOUND_ORIGIN._origins.clear()
+    SESSION_INBOUND_ORIGIN._unbound.clear()
+    SESSION_INBOUND_ORIGIN._by_address.clear()
+    SESSION_INBOUND_ORIGIN._by_message.clear()
+
+
+def test_webhook_route_turn_resolves_verified_sender_and_rekeys(initiation):
+    # The live email path: dispatch records the Svix-verified sender with NO
+    # session id; the gateway threads the ROUTE as sender_id. The authority
+    # must be granted to the verified person, and the claimed origin must be
+    # re-keyed so a later resolver in the same pass still finds it.
+    SESSION_INBOUND_ORIGIN.record(
+        "", InboundOrigin(sender_address="chris@firm.com", message_id="m-1")
+    )
+    out = initiation.on_pre_llm_call(session_id="sess-9", sender_id="webhook:agentmail")
+    assert out is not None
+    assert "chris@firm.com" in out["context"]
+    assert "Admin-classed: YES" in out["context"]
+    rekeyed = SESSION_INBOUND_ORIGIN.get("sess-9")
+    assert rekeyed is not None and rekeyed.sender_address == "chris@firm.com"
+
+
+def test_session_keyed_origin_wins_without_claiming(initiation):
+    SESSION_INBOUND_ORIGIN.record(
+        "sess-1", InboundOrigin(sender_address="paralegal@firm.com", message_id="m-2")
+    )
+    out = initiation.on_pre_llm_call(session_id="sess-1", sender_id="webhook:agentmail")
+    assert out is not None
+    assert "Admin-classed: NO" in out["context"]
+
+
+def test_two_pending_unbound_origins_decline(initiation):
+    # Matching a turn to its inbound would be a guess with two pending —
+    # misattributing a verified sender is worse than not resolving.
+    SESSION_INBOUND_ORIGIN.record(
+        "", InboundOrigin(sender_address="chris@firm.com", message_id="m-3")
+    )
+    SESSION_INBOUND_ORIGIN.record(
+        "", InboundOrigin(sender_address="paralegal@firm.com", message_id="m-4")
+    )
+    assert initiation.on_pre_llm_call(session_id="sess-2", sender_id="webhook:agentmail") is None
+
+
+def test_real_per_user_id_never_overridden_by_pending_origin(initiation):
+    # A channel that threads a real per-user id (a rostered address here)
+    # must keep it — a coincidentally pending email origin belongs to a
+    # different turn.
+    SESSION_INBOUND_ORIGIN.record(
+        "", InboundOrigin(sender_address="chris@firm.com", message_id="m-5")
+    )
+    out = initiation.on_pre_llm_call(session_id="sess-3", sender_id="paralegal@firm.com")
+    assert out is not None
+    assert "paralegal@firm.com" in out["context"]
+    assert "Admin-classed: NO" in out["context"]
+    # The pending origin was not consumed.
+    assert len(SESSION_INBOUND_ORIGIN._unbound) == 1
+
+
+def test_channel_identity_with_no_origin_gets_nothing(initiation):
+    assert initiation.on_pre_llm_call(session_id="sess-4", sender_id="webhook:agentmail") is None
 
 
 def test_callback_is_exception_safe(monkeypatch):
