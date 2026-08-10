@@ -7,9 +7,17 @@ the worker may claim a job, so it is unit-tested.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
-from shared.job_worker_runtime import put_result, readiness_ok
+from shared.job_ledger_client import JobLedgerError
+from shared.job_worker_runtime import (
+    _is_broker_unreachable,
+    _unreachable_log_level,
+    put_result,
+    readiness_ok,
+)
 
 # Env vars that, when all present, switch put_result onto the R2 path. The
 # entrypoint/config-applier contract: same names the ADR-0044 applier reads.
@@ -101,3 +109,56 @@ def test_put_result_falls_back_to_volume_when_uploader_raises(tmp_path, monkeypa
     expected = tmp_path / "job_results" / "job-xyz.md"
     assert ref == f"file://{expected}"
     assert expected.read_text(encoding="utf-8") == "resilient body"
+
+
+# -- broker-unreachable severity (2026-08-10) ---------------------------------
+# The worker has no shutdown path: Hermes exposes no process-lifecycle hook to
+# plugins, so on machine teardown the broker exits while this daemon thread is
+# still sweeping. That produces a connection-refused sweep failure identical in
+# shape to a genuinely dead broker. The loop separates them by persistence —
+# a dying process never reaches a second consecutive miss.
+
+
+def test_broker_unreachable_recognises_refused_and_missing_socket():
+    """Both shapes of "the socket would not take a connection" count."""
+    for cause in (ConnectionRefusedError(111, "Connection refused"), FileNotFoundError()):
+        exc = JobLedgerError("job broker socket error")
+        exc.__cause__ = cause
+        assert _is_broker_unreachable(exc) is True
+
+
+def test_broker_unreachable_excludes_a_hung_broker():
+    """A timeout means the broker ACCEPTED and then failed to answer — a hung
+    broker is a real fault, not teardown, so it must not be softened."""
+    exc = JobLedgerError("job broker socket error")
+    exc.__cause__ = TimeoutError("timed out")
+    assert _is_broker_unreachable(exc) is False
+
+
+def test_broker_unreachable_excludes_unrelated_failures():
+    """Only a wrapped transport refusal qualifies: not other JobLedgerErrors
+    (e.g. the unset-env constructor raise, which has no cause), and not
+    arbitrary sweep crashes."""
+    assert _is_broker_unreachable(JobLedgerError("SMD_WORKSPACE_BROKER_SOCKET is unset")) is False
+    assert _is_broker_unreachable(ValueError("something else entirely")) is False
+    # Pins the TYPE guard specifically: a refused connection raised by anything
+    # other than the job-ledger transport is not this failure mode. Without
+    # this case the guard can be deleted and the suite still passes.
+    foreign = ValueError("some other client's socket")
+    foreign.__cause__ = ConnectionRefusedError(111, "Connection refused")
+    assert _is_broker_unreachable(foreign) is False
+
+
+def test_first_miss_stays_below_the_sentry_event_threshold():
+    """The whole point: miss #1 must NOT reach Sentry. sentry_init sets no
+    LoggingIntegration, so the SDK default event_level=ERROR applies and
+    anything below ERROR is a breadcrumb only."""
+    assert _unreachable_log_level(1) == logging.WARNING
+    assert _unreachable_log_level(1) < logging.ERROR
+
+
+def test_second_consecutive_miss_escalates_to_a_real_outage():
+    """One sweep interval later the process is still alive, which teardown does
+    not survive. That is an outage and must reach Sentry."""
+    assert _unreachable_log_level(2) == logging.ERROR
+    assert _unreachable_log_level(9) == logging.ERROR
