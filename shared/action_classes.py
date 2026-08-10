@@ -395,6 +395,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # NOT a fenced read — the filed copy is read later via read_document,
     # which fences and taints.
     "mcp_smokeball_file_attachment_to_matter": ActionClass.INTERNAL_WRITE,
+    # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
+    # content-gated markdown skeleton server-side and files it into the matter
+    # via the same two-stage upload as add_file. Internal write: it reaches
+    # the firm's own record, never an outside recipient.
+    "mcp_smokeball_render_docx_template": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_get_upload_url": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_event": ActionClass.INTERNAL_WRITE,
