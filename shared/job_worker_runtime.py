@@ -67,6 +67,40 @@ def _broker_healthy() -> bool:
         return False
 
 
+def _is_broker_unreachable(exc: BaseException) -> bool:
+    """True when a sweep failed because the broker socket would not take a
+    connection at all (refused, or the socket file is gone).
+
+    This is the shape MACHINE TEARDOWN produces: the broker exits while this
+    daemon thread is still sweeping, because nothing stops the worker on
+    shutdown — Hermes exposes no process-lifecycle hook to plugins (its hook
+    surface is conversation-scoped), and installing our own signal handler from
+    plugin code would collide with Hermes core, which the overlay must not
+    touch. It is also, identically, the shape a CRASHED broker produces. The
+    two cannot be told apart from in here, so ``_worker_loop`` separates them
+    by persistence instead — see the comment there.
+    """
+    from shared.job_ledger_client import JobLedgerError
+
+    if not isinstance(exc, JobLedgerError):
+        return False
+    # BrokerJobClient._request wraps the transport OSError as __cause__.
+    return isinstance(exc.__cause__, (ConnectionRefusedError, FileNotFoundError))
+
+
+def _unreachable_log_level(consecutive: int) -> int:
+    """Severity for the Nth consecutive broker-unreachable sweep.
+
+    The first miss is teardown-shaped and stays at WARNING, which the Sentry
+    SDK records as a breadcrumb rather than an event (no ``LoggingIntegration``
+    override in ``sentry_init``, so ``event_level`` is the ERROR default). The
+    second miss means this process outlived the broker by a full sweep
+    interval, which teardown does not survive — that is a real outage and
+    escalates to ERROR, and therefore to Sentry.
+    """
+    return logging.WARNING if consecutive <= 1 else logging.ERROR
+
+
 # -- Hermes agent construction (STAGING) --------------------------------------
 def build_hermes_agent(*, model: str, session_id: str, max_iterations: int, session_db: Any) -> Any:
     """Construct an AIAgent on our session lineage, mirroring run_job's LLM-path
@@ -392,11 +426,31 @@ def _worker_loop() -> None:
         worker_id,
         WORKER_SWEEP_INTERVAL_S,
     )
+    # An unreachable broker means one of two things, and from in here they are
+    # the same observation: the machine is being torn down (the broker exits
+    # first; nothing stops this daemon thread), or the broker has genuinely
+    # died. They differ in exactly one way — whether this process is still
+    # alive one sweep later. A dying process never reaches the second miss; a
+    # real outage reaches every one of them. So the first miss is a warning
+    # (breadcrumb only, no Sentry event) and the second escalates to error.
+    consecutive_unreachable = 0
     while True:
         try:
             worker.sweep()
+            consecutive_unreachable = 0
         except Exception as exc:  # the loop must never die
-            logger.exception("smd-job-worker: sweep crashed (continuing): %s", exc)
+            if _is_broker_unreachable(exc):
+                consecutive_unreachable += 1
+                logger.log(
+                    _unreachable_log_level(consecutive_unreachable),
+                    "smd-job-worker: broker unreachable for %d consecutive sweep(s) (~%.0fs): %s",
+                    consecutive_unreachable,
+                    consecutive_unreachable * WORKER_SWEEP_INTERVAL_S,
+                    exc,
+                )
+            else:
+                consecutive_unreachable = 0
+                logger.exception("smd-job-worker: sweep crashed (continuing): %s", exc)
         time.sleep(WORKER_SWEEP_INTERVAL_S)
 
 
