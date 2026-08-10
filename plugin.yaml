@@ -12,6 +12,12 @@ plugins:
   - plugins/hermes-smd-hook-probe
   - plugins/hermes-smd-workspace
   - plugins/hermes-smd-reply
+  # initiation MUST register before peer-memory: both resolve the turn's
+  # verified sender through SESSION_INBOUND_ORIGIN's claim-once unbound
+  # handoff on the live email path, and initiation re-keys the claimed origin
+  # under the turn's session id so peer-memory (and any later resolver) finds
+  # it via get() instead of starving on an already-claimed entry.
+  - plugins/hermes-smd-initiation
   - plugins/hermes-smd-peer-memory
   - plugins/hermes-smd-mcp-result-sink
   - plugins/hermes-smd-jobs
@@ -21,4 +27,3 @@ plugins:
   - plugins/hermes-smd-usage
   - plugins/hermes-smd-drafting
   - plugins/hermes-smd-establishment
-  - plugins/hermes-smd-initiation
