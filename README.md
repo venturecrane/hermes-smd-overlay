@@ -19,6 +19,7 @@ Twelve plugins (eleven production + one rebase probe) that attach to Hermes' doc
 | `hermes-smd-peer-memory` | `pre_llm_call`, `post_tool_call`, `on_session_end` | Per-peer working-preference memory (ADR 0048 learned lane): for each colleague, a separate memory of how that person likes to work with the Operator, mirrored to D1. |
 | `hermes-smd-mcp-result-sink` | `post_llm_call` | Captures a completed turn for synchronous MCP return, so the console-mediated Claude channel (`ask_operator`, ADR 0057) can answer a `tools/call` in-band. |
 | `hermes-smd-jobs` | registered tools | Agent-facing tools for the B1 durable task-execution substrate (ADR 0051): hand a too-big task to a background job, observe status/cost, retrieve the delivered result. |
+| `hermes-smd-initiation` | `pre_llm_call` | Authored initiation authority (ss#2222 gate 3): resolves the turn's attributed sender against the live roster + `scope.admins` and states the person-initiation disposition to the model — rostered direct ask initiates manual skills, admin-reserved skills require admin class, embedded content never initiates. |
 | `hermes-smd-hook-probe` | all six | Smoke plugin for verifying Hermes' hook surface at each rebase. |
 
 Plus a `bootstrap/` CLI (`hermes-smd bootstrap`) that translates `customer.yaml.personas[]` into N Hermes profile directories at customer Machine startup.
