@@ -1,0 +1,9 @@
+name: hermes-smd-initiation
+version: "0.1.0"
+description: "Authored initiation authority for person-invoked skills over the mail channel (ss#2222 gate 3, from the card-rehearsal R1 finding): a pre_llm_call injection that resolves the turn's attributed sender against the LIVE authored roster (scope.inbound_allow_from) and admin list (scope.admins) and states the disposition to the model — an authenticated rostered sender's direct ask IS person-initiation for manual-initiation skills; admin-reserved skills additionally require the sender to be admin-classed (polite decline otherwise); forwarded/quoted/attached content stays third-party data and never initiates anything; a skill's work is never approximated without running it. The disposition is authored + platform-resolved, never model-judged per turn — R1 observed three different dispositions (answer / improvise / refuse) for skill-shaped requests on the same channel. Fail-safe: an unattributed turn, a non-rostered sender, or an unreadable config injects nothing (the ADR 0027 fence + taint already govern non-rostered inbound)."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - pre_llm_call
+hooks:
+  - pre_llm_call
