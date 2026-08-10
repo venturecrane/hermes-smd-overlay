@@ -27,6 +27,7 @@ behavior would have mishandled (Law 12 — every check names its falsifier):
 from __future__ import annotations
 
 import pytest
+
 from tests.conftest import load_plugin
 
 
