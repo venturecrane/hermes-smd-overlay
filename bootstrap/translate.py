@@ -83,6 +83,7 @@ from bootstrap.cron_materialize import (
 )
 from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
 from bootstrap.validate import validate_customer_yaml
+from shared.cron_containment import containment_active, containment_reason, sentinel_path
 from shared.secrets import get_secret
 from shared.webhook_read_surface import webhook_platform_toolsets
 
@@ -1607,6 +1608,24 @@ def translate_customer_yaml(
         # reloads ``cron.jobs``) per persona; snapshot/restore it so reconciling
         # the broadened set cannot leak the last-visited persona home into the
         # rest of bootstrap.
+        # ss-console#2276: the durable containment lever. While the sentinel
+        # file exists on the volume, this boot converges every persona's cron
+        # store to ZERO managed jobs (removing any that exist) instead of the
+        # authored set — so an incident containment survives reboots. Loud by
+        # construction: WARNING here, and the heartbeat carries
+        # cron_containment=1 every tick (shared/heartbeat.py).
+        _containment = containment_active(hermes_home)
+        if _containment:
+            _reason = containment_reason(hermes_home)
+            logger.warning(
+                "translate: CRON CONTAINMENT ACTIVE — sentinel %s present%s; "
+                "materializing ZERO managed cron jobs for %d persona(s) and "
+                "removing any existing managed jobs. Remove the sentinel and "
+                "reboot to restore the authored schedule.",
+                sentinel_path(hermes_home),
+                f" (reason: {_reason})" if _reason else "",
+                len(reconcile_slugs),
+            )
         _prev_hermes_home = os.environ.get("HERMES_HOME")
         try:
             registered = materialize_cron(
@@ -1614,6 +1633,7 @@ def translate_customer_yaml(
                 store_for,
                 _real_script_stager(profiles_root),
                 reconcile_slugs=reconcile_slugs,
+                containment=_containment,
             )
         except CronMaterializeError as exc:
             raise TranslateError(str(exc)) from exc

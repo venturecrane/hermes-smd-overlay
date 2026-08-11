@@ -671,3 +671,30 @@ def test_webhook_surface_check_crash_reports_rather_than_going_dark():
     p = _last_payload(calls)
     assert p["webhook_surface_ok"] == 0
     assert "webhook_surface" not in p, "a broken check must never emit a map it cannot trust"
+
+
+# ---------------------------------------------------------------------------
+# cron_containment field (ss-console#2276)
+# ---------------------------------------------------------------------------
+
+
+def test_payload_sends_cron_containment_including_false():
+    base = dict(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+    )
+    assert hb.build_payload(**base, cron_containment=True)["cron_containment"] == 1
+    # False is a REAL "not contained" value and must reach the wire as 0
+    assert hb.build_payload(**base, cron_containment=False)["cron_containment"] == 0
+    # None (check failed) omits — the console holds rather than resolves
+    assert "cron_containment" not in hb.build_payload(**base)
+
+
+def test_read_cron_containment_reflects_sentinel(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert hb._read_cron_containment() is False
+    (tmp_path / "CRON_CONTAINMENT").write_text("ss#2258 containment\n")
+    assert hb._read_cron_containment() is True

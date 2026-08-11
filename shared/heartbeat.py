@@ -127,6 +127,7 @@ def build_payload(
     spec_control: dict[str, dict] | None = None,
     webhook_surface_ok: bool | None = None,
     webhook_surface: dict[str, dict] | None = None,
+    cron_containment: bool | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -170,6 +171,12 @@ def build_payload(
     # or absent server = nothing to report (hold), never zero.
     if connector_token_age:
         payload["connector_token_age"] = connector_token_age
+    # Cron containment (ss-console#2276). is-not-None discipline like the
+    # scheduler fields: 1 = the volume sentinel is present and boot converged
+    # the cron stores to zero managed jobs; 0 = normal. A contained seat must
+    # be visibly contained on the console, never mistaken for a quiet one.
+    if cron_containment is not None:
+        payload["cron_containment"] = 1 if cron_containment else 0
     # Authored-spec control health (ss-console #2234). Same is-not-None
     # discipline for the same reason: an empty map is a REAL "checked, every
     # declared spec is installed" state, and it is the state that RESOLVES an
@@ -499,6 +506,7 @@ class HeartbeatEmitter:
             spec_control=spec.entries if spec is not None else None,
             webhook_surface_ok=surface.ok if surface is not None else None,
             webhook_surface=surface.tools if surface is not None else None,
+            cron_containment=_read_cron_containment(),
         )
         import json
 
@@ -519,6 +527,19 @@ class HeartbeatEmitter:
             )
         else:
             logger.warning("heartbeat: control-plane returned %d", status)
+
+
+def _read_cron_containment() -> bool | None:
+    """Sentinel presence for the heartbeat (ss-console#2276). A cheap stat per
+    tick; None (omitted) only if the check itself fails, so a read error never
+    reports a false 'not contained'."""
+    try:
+        from shared.cron_containment import containment_active
+
+        return containment_active()
+    except Exception as exc:  # noqa: BLE001 — the check must never kill the beat
+        logger.debug("heartbeat: cron-containment read failed: %s", exc)
+        return None
 
 
 def _default_scheduler_check():
