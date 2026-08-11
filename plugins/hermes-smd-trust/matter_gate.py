@@ -32,13 +32,28 @@ read. Otherwise a recipient's absence proves nothing, and the verdict is
 ``unresolved`` — a different sentence to a reviewer, deliberately. Collapsing
 the two would tell a paralegal that a legitimate client is an outsider.
 
-POSTURE
--------
-Additive and SILENT when unauthored, matching the spec gate's precedent: a seat
-that authored nothing is untouched, so shipping this cannot brick a seat during
-a rebuild window. ``SMD_MATTER_GATE_MODE`` is the rollback lever (``report``
-observes only; ``block`` downgrades to draft), fail-closed on a malformed value
-in the same shape as ``SMD_IDENTIFIER_GATE_MODE``.
+POSTURE — read this before deciding it is safe to enable somewhere
+------------------------------------------------------------------
+This gate is **ON by default and is NOT gated on anything the seat authored.**
+``SMD_MATTER_GATE_MODE`` is the only lever (``report`` observes; anything else,
+including unset, is ``block``), and the ``enforce`` stanza runs for every
+EXTERNAL_SEND / _CLIENT / _VENDOR call regardless of customer.yaml.
+
+An earlier version of this docstring claimed the opposite — "additive and SILENT
+when unauthored, matching the spec gate's precedent" — and that claim was
+repeated in the shipping PRs and used to argue the pin could not disturb a client
+seat during a rebuild. It was false: there is no CustomerConfig read anywhere in
+this module. Corrected under ss#2252, which also carries the open decision about
+whether to BUILD the authored posture rather than merely withdraw the claim.
+
+What is actually true, and what the safety argument should rest on:
+
+* a mismatch **downgrades to a human draft**; it never refuses outright;
+* an ``unresolved`` membership does not withhold at all;
+* a withhold additionally requires a CLOSED party set, which today only arrives
+  via ``get_matter`` — so the gate is *narrow*, but that narrowness is an
+  emergent property of the data flow, NOT a designed opt-in, and it will erode
+  as party capture spreads. Do not lean on it as if it were a switch.
 """
 
 from __future__ import annotations
