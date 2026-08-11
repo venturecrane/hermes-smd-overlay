@@ -56,7 +56,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from shared import content_floor, spec_gate
+from shared import content_floor, matter_gate, spec_gate
 from shared.action_classes import (
     BANNED_TOOLS,
     TOOL_ACTION_CLASS_MAP,
@@ -77,7 +77,7 @@ from shared.trust_decision import (
     TrustDecision,
 )
 
-from . import matter_gate, voice_gate
+from . import voice_gate
 
 # Action classes that must never fire autonomously on a turn that ingested
 # untrusted (non-internal) inbound content — the taint-gate. READ and

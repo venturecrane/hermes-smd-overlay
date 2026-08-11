@@ -32,10 +32,21 @@ What it does:
      classify INTERNAL under ``recipient_classifier`` (the send path
      deliberately does not content-floor internal sends — firm coordination
      legitimately names deadlines, signatures, attorneys).
-  4. **Rate-limit.** Per-sender + global rolling-window bound.
-  5. **Audit.** Emits ``REPLY_SENT`` on send, ``REPLY_HELD`` on a reply held
+  4. **Matter identity (ss#2167).** Holds a reply that cites a matter the locked
+     recipient is provably not a party to. This check has to live HERE: it sits
+     in ``enforce.evaluate_tool_call`` behind ``is_send``, which is true only for
+     EXTERNAL_SEND* classes, and the tool this lane calls is ``create_draft`` —
+     INTERNAL_WRITE. So the matter gate never ran on this path while this
+     function relayed the draft out as real email
+     (vfy_01KZRRW066Y70TFEYKGQX6ME76). Note the exemption is NOT
+     ``recipient_class is INTERNAL``: an inbound-roster match classifies INTERNAL
+     before the typed roster is consulted, so that spelling would exempt 100% of
+     this lane. See the comment at the call site.
+  5. **Rate-limit.** Per-sender + global rolling-window bound.
+  6. **Audit.** Emits ``REPLY_SENT`` on send, ``REPLY_HELD`` on a reply held
      back to draft (reason only — never the body), ``REPLY_FAILED`` on a send
-     error. Digest + recipient + message id only; never the content.
+     error, ``MATTER_UNRESOLVED`` when membership could be neither confirmed nor
+     denied. Digest + recipient + message id only; never the content.
 
 It defeats NO agent floor — the trust gate, taint-gate, content floor, and
 fabrication gate are byte-for-byte unchanged. "Autonomous reply" lives in this
@@ -53,7 +64,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, msgraph_client, provenance, send_policy
+from shared import inbound, matter_gate, msgraph_client, provenance, send_policy
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -462,6 +473,87 @@ def on_post_tool_call(**kwargs: Any) -> None:
             # but a reply transmits only the body). Fail closed.
             _held("empty_body", origin)
             return
+
+        # (c2) Matter identity — is this recipient a party to the matter this
+        # reply is about? (ss#2167)
+        #
+        # WHY IT HAS TO BE HERE AND NOT IN THE TRUST GATE. The matter check lives
+        # in enforce.evaluate_tool_call, guarded by `is_send`, which is true only
+        # for EXTERNAL_SEND* action classes. The tool this lane calls is
+        # ``create_draft`` — INTERNAL_WRITE (shared/action_classes.py) — and
+        # ``_reclassify_send`` returns a non-EXTERNAL_SEND base class unchanged.
+        # So on the reply lane the matter gate never ran at all, while THIS
+        # function relayed the same draft out as a real email a few lines below.
+        # That was 86 of the pilot's replies, and ~74% of all sends, with no
+        # matter-identity check of any kind (vfy_01KZRRW066Y70TFEYKGQX6ME76).
+        # It was recorded on the issue as the gate being *blind* here; it was
+        # absent, which is why widening membership capture alone would have
+        # changed nothing and reported the lane closed.
+        #
+        # The recipient is structurally pinned to the verified inbound sender by
+        # the recipient-lock at (b), so `origin.sender_address` IS the recipient
+        # set — no model-chosen address participates.
+        # The exemption cannot be `recipient_class is INTERNAL` on this lane, and
+        # getting that wrong would have shipped a control that can never fire.
+        # `sender_on_roster` above IS `scope.inbound_allow_from`, and
+        # `_classify_one_typed` returns INTERNAL on an inbound-roster match
+        # BEFORE consulting the typed roster ("a rostered internal recipient
+        # outranks a typed class"). So every relayed reply classifies INTERNAL by
+        # construction, and an INTERNAL exemption would skip 100% of this lane.
+        #
+        # The conflation is the real hazard: `inbound_allow_from` answers "may I
+        # reply to you", not "are you firm staff". A firm that authors a client
+        # onto it to enable autonomous replies silently makes that client
+        # INTERNAL — exempt from matter identity AND from the content floor.
+        # So for THIS decision the typed roster is consulted on its own terms
+        # (empty internal roster), and a recipient the client typed as CLIENT is
+        # never exempt, whatever the inbound roster also says. With no
+        # outbound_roster authored — A&P today — nothing types as CLIENT and the
+        # behaviour is exactly today's.
+        try:
+            typed_only = classify_recipients_typed([origin.sender_address], [], cfg.outbound_roster)
+        except Exception:  # noqa: BLE001 — a fault must not take the reply path
+            # Unknown typing pairs with the None recipient_class the fault above
+            # already produced, so the exemption resolves False and the gate
+            # RUNS. A classification we could not perform is not evidence that
+            # this recipient is firm staff.
+            logger.exception(
+                "hermes-smd-reply: typed-roster classification raised; matter gate will run"
+            )
+            typed_only = None
+        matter_verdict = matter_gate.evaluate(
+            session_id=session_id,
+            body=scan_text,
+            recipients={origin.sender_address},
+            # Firm staff and records vendors are not expected to be parties
+            # (ADR 0072, the same carve-out enforce.py applies).
+            recipient_is_exempt=typed_only is not RecipientClass.CLIENT
+            and recipient_class in (RecipientClass.INTERNAL, RecipientClass.VENDOR),
+        )
+        if matter_verdict.should_withhold and matter_gate.mode() == "block":
+            _held(
+                "matter_mismatch",
+                origin,
+                matters=list(matter_verdict.matters),
+                detail=matter_verdict.reason,
+            )
+            return
+        if matter_verdict.status == "unresolved" and matter_verdict.matters:
+            # Recorded, NOT held (Captain call, 2026-08-11). A reply citing a
+            # matter whose party list this turn never read is the common case
+            # today — get_matter fires on 8 of 86 reply turns — so holding it
+            # would withhold correct client replies at a rate nobody has
+            # measured, and a control that blocks correct work gets removed
+            # rather than fixed. This row is that measurement.
+            _emit_reply_event(
+                action_type="MATTER_UNRESOLVED",
+                metadata={
+                    "recipient": origin.sender_address,
+                    "message_id": origin.message_id,
+                    "matters": list(matter_verdict.matters),
+                    "detail": matter_verdict.reason,
+                },
+            )
 
         # (d) Rate-limit under the authored send policy (#2070). Resolved LIVE
         # per call (ADR 0044): authoring `send_policy` — e.g. exempting rostered

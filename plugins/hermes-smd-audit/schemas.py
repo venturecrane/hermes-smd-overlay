@@ -169,6 +169,12 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         "REPLY_SENT",
         "REPLY_HELD",
         "REPLY_FAILED",
+        # ss#2167 — a reply cited a matter whose party list this turn never
+        # read, so membership could be neither confirmed nor denied. Recorded
+        # and NOT held: get_matter fires on 8 of 86 reply turns, so holding on
+        # unresolved would withhold correct client replies at an unmeasured
+        # rate. This row IS the measurement that decides whether it should.
+        "MATTER_UNRESOLVED",
         #   plugins/hermes-smd-trust/__init__.py (confirm-send seam)
         "CONFIRM_SEND_DISPATCHED",
         "CONFIRM_SEND_FAILED",

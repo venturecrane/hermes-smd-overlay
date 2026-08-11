@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from shared import matter_binding
-from tests.conftest import load_plugin
-
-matter_gate = load_plugin("hermes-smd-trust").matter_gate
+from shared import matter_binding, matter_gate
 
 SID = "s1"
 M_A = "aaaaaaaa-1111-2222-3333-444444444444"
 M_B = "bbbbbbbb-1111-2222-3333-444444444444"
+# What a letter actually cites.
+NUM_A = "2026-PI-101"
 CLIENT_A = "alvarez@example.com"
 CLIENT_B = "okafor@example.com"
 
@@ -129,6 +128,111 @@ def test_mixed_recipients_one_offender_is_a_mismatch() -> None:
     _closed(M_A, CLIENT_A)
     v = matter_gate.evaluate(session_id=SID, body=f"matter {M_A}", recipients={CLIENT_A, CLIENT_B})
     assert v.is_mismatch
+
+
+# ---- the citation form real correspondence uses (ss#2167 second pass) --------
+#
+# Every test above cites the matter by its connector UUID. No letter does that.
+# The gate resolved a cited token by looking it up in the membership map, which
+# is keyed by id, so a body citing "2026-PI-101" produced *unresolved* even
+# against a closed party set — the control was blind to its own subject matter
+# and the whole suite passed. These pin the number->id join.
+
+
+def test_number_cited_body_to_the_wrong_client_is_a_mismatch() -> None:
+    _closed(M_A, CLIENT_A)
+    matter_binding.membership_for(SID).add_alias(NUM_A, M_A)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body=f"Re: matter {NUM_A}. Please find the deposition summary attached.",
+        recipients={CLIENT_B},
+    )
+    assert v.is_mismatch and v.should_withhold
+    # The refusal must name the matter the way the human reading it saw it.
+    assert NUM_A in v.reason
+    assert NUM_A in v.matters
+
+
+def test_control_number_cited_correct_pairing_passes() -> None:
+    # The half that makes the test above mean something.
+    _closed(M_A, CLIENT_A)
+    matter_binding.membership_for(SID).add_alias(NUM_A, M_A)
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: matter {NUM_A}.", recipients={CLIENT_A})
+    assert v.status == "ok"
+    assert not v.should_withhold
+
+
+def test_number_citation_is_case_insensitive() -> None:
+    _closed(M_A, CLIENT_A)
+    matter_binding.membership_for(SID).add_alias(NUM_A, M_A)
+    v = matter_gate.evaluate(session_id=SID, body=f"re: {NUM_A.lower()}", recipients={CLIENT_B})
+    # The extractor only matches upper-case numbers today (its own gap, filed
+    # separately), so a lower-case citation is not extracted at all — which is
+    # unresolved, never a pass disguised as a verdict.
+    assert v.status in {"unresolved", "not_applicable"}
+    assert not v.should_withhold
+    # But a matching-case citation with odd surrounding whitespace still binds.
+    v2 = matter_gate.evaluate(session_id=SID, body=f"re:  {NUM_A} ", recipients={CLIENT_B})
+    assert v2.is_mismatch
+
+
+def test_an_ambiguous_number_is_withdrawn_not_guessed() -> None:
+    # Two matters claiming one number: neither binding may be used. Keeping
+    # either would let the gate call a legitimate client an outsider on a
+    # collision, which is the one verdict this module must never produce.
+    _closed(M_A, CLIENT_A)
+    _closed(M_B, CLIENT_B)
+    m = matter_binding.membership_for(SID)
+    m.add_alias(NUM_A, M_A)
+    m.add_alias(NUM_A, M_B)
+    assert m.resolve(NUM_A) == ""
+    v = matter_gate.evaluate(session_id=SID, body=f"matter {NUM_A}", recipients={CLIENT_B})
+    assert v.status == "unresolved"
+    assert not v.should_withhold
+
+
+def test_a_re_added_ambiguous_number_stays_withdrawn() -> None:
+    # Without the blacklist the loser's next read would simply re-add it.
+    m = matter_binding.membership_for(SID)
+    m.add_alias(NUM_A, M_A)
+    m.add_alias(NUM_A, M_B)
+    m.add_alias(NUM_A, M_A)
+    assert m.resolve(NUM_A) == ""
+
+
+def test_number_alias_on_an_open_set_is_still_unresolved() -> None:
+    # The alias answers "which matter is this", never "is the set closed".
+    _open(M_A, CLIENT_A)
+    matter_binding.membership_for(SID).add_alias(NUM_A, M_A)
+    v = matter_gate.evaluate(session_id=SID, body=f"matter {NUM_A}", recipients={CLIENT_B})
+    assert v.status == "unresolved"
+    assert not v.should_withhold
+
+
+def test_capture_learns_the_number_from_a_get_matter_payload() -> None:
+    # The connector puts `number` in the same dict as `parties` (server.py:363).
+    matter_binding.record_from_read(
+        SID,
+        {
+            "id": M_A,
+            "number": NUM_A,
+            "parties": [{"contact_id": "c1", "email": CLIENT_A, "side": "client"}],
+            "parties_complete": True,
+        },
+    )
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: matter {NUM_A}", recipients={CLIENT_B})
+    assert v.is_mismatch and v.should_withhold
+
+
+def test_capture_learns_the_number_from_a_contact_filtered_listing() -> None:
+    # The reply lane's shape: list_matters fires on 34 of 86 reply turns against
+    # get_matter's 8, so this is where the join usually comes from there.
+    matter_binding.record_from_read(SID, {"id": "c9", "person": {"email": CLIENT_A}})
+    matter_binding.record_from_read(
+        SID,
+        {"matters_for_contact": "c9", "value": [{"id": M_A, "number": NUM_A}]},
+    )
+    assert matter_binding.membership_for(SID).resolve(NUM_A) == M_A
 
 
 # ---- posture ----------------------------------------------------------------
