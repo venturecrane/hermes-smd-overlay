@@ -68,7 +68,10 @@ logger = logging.getLogger(__name__)
 #     structured-only operations while still scanning any free-text the agent
 #     authored.
 #
-# Only ``email_delete_draft`` is excluded entirely — a delete authors nothing.
+# Two tools are excluded entirely: ``email_delete_draft`` (a delete authors
+# nothing) and ``establish_stage_document`` (its payload is the FIRM's own
+# document, read in place and copied byte for byte — see the note on the set
+# below).
 #
 # The sets are data-driven from the registry (so a new INTERNAL_WRITE tool is
 # at least body-optional-gated by default, never silently un-gated); the
@@ -78,9 +81,37 @@ logger = logging.getLogger(__name__)
 
 
 # INTERNAL_WRITE tools that author NO content — excluded from the gate entirely.
+#
+# ``establish_stage_document`` (ss #2247, 2026-08-11). This gate scans text the
+# AGENT COMPOSED for fabricated markers, citations, and unverified identifiers.
+# A staged establishment document is the opposite of that: it is the firm's own
+# work product, read in place through the connector this session and copied byte
+# for byte, and the establishment skill's safety invariant 2 makes staging it
+# UNEDITED a hard requirement. Scanning it for fabrication is a category error —
+# it asks whether the firm fabricated its own letter.
+#
+# The gate also could not have protected anything here. The model already holds
+# the text: it came back from ``read_document`` on an earlier call in the same
+# turn, so refusing the staging call closes a door the content already walked
+# through. What the refusal DID accomplish was worse than nothing. On the first
+# live run (pilot-smokeball, 2026-08-11) it refused two of the three documents
+# the admin had blessed — a policy-limits demand letter for its dollar figures
+# and a trial binder index for its dates, which for a PI firm are precisely the
+# flagship voice exemplars — and the agent responded by deleting the wage rates
+# and billing totals from the letter so it would stage. A gate that cannot be
+# satisfied honestly teaches the model to satisfy it dishonestly, and an edit is
+# invisible in the record where a refusal would have been visible.
+#
+# The real controls on this path are downstream, server-side, and purpose-built:
+# ``establish_submit``'s spec_body stays gated here (it IS agent-composed), the
+# intake's leak_check refuses copied client prose in the installed spec, and the
+# digit invariant refuses any figure the profile did not compute. Both passed on
+# the run described above. The staged corpus itself never leaves the seat and is
+# purged on pass and on fail.
 _NON_AUTHORING_INTERNAL_WRITE: frozenset[str] = frozenset(
     {
         "email_delete_draft",  # delete — nothing authored to scan
+        "establish_stage_document",  # the firm's own document, verbatim (ss #2247)
     }
 )
 
