@@ -111,7 +111,9 @@ def test_exempt_recipient_class_is_skipped() -> None:
     # that says so is the client's, not ours.
     _closed(M_A, CLIENT_A)
     v = matter_gate.evaluate(
-        session_id=SID, body=f"matter {M_A}", recipients={"records@vendor.example"},
+        session_id=SID,
+        body=f"matter {M_A}",
+        recipients={"records@vendor.example"},
         recipient_is_exempt=True,
     )
     assert v.status == "not_applicable"
@@ -125,9 +127,7 @@ def test_matter_never_read_is_unresolved_not_mismatch() -> None:
 
 def test_mixed_recipients_one_offender_is_a_mismatch() -> None:
     _closed(M_A, CLIENT_A)
-    v = matter_gate.evaluate(
-        session_id=SID, body=f"matter {M_A}", recipients={CLIENT_A, CLIENT_B}
-    )
+    v = matter_gate.evaluate(session_id=SID, body=f"matter {M_A}", recipients={CLIENT_A, CLIENT_B})
     assert v.is_mismatch
 
 

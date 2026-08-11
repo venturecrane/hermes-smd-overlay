@@ -36,7 +36,8 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ class MatterMembership:
         return {m for m, emails in self._by_matter.items() if addr in emails}
 
 
-_sessions: "OrderedDict[str, MatterMembership]" = OrderedDict()
+_sessions: OrderedDict[str, MatterMembership] = OrderedDict()
 
 
 def _norm(value: Any) -> str:
@@ -228,7 +229,7 @@ def record_contact(session_id: str, contact_id: str, email: str) -> None:
         logger.debug("matter_binding: contact record failed", exc_info=True)
 
 
-_contacts: "OrderedDict[str, dict[str, str]]" = OrderedDict()
+_contacts: OrderedDict[str, dict[str, str]] = OrderedDict()
 
 
 def _contacts_for(session_id: str) -> dict[str, str]:

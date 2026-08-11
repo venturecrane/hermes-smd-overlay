@@ -28,7 +28,13 @@ from shared.secrets import get_secret
 from shared.spec_status import SPEC_STATUS
 from shared.workspace_broker import GRANT_ARG, authorize
 
-from . import approval, enforce, matter_gate, outbound, outbound_send, spec_read
+from . import approval, enforce, outbound, outbound_send, spec_read
+
+# Explicit re-export. ``enforce`` imports this module for its own use, but the
+# plugin is loaded via importlib as a standalone module rather than a real
+# package, so a relative import inside enforce does NOT bind the attribute here
+# — and the gate's tests reach it as ``load_plugin("hermes-smd-trust").matter_gate``.
+from . import matter_gate as matter_gate  # noqa: PLC0414
 
 logger = logging.getLogger(__name__)
 

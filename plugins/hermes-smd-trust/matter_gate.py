@@ -215,12 +215,16 @@ def evaluate(
         if unresolved_matters:
             return MatterVerdict(
                 "unresolved",
-                "party list for the cited matter is not closed: " + "; ".join(unresolved_matters[:6]),
+                "party list for the cited matter is not closed: "
+                + "; ".join(unresolved_matters[:6]),
                 tuple(sorted(resolved)),
                 tuple(sorted(addrs)),
             )
         return MatterVerdict(
-            "ok", "every recipient is a party to every cited matter", tuple(sorted(resolved)), tuple(sorted(addrs))
+            "ok",
+            "every recipient is a party to every cited matter",
+            tuple(sorted(resolved)),
+            tuple(sorted(addrs)),
         )
     except Exception:  # noqa: BLE001
         # A gate that raises must not take the send path with it. Report the
