@@ -1,6 +1,6 @@
 name: hermes-smd-establishment
-version: "0.2.0"
-description: "Conversational establishment (ss ADR 0085): an Operator admin (scope.admins) instructs the Operator to establish or update the firm's voice / output shape from named documents. Three broker-marshalled tools — establish_stage_document / establish_submit / establish_status — feed the root-side establish_intake daemon, which runs the distillation compilers as write gates before merge-installing the vault object. Admin-only via a pre_tool_call gate fed by a pre_llm_call sender stash; deliberately NO session-taint gate (Captain decision 2026-08-02 — the establishment turn necessarily reads connector content; the admin allow-list is the gate). On AgentMail-custody seats (ss#2164 probe: WEAK — no per-message SPF/DKIM/DMARC verdict), an admin's first establishment additionally requires a one-time mailbox-possession confirmation: a challenge code emailed to the rostered scope.admins address, confirmed by the admin's reply, durable across restarts (shared/admin_possession.py); msgraph/tenant-custody seats and sessions with no mail channel are exempt. Correction promotion is a USE of this path (source_ref cites the captured correction), never an automatic conversion."
+version: "0.3.0"
+description: "Conversational establishment (ss ADR 0085): an Operator admin (scope.admins) instructs the Operator to establish or update the firm's voice / output shape from named documents. Three broker-marshalled tools — establish_stage_document / establish_submit / establish_status — feed the root-side establish_intake daemon, which runs the distillation compilers as write gates before merge-installing the vault object. Admin-only via a pre_tool_call gate fed by a pre_llm_call sender stash; deliberately NO session-taint gate (Captain decision 2026-08-02 — the establishment turn necessarily reads connector content; the admin allow-list is the gate). On AgentMail-custody seats (ss#2164 probe: WEAK — no per-message SPF/DKIM/DMARC verdict), an admin's first establishment additionally requires a one-time mailbox-possession confirmation: a challenge code emailed to the rostered scope.admins address, confirmed by the admin's reply, durable across restarts (shared/admin_possession.py); msgraph/tenant-custody seats and sessions with no mail channel are exempt. Correction promotion is a USE of this path (source_ref cites the captured correction), never an automatic conversion. Documents are staged BY REFERENCE (ss#2247): a post_tool_call observer holds the raw text of every connector document read (shared/read_capture.py), pre_tool_call reassembles the windows that session read and refuses anything short of full coverage, and model-supplied text is refused unconditionally for a captured connector — the model cannot retype a document accurately and is no longer asked to."
 requires_env:
   - SMD_WORKSPACE_BROKER_SOCKET
 hooks:
@@ -14,3 +14,9 @@ hooks:
   # classification per session (last-writer-wins), nudges on admin turns, and
   # consumes a possession-confirming reply (rostered admin + live code).
   - pre_llm_call
+  # post_tool_call — holds the RAW text of every connector document read
+  # (shared/read_capture.py, ss#2247), so staging sends the bytes the connector
+  # returned rather than the bytes the model retyped. Fires before
+  # transform_tool_result, so the store holds unfenced text while the model
+  # still sees only the nonce-fenced wrap. Observer only; never a gate.
+  - post_tool_call

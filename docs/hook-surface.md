@@ -63,7 +63,7 @@ hooks:
 
 ### 2. `post_tool_call`
 
-**Purpose (overlay):** audit emission (`hermes-smd-audit` — one D1 row per tool invocation with duration).
+**Purpose (overlay):** audit emission (`hermes-smd-audit` — one D1 row per tool invocation with duration) AND establishment read capture (`hermes-smd-establishment` — holds the raw text of every connector document read so `establish_stage_document` stages the bytes the connector returned rather than bytes the model retyped, ss#2247; `shared/read_capture.py`). The capture depends on the ordering invariant below: firing before `transform_tool_result` is what makes the held text the RAW connector output rather than the nonce-fenced wrap the model sees.
 
 **Firing site:** `model_tools.py:826-836`.
 

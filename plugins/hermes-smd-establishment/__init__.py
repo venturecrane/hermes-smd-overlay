@@ -130,6 +130,21 @@ custody and no-mail seats are exempt exactly as for admins. ``establish_status``
 is exempt from BOTH ceremonies: it writes nothing, and its results are only
 reachable through a broker-minted secret run id from a submit that already
 passed the gates.
+
+DOCUMENTS ARE STAGED BY REFERENCE, NOT BY TRANSCRIPTION (ss#2247). Staging once
+took the document's text as a tool argument, which made "the corpus is what the
+firm actually wrote" a property the model had to achieve by careful copying.
+It cannot: live on the pilot 2026-08-11, a 19,114 character letter staged as
+19,066, and another came through with an equal-length character substitution.
+So ``on_post_tool_call`` observes every connector document read and holds the
+raw text (``shared/read_capture.py``); ``on_pre_tool_call`` — the only seam with
+both a session and a veto — reassembles the windows THAT SESSION read and
+stashes them for the handler; and for a captured connector a model-supplied
+``text`` is refused UNCONDITIONALLY. Unconditionally, rather than "when a
+capture exists", because anything that clears the capture would otherwise
+reopen the transcription path silently. The broker and the root intake are
+untouched: they receive the same field on the wire, now carrying bytes nobody
+retyped.
 """
 
 from __future__ import annotations
@@ -138,9 +153,10 @@ import json
 import logging
 import os
 import socket
+from collections import OrderedDict
 from typing import Any
 
-from shared import admin_possession
+from shared import admin_possession, provenance, read_capture
 from shared.action_classes import ActionClass, BannedToolError, classify_tool
 from shared.customer_config import CustomerConfig
 from shared.inbound import SESSION_INBOUND_ORIGIN
@@ -151,6 +167,32 @@ logger = logging.getLogger(__name__)
 
 _SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
 _TIMEOUT_SECONDS = 15
+
+#: Runtime read-tool name -> the ``source.connector`` slug the model passes.
+#: A dict rather than a set so that mapping lives in exactly one place; adding a
+#: second document connector is one entry here plus its arg-key spelling below.
+_CAPTURED_READ_TOOLS: dict[str, str] = {"mcp_smokeball_read_document": "smokeball"}
+
+#: The connectors whose documents are staged BY REFERENCE — model-supplied
+#: ``text`` is refused for these, unconditionally (ss#2247).
+_CAPTURED_CONNECTORS: frozenset[str] = frozenset(_CAPTURED_READ_TOOLS.values())
+
+#: Mirrors ``operator/workspace_broker/server.py``'s ``MAX_REQUEST_BYTES`` — the
+#: broker reads one newline-delimited frame with ``rfile.readline(...)`` and
+#: refuses the WHOLE request past this, envelope and JSON escaping included. The
+#: per-document ceiling is the same number, so the frame is what actually bites;
+#: without the pre-check below, an over-ceiling document returns a bare
+#: ``{"ok": false, "error": "request_too_large"}`` naming no field.
+_MAX_FRAME_BYTES = 1_048_576
+
+#: Assembled documents carried from ``on_pre_tool_call`` (which alone can see
+#: the session and can block) to ``_stage`` (which alone can reach the broker) —
+#: the same write-in-one-hook/read-in-another shape as ``_ADMIN_STASH``. Keyed
+#: by document identity because a tool HANDLER cannot rely on seeing
+#: ``session_id`` (overlay #141); the session check already happened at
+#: assembly time. Bounded: an abandoned call must not leak a document's bytes.
+_STAGE_PLANS: OrderedDict[tuple[str, str, str], tuple[str, str]] = OrderedDict()
+_MAX_STAGE_PLANS = 8
 
 TOOL_STAGE = "establish_stage_document"
 TOOL_SUBMIT = "establish_submit"
@@ -188,11 +230,13 @@ _STAGE_SCHEMA: dict[str, Any] = {
             ),
         },
         "text": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": (
-                "The document's full text, exactly as read from the source "
-                "system. Do not summarize, trim, or clean it: the compilers "
-                "derive the firm's voice from what the firm actually wrote."
+                "Leave this out for a document you read through a connector — "
+                "the seat stages exactly the bytes the connector returned, so "
+                "there is nothing for you to copy. Only supply text for a "
+                "source the seat cannot read for you, and then supply it "
+                "whole: unsummarized, untrimmed, uncleaned."
             ),
         },
         "source": {
@@ -209,13 +253,17 @@ _STAGE_SCHEMA: dict[str, Any] = {
                 },
                 "matter_id": {
                     "type": ["string", "null"],
-                    "description": "The matter/case id it belongs to, if any.",
+                    "description": (
+                        "The matter/case id it belongs to. Required for a "
+                        "connector document — it is half of how the seat finds "
+                        "the read you already did."
+                    ),
                 },
             },
             "required": ["connector", "document_id"],
         },
     },
-    "required": ["name", "text", "source"],
+    "required": ["name", "source"],
     "additionalProperties": False,
 }
 
@@ -343,8 +391,9 @@ _STATUS_SCHEMA: dict[str, Any] = {
 _STAGE_DESCRIPTION = (
     "Stage one firm document for an establishment run, when one of the firm's "
     "Operator admins has instructed you to establish or update the firm's voice "
-    "or an output shape from named content. Stage each named document with its "
-    "full text, then call establish_submit. Only works on an admin's instruction."
+    "or an output shape from named content. Read each named document to the end "
+    "with the connector, then stage it by naming its source — the seat supplies "
+    "the text. Then call establish_submit. Only works on an admin's instruction."
 )
 
 _SUBMIT_DESCRIPTION = (
@@ -396,6 +445,75 @@ _PERSON_MISMATCH_MESSAGE = (
     "being an Operator admin does not change that. If they described how a "
     "FIRM output should look or sound, that is firm-level establishment "
     "(admins) or a correction_capture."
+)
+
+# ---------------------------------------------------------------------------
+# Staging refusals (ss#2247) — see the reference-staging block in the docstring
+#
+# Every one names the cause, names the remedy, and FORECLOSES AN EDIT. That last
+# property is the load-bearing one: a staging refusal is terminal by the skills'
+# own doctrine, and overlay#236 is the record of what happens when a refusal
+# reads as an invitation to repair — the identifier gate refused documents
+# carrying dollar figures, so the agent deleted the wage rates and billing
+# totals until the letter staged. A refusal that does not close the edit door
+# teaches the model to walk through it.
+# ---------------------------------------------------------------------------
+
+_TEXT_NOT_ACCEPTED = (
+    "Refused: this document was read through the {connector} connector, so the "
+    "seat stages the exact bytes the connector returned — you do not supply "
+    "them. Retyping a document you read is where the bytes drift, and a "
+    "specification derived from drifted bytes describes writing the firm never "
+    "did. Call this again with `text` omitted and `source` naming the same "
+    "document."
+)
+
+_MATTER_REQUIRED = (
+    "Refused: staging a {connector} document by reference needs "
+    "`source.matter_id` as well as `source.document_id` — that pair is how the "
+    "seat finds the text you read. Supply the matter id from the read you "
+    "already did; do not guess it."
+)
+
+_NO_CAPTURE = (
+    "Refused: the seat holds no read of {connector} document {document_id} on "
+    "matter {matter_id}. Read it with the connector's document read, paged to "
+    "the end, and stage it again in the same working period. A read from an "
+    "earlier session, or one older than 30 minutes, is not held."
+)
+
+_INCOMPLETE = (
+    "Refused: the seat holds only part of {connector} document {document_id} — "
+    "{covered} of {total} characters. Not read: {ranges}. Call the document "
+    "read again at each missing offset until `truncated` is false, then stage "
+    "it. Do not stage the part you have: a specification derived from the "
+    "first page of every letter is a specification about salutations."
+)
+
+_CHANGED = (
+    "Refused: {connector} document {document_id} changed while you were "
+    "reading it — the pages you read do not describe the same document. Read "
+    "it again from offset 0, to the end, and stage that."
+)
+
+_OVERSIZE = (
+    "Refused: {connector} document {document_id} is larger than the seat can "
+    "stage. Drop it from the corpus and name it and this refusal in your "
+    "report. Do not trim, summarize, or split it — a shortened document is "
+    "writing the firm never produced, and the record would show a document "
+    "staged rather than a document refused."
+)
+
+_EMPTY = (
+    "Refused: the {connector} connector returned no text for document "
+    "{document_id} — it may be an image-only scan or an unsupported type. "
+    "There is no re-read that fixes this. Drop it from the corpus and name it "
+    "and this refusal in your report."
+)
+
+_TEXT_REQUIRED = (
+    "Refused: `text` is required for a source the seat cannot read for you. "
+    "Supply the document's full extracted text, unedited."
 )
 
 # ---------------------------------------------------------------------------
@@ -516,7 +634,16 @@ def _broker_request(payload: dict[str, Any]) -> dict[str, Any]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(_TIMEOUT_SECONDS)
         sock.connect(socket_path)
-        sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+        # ensure_ascii=False deliberately (ss#2247). With the default True every
+        # curly quote, en dash, or accented character costs SIX frame bytes
+        # instead of the two or three it occupies in utf-8, and the frame
+        # ceiling is the real per-document limit. On a typographically normal
+        # legal letter that is roughly 2x the effective headroom. Safe: the
+        # broker reads with readline() then json.loads(), which decodes utf-8,
+        # and no utf-8 continuation byte is 0x0A, so newline framing is
+        # unaffected. Restoring the default would silently halve the document
+        # ceiling — test_request_is_serialized_without_ascii_escaping pins it.
+        sock.sendall(json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n")
         raw = b""
         while not raw.endswith(b"\n"):
             chunk = sock.recv(65_536)
@@ -526,19 +653,131 @@ def _broker_request(payload: dict[str, Any]) -> dict[str, Any]:
     return json.loads(raw.decode("utf-8"))
 
 
-def _stage(args: dict[str, Any], **_: Any) -> str:
+def _source_of(args: Any) -> dict[str, Any]:
+    source = args.get("source") if isinstance(args, dict) else None
+    return source if isinstance(source, dict) else {}
+
+
+def _render_ranges(missing: tuple[tuple[int, int], ...]) -> str:
+    """``"12000-19003, 40000-41200"`` — each half directly usable as an offset."""
+    return ", ".join(f"{start}-{end}" for start, end in missing) or "unknown"
+
+
+def _plan_reference_stage(session_id: str, args: dict[str, Any]) -> str | tuple[str, str] | None:
+    """Resolve a staged document to the bytes the connector actually returned.
+
+    Returns ``None`` when this source is not a captured connector (the caller
+    keeps the model-supplied text path), a refusal MESSAGE when the reference
+    cannot be honoured, or ``(text, name)`` on success.
+
+    The name is the connector-reported one, preferred over the model's. Same
+    argument as the text: the name is a fact about the document and the seat
+    holds the true one, while a paraphrase makes a demotion report point at a
+    document the admin cannot find. This is the one place the design bends
+    "refuse, never sanitize" — refusing over a filename the model rendered with
+    a different dash would fail whole runs for nothing.
+    """
+    source = _source_of(args)
+    connector = str(source.get("connector") or "").strip().lower()
+    if connector not in _CAPTURED_CONNECTORS:
+        return None
+    document_id = str(source.get("document_id") or "").strip()
+    matter_id = str(source.get("matter_id") or "").strip()
+
+    # Unconditional, NOT "refused when a capture exists". A conditional refusal
+    # is bypassable by anything that clears the capture — a gateway restart, an
+    # eviction, a TTL expiry — and the model's natural recovery from "no
+    # capture" would be to supply the text it just failed to stage. A control
+    # must not be conditional on the state it protects.
+    if args.get("text") is not None:
+        return _TEXT_NOT_ACCEPTED.format(connector=connector)
+    if not matter_id:
+        return _MATTER_REQUIRED.format(connector=connector)
+
+    result = read_capture.assemble(connector, matter_id, document_id, session_id=session_id)
+    if result.ok:
+        return result.text, (result.name or str(args.get("name") or ""))
+
+    fields = {"connector": connector, "document_id": document_id, "matter_id": matter_id}
+    if result.reason == read_capture.REASON_OVERSIZE:
+        return _OVERSIZE.format(**fields)
+    if result.reason == read_capture.REASON_EMPTY:
+        return _EMPTY.format(**fields)
+    if result.reason == read_capture.REASON_NO_CAPTURE:
+        return _NO_CAPTURE.format(**fields)
+    if result.reason in (read_capture.REASON_CHANGED, read_capture.REASON_CONFLICT):
+        # Same cause and same remedy: the pages held do not describe one
+        # document, so the only honest recovery is a fresh read from offset 0.
+        return _CHANGED.format(**fields)
+    return _INCOMPLETE.format(
+        **fields,
+        covered=result.covered_chars,
+        total=result.total_chars,
+        ranges=_render_ranges(result.missing),
+    )
+
+
+def _remember_plan(key: tuple[str, str, str], plan: tuple[str, str]) -> None:
+    _STAGE_PLANS[key] = plan
+    _STAGE_PLANS.move_to_end(key)
+    while len(_STAGE_PLANS) > _MAX_STAGE_PLANS:
+        _STAGE_PLANS.popitem(last=False)
+
+
+def _stage(args: dict[str, Any], **kwargs: Any) -> str:
     """Stage one document. The broker computes the hash server-side (never
     trusted from the wire), safe-slugs the name, and enforces the ceilings;
-    its verdict is returned unchanged."""
-    response = _broker_request(
-        {
-            "action": TOOL_STAGE,
-            "staging_id": args.get("staging_id"),
-            "name": args.get("name"),
-            "text": args.get("text"),
-            "source": args.get("source"),
-        }
-    )
+    its verdict is returned unchanged.
+
+    For a connector document the text is NOT taken from ``args`` (ss#2247) — it
+    is the assembly of the reads the seat observed, prepared by
+    :func:`on_pre_tool_call` and carried in ``_STAGE_PLANS``. When that hook did
+    not run (a dispatch path that skips it), the assembly is redone here against
+    the resolved session, so the reference path never silently degrades into the
+    transcription path it replaced.
+    """
+    source = _source_of(args)
+    connector = str(source.get("connector") or "").strip().lower()
+    if connector in _CAPTURED_CONNECTORS:
+        key = read_capture.make_key(connector, source.get("matter_id"), source.get("document_id"))
+        plan = _STAGE_PLANS.pop(key, None)
+        if plan is None:
+            outcome = _plan_reference_stage(
+                provenance.resolve_session(kwargs.get("session_id")), args
+            )
+            if not isinstance(outcome, tuple):
+                return outcome if isinstance(outcome, str) else _TEXT_REQUIRED
+            plan = outcome
+        text, name = plan
+    else:
+        if not isinstance(args.get("text"), str):
+            return _TEXT_REQUIRED
+        text = args["text"]
+        name = str(args.get("name") or "")
+
+    payload = {
+        "action": TOOL_STAGE,
+        "staging_id": args.get("staging_id"),
+        "name": name,
+        "text": text,
+        "source": args.get("source"),
+    }
+    # Frame pre-check. The broker's ceiling applies to the WHOLE serialized
+    # request, so an over-ceiling document otherwise comes back as a bare
+    # "request_too_large" that names no field — and a model told only that
+    # something was too large will shrink the document. Measured exactly as
+    # _broker_request will serialize it, +1 for the newline readline() counts.
+    if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) + 1 > _MAX_FRAME_BYTES:
+        return _OVERSIZE.format(
+            connector=connector or "the",
+            document_id=str(source.get("document_id") or "").strip(),
+        )
+    response = _broker_request(payload)
+    if isinstance(response, dict) and response.get("ok"):
+        # Retention ends where the need does. It also means a duplicate stage of
+        # the same document refuses rather than quietly staging it twice under
+        # two broker doc ids.
+        read_capture.forget(connector, source.get("matter_id"), source.get("document_id"))
     return json.dumps(response, ensure_ascii=False)
 
 
@@ -945,6 +1184,130 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         return None
 
 
+#: Mirrors ``plugins/hermes-smd-reply/relay.py``'s ``_FAILED_STATUSES``. Copied
+#: rather than imported because hyphenated plugin directories are not importable
+#: module paths; the two must move together.
+_FAILED_STATUSES: frozenset[str] = frozenset(
+    {"error", "errored", "failed", "failure", "refused", "blocked", "denied"}
+)
+
+
+def _read_call_failed(status: Any, error_type: Any) -> bool:
+    """True when the read POSITIVELY reported it produced no document."""
+    if isinstance(status, str) and status.strip().lower() in _FAILED_STATUSES:
+        return True
+    return isinstance(error_type, str) and error_type.strip().lower() not in ("", "none", "null")
+
+
+def on_post_tool_call(**kwargs: Any) -> None:
+    """Hold the raw text of every connector document read (ss#2247).
+
+    WHY THIS HOOK AND NOT ``transform_tool_result``: ``post_tool_call`` fires
+    FIRST (docs/hook-surface.md §2, ordering invariant), so what lands in the
+    store is the connector's raw text while the model still sees only the
+    nonce-fenced wrap ``hermes-smd-inbound`` puts around it. That is a strict
+    improvement on the path this replaces, which asked the model to retype
+    content it had never seen unfenced. The fence is untouched.
+
+    Observer only — ``post_tool_call`` returns are not interpreted, and this
+    must never become a gate. Exception-safe: a capture miss costs one refused
+    stage (recoverable, and the refusal says how), never the turn.
+    """
+    try:
+        tool_name = kwargs.get("tool_name")
+        connector = _CAPTURED_READ_TOOLS.get(tool_name) if isinstance(tool_name, str) else None
+        if connector is None:
+            return
+        # Outcome kwargs are load-bearing, not telemetry (docs/hook-surface.md
+        # §2): this hook fires for FAILED calls too, and recording an error
+        # payload as a window would assemble garbage into a staged document.
+        # Detection is POSITIVE-only, matching hermes-smd-reply's relay.py:152 —
+        # an ALLOW-list of success words would silently disable capture the day
+        # Hermes renames its status vocabulary, and the resulting refusal
+        # ("no capture — read it again") would loop forever because re-reading
+        # cannot fix it. Over-capturing degrades safely instead: an error result
+        # carries no `text` key, so step 5 below drops it anyway.
+        if _read_call_failed(kwargs.get("status"), kwargs.get("error_type")):
+            return
+        # Makes the plugin self-sufficient for session resolution rather than
+        # depending on hermes-smd-trust having noted this session first.
+        session_id = kwargs.get("session_id")
+        provenance.note_session(session_id if isinstance(session_id, str) else None)
+
+        raw = kwargs.get("result")
+        if not isinstance(raw, str) or not raw:
+            return
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return
+        # The unsupported-type branch returns no `text` key at all; a document
+        # that yielded nothing returns "" with total_chars 0, which IS recorded
+        # so staging can say "drop it" instead of "read it again".
+        if "text" not in payload:
+            return
+        args = kwargs.get("args")
+        args = args if isinstance(args, dict) else {}
+        # The RESULT echoes both ids and is more trustworthy than args, which
+        # the model composed; args are the fallback.
+        matter_id = payload.get("matterId") or payload.get("matter_id") or args.get("matter_id")
+        document_id = (
+            payload.get("fileId")
+            or payload.get("file_id")
+            or payload.get("document_id")
+            or args.get("file_id")
+            or args.get("document_id")
+        )
+        read_capture.record(
+            connector,
+            matter_id,
+            document_id,
+            session_id=session_id,
+            name=payload.get("name") or payload.get("fileName"),
+            offset=payload.get("offset", args.get("offset", 0)),
+            text=payload.get("text"),
+            total_chars=payload.get("total_chars", payload.get("totalChars")),
+        )
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.warning(
+            "hermes-smd-establishment: read capture failed; the stage will refuse "
+            "and name the remedy",
+            exc_info=True,
+        )
+
+
+def _prepare_reference_stage(session_id: Any, args: dict[str, Any]) -> dict[str, Any] | None:
+    """Assemble the document this stage names, or block with the reason why.
+
+    THIS IS WHERE THE SESSION CHECK LIVES, and it lives here because this is the
+    only establishment seam that sees a session AND can refuse. Tool handlers get
+    no reliable ``session_id`` (overlay #141), so an assembly done in the handler
+    could only ask "did ANY session read this document?" — and one session's read
+    would then satisfy another session's stage, letting an establishment turn
+    stage a document nobody in that conversation ever opened.
+
+    On success the assembled bytes are stashed for :func:`_stage`; ``None`` is
+    returned because a ``pre_tool_call`` return is interpreted ONLY as a block
+    directive. Same write-here/read-there shape as ``_ADMIN_STASH``.
+    """
+    outcome = _plan_reference_stage(provenance.resolve_session(_as_session(session_id)), args)
+    if isinstance(outcome, str):
+        logger.info("hermes-smd-establishment: %s refused by reference staging", TOOL_STAGE)
+        return {"action": "block", "message": outcome}
+    if isinstance(outcome, tuple):
+        source = _source_of(args)
+        _remember_plan(
+            read_capture.make_key(
+                source.get("connector"), source.get("matter_id"), source.get("document_id")
+            ),
+            outcome,
+        )
+    return None
+
+
+def _as_session(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     """One hook, two predicates, one ceremony — every path fails closed.
 
@@ -969,6 +1332,12 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     For every OTHER tool: the recipient lock — a call carrying a live
     challenge code may only ship to exactly the rostered address
     (:func:`_containment_gate`).
+
+    A ``establish_stage_document`` that clears both gates then goes through
+    :func:`_prepare_reference_stage`, which is where a connector document is
+    resolved to the bytes the seat actually holds — after the authority checks,
+    never before, so a non-admin still gets the refusal that names who can
+    establish rather than one about document coverage.
     """
     tool_name = kwargs.get("tool_name")
     if tool_name not in ESTABLISH_TOOLS:
@@ -992,7 +1361,12 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             if entry is not None:
                 return None
         elif entry is not None and entry.get("is_admin") is True:
-            return _possession_gate(str(entry.get("sender") or ""), tool_name)
+            withheld = _possession_gate(str(entry.get("sender") or ""), tool_name)
+            if withheld is not None:
+                return withheld
+            if tool_name == TOOL_STAGE:
+                return _prepare_reference_stage(session_id, args)
+            return None
     except Exception:  # noqa: BLE001 — an unresolvable stash refuses
         logger.exception("hermes-smd-establishment: admin stash unreadable; refusing")
     logger.info(
@@ -1036,8 +1410,9 @@ def register(ctx: Any) -> None:
     )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    ctx.register_hook("post_tool_call", on_post_tool_call)
     logger.info(
-        "hermes-smd-establishment registered %s + admin gate + nudge",
+        "hermes-smd-establishment registered %s + admin gate + nudge + read capture",
         ", ".join(ESTABLISH_TOOLS),
     )
 
@@ -1048,6 +1423,7 @@ __all__ = [
     "TOOL_STAGE",
     "TOOL_STATUS",
     "TOOL_SUBMIT",
+    "on_post_tool_call",
     "on_pre_llm_call",
     "on_pre_tool_call",
     "register",
