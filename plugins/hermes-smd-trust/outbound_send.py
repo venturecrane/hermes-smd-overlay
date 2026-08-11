@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,9 +45,19 @@ _SEND_TIMEOUT_S = 10.0
 # built from a closed allowlist so nothing unexpected reaches the send API.
 _SEND_BODY_FIELDS: tuple[str, ...] = ("to", "cc", "bcc", "subject", "text", "html", "reply_to")
 
-# Cache the resolved primary inbox id for the process (single tenant per Machine;
-# the inbox is stable for the life of the seat). Resolved lazily on first send.
-_INBOX_ID: str | None = None
+# Cache the resolved inbox id for the process, KEYED BY the address it resolved,
+# so a cache hit can never answer for a different address than the caller asked
+# about. Resolved lazily on first send.
+_INBOX_ID_BY_ADDRESS: dict[str, str] = {}
+
+# The seat's own inbox address. Authored value wins; absent that, the convention
+# is <slug>@agentmail.to. The convention is a DEFAULT, never a guarantee — inboxes
+# are created out of band (provision-customer.sh's agentmail block says so), so the
+# resolved address is always checked against the account listing and a miss is
+# fatal (ss#2258).
+_INBOX_ADDRESS_ENV = "AGENTMAIL_INBOX_ADDRESS"
+_SLUG_ENVS: tuple[str, ...] = ("SMD_CUSTOMER_SLUG", "CUSTOMER_SLUG")
+_AGENTMAIL_DOMAIN = "agentmail.to"
 
 
 class OutboundSendError(RuntimeError):
@@ -111,13 +122,40 @@ def resolve_inbox_id(
     opener: Callable[..., Any] | None = None,
     _refresh: bool = False,
 ) -> str:
-    """The primary inbox id for this seat (``GET /v0/inboxes``), cached.
+    """THIS SEAT'S OWN inbox id (``GET /v0/inboxes``), matched by address, cached.
 
-    Single tenant per Machine, so the first inbox is the agent's own. Raises
-    :class:`AgentMailSendError` if the list call fails or returns no inbox."""
-    global _INBOX_ID
-    if _INBOX_ID and not _refresh:
-        return _INBOX_ID
+    Previously this took ``inboxes[0]`` on the reasoning "single tenant per
+    Machine, so the first inbox is the agent's own". That was false in production
+    and dangerous (ss#2258). ``AGENTMAIL_API_KEY`` is account-wide — provisioning
+    says so in as many words ("It can reach the shared account's OTHER inboxes
+    (cross-tenant)") — and on 2026-08-11 the listing held EIGHT inboxes ordered
+    newest-first: probe inboxes, simulation inboxes, other ventures' inboxes, and
+    the pilot seat's own at index SIX. So ``inboxes[0]`` was whichever inbox
+    somebody created most recently.
+
+    The caller is ``_dispatch_approved_send``, which fires the moment a human
+    approves a draft — and a client seat's day-one posture is
+    ``external_send: draft_for_review``. So the unfixed path sends every approved
+    letter from an arbitrary mailbox, and the moment a new client's inbox is
+    created it becomes ``inboxes[0]`` and every OTHER seat starts sending as that
+    client. It had never bitten only because this dispatch path had never fired.
+
+    Resolution now: the authored ``AGENTMAIL_INBOX_ADDRESS`` if set, else the
+    ``<slug>@agentmail.to`` convention. Either way the address MUST appear in the
+    account listing — a miss raises rather than falling back, because sending from
+    the wrong firm's mailbox is worse than not sending.
+    """
+    address = seat_inbox_address()
+    if not address:
+        raise AgentMailSendError(
+            "cannot resolve this seat's inbox address: neither "
+            f"{_INBOX_ADDRESS_ENV} nor a customer slug is set. Refusing to guess "
+            "which mailbox to send from"
+        )
+    if not _refresh:
+        cached = _INBOX_ID_BY_ADDRESS.get(address)
+        if cached:
+            return cached
     parsed = _request_json(
         base_url + "/inboxes",
         api_key=api_key,
@@ -129,12 +167,39 @@ def resolve_inbox_id(
     inboxes = parsed.get("inboxes") if isinstance(parsed, dict) else None
     if not isinstance(inboxes, list) or not inboxes:
         raise AgentMailSendError("agentmail returned no inboxes")
-    first = inboxes[0]
-    inbox_id = first.get("inbox_id") if isinstance(first, dict) else None
-    if not isinstance(inbox_id, str) or not inbox_id:
-        raise AgentMailSendError("agentmail inbox has no inbox_id")
-    _INBOX_ID = inbox_id
-    return inbox_id
+    for entry in inboxes:
+        if not isinstance(entry, dict):
+            continue
+        inbox_id = entry.get("inbox_id")
+        if not isinstance(inbox_id, str) or inbox_id.lower() != address.lower():
+            continue
+        _INBOX_ID_BY_ADDRESS[address] = inbox_id
+        return inbox_id
+    # Fail closed. The account listing is not this seat's to interpret: if the
+    # address it owns is not there, something is wrong with provisioning, and the
+    # safe outcome is a refused send the caller audits — never a send from a
+    # mailbox that belongs to someone else.
+    raise AgentMailSendError(
+        f"this seat's inbox {address!r} is not in the AgentMail account listing "
+        f"({len(inboxes)} inbox(es) visible); refusing to send from another "
+        "inbox (ss#2258)"
+    )
+
+
+def seat_inbox_address() -> str | None:
+    """The address this seat is entitled to send from, or None when unknowable.
+
+    Authored value wins so a seat whose inbox does not follow the convention can
+    still be pinned without a code change.
+    """
+    authored = (os.environ.get(_INBOX_ADDRESS_ENV) or "").strip()
+    if authored:
+        return authored
+    for env_name in _SLUG_ENVS:
+        slug = (os.environ.get(env_name) or "").strip()
+        if slug:
+            return f"{slug}@{_AGENTMAIL_DOMAIN}"
+    return None
 
 
 def _send_body(payload: dict[str, Any]) -> dict[str, Any]:
