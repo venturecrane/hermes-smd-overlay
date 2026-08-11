@@ -412,3 +412,59 @@ def test_store_acquire_failure_aborts_before_any_mutation() -> None:
         )
     assert good.removed == [], "no removal may happen if any store acquisition fails"
     assert good.creates == [], "no creation may happen if any store acquisition fails"
+
+
+# ---------------------------------------------------------------------------
+# Containment mode (ss-console#2276)
+# ---------------------------------------------------------------------------
+
+
+class TestContainment:
+    """containment=True converges every reconciled persona to ZERO managed
+    jobs regardless of what customer.yaml authors — the durable half of the
+    #2258-incident lever (the sentinel is read by translate.py; this is the
+    semantics it invokes)."""
+
+    def test_removes_managed_jobs_and_creates_nothing(self) -> None:
+        entry = {"skill": "inbox-triage", "schedule": "0 * * * *"}
+        store = FakeCronStore(
+            jobs=[
+                {"id": "keep-1", "name": "operator-added-by-hand"},
+                {"id": "kill-1", "name": managed_name("crane", "inbox-triage")},
+            ]
+        )
+        factory = FakeFactory({"crane": store})
+        registered = materialize_cron(
+            _customer([entry]),
+            factory,
+            reconcile_slugs=["crane"],
+            containment=True,
+        )
+        assert registered == []
+        assert store.creates == []
+        assert store.removed == ["kill-1"]
+        # unmanaged jobs are untouched — containment owns only managed jobs
+        assert [j["id"] for j in store.jobs] == ["keep-1"]
+
+    def test_malformed_customer_yaml_does_not_block_containment(self) -> None:
+        # A broken authored entry raises in normal mode; under containment it
+        # must NOT — converging to zero jobs is the whole point when the
+        # authored config itself is suspect.
+        broken = {"skill": "", "schedule": ""}
+        store = FakeCronStore(jobs=[{"id": "kill-1", "name": managed_name("crane", "x")}])
+        factory = FakeFactory({"crane": store})
+        with pytest.raises(CronMaterializeError):
+            materialize_cron(_customer([broken]), factory, reconcile_slugs=["crane"])
+        registered = materialize_cron(
+            _customer([broken]), factory, reconcile_slugs=["crane"], containment=True
+        )
+        assert registered == []
+        assert store.jobs == []
+
+    def test_containment_false_is_the_status_quo(self) -> None:
+        entry = {"skill": "inbox-triage", "schedule": "0 * * * *"}
+        factory = FakeFactory()
+        registered = materialize_cron(
+            _customer([entry]), factory, reconcile_slugs=["crane"], containment=False
+        )
+        assert registered == [managed_name("crane", "inbox-triage")]

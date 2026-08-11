@@ -180,6 +180,7 @@ def materialize_cron(
     store_for: Callable[[str], CronStore],
     stage_script_for: Callable[[str, str, str], str] | None = None,
     reconcile_slugs: Iterable[str] | None = None,
+    containment: bool = False,
 ) -> list[str]:
     """Reconcile Hermes cron jobs from customer.yaml into each persona's profile
     home, converging every reconciled persona's store to EXACTLY its authored
@@ -210,8 +211,19 @@ def materialize_cron(
     pass, before ANY store mutation — so a failure (bad entry, missing script, or
     an unreadable store) leaves every store untouched. The second pass removes
     each reconciled persona's managed jobs, then recreates only the authored set.
-    Returns the managed names now registered."""
-    by_persona = _desired_by_persona(customer)  # raises before any mutation on bad input
+    Returns the managed names now registered.
+
+    ``containment=True`` (the ss-console#2276 sentinel,
+    :mod:`shared.cron_containment`) converges every reconciled persona to the
+    EMPTY set regardless of what customer.yaml authors: the desired set is
+    forced to nothing, existing managed jobs are removed, and nothing is
+    created. Authored entries are deliberately not validated in this mode —
+    containment must converge to zero even when customer.yaml is the thing
+    that is broken."""
+    # raises before any mutation on bad input (skipped under containment: the
+    # desired set is empty by decree, and a malformed customer.yaml must not
+    # keep a contained seat from converging to zero jobs)
+    by_persona = {} if containment else _desired_by_persona(customer)
 
     reconcile = sorted(set(by_persona) | {s for s in (reconcile_slugs or []) if s})
 

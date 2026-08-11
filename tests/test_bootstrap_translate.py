@@ -1770,3 +1770,48 @@ def test_the_email_prompts_still_end_in_the_untrusted_data_fence():
 
     for prompt in (_INBOUND_EMAIL_PROMPT, _INBOUND_EMAIL_PROMPT_MSGRAPH):
         assert prompt.index(_GROUNDING) < prompt.index("untrusted email body below")
+
+
+# ---------------------------------------------------------------------------
+# Cron containment sentinel at the translate layer (ss-console#2276)
+# ---------------------------------------------------------------------------
+
+
+def test_translate_containment_sentinel_converges_cron_to_zero(tmp_path, caplog):
+    """With <hermes_home>/CRON_CONTAINMENT present, bootstrap removes existing
+    managed jobs, creates none, and says so at WARNING — the durable half of an
+    incident containment (a runtime enabled=False flip alone is undone by the
+    next boot's authored-set reconcile)."""
+    import logging
+
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    (hermes_home / "CRON_CONTAINMENT").write_text("ss#2258 containment\n")
+    stores: dict[str, _RecordingReconcileStore] = {
+        "marcus": _RecordingReconcileStore(
+            [
+                {
+                    "id": "armed-1",
+                    "name": "op-managed:marcus:health-monitor",
+                    "schedule": "*/30 * * * *",
+                }
+            ]
+        )
+    }
+
+    def store_for(slug: str) -> _RecordingReconcileStore:
+        return stores.setdefault(slug, _RecordingReconcileStore())
+
+    with caplog.at_level(logging.WARNING):
+        translate_customer_yaml(
+            customer_yaml_path=str(customer_yaml),
+            hermes_home=str(hermes_home),
+            skills_dir=str(skills_dir),
+            cron_store_for=store_for,
+        )
+
+    assert "armed-1" in stores["marcus"].removed, "containment must remove existing managed jobs"
+    assert all(not j["name"].startswith("op-managed:") for j in stores["marcus"].jobs), (
+        "no managed job may survive containment"
+    )
+    assert any("CRON CONTAINMENT ACTIVE" in r.getMessage() for r in caplog.records)
+    assert any("ss#2258 containment" in r.getMessage() for r in caplog.records)
