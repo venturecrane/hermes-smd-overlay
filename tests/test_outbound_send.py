@@ -44,11 +44,15 @@ def _opener(captured, payload):
 
 
 @pytest.fixture(autouse=True)
-def _reset_inbox_cache():
+def _reset_inbox_cache(monkeypatch):
     mod = _load()
-    mod._INBOX_ID = None
+    mod._INBOX_ID_BY_ADDRESS.clear()
+    # Pin the seat's identity for every test. Without this the module would fall
+    # back to the <slug>@agentmail.to convention off the ambient environment, and
+    # the suite's verdict would depend on the developer's shell (ss#2258).
+    monkeypatch.setenv("AGENTMAIL_INBOX_ADDRESS", "crane@x.agentmail.to")
     yield
-    mod._INBOX_ID = None
+    mod._INBOX_ID_BY_ADDRESS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +77,80 @@ def test_resolve_inbox_id_errors_on_no_inbox():
     mod = _load()
     with pytest.raises(mod.AgentMailSendError):
         mod.resolve_inbox_id("am_key", opener=_opener([], {"inboxes": []}))
+
+
+# ---------------------------------------------------------------------------
+# ss#2258 — the seat sends from ITS OWN inbox, or not at all
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_picks_its_own_inbox_not_the_first():
+    """The regression. The account listing is newest-first and account-wide: on
+    2026-08-11 it held 8 inboxes with the pilot seat's own at index 6. Taking
+    inboxes[0] meant sending from whichever inbox was created most recently."""
+    mod = _load()
+    listing = {
+        "inboxes": [
+            {"inbox_id": "ss-probe-admin@agentmail.to"},
+            {"inbox_id": "sim-opposing-counsel@agentmail.to"},
+            {"inbox_id": "crane@x.agentmail.to"},
+            {"inbox_id": "another-firm@agentmail.to"},
+        ]
+    }
+    assert mod.resolve_inbox_id("am_key", opener=_opener([], listing)) == "crane@x.agentmail.to"
+
+
+def test_resolve_refuses_when_its_own_inbox_is_absent():
+    """Fail closed. Sending from another firm's mailbox is worse than not sending,
+    so a listing without this seat's address raises instead of falling back."""
+    mod = _load()
+    listing = {
+        "inboxes": [
+            {"inbox_id": "ss-probe-admin@agentmail.to"},
+            {"inbox_id": "another-firm@agentmail.to"},
+        ]
+    }
+    with pytest.raises(mod.AgentMailSendError, match="not in the AgentMail account listing"):
+        mod.resolve_inbox_id("am_key", opener=_opener([], listing))
+
+
+def test_resolve_refuses_when_identity_is_unknowable(monkeypatch):
+    """No authored address and no slug ⇒ the seat cannot know which mailbox is
+    its own, so it must not pick one."""
+    mod = _load()
+    monkeypatch.delenv("AGENTMAIL_INBOX_ADDRESS", raising=False)
+    monkeypatch.delenv("SMD_CUSTOMER_SLUG", raising=False)
+    monkeypatch.delenv("CUSTOMER_SLUG", raising=False)
+    with pytest.raises(mod.AgentMailSendError, match="Refusing to guess"):
+        mod.resolve_inbox_id("am_key", opener=_opener([], {"inboxes": [{"inbox_id": "x@y"}]}))
+
+
+def test_seat_address_falls_back_to_slug_convention(monkeypatch):
+    mod = _load()
+    monkeypatch.delenv("AGENTMAIL_INBOX_ADDRESS", raising=False)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "ashton-price")
+    assert mod.seat_inbox_address() == "ashton-price@agentmail.to"
+
+
+def test_authored_address_wins_over_the_convention(monkeypatch):
+    """A seat whose inbox does not follow the convention can still be pinned
+    without a code change."""
+    mod = _load()
+    monkeypatch.setenv("AGENTMAIL_INBOX_ADDRESS", "odd-name@agentmail.to")
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "ashton-price")
+    assert mod.seat_inbox_address() == "odd-name@agentmail.to"
+
+
+def test_cache_is_keyed_by_address(monkeypatch):
+    """A cache hit must never answer for a different address than was asked."""
+    mod = _load()
+    calls = []
+    first = {"inboxes": [{"inbox_id": "crane@x.agentmail.to"}]}
+    assert mod.resolve_inbox_id("am_key", opener=_opener(calls, first)) == "crane@x.agentmail.to"
+    monkeypatch.setenv("AGENTMAIL_INBOX_ADDRESS", "other@agentmail.to")
+    second = {"inboxes": [{"inbox_id": "other@agentmail.to"}]}
+    assert mod.resolve_inbox_id("am_key", opener=_opener(calls, second)) == "other@agentmail.to"
+    assert len(calls) == 2  # the second address did NOT read the first one's cache
 
 
 # ---------------------------------------------------------------------------
