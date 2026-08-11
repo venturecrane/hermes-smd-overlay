@@ -191,7 +191,9 @@ def test_acked_unknown_token_is_rejected_before_the_broker(escalation, tmp_path,
     assert requests == []  # nothing shipped
 
 
-def test_acked_against_pre_epoch_raise_is_refused_before_the_broker(escalation, tmp_path, monkeypatch):
+def test_acked_against_pre_epoch_raise_is_refused_before_the_broker(
+    escalation, tmp_path, monkeypatch
+):
     """ss #2151. A human replying with an ACK code from an old alert must be told
     the code is superseded. Resolving it would ship an ack for a phantom item and
     report a silenced alarm while the real deadline kept firing."""
