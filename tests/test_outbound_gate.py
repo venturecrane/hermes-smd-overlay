@@ -256,6 +256,25 @@ def test_gated_draft_tools_cover_expected_set() -> None:
     assert "email_list_messages" not in ob.GATED_DRAFT_TOOLS
 
 
+def test_establishment_staging_is_exempt_but_submission_is_not() -> None:
+    """ss #2247: the draft gate scans AGENT-COMPOSED text.
+
+    ``establish_stage_document`` carries the firm's own document, read in place
+    and staged byte for byte, so scanning it for fabrication asks whether the
+    firm fabricated its own letter. On the first live run the gate refused the
+    firm's demand letter (dollar figures) and trial binder (dates), and the
+    agent deleted the figures to make it stage.
+
+    ``establish_submit`` is the other half of the pair and MUST stay gated: its
+    ``spec_body`` is composed by the agent. Both directions are asserted here,
+    because an exemption written without its falsifier is how the whole gate
+    quietly goes away.
+    """
+    ob = load_plugin("hermes-smd-trust").outbound
+    assert "establish_stage_document" not in ob.GATED_DRAFT_TOOLS
+    assert "establish_submit" in ob.GATED_DRAFT_TOOLS
+
+
 def test_draft_gate_scans_html_key(monkeypatch) -> None:
     """EFF-01: a draft whose body is under the AgentMail `html` key must be
     scanned (previously only html_body/text were recognized, so an html-only
