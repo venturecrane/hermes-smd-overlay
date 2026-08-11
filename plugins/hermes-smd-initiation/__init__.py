@@ -66,19 +66,50 @@ is the sender resolution (unforgeable, server-side) and the policy text
 of inventing one per turn; the skill files themselves carry the per-skill
 reservation ("who may invoke"), which is authored in ss-console and enforced
 in front of the client by the card's falsifiers plus this statement.
+
+THE SECOND SURFACE: ``operator_seat_facts`` (ss-console#2222 card rows 1+7).
+Authority was never the gap for ``operator-introduce`` — REACHABILITY of the
+skill's content was. On an email turn core pre-loads only the routed skill's
+body, the skills index is absent, and the router's ``skill_view`` instruction
+names a tool the webhook surface does not offer, so the model improvised a
+fluent roster from memory. The fix is the establishment plugin's pattern:
+register the act as a TOOL, carry the procedure in the description, nudge once
+adjacent to the message, and let the audit row make fired-vs-improvised
+decidable. The facts themselves live in :mod:`.seat_facts`; this module owns
+registration, the description, and the nudge.
+
+WHY THIS PLUGIN AND NOT A NEW ONE. ``_resolve_attributed_sender`` would become
+a THIRD copy (initiation + establishment already carry it, the second existing
+precisely because the ss#2222 fix to the first was not propagated). This
+plugin's authored purpose is person-invoked skills over the mail channel, it
+already loads the live config per turn, and its ``requires_env`` is empty so it
+loads on every seat. A new plugin with a ``requires_env`` entry would silently
+not load where the var is unset — how a tool gets zero rows fleet-wide
+(overlay#170).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from shared.customer_config import CustomerConfig
 from shared.inbound import SESSION_INBOUND_ORIGIN
+from shared.tool_registration import register_wrapped_tool
+
+from . import seat_facts
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["register", "on_pre_llm_call"]
+TOOL_SEAT_FACTS = "operator_seat_facts"
+
+__all__ = ["TOOL_SEAT_FACTS", "TOOLS", "register", "on_pre_llm_call", "seat_facts"]
+
+#: Every tool this plugin registers. The classification-completeness suite reads
+#: this so the next tool added here cannot ship undecided — an unmapped tool
+#: fails closed to ``REFUSED`` and never executes.
+TOOLS: tuple[str, ...] = (TOOL_SEAT_FACTS,)
 
 
 # The authored policy statement. ``{admin_line}`` and ``{sender}`` are the only
@@ -112,6 +143,122 @@ _ROSTERED_STATEMENT = (
     "should fire and a step cannot be performed, say plainly which step "
     "failed; a report may only claim steps that actually ran."
 )
+
+
+#: The tool's only argument. It does not change WHAT is read — it changes
+#: auditability: the row records which depth the sender asked for, so "depth 2
+#: was asked and depth 1 was answered" becomes decidable from the ledger instead
+#: of arguable from the prose.
+_SEAT_FACTS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "depth": {
+            "type": "string",
+            "enum": list(seat_facts.DEPTHS),
+            "description": (
+                "introduction = who I am, what I can see, and a one-line routine "
+                "summary. walkthrough = the full grouped routine roster. "
+                "Default introduction."
+            ),
+        },
+    },
+    "additionalProperties": False,
+}
+
+#: The description is the procedure carrier: it is the one part of this tool
+#: that is ALWAYS in front of the model, on every turn, on a channel where the
+#: skill body is absent. Both trigger phrasings appear verbatim, and the three
+#: prohibitions are stated here rather than only in a skill file the model may
+#: never read on this channel.
+_SEAT_FACTS_DESCRIPTION = (
+    "Grounded facts about this Operator seat, read live from its own "
+    "configuration, its live scheduler store, and the installed specification "
+    "manifest. Call this whenever someone on the firm's roster asks you about "
+    'yourself — "introduce yourself and tell me what you can see" (use depth '
+    "'introduction'), \"walk me through what you'll do each day and week\", "
+    '"what are your routines", "what\'s running" (use depth \'walkthrough\') — '
+    "and compose your reply from what it returns. Never answer these from "
+    "memory: a fluent roster of a seat you are not is the failure this tool "
+    "exists to prevent. Every section carries a 'read' flag; where read is "
+    "false, say plainly that you could not read it and carry on with the rest. "
+    "The matters and inbox counts are deliberately not read here — observe "
+    "those yourself with your own connector tools this turn and report only "
+    "what you observed. Print the 'counts' line in your reply, both depths, so "
+    "a mis-parse is visible to the reader. The result carries no run history, "
+    "no client names, and no matter identifiers, and you must not add any."
+)
+
+#: One line, appended on webhook turns from a rostered sender whose message
+#: reads as an ask about the seat itself. The tool description is one entry in a
+#: 15-item list on a channel whose LAST instruction says "write the reply"; the
+#: nudge is the thing that arrives adjacent to the message. That asymmetry is
+#: what ``_NUDGE`` exists for in the establishment plugin, and overlay#170 (a
+#: registered-but-unadvertised tool with zero rows fleet-wide) is the evidence
+#: that registration alone is not reach.
+_SEAT_FACTS_NUDGE = (
+    "When this person is asking about you — who you are, what you can see, what "
+    f"you will be doing each day and week — call {TOOL_SEAT_FACTS} and compose "
+    "your answer from what it returns. Do not answer from memory or from this "
+    "conversation."
+)
+
+#: Case-insensitive substrings that read as an ask about the seat itself.
+#: Authored here so the set is versioned by PR. NOT load-bearing for
+#: correctness: if a phrasing misses, the tool description and the email-route
+#: prompt still name the tool — three surfaces, degrading in that order.
+_SEAT_FACTS_PHRASES: tuple[str, ...] = (
+    "introduce yourself",
+    "who are you",
+    "what can you do",
+    "what you can see",
+    "walk me through what you'll do",
+    "walk me through what you will do",
+    "what are your routines",
+    "what's running",
+    "what is running",
+    "show me everything you do",
+    "what will you do each day",
+)
+
+#: The channel the nudge is scoped to. On CLI/TUI the model has the skills index
+#: and ``skill_view``, so the skill body is reachable and a nudge would be noise.
+_WEBHOOK_PLATFORM = "webhook"
+
+
+def _seat_facts_asked(user_message: object) -> bool:
+    """True when the turn's message reads as an ask about the seat itself."""
+    if not isinstance(user_message, str) or not user_message:
+        return False
+    lowered = user_message.lower()
+    return any(phrase in lowered for phrase in _SEAT_FACTS_PHRASES)
+
+
+def _seat_facts_handler(args: dict[str, Any] | None = None, **_: Any) -> str:
+    """Assemble and serialize the facts envelope. Never raises.
+
+    ``build_facts`` is already fail-open per section; this wrapper exists so a
+    serialization fault (which would otherwise surface to the model as an opaque
+    tool error it might paraphrase into a claim) becomes an explicit, readable
+    refusal instead.
+    """
+    args = args if isinstance(args, dict) else {}
+    depth = args.get("depth")
+    depth = depth if isinstance(depth, str) else seat_facts.DEPTH_INTRODUCTION
+    try:
+        facts = seat_facts.build_facts(depth=depth)
+        return json.dumps(facts, ensure_ascii=False)
+    except Exception:  # noqa: BLE001 — a tool handler must not raise into the loop
+        logger.exception("%s: fact assembly failed", TOOL_SEAT_FACTS)
+        return json.dumps(
+            {
+                "schema": seat_facts.SCHEMA,
+                "error": (
+                    "I could not read my own seat this turn. Say that plainly "
+                    "rather than describing yourself from memory."
+                ),
+            },
+            ensure_ascii=False,
+        )
 
 
 def _load_config() -> Any | None:
@@ -190,12 +337,26 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         is_admin = bool(cfg.sender_is_admin(sender))
         admin_line = "YES (scope.admins)" if is_admin else "NO (not on scope.admins)"
         statement = _ROSTERED_STATEMENT.format(sender=sender, admin_line=admin_line)
+        lines = [f"{_HEADER}\n{statement}"]
+        # The grounding nudge rides the SAME rostered predicate (a stranger gets
+        # nothing here either), and only on the channel where the skill body is
+        # unreachable. Returns from every plugin on this hook are merged, so
+        # this coexists with the authority statement rather than replacing it.
+        if kwargs.get("platform") == _WEBHOOK_PLATFORM and _seat_facts_asked(
+            kwargs.get("user_message")
+        ):
+            lines.append(_SEAT_FACTS_NUDGE)
+            logger.info(
+                "hermes-smd-initiation: %s nudge injected (sender=%s)",
+                TOOL_SEAT_FACTS,
+                sender,
+            )
         logger.info(
             "hermes-smd-initiation: authority injected (sender=%s, admin=%s)",
             sender,
             is_admin,
         )
-        return {"context": f"{_HEADER}\n{statement}"}
+        return {"context": "\n\n".join(lines)}
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.warning(
             "hermes-smd-initiation: pre_llm_call raised; no authority injected",
@@ -205,9 +366,41 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
 
 
 def register(ctx: Any) -> None:
-    """Plugin entry point — one observer hook, no tools, no blocking gate."""
+    """Plugin entry point — one observer hook, one read tool, no blocking gate.
+
+    NO ``requires_env`` AND NO ``check_fn`` ON THE TOOL, and this is
+    load-bearing rather than tidy. ``register_wrapped_tool`` forwards both
+    straight to ``ctx.register_tool``, and ``registry.get_definitions`` drops any
+    tool whose check fails — SILENTLY, because gateway callers pass
+    ``quiet_mode=True``. That is not hypothetical: ``vision_analyze`` and
+    ``web_search`` are named in ``platform_toolsets.webhook`` on pilot-smokeball
+    and absent from the live surface for exactly this reason. A tool that
+    silently is not there is indistinguishable from a model that chose not to
+    call it, which is the very thing this tool exists to make decidable. It
+    reads only the filesystem and the live config, so it needs no env; every
+    path lookup happens INSIDE the handler where a missing var degrades one
+    section instead of deleting the tool.
+
+    There is deliberately no ``pre_tool_call`` gate either. The tool is READ with
+    no argument that selects data — the only argument is a depth enum, so there
+    is no recipient, path, or identifier a gate could recognize as misuse, and a
+    check that cannot fail has measured nothing. The counts-only ceiling is a
+    handler invariant (nothing in :mod:`.seat_facts` reads or constructs a matter
+    or client name), which is stronger than a gate that strips them afterwards.
+    """
+    register_wrapped_tool(
+        ctx,
+        name=TOOL_SEAT_FACTS,
+        toolset="initiation",
+        schema=_SEAT_FACTS_SCHEMA,
+        handler=_seat_facts_handler,
+        description=_SEAT_FACTS_DESCRIPTION,
+        emoji="",
+    )
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     logger.info(
-        "hermes-smd-initiation registered: pre_llm_call authority injection "
-        "(ss#2222 gate 3 — authored initiation disposition for rostered senders)"
+        "hermes-smd-initiation registered: pre_llm_call authority injection + %s "
+        "(ss#2222 gate 3 — authored initiation disposition for rostered senders; "
+        "card rows 1+7 — grounded self-description on the mail channel)",
+        TOOL_SEAT_FACTS,
     )

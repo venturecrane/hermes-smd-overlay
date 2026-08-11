@@ -275,6 +275,11 @@ def _workspace_tools() -> frozenset[str]:
     return frozenset(plugin.TOOLS)
 
 
+def _initiation_tools() -> frozenset[str]:
+    plugin = load_plugin("hermes-smd-initiation")
+    return frozenset(plugin.TOOLS)
+
+
 # ---------------------------------------------------------------------------
 # Layer A — every WIREABLE MCP connector must have a classified tool surface.
 # ---------------------------------------------------------------------------
@@ -400,6 +405,35 @@ def test_every_workspace_tool_is_classified() -> None:
         f"workspace tool(s) not classified: {undecided}. "
         f"Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
     )
+
+
+def test_every_initiation_tool_is_classified() -> None:
+    """Every tool the hermes-smd-initiation plugin registers in-process must be
+    decided (ss-console#2222). Same property as the workspace guard, and the same
+    reason: an unclassified tool fails closed to REFUSED and never executes, so
+    ``operator_seat_facts`` would be registered, advertised, nudged for, and
+    silently dead — the introduce ask improvising exactly as it does today while
+    every other test in this suite stayed green.
+
+    This is also the drift guard for the NEXT tool added to this plugin."""
+    undecided = sorted(t for t in _initiation_tools() if not _is_decided(t))
+    assert undecided == [], (
+        f"initiation tool(s) not classified: {undecided}. "
+        f"Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
+    )
+
+
+def test_seat_facts_is_read() -> None:
+    """Not merely decided — READ specifically. It opens the seat's own config,
+    its own scheduler store, and the root-owned manifest, writes nothing, and
+    reaches no tenant surface. Any heavier class would put it behind an
+    entitlement ceiling a seat may not have authored, which is how a tool ends up
+    with zero rows fleet-wide."""
+    from shared.action_classes import ActionClass, classify_tool
+
+    resolved = classify_tool("operator_seat_facts")
+    assert resolved.action_class is ActionClass.READ
+    assert resolved.unmapped is False
 
 
 def test_msgraph_mail_tools_mirror_the_manifest_oracle():

@@ -75,16 +75,25 @@ def initiation(monkeypatch):
     return plugin
 
 
-def test_register_wires_pre_llm_call(initiation):
+def test_register_wires_pre_llm_call_and_the_seat_facts_tool(initiation):
+    """One hook and one tool. The hook list is unchanged — ``plugin.yaml``'s
+    ``hooks:`` and ``tests/test_hook_parity.py`` stay correct without an edit,
+    because a registered TOOL is not a hook attachment."""
     hooks: dict[str, object] = {}
+    tools: list[dict] = []
 
     class _Ctx:
         def register_hook(self, name, cb):
             hooks[name] = cb
 
+        def register_tool(self, **kwargs):
+            tools.append(kwargs)
+
     initiation.register(_Ctx())
     assert hooks.keys() == {"pre_llm_call"}
     assert callable(hooks["pre_llm_call"])
+    assert [t["name"] for t in tools] == [initiation.TOOL_SEAT_FACTS]
+    assert initiation.TOOLS == (initiation.TOOL_SEAT_FACTS,)
 
 
 def test_rostered_admin_gets_full_authority(initiation):
@@ -229,3 +238,158 @@ def test_callback_is_exception_safe(monkeypatch):
     monkeypatch.setattr(plugin, "_load_config", _boom)
     # Must swallow, log, and inject nothing — never raise out of a hook.
     assert plugin.on_pre_llm_call(session_id="s1", sender_id="chris@firm.com") is None
+
+
+# ---------------------------------------------------------------------------
+# T10 — the operator_seat_facts nudge (ss-console#2222 card rows 1 + 7).
+#
+# Registration is not reach. overlay#170 is the evidence: record_peer_preference
+# was registered fleet-wide and had zero rows, because a tool nobody advertises
+# is a tool that does not exist. The tool description is one entry in a 15-item
+# list on a channel whose LAST instruction says "write the reply"; the nudge is
+# the thing that arrives adjacent to the message.
+#
+# Three gates, ALL required, each with the state it must refuse:
+#   * platform == webhook   — on CLI/TUI the model has the skills index and
+#                             skill_view, so the skill body is reachable and a
+#                             nudge is noise. Falsifier: drop the platform check
+#                             and the CLI case injects.
+#   * rostered sender       — the same predicate that already governs the
+#                             authority statement. A stranger gets nothing here
+#                             either; the fence + taint stay the only surfaces.
+#   * an introduce-ish ask  — NOT load-bearing for correctness (the description
+#                             and the email-route prompt still name the tool), so
+#                             a missed phrasing degrades rather than breaks.
+# ---------------------------------------------------------------------------
+
+_ASK = "Introduce yourself and tell me what you can see."
+
+
+def _ctx(initiation, **kwargs):
+    out = initiation.on_pre_llm_call(**kwargs)
+    return out["context"] if out else None
+
+
+def test_nudge_rides_a_rostered_webhook_turn_that_asks_about_the_seat(initiation):
+    ctx = _ctx(
+        initiation,
+        session_id="s1",
+        sender_id="chris@firm.com",
+        platform="webhook",
+        user_message=_ASK,
+    )
+    assert initiation.TOOL_SEAT_FACTS in ctx
+    # The authority statement is still emitted independently — returns from every
+    # plugin on this hook are merged, and so are these two lines.
+    assert "Admin-classed: YES" in ctx
+    assert "person-initiation" in ctx
+
+
+def test_nudge_rides_a_rostered_non_admin_too(initiation):
+    """A new paralegal asking what their Operator does deserves an answer as much
+    as a partner does — the skill is read-only and explicitly not admin-gated."""
+    ctx = _ctx(
+        initiation,
+        session_id="s1",
+        sender_id="paralegal@firm.com",
+        platform="webhook",
+        user_message=_ASK,
+    )
+    assert initiation.TOOL_SEAT_FACTS in ctx
+    assert "Admin-classed: NO" in ctx
+
+
+def test_no_nudge_on_a_non_webhook_platform(initiation):
+    """THE falsifier for the platform gate."""
+    ctx = _ctx(
+        initiation,
+        session_id="s1",
+        sender_id="chris@firm.com",
+        platform="cli",
+        user_message=_ASK,
+    )
+    assert ctx is not None, "authority is unchanged on CLI"
+    assert initiation.TOOL_SEAT_FACTS not in ctx
+
+
+def test_no_nudge_for_a_non_rostered_sender(initiation):
+    """A stranger gets nothing at all from this plugin — not the authority
+    statement, and not the nudge."""
+    assert (
+        initiation.on_pre_llm_call(
+            session_id="s1",
+            sender_id="attacker@evil.com",
+            platform="webhook",
+            user_message=_ASK,
+        )
+        is None
+    )
+
+
+def test_no_nudge_on_an_unattributed_turn(initiation):
+    """Cron / self-wake / webhook dispatch: no person to nudge."""
+    assert (
+        initiation.on_pre_llm_call(
+            session_id="s1", sender_id="", platform="webhook", user_message=_ASK
+        )
+        is None
+    )
+
+
+def test_no_nudge_when_the_message_is_about_something_else(initiation):
+    ctx = _ctx(
+        initiation,
+        session_id="s1",
+        sender_id="chris@firm.com",
+        platform="webhook",
+        user_message="Please pull the served discovery on the Tuesday calendar.",
+    )
+    assert ctx is not None
+    assert initiation.TOOL_SEAT_FACTS not in ctx
+
+
+def test_no_nudge_when_there_is_no_user_message(initiation):
+    ctx = _ctx(initiation, session_id="s1", sender_id="chris@firm.com", platform="webhook")
+    assert ctx is not None
+    assert initiation.TOOL_SEAT_FACTS not in ctx
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Introduce yourself and tell me what you can see.",
+        "introduce yourself",
+        "WHO ARE YOU?",
+        "Walk me through what you'll do each day and week.",
+        "Walk me through what you will do each day and week.",
+        "what are your routines",
+        "So, what's running right now?",
+        "Show me everything you do.",
+        "Hi there. What can you do for us?",
+    ],
+)
+def test_both_card_phrasings_and_their_neighbours_trigger_the_nudge(initiation, message):
+    """Both card rows are covered verbatim. The depth-2 phrasing is the one that
+    appears NOWHERE in the router body on main — the gap that let row 7 ship
+    unmapped — so its presence here is the point, not a convenience."""
+    ctx = _ctx(
+        initiation,
+        session_id="s1",
+        sender_id="chris@firm.com",
+        platform="webhook",
+        user_message=message,
+    )
+    assert initiation.TOOL_SEAT_FACTS in ctx
+
+
+def test_the_nudge_forbids_answering_from_memory(initiation):
+    """A remembered roster is the failure that looks exactly like success, so the
+    nudge has to say so rather than merely pointing at the tool."""
+    ctx = _ctx(
+        initiation,
+        session_id="s1",
+        sender_id="chris@firm.com",
+        platform="webhook",
+        user_message=_ASK,
+    )
+    assert "Do not answer from memory" in ctx

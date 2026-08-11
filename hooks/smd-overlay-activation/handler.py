@@ -248,6 +248,82 @@ def _webhook_read_self_check() -> None:
     )
 
 
+def _webhook_expected_tools_check() -> None:
+    """Report the WARN-tier webhook surface. Never ``_die``s (ss-console#2222).
+
+    ``WEBHOOK_EXPECTED_TOOLS`` names tools whose absence degrades one class of
+    answer rather than the seat — ``operator_seat_facts`` today. So the posture
+    is deliberately the opposite of the ``read_file`` assertion above: log
+    CRITICAL, write the sentinel the gate's heartbeat reads, and KEEP BOOTING. A
+    seat that would improvise an introduction is worse than one that would not;
+    a seat that refuses to serve at all is worse than both, and that cost lands
+    on the paid client.
+
+    The sentinel splits "an expected tool is missing" from "the check could not
+    run", because identical silence would hide the second behind the first.
+    Skipped entirely on seats that do not serve the webhook platform: nothing is
+    written, so the heartbeat holds rather than reporting a green for a surface
+    that does not exist.
+    """
+    try:
+        from shared.webhook_read_surface import (
+            expected_tool_report,
+            webhook_platform_enabled,
+            write_webhook_surface_status,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.critical(
+            "SMD OVERLAY WEBHOOK SURFACE UNPROVABLE: cannot import the expected-tools "
+            "contract (%s: %s) — boot CONTINUES, but nothing can tell you whether the "
+            "seat's grounded self-description is reachable (ss-console#2222)",
+            type(e).__name__,
+            e,
+        )
+        return
+
+    try:
+        config = _gateway_config()
+        if not webhook_platform_enabled(config):
+            logger.info(
+                "webhook expected-tools check skipped: this seat does not serve "
+                "the webhook platform"
+            )
+            return
+        report = expected_tool_report(config)
+    except Exception as e:  # noqa: BLE001
+        logger.critical(
+            "SMD OVERLAY WEBHOOK SURFACE UNPROVABLE: expected-tools check raised "
+            "(%s: %s) — boot CONTINUES; heartbeat will report webhook_surface_ok=0",
+            type(e).__name__,
+            e,
+        )
+        try:
+            write_webhook_surface_status(ok=False, tools=None)
+        except Exception:  # noqa: BLE001 — observability must never block boot
+            logger.warning("webhook expected-tools: sentinel write failed", exc_info=True)
+        return
+
+    missing = sorted(tool for tool, entry in report.items() if not entry["offered"])
+    if missing:
+        logger.critical(
+            "SMD OVERLAY WEBHOOK SURFACE DEGRADED: expected tool(s) %s are NOT offered "
+            "on webhook turns — the plugin did not register them, or a check_fn dropped "
+            "them silently (gateway callers pass quiet_mode=True). Boot CONTINUES: their "
+            "absence degrades one class of answer, not the seat. Asks about this seat "
+            "will be answered from memory instead of from what was read (ss-console#2222).",
+            missing,
+        )
+    else:
+        logger.info(
+            "webhook expected-tools check passed: %s offered on webhook turns",
+            sorted(report),
+        )
+    try:
+        write_webhook_surface_status(ok=True, tools=report)
+    except Exception:  # noqa: BLE001 — observability must never block boot
+        logger.warning("webhook expected-tools: sentinel write failed", exc_info=True)
+
+
 def _die(reason: str) -> None:
     """Fail closed: an operator that cannot prove it governs live turns must not
     serve. Log CRITICAL with the SPECIFIC reason (so the failure is diagnosable —
@@ -435,6 +511,13 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     #    so the only way to be wrong about it is to be visibly down. Scoped to
     #    seats that actually serve the webhook platform.
     _webhook_read_self_check()
+
+    # 5b. WEBHOOK EXPECTED-TOOLS check (ss-console#2222), the WARN tier of the
+    #     same surface. Same resolution, opposite posture: absence logs CRITICAL
+    #     and lands in a heartbeat field, and the boot CONTINUES. See the
+    #     function's docstring and shared/webhook_read_surface.py for why the two
+    #     tiers answer different orders of harm.
+    _webhook_expected_tools_check()
 
     logger.info(
         "SMD overlay ACTIVE + AUDITING + SPEND-CAPPED on the live gateway: %d hook "

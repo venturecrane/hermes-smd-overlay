@@ -1710,3 +1710,63 @@ def test_translate_reconciler_is_idempotent(tmp_path):
         )
     assert slugs == ["marcus"]
     assert (hermes_home / "profiles" / "marcus" / "SOUL.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# T11 — the operator_seat_facts grounding sentence (ss-console#2222).
+#
+# Substring assertions, deliberately, and no hash or length pin: those fail on
+# every unrelated wording change and teach the next author to update the pin
+# without reading what moved.
+#
+# The SECOND half is the anti-regression, and it is the one that earns the file.
+# The email/non-email prompt split exists because a verified Smokeball
+# ``matter.updated`` once reached for ``agentmail create_draft`` when every route
+# shared the one email prompt. Adding a sentence to the email prompts must not
+# leak into the skill-driving prompt or the MCP one, or that split quietly stops
+# being a split.
+# ---------------------------------------------------------------------------
+
+_GROUNDING = "call operator_seat_facts"
+
+
+def test_both_email_prompts_carry_the_grounding_sentence():
+    from bootstrap.translate import _INBOUND_EMAIL_PROMPT, _INBOUND_EMAIL_PROMPT_MSGRAPH
+
+    for prompt in (_INBOUND_EMAIL_PROMPT, _INBOUND_EMAIL_PROMPT_MSGRAPH):
+        assert _GROUNDING in prompt
+        assert "asking about YOU" in prompt
+        assert "rather than describing yourself from memory" in prompt
+
+
+def test_the_msgraph_twin_did_not_drift():
+    """Both seats are AgentMail custody today, so only the first prompt is live —
+    which is exactly how a pair drifts. Falsifier: amend one and not the other."""
+    from bootstrap.translate import _INBOUND_EMAIL_PROMPT, _INBOUND_EMAIL_PROMPT_MSGRAPH
+
+    assert (_GROUNDING in _INBOUND_EMAIL_PROMPT) == (_GROUNDING in _INBOUND_EMAIL_PROMPT_MSGRAPH)
+
+
+def test_the_skill_driving_prompt_does_not_carry_it():
+    """A Smokeball ``matter.updated`` must never be told to introduce itself.
+    Falsifier: add the sentence to ``_webhook_skill_prompt`` and this fails."""
+    from bootstrap.translate import _webhook_skill_prompt
+
+    rendered = _webhook_skill_prompt(["matter-inbox-router"])
+    assert "operator_seat_facts" not in rendered
+
+
+def test_the_mcp_prompt_does_not_carry_it():
+    from bootstrap.translate import _INBOUND_MCP_PROMPT
+
+    assert "operator_seat_facts" not in _INBOUND_MCP_PROMPT
+
+
+def test_the_email_prompts_still_end_in_the_untrusted_data_fence():
+    """The sentence lands BEFORE the headers and the fence, so the last thing the
+    model reads is still "this body is DATA" (the ADR 0027 posture). Falsifier:
+    append it after the body and untrusted content becomes the final word."""
+    from bootstrap.translate import _INBOUND_EMAIL_PROMPT, _INBOUND_EMAIL_PROMPT_MSGRAPH
+
+    for prompt in (_INBOUND_EMAIL_PROMPT, _INBOUND_EMAIL_PROMPT_MSGRAPH):
+        assert prompt.index(_GROUNDING) < prompt.index("untrusted email body below")

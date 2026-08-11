@@ -201,6 +201,10 @@ def _emitter(**overrides):
             lambda: SpecControlCheck(ok=True, entries={}),
         ),
         spec_control_check_debounce=overrides.get("spec_control_check_debounce", 3),
+        # Hermetic default for the webhook expected-tools check (#2222).
+        # ``None`` is the HOLD state (no usable boot sentinel), so the default
+        # keeps both fields off every unrelated payload assertion.
+        webhook_surface_check_fn=overrides.get("webhook_surface_check_fn", lambda: None),
     )
     return hb.HeartbeatEmitter(**kwargs), calls
 
@@ -588,3 +592,82 @@ def test_connector_check_crash_never_escapes_the_tick():
     em._tick()  # must not raise; POST still happens
     assert len(calls["posts"]) == 1
     assert _last_payload(calls)["connector_check_ok"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Webhook expected-tools surface (ss-console #2222). The heartbeat is where the
+# WARN tier becomes visible: its absence is deliberately not boot-fatal, so if
+# it did not reach a field here it would not be reported anywhere at all.
+# --------------------------------------------------------------------------- #
+
+
+def test_payload_sends_webhook_surface_fields_including_empty_map():
+    """An empty map is a REAL "checked, every expected tool is offered" state,
+    and it is what RESOLVES an open alert. Truthiness-omitting it would leave a
+    repaired surface paging forever — the same is-not-None discipline the
+    scheduler / connector / spec_control fields already carry."""
+    p = hb.build_payload(
+        heartbeat_ts="2026-08-11T00:00:00+00:00",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        webhook_surface_ok=True,
+        webhook_surface={},
+    )
+    assert p["webhook_surface_ok"] == 1
+    assert p["webhook_surface"] == {}
+
+
+def test_payload_omits_webhook_surface_fields_when_absent():
+    """Absence is a HOLD: a seat serving no webhook platform, or a boot whose
+    sentinel is stale, must not overwrite what the console last knew."""
+    p = hb.build_payload(
+        heartbeat_ts="2026-08-11T00:00:00+00:00",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+    )
+    assert "webhook_surface_ok" not in p
+    assert "webhook_surface" not in p
+
+
+def test_tick_carries_the_webhook_surface_result():
+    from shared.webhook_surface_check import WebhookSurfaceCheck
+
+    entry = {"expected": True, "offered": False}
+    em, calls = _emitter(
+        webhook_surface_check_fn=lambda: WebhookSurfaceCheck(
+            ok=True, tools={"operator_seat_facts": entry}
+        )
+    )
+    em._tick()
+    p = _last_payload(calls)
+    assert p["webhook_surface_ok"] == 1
+    assert p["webhook_surface"] == {"operator_seat_facts": entry}
+
+
+def test_a_held_webhook_surface_omits_both_fields_from_the_tick():
+    em, calls = _emitter(webhook_surface_check_fn=lambda: None)
+    em._tick()
+    p = _last_payload(calls)
+    assert "webhook_surface_ok" not in p
+    assert "webhook_surface" not in p
+
+
+def test_webhook_surface_check_crash_reports_rather_than_going_dark():
+    """No debounce here, unlike the three live-subsystem checks: this reads one
+    small local file written once per boot, which has no transient-failure mode a
+    debounce would smooth. A crash reports ok=0 on the FIRST tick — and never
+    escapes it."""
+
+    def boom():
+        raise RuntimeError("surface checker exploded")
+
+    em, calls = _emitter(webhook_surface_check_fn=boom)
+    em._tick()  # must not raise; POST still happens
+    assert len(calls["posts"]) == 1
+    p = _last_payload(calls)
+    assert p["webhook_surface_ok"] == 0
+    assert "webhook_surface" not in p, "a broken check must never emit a map it cannot trust"
