@@ -1067,6 +1067,22 @@ def test_unread_caption_still_blocks(relay_mod) -> None:
 #
 # A test of the gate's verdict logic cannot catch that, which is the whole point:
 # the verdict logic was correct the entire time. Only a test of THIS path can.
+#
+# WHAT THESE DO AND DO NOT PROVE (read before citing them as coverage).
+# They pin the logic. They do NOT demonstrate a reachable production state. The
+# roster below puts one address on `scope.inbound_allow_from` AND types it as a
+# client in `scope.outbound_roster` — a combination the console validator
+# REJECTS (src/lib/operator/customer-yaml/sections-scope.ts:268, "a recipient
+# cannot be both internal and a typed outbound class"). Since a reply only fires
+# for a sender on `inbound_allow_from`, and such a sender therefore can never
+# carry a typed class, the gate's enforcing branch is unreachable in any
+# AUTHORABLE config — not merely unconfigured today.
+#
+# They are kept because the logic is correct and goes live the moment that gap
+# closes: ss#2263 decides how a firm expresses "auto-reply to this person AND
+# treat them as a client"; ss#2271 is the activation checklist. Re-point the
+# roster below at whatever ss#2263 makes authorable, and only then does a green
+# run here mean the reply lane is covered.
 # ---------------------------------------------------------------------------
 
 _M_A = "aaaaaaaa-1111-2222-3333-444444444444"

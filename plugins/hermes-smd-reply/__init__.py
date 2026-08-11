@@ -507,9 +507,27 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # INTERNAL — exempt from matter identity AND from the content floor.
         # So for THIS decision the typed roster is consulted on its own terms
         # (empty internal roster), and a recipient the client typed as CLIENT is
-        # never exempt, whatever the inbound roster also says. With no
-        # outbound_roster authored — A&P today — nothing types as CLIENT and the
-        # behaviour is exactly today's.
+        # never exempt, whatever the inbound roster also says.
+        #
+        # READ THIS BEFORE BELIEVING THE LANE IS COVERED. It is NOT. The branch
+        # below where the gate actually runs is unreachable in any AUTHORABLE
+        # configuration, and that is a stronger statement than "no seat has
+        # configured it yet". A reply only happens for a sender on
+        # `scope.inbound_allow_from`; the console validator
+        # (src/lib/operator/customer-yaml/sections-scope.ts:268) REJECTS any
+        # address that is on that list and also typed in `scope.outbound_roster`
+        # — "a recipient cannot be both internal and a typed outbound class". So
+        # a reply recipient can never be typed CLIENT, `typed_only` is never
+        # CLIENT here, and the exemption always resolves True.
+        #
+        # This is kept, not deleted, because the logic is right and becomes live
+        # the moment that schema gap closes (ss#2263 decides how a firm should
+        # express "auto-reply to this person AND treat them as a client";
+        # ss#2271 is the activation checklist, gated on a firm actually asking
+        # for client replies). Until then: say "the proactive lane, when the
+        # matter's party list is complete" — never "the reply lane is covered".
+        # The ss#2167 cases in tests/test_reply.py author the both-lists config
+        # the validator rejects, so they pin the logic, not a reachable state.
         try:
             typed_only = classify_recipients_typed([origin.sender_address], [], cfg.outbound_roster)
         except Exception:  # noqa: BLE001 — a fault must not take the reply path
