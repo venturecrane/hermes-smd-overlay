@@ -163,15 +163,17 @@ def test_control_number_cited_correct_pairing_passes() -> None:
 
 
 def test_number_citation_is_case_insensitive() -> None:
+    # This test previously asserted the OPPOSITE — that a lower-case citation was
+    # not extracted at all — and documented that as a known gap (ss#2262). The
+    # gap is closed: the extractor is IGNORECASE, which is safe here because
+    # _resolve_cited keeps only tokens that resolve to a matter this session
+    # read, so a false positive cannot manufacture a verdict. Extraction detail
+    # lives in tests/test_matter_number_extraction.py.
     _closed(M_A, CLIENT_A)
     matter_binding.membership_for(SID).add_alias(NUM_A, M_A)
     v = matter_gate.evaluate(session_id=SID, body=f"re: {NUM_A.lower()}", recipients={CLIENT_B})
-    # The extractor only matches upper-case numbers today (its own gap, filed
-    # separately), so a lower-case citation is not extracted at all — which is
-    # unresolved, never a pass disguised as a verdict.
-    assert v.status in {"unresolved", "not_applicable"}
-    assert not v.should_withhold
-    # But a matching-case citation with odd surrounding whitespace still binds.
+    assert v.is_mismatch and v.should_withhold
+    # And a matching-case citation with odd surrounding whitespace still binds.
     v2 = matter_gate.evaluate(session_id=SID, body=f"re:  {NUM_A} ", recipients={CLIENT_B})
     assert v2.is_mismatch
 
