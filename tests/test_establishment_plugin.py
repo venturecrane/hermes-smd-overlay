@@ -25,8 +25,21 @@ import json
 import pytest
 
 from shared.action_classes import ActionClass, classify_tool
-from shared.inbound import SESSION_TAINT
+from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT, InboundOrigin
 from tests.conftest import load_plugin
+
+
+@pytest.fixture(autouse=True)
+def _clean_origin_register():
+    SESSION_INBOUND_ORIGIN._origins.clear()
+    SESSION_INBOUND_ORIGIN._unbound.clear()
+    SESSION_INBOUND_ORIGIN._by_address.clear()
+    SESSION_INBOUND_ORIGIN._by_message.clear()
+    yield
+    SESSION_INBOUND_ORIGIN._origins.clear()
+    SESSION_INBOUND_ORIGIN._unbound.clear()
+    SESSION_INBOUND_ORIGIN._by_address.clear()
+    SESSION_INBOUND_ORIGIN._by_message.clear()
 
 
 class _FakeConfig:
@@ -211,6 +224,43 @@ def test_unattributed_turn_leaves_the_classification(establishment):
     _turn(plugin, "chris@firm.com")
     _turn(plugin, "")
     assert _gate(plugin, plugin.TOOL_SUBMIT) is None
+
+
+def test_webhook_route_turn_classifies_the_verified_admin(establishment):
+    """ss#2222, live-caught: on the email path the gateway threads the ROUTE
+    as sender_id, so classifying it asks "is this channel an admin?" and an
+    authored admin was refused with "only the firm's Operator admins can
+    establish" — the possession ceremony never reached, no challenge ever
+    sent. The verified sender recorded by the webhook router is the person.
+    """
+    plugin, _ = establishment
+    SESSION_INBOUND_ORIGIN.record(
+        "", InboundOrigin(sender_address="chris@firm.com", message_id="m-1")
+    )
+    _turn(plugin, "webhook:agentmail", session="sess-9")
+    assert _gate(plugin, plugin.TOOL_SUBMIT, session="sess-9") is None
+    # The claimed origin is re-keyed so later resolvers in the same pass find it.
+    rekeyed = SESSION_INBOUND_ORIGIN.get("sess-9")
+    assert rekeyed is not None and rekeyed.sender_address == "chris@firm.com"
+
+
+def test_webhook_route_turn_does_not_promote_a_non_admin(establishment):
+    """The falsifier for the fix: resolution must grant the PERSON's authority,
+    never blanket-pass a webhook turn. A rostered non-admin stays refused."""
+    plugin, _ = establishment
+    SESSION_INBOUND_ORIGIN.record(
+        "", InboundOrigin(sender_address="paralegal@firm.com", message_id="m-2")
+    )
+    _turn(plugin, "webhook:agentmail", session="sess-8")
+    assert _gate(plugin, plugin.TOOL_SUBMIT, session="sess-8")["action"] == "block"
+
+
+def test_unresolvable_webhook_route_stays_refused(establishment):
+    """No recorded origin: the route falls through unchanged, fails the admin
+    match, and the gate refuses. Fail-safe, not fail-open."""
+    plugin, _ = establishment
+    _turn(plugin, "webhook:agentmail", session="sess-7")
+    assert _gate(plugin, plugin.TOOL_SUBMIT, session="sess-7")["action"] == "block"
 
 
 # ---------------------------------------------------------------------------

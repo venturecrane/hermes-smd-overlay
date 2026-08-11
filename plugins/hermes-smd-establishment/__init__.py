@@ -143,6 +143,7 @@ from typing import Any
 from shared import admin_possession
 from shared.action_classes import ActionClass, BannedToolError, classify_tool
 from shared.customer_config import CustomerConfig
+from shared.inbound import SESSION_INBOUND_ORIGIN
 from shared.outbound_recipient import DRAFT_RECORD_TOOLS, extract_to_recipients
 from shared.tool_registration import register_wrapped_tool
 
@@ -849,6 +850,46 @@ def _person_pref_pointer(sender_id: Any) -> str | None:
         return None
 
 
+def _resolve_attributed_sender(session_id: str, sender_id: str) -> str:
+    """The verified person behind this turn — never a channel identity.
+
+    THE ss#1941 SHAPE, AND WHY THIS EXISTS (ss#2222, live-caught 2026-08-10):
+    on a webhook-dispatched turn ``sender_id`` is the ROUTE
+    (``webhook:agentmail``), not the person, so classifying it against
+    ``scope.admins`` asks "is this channel an admin?" — always no. An admin
+    authored on the seat emailed a blessed corpus and was told "only the
+    firm's Operator admins can establish firm-level voice/shape"; the
+    possession ceremony was never reached, so no challenge was ever sent and
+    the refusal named the wrong cause. Peer-memory hit this first (ss#1941)
+    and the initiation plugin fixed it (overlay#230); establishment carried
+    the same defect because nothing re-checked the other consumers.
+
+    Mirrors ``hermes-smd-initiation._resolve_attributed_sender`` exactly.
+    Preference order:
+
+    1. ``SESSION_INBOUND_ORIGIN.get(session_id)`` — already session-keyed.
+    2. The claim-once unbound handoff, ONLY for channel-shaped sender ids (a
+       real per-user id must never be overridden by a coincidentally pending
+       email origin). A claimed origin is immediately RE-KEYED under this
+       session id so later resolvers in the same pass find it cooperatively.
+    3. Fall back to ``sender_id`` unchanged — a channel identity then simply
+       fails the admin match and nothing is granted (fail-safe).
+    """
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id) if session_id else None
+        if origin is None and str(sender_id).startswith("webhook:"):
+            origin = SESSION_INBOUND_ORIGIN.claim_unbound()
+            if origin is not None and session_id:
+                SESSION_INBOUND_ORIGIN.record(session_id, origin)
+    except Exception:  # noqa: BLE001 — resolution must never break the hook
+        origin = None
+    if origin is not None and origin.sender_address:
+        addr = origin.sender_address.strip().lower()
+        if addr:
+            return addr
+    return str(sender_id)
+
+
 def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Classify the turn's sender against ``scope.admins`` and stash it.
 
@@ -870,9 +911,13 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         session_id = kwargs.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             return None
-        sender_id = kwargs.get("sender_id")
-        if not sender_id:
+        raw_sender = kwargs.get("sender_id")
+        if not raw_sender:
             return None
+        # The person, not the route (ss#2222). Everything below — the admin
+        # classification, the stash the pre_tool_call gate reads, the
+        # possession confirmations, the per-person pointer — keys on this.
+        sender_id = _resolve_attributed_sender(session_id, str(raw_sender))
         cfg = _load_config()
         is_admin = bool(cfg is not None and cfg.sender_is_admin(sender_id))
         _ADMIN_STASH[session_id] = {"sender": str(sender_id), "is_admin": is_admin}
