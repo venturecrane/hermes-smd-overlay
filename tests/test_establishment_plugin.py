@@ -471,6 +471,93 @@ def test_post_tool_call_ignores_a_result_with_no_text_key(admin_session):
     )
 
 
+def test_capture_unwraps_the_live_dispatcher_envelope(admin_session):
+    """Falsifier: the exact silent failure caught live on pilot-smokeball at
+    2026-08-11T17:25 — the hook's ``result`` is ``{"result": "<connector JSON
+    as a string>"}``, not the connector's JSON. The outer object parses, has no
+    top-level ``text``, and the old guard returned silently: no warning, no
+    capture, and every stage in the turn refused ``no_capture`` after four real
+    reads. This fixture is the LIVE string shape, transcribed from the seat's
+    session store, not the connector's documented shape."""
+    plugin, _ = admin_session
+    inner = json.dumps(
+        {
+            "fileId": "f-1",
+            "matterId": "m-1",
+            "name": "Reyes demand.pdf",
+            "fileExtension": ".txt",
+            "text": "Dear Ms. Reyes,",
+            "offset": 0,
+            "total_chars": 15,
+            "truncated": False,
+        },
+        indent=2,
+    )
+    plugin.on_post_tool_call(
+        tool_name="mcp_smokeball_read_document",
+        args={"matter_id": "m-1", "file_id": "f-1"},
+        result=json.dumps({"result": inner}),
+        session_id="sess-1",
+        status="success",
+    )
+    result = read_capture.assemble("smokeball", "m-1", "f-1", session_id="sess-1")
+    assert result.ok and result.text == "Dear Ms. Reyes,"
+
+
+def test_capture_unwraps_an_mcp_content_block_envelope(admin_session):
+    """Falsifier: a future Hermes hands the MCP protocol shape
+    (``{"content": [{"type": "text", "text": ...}]}``) through the hook and
+    capture goes silently dark again, exactly like the live incident."""
+    plugin, _ = admin_session
+    inner = json.dumps(
+        {
+            "fileId": "f-1",
+            "matterId": "m-1",
+            "name": "n",
+            "text": "Body.",
+            "offset": 0,
+            "total_chars": 5,
+            "truncated": False,
+        }
+    )
+    plugin.on_post_tool_call(
+        tool_name="mcp_smokeball_read_document",
+        args={"matter_id": "m-1", "file_id": "f-1"},
+        result=json.dumps({"content": [{"type": "text", "text": inner}]}),
+        session_id="sess-1",
+        status="success",
+    )
+    result = read_capture.assemble("smokeball", "m-1", "f-1", session_id="sess-1")
+    assert result.ok and result.text == "Body."
+
+
+def test_unwrap_never_reparses_a_result_that_already_carries_text(admin_session):
+    """Falsifier: a connector result carrying a field literally named
+    ``result`` alongside ``text`` gets re-unwrapped into garbage. The unwrap
+    must stop the moment the payload looks like the read result itself."""
+    plugin, _ = admin_session
+    plugin.on_post_tool_call(
+        tool_name="mcp_smokeball_read_document",
+        args={"matter_id": "m-1", "file_id": "f-1"},
+        result=json.dumps(
+            {
+                "matterId": "m-1",
+                "fileId": "f-1",
+                "name": "n",
+                "text": "Keep me.",
+                "offset": 0,
+                "total_chars": 8,
+                "truncated": False,
+                "result": "IGNORED",
+            }
+        ),
+        session_id="sess-1",
+        status="success",
+    )
+    result = read_capture.assemble("smokeball", "m-1", "f-1", session_id="sess-1")
+    assert result.ok and result.text == "Keep me."
+
+
 def test_an_unfamiliar_status_word_still_captures(admin_session):
     """Falsifier: failure detected by an ALLOW-list of success words. The day
     Hermes reports ``status="completed"`` instead of ``"success"``, capture stops
