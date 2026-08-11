@@ -67,9 +67,41 @@ from shared import matter_binding
 
 logger = logging.getLogger(__name__)
 
-# Matter-number shapes. Kept byte-compatible with the identifier filter's case
-# pattern so the two agree on what "a matter number in the body" means.
-_MATTER_NUM_RE = re.compile(r"\b(?:\d{2,4}-[A-Z]{2,4}-\d{2,5}|[A-Z]{2,4}-\d{4,6})\b")
+# Matter-number shapes, LONGEST ALTERNATIVE FIRST — the ordering is the fix.
+#
+# An earlier version of this comment claimed the pattern was "kept byte-compatible
+# with the identifier filter's case pattern". That was false: identifier_filter's
+# ``_CASE_RE`` already carried an ``[A-Z]{2}-\d{4}-\d{4}`` branch and IGNORECASE,
+# and this one carried neither. The two had diverged, and the comment asserting
+# they had not is what made the divergence invisible.
+#
+# The cost of that divergence, measured on the pilot 2026-08-11
+# (vfy_01KZRZH044CH4N5EEKHQ9A6KHW): alternation is first-match-wins, so against
+# the real matter ``PI-2026-0001`` the short ``[A-Z]{2,4}-\d{4,6}`` branch matched
+# ``PI-2026`` and left ``-0001`` behind. The truncated token resolved to nothing,
+# the verdict was *unresolved*, and the send was not withheld — on the ONE matter
+# of nine on that seat with a complete party list, i.e. the only one the gate
+# could have acted on at all. A silently WRONG token is worse than no token: it
+# reads as "this body cites a matter I have never seen" rather than as a defect.
+#
+# Deliberately NOT reusing identifier_filter._CASE_RE: its branches require
+# exactly two letters, which drops the real ``2026-OPS-001`` (three). The two
+# patterns stay separate and that is now stated rather than denied.
+#
+# IGNORECASE is safe HERE specifically, in a way it would not be in a reporting
+# filter: ``_resolve_cited`` keeps only tokens that resolve to a matter this
+# session actually read, so a false positive contributes nothing to any verdict.
+# It cannot manufacture a mismatch; it can only fail to find a matter. That is
+# what lets this close ss#2262 (a lower-case citation was not extracted at all)
+# in the same pattern as ss#2269.
+_MATTER_NUM_RE = re.compile(
+    r"\b(?:"
+    r"[A-Za-z]{2,4}-\d{4}-\d{2,5}"  # PI-2026-0001  (must precede the short form)
+    r"|\d{2,4}-[A-Za-z]{2,4}-\d{2,5}"  # 2026-PI-101, 2026-OPS-001
+    r"|[A-Za-z]{2,4}-\d{4,6}"  # PI-123456
+    r")\b",
+    re.IGNORECASE,
+)
 
 # A matter id as the connector emits it (UUID), in case a body carries one.
 _MATTER_ID_RE = re.compile(
