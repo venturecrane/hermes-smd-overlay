@@ -266,6 +266,20 @@ vars:
       = BLOCK (the enforcing state). Only the literal "report" downgrades to
       report-only; any other value blocks (fail-closed). Never client-authorable
       — integrity controls do not appear in customer.yaml.
+  SMD_MATTER_GATE_MODE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: >-
+      operator-only rollback lever for the outbound matter-identity gate (ss
+      #2167). Same shape as SMD_IDENTIFIER_GATE_MODE: unset = BLOCK, only the
+      literal "report" downgrades to report-only, any other value blocks
+      (fail-closed, so an operator typo cannot silently disable a safety
+      control). Never client-authorable — integrity controls do not appear in
+      customer.yaml. BLOCK here means a proven cross-matter send is downgraded
+      to a human draft; it never refuses outright, and an UNRESOLVED membership
+      is reported rather than enforced.
   CUSTOMER_SLUG:
     discovery: static
     stage: agent

@@ -77,7 +77,7 @@ from shared.trust_decision import (
     TrustDecision,
 )
 
-from . import voice_gate
+from . import matter_gate, voice_gate
 
 # Action classes that must never fire autonomously on a turn that ingested
 # untrusted (non-internal) inbound content — the taint-gate. READ and
@@ -1141,6 +1141,65 @@ def evaluate_tool_call(
     # supersedes any prior pending; only a resolved-recipient send is captured.
     if is_send and send_recips and decision.audit_action == "await_approval":
         PENDING_SEND.capture(tool_name, args, send_recips)
+
+    # ---- Outbound matter identity (ss#2167) --------------------------------
+    # Deliberately OUTSIDE the ``decision.allowed`` guard below. On a seat where
+    # every send sits at the draft_for_review ceiling, ``allowed`` is False for
+    # EVERY send, so a check placed inside that block would never execute on the
+    # seat that most needs it — the same defect, one layer in, as placing it
+    # after the pre_tool_call early return.
+    #
+    # Neither side of the check is the model's word: the matter identifiers are
+    # the ones physically in the body it wrote, and membership comes from
+    # connector reads. A send declaring its own matter would be circular — the
+    # model resolves the recipient's matter to address them, so it would declare
+    # the recipient's matter and always agree with itself.
+    #
+    # EXTERNAL_SEND_INTERNAL is absent from this tuple by design: firm staff are
+    # not expected to be parties, and an internal alert CARRIES matter context to
+    # a colleague on purpose (ADR 0072).
+    if is_send and effective_action in (
+        ActionClass.EXTERNAL_SEND,
+        ActionClass.EXTERNAL_SEND_CLIENT,
+        ActionClass.EXTERNAL_SEND_VENDOR,
+    ):
+        matter_verdict = matter_gate.evaluate(
+            session_id=session_id,
+            body=matter_gate.body_from_args(args),
+            recipients=send_recips,
+            # A records vendor is not a party to the matter it is being written
+            # about; the roster that types it is the CLIENT's, not ours.
+            recipient_is_exempt=effective_action is ActionClass.EXTERNAL_SEND_VENDOR,
+        )
+        if matter_verdict.should_withhold and matter_gate.mode() == "block":
+            if decision.allowed:
+                return {
+                    "action": "block",
+                    "message": (
+                        "Refused: this message cites "
+                        f"{', '.join(matter_verdict.matters) or 'a matter'} but "
+                        f"{matter_verdict.reason}; routing to draft for human review "
+                        "(ss#2167 matter identity)"
+                    ),
+                }
+            # The ceiling already withheld this send, so there is nothing left to
+            # stop — but a reviewer working the draft queue must be able to tell a
+            # suspected cross-matter send from ordinary review traffic. Re-record
+            # carries the FULL original trail plus the augmented reason: rebuilding
+            # the row from scratch would write the ceiling fields back to None and
+            # re-break the null-ceiling defect #2122 fixed.
+            _record_decision(
+                tool_call_id,
+                tool_name,
+                persona_slug,
+                action_class=decision.action_class.value,
+                audit_action=decision.audit_action,
+                allowed=decision.allowed,
+                reason=f"{decision.reason} | MATTER_MISMATCH: {matter_verdict.reason}",
+                authored_ceiling=decision.authored_ceiling,
+                vertical_floor=decision.vertical_floor,
+                effective_ceiling=decision.effective_ceiling,
+            )
 
     # Content-sensitivity floor (ADR 0031). Applies to sends that LEAVE the firm:
     # the outside class plus the typed client / records-vendor classes. Money /

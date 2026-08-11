@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import provenance, report_render, spec_stamp
+from shared import matter_binding, provenance, report_render, spec_stamp
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _AUDIT_INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -28,7 +28,7 @@ from shared.secrets import get_secret
 from shared.spec_status import SPEC_STATUS
 from shared.workspace_broker import GRANT_ARG, authorize
 
-from . import approval, enforce, outbound, outbound_send, spec_read
+from . import approval, enforce, matter_gate, outbound, outbound_send, spec_read
 
 logger = logging.getLogger(__name__)
 
@@ -344,6 +344,13 @@ def on_post_tool_call(**kwargs: Any) -> None:
             resolved,
             result if isinstance(result, str) else str(result),
         )
+        # ss#2167 — matter membership rides the SAME read stream. The outbound
+        # matter-identity gate cannot call the connector at send time (this
+        # process cannot synchronously drive an MCP server from pre_tool_call),
+        # so "who is a party to which matter" has to be captured while the agent
+        # reads it. Structured capture, deliberately separate from the
+        # provenance register above, which stringifies.
+        matter_binding.record_from_read(resolved, result)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: post_tool_call provenance record failed", exc_info=True)
 
