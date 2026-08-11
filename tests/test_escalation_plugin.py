@@ -191,6 +191,68 @@ def test_acked_unknown_token_is_rejected_before_the_broker(escalation, tmp_path,
     assert requests == []  # nothing shipped
 
 
+def test_acked_against_pre_epoch_raise_is_refused_before_the_broker(escalation, tmp_path, monkeypatch):
+    """ss #2151. A human replying with an ACK code from an old alert must be told
+    the code is superseded. Resolving it would ship an ack for a phantom item and
+    report a silenced alarm while the real deadline kept firing."""
+    plugin, requests = escalation
+    key = escalation_ledger.item_key("m-1", "task-1", "settlement-offer-lapsed", None)
+    token = escalation_ledger.token_for(key)
+    ledger_file = tmp_path / "ledger.jsonl"
+    fired = escalation_ledger.make_event(
+        skill="deadline-miss-escalator",
+        matter_id="m-1",
+        item_key=key,
+        event="fired",
+        attempt=1,
+        token=token,
+        ts="2026-08-11T14:05:18.711Z",
+    )
+    fired["v"] = 1  # written under the superseded derivation
+    ledger_file.write_text(json.dumps(fired) + "\n", encoding="utf-8")
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
+    with pytest.raises(ValueError, match="ss #2151"):
+        plugin._escalation_append(
+            {"skill": "deadline-miss-escalator", "event": "acked", "attempt": 1, "ack_token": token}
+        )
+    assert requests == []  # nothing shipped to the broker
+
+
+def test_acked_resolves_past_a_pre_epoch_raise_to_a_current_one(escalation, tmp_path, monkeypatch):
+    """The epoch guard must not block a legitimate ack when a current raise for
+    the same token also exists."""
+    plugin, requests = escalation
+    key = escalation_ledger.item_key("m-1", "task-1", "task-deadline", None)
+    token = escalation_ledger.token_for(key)
+    ledger_file = tmp_path / "ledger.jsonl"
+
+    def _row(ts, version):
+        row = escalation_ledger.make_event(
+            skill="deadline-miss-escalator",
+            matter_id="m-1",
+            item_key=key,
+            event="fired",
+            attempt=1,
+            token=token,
+            ts=ts,
+        )
+        row["v"] = version
+        return json.dumps(row)
+
+    ledger_file.write_text(
+        _row("2026-08-11T14:05:18.711Z", 1) + "\n" + _row("2026-08-12T14:00:00.000Z", 2) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
+    out = json.loads(
+        plugin._escalation_append(
+            {"skill": "deadline-miss-escalator", "event": "acked", "attempt": 1, "ack_token": token}
+        )
+    )
+    assert out["ok"] is True
+    assert requests[0]["event"]["item_key"] == key
+
+
 def test_append_returns_broker_rejection_verbatim(escalation, monkeypatch):
     plugin, _ = escalation
     monkeypatch.setattr(

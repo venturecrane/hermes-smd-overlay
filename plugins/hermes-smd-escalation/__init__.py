@@ -157,11 +157,29 @@ def _broker_request(payload: dict[str, Any]) -> dict[str, Any]:
 def _resolve_token_identity(ack_token: str) -> tuple[str, str | None]:
     """Resolve an ACK token to (item_key, matter_id) via the ledger's prior
     raises. Raises ValueError when no prior raise carries the token — the same
-    verdict the broker would return, surfaced before a malformed event ships."""
+    verdict the broker would return, surfaced before a malformed event ships.
+
+    A raise from before the item-identity epoch (ss #2151) does NOT resolve. Its
+    key came from the superseded derivation that hashed the model-composed label,
+    so it names no live item: acking it would report a silenced alarm while the
+    deadline kept firing. The epoch test is ``escalation_ledger``'s own, not a
+    copy — one authority over one decision.
+    """
     path = os.environ.get(_LEDGER_PATH_ENV) or escalation_ledger.DEFAULT_LEDGER_PATH
+    stale_only = False
     for event in reversed(escalation_ledger.read_ledger(path)):
-        if event.get("token") == ack_token and event.get("event") in ("fired", "chased"):
-            return str(event.get("item_key")), event.get("matter_id")
+        if event.get("token") != ack_token or event.get("event") not in ("fired", "chased"):
+            continue
+        if escalation_ledger.is_pre_identity_epoch(event):
+            stale_only = True
+            continue
+        return str(event.get("item_key")), event.get("matter_id")
+    if stale_only:
+        raise ValueError(
+            f"token {ack_token!r} was issued before the item-identity fix (ss #2151) and no "
+            "longer names a live item; the deadline will re-raise with a current code. Tell "
+            "the reader the code is superseded — do not report it as acknowledged"
+        )
     raise ValueError(
         f"no prior raise carries token {ack_token!r}; an alarm that never rang cannot be acked"
     )

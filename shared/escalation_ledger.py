@@ -18,9 +18,13 @@ Smokeball memos let a person reconstruct history.
 
 Record shape (one JSON object per line)::
 
-    {"v":1,"ts":<iso>,"skill":<str>,"matter_id":<str|null>,
+    {"v":2,"ts":<iso>,"skill":<str>,"matter_id":<str|null>,
      "item_key":<hex>,"event":<fired|chased|acked|handed_off|resolved>,
      "attempt":<int>,"token":<ACK-XXXXXX|null>,"id":<ulid, broker-stamped>}
+
+``v`` is also the item-identity epoch — see ``IDENTITY_EPOCH`` and ``item_key``.
+A row below the epoch keyed the same deadline differently and cannot be joined
+against, or acked, by anything current.
 
 The security line
 -----------------
@@ -45,7 +49,16 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# The item-identity epoch. Raises written below this version had their
+# ``item_key`` derived by a different function (it hashed the model-composed
+# ``label``; see ``item_key``), so a pre-epoch key can never name a live item.
+# Acking one would tell a human an alarm was silenced when nothing changed, which
+# is why ``validate_append`` refuses it by name rather than accepting it as a
+# harmless no-op. Pre-epoch rows are otherwise left in place: they are history,
+# and their keys cannot collide with current ones.
+IDENTITY_EPOCH = 2
 
 # The full event vocabulary. A ``fired`` or ``chased`` is a "raise" — an alarm
 # surfaced to a human; an ``acked`` references a prior raise; ``handed_off`` and
@@ -85,16 +98,30 @@ def _as_iso_date(value) -> str:
 
 def item_key(matter_id, source_id, label, authored_date) -> str:
     """Stable per-item key: sha256 hex of (matter_id, Smokeball task/event id,
-    label, authored date). The ``source_id`` is the load-bearing anti-collision
-    field — two same-day tasks on one matter differ only by it. Callers pass
+    authored date). The ``source_id`` is the load-bearing anti-collision field —
+    two same-day tasks on one matter differ only by it. Callers pass
     ``source_id=None`` ONLY for items with no stable id; those get no per-item
     token and render in the blanket-ack-only group (see ``has_stable_identity``).
+
+    ``label`` is ACCEPTED AND DELIBERATELY IGNORED (ss #2151). It was in the hash
+    until the identity epoch below, and it is model-composed free text: ``pre_run``
+    assigns it from a closed set (``task-deadline`` / ``court-date``) while the
+    agent's turn writes a descriptor it invents that run (``settlement-offer-lapsed``,
+    ``rfa-confirm-service-date``). The two halves therefore hashed the SAME deadline
+    to different keys, so the ledger join never matched: on the pilot seat, 160
+    events had produced 128 item states, and NONE of them corresponded to any open
+    Smokeball task. Fire-once and the seven-day ack snooze were both inert — every
+    in-range item re-fired every run and every per-item ACK code named a phantom.
+
+    The parameter survives only so the two call sites (this repo's ``pre_run.py``
+    and the overlay's escalation plugin) keep working without a lockstep cross-repo
+    signature change. Nothing may put it back in the hash;
+    ``test_item_key_ignores_label`` is the guard.
     """
     raw = "\x1f".join(
         (
             str(matter_id or ""),
             str(source_id or ""),
-            str(label or ""),
             _as_iso_date(authored_date),
         )
     )
@@ -309,6 +336,23 @@ def should_fire(
 # ---------------------------------------------------------------------------
 
 
+def is_pre_identity_epoch(event) -> bool:
+    """True for a raise written before the ss #2151 identity fix. PUBLIC so the
+    overlay's escalation plugin resolves ack tokens against the same rule the
+    broker validates with — a second implementation there would be a second
+    authority over one decision, and the two would disagree the first time
+    either changed. Its ``item_key``
+    came from a different derivation (it hashed the model-composed label), so it
+    can never name a live item. Acking one would tell a human an alarm was
+    silenced when nothing changed — the exact class of false report the fix
+    exists to end. A row with a missing or unparseable ``v`` is treated as
+    pre-epoch: unknown provenance is not evidence of a current key."""
+    try:
+        return int(event.get("v") or 1) < IDENTITY_EPOCH
+    except (TypeError, ValueError):
+        return True
+
+
 def validate_append(existing_events, new_event: dict) -> None:
     """Raise ValueError unless ``new_event`` is a well-formed event that may be
     appended. The load-bearing rule: an ``acked`` MUST reference a prior
@@ -327,16 +371,30 @@ def validate_append(existing_events, new_event: dict) -> None:
         token = new_event.get("token")
         key = str(new_event.get("item_key") or "")
         raised = False
+        stale_only = False
         for prior in existing_events:
             if prior.get("event") not in RAISING_EVENTS:
                 continue
             if token is not None and prior.get("token") == token:
-                raised = True
-                break
-            if prior.get("item_key") == key:
-                raised = True
-                break
+                pass
+            elif prior.get("item_key") == key:
+                pass
+            else:
+                continue
+            if is_pre_identity_epoch(prior):
+                # Matches, but its key came from the superseded derivation, so it
+                # names nothing live. Keep looking for a current raise.
+                stale_only = True
+                continue
+            raised = True
+            break
         if not raised:
+            if stale_only:
+                raise ValueError(
+                    "that ACK code was issued before the item-identity fix (ss #2151) and no "
+                    "longer names a live item; the deadline will re-raise with a current code. "
+                    "Do not report it as acknowledged"
+                )
             raise ValueError("acked event has no prior fired/chased raise for its token/item_key")
 
 
