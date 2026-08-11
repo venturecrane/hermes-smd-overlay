@@ -25,7 +25,7 @@ import json
 
 import pytest
 
-from shared import inbound
+from shared import inbound, matter_binding
 from tests.conftest import load_plugin
 
 # ---------------------------------------------------------------------------
@@ -1053,3 +1053,144 @@ def test_unread_caption_still_blocks(relay_mod) -> None:
         "fabrication:tier2_citation"
     ]
     provenance._reset_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# 7. Matter identity on the reply lane (ss#2167)
+#
+# These exist because the matter gate was shipped, kill-tested, and reported
+# working while doing NOTHING on this lane. It lives in enforce.evaluate_tool_call
+# behind `is_send`, which is true only for EXTERNAL_SEND* classes; the tool this
+# lane calls is create_draft, which is INTERNAL_WRITE. So the gate never ran,
+# and this function relayed the draft out as real email anyway — 86 of the
+# pilot's replies, with no matter-identity check of any kind.
+#
+# A test of the gate's verdict logic cannot catch that, which is the whole point:
+# the verdict logic was correct the entire time. Only a test of THIS path can.
+# ---------------------------------------------------------------------------
+
+_M_A = "aaaaaaaa-1111-2222-3333-444444444444"
+_NUM_A = "2026-PI-101"
+_PARTY_A = "alvarez@example.com"
+_SENDER = "greg@whitfield.example"
+
+
+# A roster where the inbound sender is ALSO typed as a client. This is the
+# configuration that makes the matter gate reachable on this lane at all: an
+# inbound-roster match alone classifies INTERNAL (and is exempt), so without a
+# typed CLIENT entry every one of these tests would pass against a gate that
+# never ran.
+_CLIENT_TYPED_YAML = (
+    "customer_id: acme\n"
+    "vertical: law-firm\n"
+    "scope:\n"
+    "  inbound_allow_from:\n"
+    "    - greg@whitfield.example\n"
+    "  outbound_roster:\n"
+    "    - address: greg@whitfield.example\n"
+    "      class: client\n"
+)
+
+
+def _type_sender_as_client(mod) -> None:
+    mod._YAML_PATH.write_text(_CLIENT_TYPED_YAML)
+
+
+def _seed_closed(party: str) -> None:
+    """Matter A's OWN complete party list was read this turn."""
+    matter_binding._reset_for_tests()
+    m = matter_binding.membership_for("s1")
+    m.add(_M_A, [party], complete=True)
+    m.add_alias(_NUM_A, _M_A)
+
+
+def test_reply_citing_another_matter_is_held_not_relayed(relay_mod) -> None:
+    mod, d1, sent = relay_mod
+    # Matter A belongs to Alvarez. The inbound sender is not a party to it.
+    _seed_closed(_PARTY_A)
+    _type_sender_as_client(mod)
+    _record_origin(sender=_SENDER, message_id="msg_matter_1", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft([_SENDER], text=f"Re: matter {_NUM_A}. The deposition is set for Tuesday."),
+        session_id="s1",
+    )
+    assert sent == [], "a cross-matter reply reached the transport"
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert [h["reason"] for h in held] == ["matter_mismatch"]
+    # The hold must name what disagreed, or a reviewer cannot action it.
+    assert _NUM_A in held[0]["matters"]
+    assert _SENDER in held[0]["detail"]
+    matter_binding._reset_for_tests()
+
+
+def test_control_reply_to_a_party_of_the_cited_matter_is_relayed(relay_mod) -> None:
+    # The half that makes the test above mean something. Without it, a gate that
+    # held EVERY reply would satisfy the assertion and look like a working control.
+    mod, d1, sent = relay_mod
+    _seed_closed(_SENDER)  # this time the sender IS a party to matter A
+    _type_sender_as_client(mod)
+    _record_origin(sender=_SENDER, message_id="msg_matter_2", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft([_SENDER], text=f"Re: matter {_NUM_A}. The deposition is set for Tuesday."),
+        session_id="s1",
+    )
+    assert len(sent) == 1, "a correct-pairing reply was withheld"
+    assert not [m for a, m in d1.events() if a == "REPLY_HELD"]
+    matter_binding._reset_for_tests()
+
+
+def test_reply_citing_no_matter_is_untouched(relay_mod) -> None:
+    # Scope control: the gate must not interfere with ordinary reply traffic.
+    mod, d1, sent = relay_mod
+    _seed_closed(_PARTY_A)
+    _type_sender_as_client(mod)
+    _record_origin(sender=_SENDER, message_id="msg_matter_3", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft([_SENDER], text="Thanks, received. We'll follow up shortly."),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+    matter_binding._reset_for_tests()
+
+
+def test_unresolved_membership_records_but_does_not_hold(relay_mod) -> None:
+    # Captain call 2026-08-11: get_matter fires on 8 of 86 reply turns, so
+    # holding on unresolved would withhold correct client replies at a rate
+    # nobody has measured. The row IS the measurement.
+    mod, d1, sent = relay_mod
+    matter_binding._reset_for_tests()
+    # The matter is known by number but its party set was never closed.
+    m = matter_binding.membership_for("s1")
+    m.add(_M_A, [_PARTY_A], complete=False)
+    m.add_alias(_NUM_A, _M_A)
+    _type_sender_as_client(mod)
+    _record_origin(sender=_SENDER, message_id="msg_matter_4", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft([_SENDER], text=f"Re: matter {_NUM_A}. Noted."),
+        session_id="s1",
+    )
+    assert len(sent) == 1, "an unresolved membership withheld a reply"
+    unresolved = [m for a, m in d1.events() if a == "MATTER_UNRESOLVED"]
+    assert len(unresolved) == 1
+    assert _NUM_A in unresolved[0]["matters"]
+    matter_binding._reset_for_tests()
+
+
+def test_report_mode_records_nothing_and_holds_nothing(relay_mod, monkeypatch) -> None:
+    mod, d1, sent = relay_mod
+    monkeypatch.setenv("SMD_MATTER_GATE_MODE", "report")
+    _seed_closed(_PARTY_A)
+    _type_sender_as_client(mod)
+    _record_origin(sender=_SENDER, message_id="msg_matter_5", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft([_SENDER], text=f"Re: matter {_NUM_A}. The deposition is set for Tuesday."),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+    assert not [m for a, m in d1.events() if a == "REPLY_HELD"]
+    matter_binding._reset_for_tests()

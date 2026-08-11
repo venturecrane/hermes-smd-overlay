@@ -160,12 +160,20 @@ def _resolve_cited(membership: matter_binding.MatterMembership, cited: set[str])
     """Map each cited token to a known matter id. A matter is addressable here by
     its id or by its number, and only tokens that resolve to a matter this
     session actually READ can be checked — a number nobody read is not evidence
-    of anything, and is left out rather than guessed at."""
-    known = membership.known_matters()
+    of anything, and is left out rather than guessed at.
+
+    The number half of that sentence was aspirational until ss#2167's second
+    pass: this compared the token against ``known_matters()``, which holds
+    connector ids only, so a body citing "2026-PI-101" — the form real
+    correspondence uses — resolved to nothing and the verdict came back
+    *unresolved* even against a CLOSED party set. Every test seeded a UUID body,
+    so nothing caught it. ``membership.resolve`` performs the number->id join.
+    """
     out: dict[str, str] = {}
     for token in cited:
-        if token in known:
-            out[token] = token
+        matter_id = membership.resolve(token)
+        if matter_id:
+            out[token] = matter_id
     return out
 
 

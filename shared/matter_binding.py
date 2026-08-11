@@ -52,11 +52,20 @@ _MAX_EMAILS_PER_MATTER = 64
 class MatterMembership:
     """``matter_id -> (party emails, closed?)`` for one session."""
 
-    __slots__ = ("_by_matter", "_complete")
+    __slots__ = ("_by_matter", "_complete", "_alias", "_ambiguous")
 
     def __init__(self) -> None:
         self._by_matter: dict[str, set[str]] = {}
         self._complete: set[str] = set()
+        # A matter's human-readable number ("2026-PI-101") -> its connector id.
+        # Correspondence cites the number; the connector keys everything by the
+        # id, and without this join a real letter's citation resolved to nothing
+        # and the gate returned *unresolved* on a body it could have checked.
+        self._alias: dict[str, str] = {}
+        # Numbers seen pointing at two different matters. Kept so the collision
+        # is remembered after the alias is withdrawn — otherwise the loser's next
+        # read would simply re-add it and the ambiguity would flip-flop.
+        self._ambiguous: set[str] = set()
 
     def add(self, matter_id: str, emails: Iterable[str], *, complete: bool) -> None:
         if not matter_id:
@@ -73,6 +82,41 @@ class MatterMembership:
         # downgrade it, and an open read must never upgrade a set to closed.
         if complete:
             self._complete.add(matter_id)
+
+    def add_alias(self, alias: str, matter_id: str) -> None:
+        """Record a matter's human-readable number as another name for its id.
+
+        Ambiguity is withdrawn, never resolved by guessing: if a number is ever
+        seen pointing at a second matter, the alias is dropped and blacklisted,
+        so a body citing it reads as *unresolved*. The alternative — keeping
+        either binding — would let the gate call a legitimate recipient an
+        outsider on the strength of a collision, which is the one verdict this
+        module exists to never produce.
+        """
+        key = _norm_matter(alias)
+        if not key or not matter_id or key == matter_id:
+            return
+        if key in self._ambiguous:
+            return
+        existing = self._alias.get(key)
+        if existing is not None and existing != matter_id:
+            del self._alias[key]
+            self._ambiguous.add(key)
+            logger.debug("matter_binding: alias %s is ambiguous; withdrawn", key)
+            return
+        if existing is None and len(self._alias) >= _MAX_MATTERS_PER_SESSION:
+            return
+        self._alias[key] = matter_id
+
+    def resolve(self, token: str) -> str:
+        """The canonical matter id for a cited token — the id itself, or the
+        matter whose number it is. Empty when this session read no such matter,
+        which the gate reads as *unresolved*."""
+        if not isinstance(token, str) or not token:
+            return ""
+        if token in self._by_matter:
+            return token
+        return self._alias.get(_norm_matter(token), "")
 
     def parties(self, matter_id: str) -> set[str]:
         return set(self._by_matter.get(matter_id, ()))
@@ -104,6 +148,16 @@ def _norm(value: Any) -> str:
     if "<" in addr and ">" in addr:
         addr = addr[addr.rfind("<") + 1 : addr.rfind(">")].strip()
     return addr if "@" in addr else ""
+
+
+def _norm_matter(value: Any) -> str:
+    """Case-folded matter number. Smokeball renders "2026-PI-101"; a body may
+    carry a different case, and two spellings of one number must not become two
+    matters. Whitespace only — no punctuation stripping, because the separators
+    are part of the number, not formatting."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip().upper()
 
 
 def membership_for(session_id: str) -> MatterMembership:
@@ -185,6 +239,12 @@ def record_from_read(session_id: str, result: Any) -> None:
                     [e for e in emails if e],
                     complete=bool(node.get("parties_complete")),
                 )
+            # A matter record carries its human-readable number in the SAME dict
+            # the party list arrives in (connector server.py:363). Aliased on any
+            # matter-shaped node, not only a party-bearing one, so a matter read
+            # for other reasons still teaches this session what its number means.
+            if matter_id and isinstance(node.get("number"), str):
+                m.add_alias(node["number"], str(matter_id))
             # Direction 2 — "the matters THIS person is party to" (never closed).
             contact_id = node.get("matters_for_contact")
             if contact_id:
@@ -197,6 +257,12 @@ def record_from_read(session_id: str, result: Any) -> None:
                         mid = item.get("id")
                         if mid:
                             m.add(str(mid), [email], complete=False)
+                            # The listing is /matters, so each item carries its
+                            # number too — this is the reply lane's main source
+                            # of the number->id join (list_matters fires on 34 of
+                            # 86 reply turns, get_matter on 8).
+                            if isinstance(item.get("number"), str):
+                                m.add_alias(item["number"], str(mid))
     except Exception:  # noqa: BLE001 — capture must never perturb the tool path
         logger.debug("matter_binding: read capture failed", exc_info=True)
 
