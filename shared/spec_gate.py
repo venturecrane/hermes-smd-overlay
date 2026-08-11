@@ -17,7 +17,32 @@ Binding — three conditions, ALL required
    reader, and that person is a better spec check than this gate.
 3. Nothing else. In particular the gate does NOT require the spec to be
    installed: a class that declares ``expected`` whose spec never arrived is a
-   BROKEN CONTROL, and refusing is the entire point of the declaration.
+   BROKEN CONTROL.
+
+   WHAT A BROKEN CONTROL COSTS — amended 2026-08-10 (Captain ruling, ss-console
+   #2228/#2234; ADR 0083 amended alongside). Refusing used to be "the entire
+   point of the declaration", full stop. It was not: on ``pilot-smokeball`` the
+   ``staff`` class declared a voice spec that was never installed, and for six
+   days every autonomous internal send refused with a remedy the model could not
+   perform — there was no spec to read — while the firm's escalations and
+   digests fell into matter memos nobody watches, and nothing alerted. A control
+   that can only fail silently and permanently is not a control.
+
+   So the cost is now paid by whoever can afford it, per class:
+
+   * ``staff`` — a person inside the firm is waiting on ops mail. **Proceed** in
+     the persona's own authored register (ADR 0083: "authored by the customer or
+     fails closed to the persona's own authored judgment"), and alert.
+   * ``outbound_client`` / ``outbound_vendor`` / ``outbound_external`` — the
+     FIRM's voice to someone outside it. The persona's register is the wrong
+     voice there, not a neutral one, so these route to a human, and alert.
+   * ``work_product`` / ``record`` — artifacts with nobody blocked on them.
+     Refusing costs nothing, so they still refuse.
+
+   Two states are NOT broken controls and still refuse everywhere: a spec whose
+   bytes no longer match the root-recorded digest (tamper must not become an
+   escape hatch), and a manifest this process cannot read at all (absence of
+   evidence is not evidence of absence — see ``shared.spec_manifest``).
 
 Class resolution
 ----------------
@@ -76,6 +101,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from shared import spec_manifest
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
 from shared.audit_status import NoAuditWarner
@@ -95,6 +121,52 @@ _REASON_GATE_ERROR = "gate_error"
 #: `spec_not_read` on purpose: that one means the model never looked, this one
 #: means it looked and produced something else, and the fixes differ.
 _REASON_FORMAT_VIOLATION = "format_violation"
+#: Declared, and affirmatively never installed — a BROKEN CONTROL. Named apart
+#: from `spec_not_read` because the remedy differs absolutely: not-read is the
+#: model's to fix by reading, and no_spec cannot be fixed by the model at all.
+#: Telling an agent to "read the spec named in your pointer" when no such spec
+#: exists is an instruction that cannot be followed, which is what six days of
+#: refusals looked like from inside the seat (ss-console #2228).
+_REASON_NO_SPEC = "no_spec"
+#: This process cannot see the spec tree, so it can prove nothing. NEVER folded
+#: into `no_spec`: absence of evidence would otherwise unlock a send.
+_REASON_SPEC_UNPROVABLE = "spec_unprovable"
+#: Entries exist and none matches the digest root recorded. Reads as tamper and
+#: must never take the broken-control path — that would make deleting bytes a
+#: way to escape the gate.
+_REASON_SPEC_HASH_MISMATCH = "spec_hash_mismatch"
+#: A format-bound send whose body this gate cannot inspect. `_extract_send_body`
+#: returns None to mean INDETERMINATE and `_apply_content_floor` fails toward
+#: draft on it; this gate used to coerce that None to "" and skip the format
+#: check entirely — the same value, two adjacent call sites, opposite
+#: dispositions (ss-console #2234).
+_REASON_BODY_INDETERMINATE = "body_indeterminate"
+
+#: Per-property control states. The question is not "what is installed" but
+#: "what can this process PROVE about what is installed" — see
+#: ``shared.spec_manifest.manifest_state``.
+_STATE_PRESENT = "present"
+_STATE_MISSING = "missing"
+_STATE_TAMPERED = "tampered"
+_STATE_UNPROVABLE = "unprovable"
+
+#: The one output class that PROCEEDS when its control is broken (Captain,
+#: 2026-08-10; ADR 0083 amended).
+#:
+#: The distinction is who is waiting. `staff` is ops mail to a person inside the
+#: firm — a digest, an escalation, a deadline they asked to be told about — and
+#: a refusal there costs them the message itself, silently. The three outbound
+#: classes carry the FIRM's voice to someone outside it, where the persona's own
+#: register is the wrong voice rather than a neutral one, so they route to a
+#: human instead. `work_product` and `record` are artifacts with no reader
+#: blocked on them; refusing costs nothing and `draft_delivery_gate` in
+#: ss-console's runtime-controls registry is `enforced` on exactly that
+#: behaviour (observed live, vfy_01KYZNTJAEST5HEVJATYFY9ED3).
+#:
+#: Membership is by explicit class name, never by "internal" — that word already
+#: means work_product/record here (`_INTERNAL_ARTIFACT_CLASSES` below), and
+#: conflating the two senses would invert a certified control.
+_PROCEED_ON_BROKEN_CONTROL = frozenset({"staff"})
 
 
 def resolve_output_class(action_class_value: str) -> str | None:
@@ -264,6 +336,70 @@ def _emit_spec_gate_audit(
 _INTERNAL_ARTIFACT_CLASSES = frozenset({"work_product", "record"})
 
 
+def _refuse(
+    *,
+    tool_name: str,
+    output_class: str,
+    reason: str,
+    session_id: str,
+    tool_call_id: str,
+) -> dict:
+    """Audit the refusal and return its block directive. Never silently passes."""
+    _emit_spec_gate_audit(
+        tool_name=tool_name,
+        output_class=output_class,
+        reason=reason,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+    )
+    return {"action": "block", "message": _draft_message(output_class, reason)}
+
+
+def _control_state(output_class: str, prop: str) -> str:
+    """What can be PROVEN about this (class, property)'s installed spec.
+
+    ``manifest_state`` is consulted first and its ``unreadable`` verdict wins
+    outright: an empty entry list means "nothing installed" ONLY when the
+    manifest was actually readable. Reading emptiness as absence without that
+    check is how a lost ``SMD_SPEC_DIR`` would come to look like an authored
+    choice.
+    """
+    if spec_manifest.manifest_state() == spec_manifest.STATE_UNREADABLE:
+        return _STATE_UNPROVABLE
+    entries = [e for e in spec_manifest.entries_for_class(output_class) if e.prop == prop]
+    if not entries:
+        return _STATE_MISSING
+    if not any(spec_manifest.verify(e) for e in entries):
+        return _STATE_TAMPERED
+    return _STATE_PRESENT
+
+
+def _broken_control_message(output_class: str, props: list[str]) -> str:
+    """What a refused output is told when its control was never installed.
+
+    Names the fault and who can fix it. It deliberately does NOT tell the model
+    to read the spec: there is nothing to read, and an unfollowable instruction
+    is what turned this failure into six days of silence.
+
+    The remedy splits the same way ``_draft_message`` splits it: an internal
+    artifact already IS a draft, so offering "create a draft" there would send
+    the model hunting for an escape hatch instead of stopping.
+    """
+    named = " and ".join(sorted(props))
+    remedy = (
+        "Nothing is delivered; this needs a person, not a retry."
+        if output_class in _INTERNAL_ARTIFACT_CLASSES
+        else "Create a draft for human review instead."
+    )
+    return (
+        f"Refused: this seat declares an authored {named} spec for the "
+        f"'{output_class}' output class and no such spec is installed — a broken "
+        f"control, not something you can fix by reading. {remedy} The fault has "
+        "been reported to the firm's operators; do not route around it. "
+        "(ss ADR 0083)"
+    )
+
+
 def _draft_message(output_class: str, reason: str) -> str:
     internal = output_class in _INTERNAL_ARTIFACT_CLASSES
     if reason == _REASON_SPEC_NOT_READ:
@@ -296,10 +432,14 @@ def check_spec_gate(
     action_class_value: str,
     session_id: str = "",
     tool_call_id: str = "",
-    body: str = "",
+    body: str | None = "",
     output_class: str | None = None,
 ) -> dict | None:
     """Gate an output on having read its class's authored spec.
+
+    ``body`` is the composed text, or ``None`` meaning INDETERMINATE — the same
+    contract ``enforce._extract_send_body`` states and the content floor honours.
+    Do not coerce it: a format-bound send whose body cannot be inspected refuses.
 
     For a SEND, the caller invokes this only for an allowed send whose effective
     ceiling is ``autonomous``, and leaves ``output_class`` unset so the class
@@ -322,40 +462,120 @@ def check_spec_gate(
         if not voice_bound and not format_bound:
             return None  # not bound for this class on this seat
 
+        # A control that IS installed binds exactly as it always did. Only a
+        # control that was never installed takes the broken-control path at the
+        # end, and a missing voice spec never excuses a real format violation.
+        broken: list[str] = []
+
         # FORMAT FIRST, and it is checked against the actual text. Voice asks
         # whether the model consulted its spec; format asks whether the thing it
         # produced has the authored shape. ADR 0083 §3: format is binary where
         # voice is probabilistic, so this is the half that can be decided rather
         # than graded — and a shape honoured only most of the time is worse than
         # one never promised, because the reader stops trusting all of it.
-        if format_bound and body:
-            violations = _format_violations(output_class, body)
-            if violations:
-                from shared import format_check
-
-                detail = format_check.describe(violations)
-                _emit_spec_gate_audit(
+        if format_bound:
+            format_state = _control_state(output_class, "format")
+            if format_state in (_STATE_TAMPERED, _STATE_UNPROVABLE):
+                return _refuse(
                     tool_name=tool_name,
                     output_class=output_class,
-                    reason=_REASON_FORMAT_VIOLATION,
+                    reason=(
+                        _REASON_SPEC_HASH_MISMATCH
+                        if format_state == _STATE_TAMPERED
+                        else _REASON_SPEC_UNPROVABLE
+                    ),
                     session_id=session_id,
                     tool_call_id=tool_call_id,
-                    detail=format_check.rule_names(violations),
                 )
-                return {
-                    "action": "block",
-                    "message": (
-                        f"Refused: this output does not have the shape the firm authored for "
-                        f"the '{output_class}' class — {detail}. Fix the shape and send again, "
-                        "or create a draft for review. (ss ADR 0083 §3)"
-                    ),
-                }
+            if format_state == _STATE_MISSING:
+                broken.append("format")
+            elif body is None:
+                # INDETERMINATE, and it fails the way the content floor fails on
+                # this exact value: an autonomous send whose body this gate
+                # cannot read must not be certified as carrying the authored
+                # shape. Coercing it to "" (as this gate used to) silently
+                # skipped the check for every tool whose arg shape is
+                # unrecognised.
+                return _refuse(
+                    tool_name=tool_name,
+                    output_class=output_class,
+                    reason=_REASON_BODY_INDETERMINATE,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                )
+            else:
+                violations = _format_violations(output_class, body)
+                if violations:
+                    from shared import format_check
 
-        if not voice_bound:
+                    detail = format_check.describe(violations)
+                    _emit_spec_gate_audit(
+                        tool_name=tool_name,
+                        output_class=output_class,
+                        reason=_REASON_FORMAT_VIOLATION,
+                        session_id=session_id,
+                        tool_call_id=tool_call_id,
+                        detail=format_check.rule_names(violations),
+                    )
+                    return {
+                        "action": "block",
+                        "message": (
+                            f"Refused: this output does not have the shape the firm authored "
+                            f"for the '{output_class}' class — {detail}. Fix the shape and send "
+                            "again, or create a draft for review. (ss ADR 0083 §3)"
+                        ),
+                    }
+
+        if voice_bound:
+            voice_state = _control_state(output_class, "voice")
+            if voice_state in (_STATE_TAMPERED, _STATE_UNPROVABLE):
+                return _refuse(
+                    tool_name=tool_name,
+                    output_class=output_class,
+                    reason=(
+                        _REASON_SPEC_HASH_MISMATCH
+                        if voice_state == _STATE_TAMPERED
+                        else _REASON_SPEC_UNPROVABLE
+                    ),
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                )
+            if voice_state == _STATE_MISSING:
+                broken.append("voice")
+            elif not SPEC_STATUS.was_read(session_id, output_class, "voice"):
+                return _refuse(
+                    tool_name=tool_name,
+                    output_class=output_class,
+                    reason=_REASON_SPEC_NOT_READ,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                )
+
+        if not broken:
             return None
-        if SPEC_STATUS.was_read(session_id, output_class, "voice"):
+
+        # BROKEN CONTROL — declared, and affirmatively never installed. Recorded
+        # either way; the send's fate depends on who is waiting. The audit row is
+        # the seat-local record; the alert that reaches a PERSON is
+        # `shared.spec_control_check` on the heartbeat, which does not depend on
+        # anyone happening to send.
+        _emit_spec_gate_audit(
+            tool_name=tool_name,
+            output_class=output_class,
+            reason=_REASON_NO_SPEC,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            detail=sorted(broken),
+        )
+        if output_class in _PROCEED_ON_BROKEN_CONTROL:
+            # Proceed in the persona's own authored register — ADR 0083's own
+            # decision sentence: each property "is authored by the customer or
+            # fails closed to the persona's own authored judgment". Nothing here
+            # PRODUCES that register; `bootstrap/translate.py` renders the
+            # authored `personas[].tone` into SOUL on every turn. This only
+            # declines to refuse on account of a control nobody installed.
             return None
-        reason = _REASON_SPEC_NOT_READ
+        return {"action": "block", "message": _broken_control_message(output_class, broken)}
     except Exception:  # noqa: BLE001 — a bound-seat evaluation fault fails closed
         logger.exception(
             "spec gate: evaluation failed for %s (%s); failing toward draft",

@@ -14,6 +14,7 @@ import sqlite3
 from shared import heartbeat as hb
 from shared.connector_check import ConnectorCheck
 from shared.scheduler_check import SchedulerCheck
+from shared.spec_control_check import SpecControlCheck
 
 _KEY = "shared-fleet-key"
 _SLUG = "ashton-price"
@@ -193,6 +194,13 @@ def _emitter(**overrides):
             lambda: ConnectorCheck(ok=True, servers={}),
         ),
         connector_check_debounce=overrides.get("connector_check_debounce", 3),
+        # Hermetic default for the authored-spec control check (ss-console
+        # #2234). Without this the emitter would read the real customer.yaml.
+        spec_control_check_fn=overrides.get(
+            "spec_control_check_fn",
+            lambda: SpecControlCheck(ok=True, entries={}),
+        ),
+        spec_control_check_debounce=overrides.get("spec_control_check_debounce", 3),
     )
     return hb.HeartbeatEmitter(**kwargs), calls
 
@@ -466,6 +474,63 @@ def test_payload_omits_connector_fields_when_absent():
     )
     assert "connector_check_ok" not in p
     assert "connectors" not in p
+
+
+def test_payload_sends_spec_control_fields_including_empty_map():
+    """The empty map is the state that RESOLVES an open alert — every declared
+    spec is installed. Truthiness-omitting it would leave a repaired control
+    paging forever (ss-console #2234)."""
+    p = hb.build_payload(
+        heartbeat_ts="2026-08-10T00:00:00+00:00",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        spec_control_ok=True,
+        spec_control={},
+    )
+    assert p["spec_control_ok"] == 1
+    assert p["spec_control"] == {}
+
+
+def test_payload_omits_spec_control_fields_when_absent():
+    p = hb.build_payload(
+        heartbeat_ts="2026-08-10T00:00:00+00:00",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+    )
+    assert "spec_control_ok" not in p
+    assert "spec_control" not in p
+
+
+def test_tick_carries_spec_control_result():
+    entry = {"declared": True, "installed": False}
+    em, calls = _emitter(
+        spec_control_check_fn=lambda: SpecControlCheck(ok=True, entries={"staff.voice": entry})
+    )
+    em._tick()
+    p = _last_payload(calls)
+    assert p["spec_control_ok"] == 1
+    assert p["spec_control"] == {"staff.voice": entry}
+
+
+def test_spec_control_check_crash_debounces_then_reports_not_omits():
+    """A check that cannot run must eventually SAY so. Omitting forever would
+    make a broken alarm indistinguishable from a healthy seat — which is the
+    failure shape this whole change exists to remove."""
+
+    def boom():
+        raise RuntimeError("spec control checker exploded")
+
+    em, calls = _emitter(spec_control_check_fn=boom, spec_control_check_debounce=2)
+    em._tick()  # failure 1: no prior good -> fields omitted (console holds)
+    assert "spec_control_ok" not in _last_payload(calls)
+    em._tick()  # failure 2: debounce reached -> reported as ok=0
+    p = _last_payload(calls)
+    assert p["spec_control_ok"] == 0
+    assert "spec_control" not in p  # never emit a map you cannot trust
 
 
 def test_tick_carries_connector_check_result():

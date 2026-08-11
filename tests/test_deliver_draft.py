@@ -82,9 +82,17 @@ def spec_tree(tmp_path, monkeypatch):
                 "source_digest": "deadbeef",
                 "specs": {
                     rel: {
-                        "output_class": "work_product",
-                        "prop": "voice",
+                        # `class` / `property`, NOT `output_class` / `prop`:
+                        # `spec_manifest.load_entries` skips an entry missing
+                        # either key, silently. This fixture used to use the
+                        # wrong names, so it installed nothing while claiming to
+                        # — invisible until the gate started asking whether the
+                        # spec exists rather than only whether it was read
+                        # (ss-console #2234).
+                        "class": "work_product",
+                        "property": "voice",
                         "sha256": hashlib.sha256(body.encode()).hexdigest(),
+                        "bytes": len(body),
                     }
                 },
             }

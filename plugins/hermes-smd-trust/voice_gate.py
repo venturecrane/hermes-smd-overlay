@@ -87,6 +87,10 @@ _REASON_TRANSFORM_NOT_APPLIED = "transform_not_applied"
 _REASON_NO_SPEC = "no_spec"
 _REASON_SPEC_NOT_READ = "spec_not_read"
 _REASON_SPEC_HASH_MISMATCH = "spec_hash_mismatch"
+#: This process cannot read the manifest, so an empty entry list proves nothing
+#: (ss-console #2234). Distinct from `no_spec`: that one is the firm's authoring
+#: gap, this one is our own fault, and only one of them is the firm's to fix.
+_REASON_SPEC_UNPROVABLE = "spec_unprovable"
 # Either regime:
 _REASON_GATE_ERROR = "gate_error"
 
@@ -299,13 +303,24 @@ def _spec_fail_reason(output_class: str) -> str:
 
     ``was_read`` being False is the refusal; this probe only names it — the same
     shape as the fallback regime consulting the samples probe only to pick
-    between ``no_samples`` and ``transform_not_applied``. No manifest entry for
-    (class, voice) ⇒ ``no_spec`` (declared-but-never-installed is a broken
-    control, and refusing is the point of the declaration — ``shared.spec_gate``
-    binding condition 3). Entries exist but none verifies ⇒
-    ``spec_hash_mismatch`` (disk no longer matches what root recorded — reads as
-    tamper). A verified spec existed and simply was not read ⇒ ``spec_not_read``.
+    between ``no_samples`` and ``transform_not_applied``.
+
+    Manifest unreadable ⇒ ``spec_unprovable``, and that check comes FIRST.
+    Without it a lost ``SMD_SPEC_DIR`` reports as ``no_spec`` — the seat would
+    claim the firm never installed a spec when the truth is the seat could not
+    look, and the two want opposite responses (ss-console #2234).
+
+    Then: no manifest entry for (class, voice) ⇒ ``no_spec``, a broken control.
+    Entries exist but none verifies ⇒ ``spec_hash_mismatch`` (disk no longer
+    matches what root recorded — reads as tamper). A verified spec existed and
+    simply was not read ⇒ ``spec_not_read``.
+
+    All four downgrade an OUTBOUND send to draft-for-review. This gate never
+    fires on ``staff``, whose broken-control disposition changed on 2026-08-10
+    and lives in ``shared.spec_gate``.
     """
+    if spec_manifest.manifest_state() == spec_manifest.STATE_UNREADABLE:
+        return _REASON_SPEC_UNPROVABLE
     entries = [e for e in spec_manifest.entries_for_class(output_class) if e.prop == "voice"]
     if not entries:
         return _REASON_NO_SPEC
