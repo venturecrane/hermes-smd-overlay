@@ -376,10 +376,13 @@ def test_skill_route_gets_skill_prompt_not_email_prompt(monkeypatch):
     assert sb["events"] == ["matter.updated"]
     # The Smokeball route must NOT carry the email-reply prompt.
     assert sb["prompt"] != translate._INBOUND_EMAIL_PROMPT
-    # It names the routed skill, offers the skill_view fallback, presents the
-    # payload as untrusted data, and never instructs an email draft.
+    # It names the routed skill, offers a fallback the webhook surface can
+    # actually execute (ss-console#2255), presents the payload as untrusted
+    # data, and never instructs an email draft.
     assert "matter-memo-on-update" in sb["prompt"]
-    assert 'skill_view("matter-memo-on-update")' in sb["prompt"]
+    assert "/app/skills/matter-memo-on-update/SKILL.md" in sb["prompt"]
+    assert "read_file" in sb["prompt"]
+    assert "skill_view" not in sb["prompt"]
     assert "{__raw__}" in sb["prompt"]
     assert "untrusted DATA" in sb["prompt"]
     assert "create_draft" not in sb["prompt"]
@@ -398,12 +401,33 @@ def test_agentmail_route_keeps_email_prompt(monkeypatch):
 
 def test_webhook_skill_prompt_single_and_multi():
     one = translate._webhook_skill_prompt(["matter-memo-on-update"])
-    assert 'skill_view("matter-memo-on-update")' in one
+    assert "/app/skills/matter-memo-on-update/SKILL.md" in one
     assert "the matter-memo-on-update skill" in one
     multi = translate._webhook_skill_prompt(["a-skill", "b-skill"])
-    # The first skill anchors skill_view; all are named for the agent.
-    assert 'skill_view("a-skill")' in multi
+    # The first skill anchors the file path; all are named for the agent.
+    assert "/app/skills/a-skill/SKILL.md" in multi
     assert "a-skill, b-skill" in multi
+
+
+def test_webhook_skill_prompt_fallback_is_executable_on_this_surface():
+    """The self-heal fallback must name a tool the webhook surface OFFERS.
+
+    ss-console#2255. The prompt used to say ``skill_view(<skill>)``, which lives
+    in the ``skills`` toolset and is deliberately off this surface (it carries
+    ``skill_manage``), so the recovery path was dead and a pre-load failure fell
+    through to improvisation. ``read_file`` is the boot-fatal read tool on the
+    webhook surface, which is what makes this instruction executable.
+
+    Falsifier: name any tool outside the resolved webhook surface and the first
+    assertion below fails.
+    """
+    from shared.webhook_read_surface import WEBHOOK_READ_TOOLS
+
+    rendered = translate._webhook_skill_prompt(["matter-memo-on-update"])
+    assert any(tool in rendered for tool in WEBHOOK_READ_TOOLS)
+    assert "skill_view" not in rendered
+    # The honest-failure branch: an unreadable file is stated, never papered over.
+    assert "say so plainly instead of approximating" in rendered
 
 
 # --- thread continuity (mcp_thread_store): principal-namespaced -----------------
