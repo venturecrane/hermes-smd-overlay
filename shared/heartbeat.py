@@ -125,6 +125,8 @@ def build_payload(
     connector_token_age: dict[str, int] | None = None,
     spec_control_ok: bool | None = None,
     spec_control: dict[str, dict] | None = None,
+    webhook_surface_ok: bool | None = None,
+    webhook_surface: dict[str, dict] | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -180,6 +182,16 @@ def build_payload(
         payload["spec_control_ok"] = 1 if spec_control_ok else 0
     if spec_control is not None:
         payload["spec_control"] = spec_control
+    # Webhook expected-tool surface (ss-console #2222, the WARN tier). Same
+    # is-not-None discipline once more: an empty map is a REAL "checked, every
+    # expected tool is offered" state and it is what RESOLVES an open alert, and
+    # `webhook_surface_ok=False` means the boot check could not resolve the
+    # surface at all — our blindness, which pages separately from a missing tool
+    # for the same reason spec_control splits the two.
+    if webhook_surface_ok is not None:
+        payload["webhook_surface_ok"] = 1 if webhook_surface_ok else 0
+    if webhook_surface is not None:
+        payload["webhook_surface"] = webhook_surface
     return payload
 
 
@@ -253,6 +265,7 @@ class HeartbeatEmitter:
         connector_check_debounce: int = 3,
         spec_control_check_fn=None,
         spec_control_check_debounce: int = 3,
+        webhook_surface_check_fn=None,
     ) -> None:
         self._slug = slug
         self._key = key
@@ -284,6 +297,11 @@ class HeartbeatEmitter:
         self._spec_debounce = max(1, spec_control_check_debounce)
         self._spec_fail_count = 0
         self._spec_last_good = None
+        # Webhook expected-tool surface check (#2222). No debounce, unlike the
+        # three above: it reads one local sentinel written once per boot, which
+        # has no transient-failure mode a debounce would smooth — see
+        # shared/webhook_surface_check.py.
+        self._webhook_surface_check_fn = webhook_surface_check_fn or _default_webhook_surface_check
 
     def start(self) -> bool:
         """Launch the daemon thread. Returns False (and logs) when the
@@ -423,6 +441,22 @@ class HeartbeatEmitter:
         self._spec_last_good = result
         return result
 
+    def _read_webhook_surface_check(self):
+        """Read the warn-tier webhook-surface sentinel (#2222).
+
+        ``None`` (no usable sentinel, or a seat that serves no webhook platform)
+        omits both fields so the console holds. A raise reports
+        ``ok=False, tools=None`` rather than going dark — the same
+        broken-check-pages posture the other three take.
+        """
+        from shared.webhook_surface_check import WebhookSurfaceCheck
+
+        try:
+            return self._webhook_surface_check_fn()
+        except Exception as exc:  # noqa: BLE001 — the check must never kill the beat
+            logger.warning("heartbeat: webhook surface check failed: %s", exc)
+            return WebhookSurfaceCheck(ok=False, tools=None)
+
     def _post_control_plane(self) -> None:
         last_audit_ts, last_skill_ts = read_audit_timestamps(self._audit_db_path_fn())
         # ADR 0062: surface the cost-breaker ladder level so the fleet view
@@ -438,6 +472,7 @@ class HeartbeatEmitter:
         sched = self._read_scheduler_check()
         conn = self._read_connector_check()
         spec = self._read_spec_control_check()
+        surface = self._read_webhook_surface_check()
         token_age: dict[str, int] | None = None
         try:
             from shared.connector_check import token_ages
@@ -462,6 +497,8 @@ class HeartbeatEmitter:
             connector_token_age=token_age,
             spec_control_ok=spec.ok if spec is not None else None,
             spec_control=spec.entries if spec is not None else None,
+            webhook_surface_ok=surface.ok if surface is not None else None,
+            webhook_surface=surface.tools if surface is not None else None,
         )
         import json
 
@@ -507,6 +544,15 @@ def _default_spec_control_check():
     the same reason as the other two: a missing module surfaces through the
     emitter's debounce as spec_control_ok=0, reported not omitted."""
     from shared.spec_control_check import check
+
+    return check()
+
+
+def _default_webhook_surface_check():
+    """The real warn-tier webhook-surface check (ss-console #2222). Lazy import
+    for the same reason as the other three: a missing module surfaces as
+    webhook_surface_ok=0, reported not omitted."""
+    from shared.webhook_surface_check import check
 
     return check()
 

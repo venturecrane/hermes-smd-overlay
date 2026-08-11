@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import logging
 import os
 import sys
 import types
@@ -511,3 +512,152 @@ def test_config_check_falls_back_when_the_gateway_loader_moves(monkeypatch):
     monkeypatch.delitem(sys.modules, "gateway", raising=False)
     handler = _load_handler()
     assert handler._gateway_config() == {"from": "hermes_cli"}
+
+
+# ---------------------------------------------------------------------------
+# Webhook EXPECTED-TOOLS tier (ss-console#2222). Step 5b over the SAME resolved
+# surface with the OPPOSITE posture: log CRITICAL, write the sentinel the gate's
+# heartbeat reads, and KEEP BOOTING.
+#
+# The two tiers answer different orders of harm. Without ``read_file`` the spec
+# read-mark can never be set and every voice-gated delivery refuses — the seat
+# cannot do its job on its only channel, so being visibly down is better than
+# serving. A missing ``operator_seat_facts`` means ONE class of answer (an ask
+# about the seat) is improvised instead of grounded. That is bad; refusing to
+# serve the paid client over it is worse. Every test below exists to keep the two
+# apart, because collapsing them in either direction is a real design mistake:
+# this tier was specified as fatal and the critique reversed it.
+# ---------------------------------------------------------------------------
+
+
+def _fake_expected(monkeypatch, *, missing: bool, raises: bool = False):
+    """Point the handler's expected-tools contract at a known answer. The
+    contract's own resolution is covered against faithful Hermes fakes in
+    tests/test_webhook_read_surface.py."""
+    import shared.webhook_read_surface as wrs
+
+    def _report(_config):
+        if raises:
+            raise RuntimeError("surface resolution exploded")
+        return {"operator_seat_facts": {"expected": True, "offered": not missing}}
+
+    monkeypatch.setattr(wrs, "expected_tool_report", _report)
+
+
+def _sentinel_reader(monkeypatch, tmp_path):
+    """Redirect the boot sentinel into tmp and hand back a reader for it."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def _read():
+        import shared.webhook_read_surface as wrs
+
+        return wrs.read_webhook_surface_status(str(tmp_path))
+
+    return _read
+
+
+def test_a_missing_expected_tool_does_not_stop_the_boot(monkeypatch, no_real_exit, tmp_path):
+    """THE tier distinction as an executable claim. Falsifier: route this through
+    ``_die`` like the read_file check, and this test fails."""
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_WEBHOOK_CONFIG
+    )
+    _fake_surface(monkeypatch, offers_read_file=True)
+    _fake_expected(monkeypatch, missing=True)
+    read = _sentinel_reader(monkeypatch, tmp_path)
+
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))  # no _Exit
+
+    status = read()
+    assert status["ok"] is True, "the CHECK ran; it is the TOOL that is missing"
+    assert status["tools"]["operator_seat_facts"]["offered"] is False
+
+
+def test_a_missing_expected_tool_logs_critical(monkeypatch, no_real_exit, tmp_path, caplog):
+    """Non-fatal must not mean quiet — the whole point of the tier is that the
+    failure is visible somewhere other than a crash. Falsifier: downgrade the log
+    to INFO and a degraded surface becomes indistinguishable from a healthy one."""
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_WEBHOOK_CONFIG
+    )
+    _fake_surface(monkeypatch, offers_read_file=True)
+    _fake_expected(monkeypatch, missing=True)
+    _sentinel_reader(monkeypatch, tmp_path)
+
+    handler = _load_handler()
+    with caplog.at_level(logging.CRITICAL):
+        asyncio.run(handler.handle("gateway:startup", {}))
+    critical = [r for r in caplog.records if r.levelno >= logging.CRITICAL]
+    assert critical, "a degraded warn tier must log CRITICAL"
+    text = " ".join(r.getMessage() for r in critical)
+    assert "operator_seat_facts" in text
+    assert "CONTINUES" in text
+
+
+def test_a_healthy_expected_tier_writes_a_green_sentinel(monkeypatch, no_real_exit, tmp_path):
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_WEBHOOK_CONFIG
+    )
+    _fake_surface(monkeypatch, offers_read_file=True)
+    _fake_expected(monkeypatch, missing=False)
+    read = _sentinel_reader(monkeypatch, tmp_path)
+
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))
+    status = read()
+    assert status["ok"] is True
+    assert status["tools"]["operator_seat_facts"]["offered"] is True
+
+
+def test_an_unresolvable_surface_is_reported_as_our_blindness(monkeypatch, no_real_exit, tmp_path):
+    """``ok=False, tools=None``: the check itself could not run. Never an empty
+    map, which the console would read as "checked, everything offered"."""
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_WEBHOOK_CONFIG
+    )
+    _fake_surface(monkeypatch, offers_read_file=True)
+    _fake_expected(monkeypatch, missing=False, raises=True)
+    read = _sentinel_reader(monkeypatch, tmp_path)
+
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))
+    status = read()
+    assert status["ok"] is False
+    assert status["tools"] is None
+
+
+def test_the_fatal_read_file_tier_still_dies_regardless_of_the_warn_tier(
+    monkeypatch, no_real_exit, tmp_path
+):
+    """The fatal tier is UNCHANGED. A posture change that quietly relaxed the
+    read_file assertion would trade a loud failure for a silent one — exactly
+    what #2145's boot gate exists to prevent."""
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_WEBHOOK_CONFIG
+    )
+    _fake_surface(monkeypatch, offers_read_file=False)
+    _fake_expected(monkeypatch, missing=False)  # warn tier perfectly healthy
+    _sentinel_reader(monkeypatch, tmp_path)
+
+    handler = _load_handler()
+    with pytest.raises(_Exit) as ei:
+        asyncio.run(handler.handle("gateway:startup", {}))
+    assert ei.value.code == 1
+
+
+def test_expected_tier_skipped_on_a_seat_without_the_webhook_platform(
+    monkeypatch, no_real_exit, tmp_path
+):
+    """No sentinel is written at all, so the heartbeat HOLDS rather than
+    reporting a green for a surface this seat does not have."""
+    _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config={"platforms": {}}
+    )
+    _fake_surface(monkeypatch, offers_read_file=False)
+    _fake_expected(monkeypatch, missing=True)
+    read = _sentinel_reader(monkeypatch, tmp_path)
+
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))
+    assert read() is None

@@ -581,6 +581,14 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "establish_stage_document": ActionClass.INTERNAL_WRITE,
     "establish_submit": ActionClass.INTERNAL_WRITE,
     "establish_status": ActionClass.READ,
+    # Seat self-description (hermes-smd-initiation, ss-console #2222 card rows
+    # 1+7). READ, and nothing subtler: it opens the seat's own customer.yaml, its
+    # own scheduler store, and the root-owned spec manifest, writes nothing, and
+    # reaches no tenant surface. The classification is a COORDINATED part of the
+    # change, never a follow-up — an unmapped name fails closed to REFUSED and
+    # never executes, which would leave the introduce ask improvising exactly as
+    # it does today while every unit test stayed green.
+    "operator_seat_facts": ActionClass.READ,
     # Durable-job tools (hermes-smd-jobs, ss #1916 — these were unmapped, so the
     # fail-closed REFUSED default made durable jobs inert at runtime).
     # start_background_job launches a budgeted background agent turn with tools:
