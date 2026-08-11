@@ -127,7 +127,6 @@ _DEFAULT_CUSTOMER_YAML_PATH = "/opt/data/customer.yaml"
 # lets authoring the roster take effect without a restart while keeping the send
 # credential off the hot path.
 _INFRA_READY: bool = False
-_API_KEY: str | None = None
 _CUSTOMER_SLUG: str | None = None
 _D1_CLIENT: Any | None = None
 _LIMITER: relay.RateLimiter | None = None
@@ -643,8 +642,6 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 sent_id = _send_msgraph_reply(origin.message_id, send_text or send_html)
             else:
                 sent_id = relay.send_reply(
-                    api_key=_API_KEY or "",
-                    inbox_id=origin.inbox_id,
                     message_id=origin.message_id,
                     text=send_text,
                     html=send_html,
@@ -688,8 +685,6 @@ def _release_send(row: held_store.HeldReply) -> str:
     if row.adapter == _ADAPTER_MSGRAPH:
         return _send_msgraph_reply(row.message_id, row.send_text or row.send_html)
     return relay.send_reply(
-        api_key=_API_KEY or "",
-        inbox_id=row.inbox_id,
         message_id=row.message_id,
         text=row.send_text,
         html=row.send_html,
@@ -789,26 +784,17 @@ def register(ctx) -> None:
     the plugin set is uniform across customers; it no-ops whenever the relay is
     not infra-ready or the sender is not on the live roster.
     """
-    global _INFRA_READY, _API_KEY, _CUSTOMER_SLUG, _D1_CLIENT, _LIMITER, _YAML_PATH
+    global _INFRA_READY, _CUSTOMER_SLUG, _D1_CLIENT, _LIMITER, _YAML_PATH
 
     _INFRA_READY = False  # fail closed until the send infra resolves
     _YAML_PATH = Path(os.environ.get("SMD_CUSTOMER_YAML_PATH") or _DEFAULT_CUSTOMER_YAML_PATH)
 
-    # Resolve the AgentMail send credential best-effort. The relay is now
-    # provider-neutral (ADR 0078): a msgraph seat has NO AgentMail key and mints
-    # its Graph token per-send from MSGRAPH_* — so a missing AgentMail key no
-    # longer disables the relay. Infra-readiness means "the rate-limiter is
-    # built"; the actual transport (and its credential) is resolved per-call by
-    # the seat's Email adapter, and the msgraph/agentmail path each fails closed
-    # when ITS credential is absent (audited REPLY_FAILED), never cross-falling.
-    try:
-        _API_KEY = get_secret("AGENTMAIL_API_KEY")
-    except KeyError:
-        _API_KEY = None
-        logger.info(
-            "hermes-smd-reply: AGENTMAIL_API_KEY unset; the AgentMail transport "
-            "cannot send (a msgraph seat is unaffected — it uses MSGRAPH_*)."
-        )
+    # ss#2258: NO AgentMail credential is resolved here anymore. The AgentMail
+    # reply goes through a broker verb, so this process holds nothing that could
+    # transmit — which is the fix, not a side effect. Keeping a key here "just in
+    # case" would restore exactly the reachable-credential the incident exploited.
+    # The msgraph path still mints its own Graph token per send (ADR 0078); the
+    # two never cross-fall.
 
     try:
         _CUSTOMER_SLUG = get_secret("SMD_CUSTOMER_SLUG")

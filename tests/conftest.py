@@ -24,16 +24,21 @@ class FakePluginContext:
     """Minimal stand-in for Hermes' ``PluginContext``.
 
     Records every ``register_hook(name, callback)`` invocation into
-    ``self.registered``, a dict mapping hook name to list of callbacks.
-    Tests inspect ``registered`` to assert what a plugin's ``register``
-    entry point attached.
+    ``self.registered``, a dict mapping hook name to list of callbacks, and
+    every ``register_tool(...)`` into ``self.tools`` keyed by tool name.
+    Tests inspect both to assert what a plugin's ``register`` entry point
+    attached.
     """
 
     def __init__(self) -> None:
         self.registered: dict[str, list[Callable[..., Any]]] = {}
+        self.tools: dict[str, dict[str, Any]] = {}
 
     def register_hook(self, name: str, callback: Callable[..., Any]) -> None:
         self.registered.setdefault(name, []).append(callback)
+
+    def register_tool(self, *, name: str, **kwargs: Any) -> None:
+        self.tools[name] = {"name": name, **kwargs}
 
 
 @pytest.fixture

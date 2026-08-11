@@ -107,14 +107,16 @@ class McpConnectorSpec:
 
 
 # AgentMail (https://agentmail.to) — API-first email built for AI agents. The
-# persona gets its OWN inbox (not the principal's Gmail). The send tools are
-# NOT excluded: ADR 0025 makes autonomous send a CONFIGURABLE per-action
-# ceiling, so the sends stay on the menu and are governed by the trust layer
-# (default draft_for_review; raised to autonomous only by
-# authored action_ceilings; the content-sensitivity floor forces money /
-# contract / scope / legal to draft regardless). Excluding them here would
-# hide the capability from the very layer meant to govern it. Hosted MCP
-# authenticates with an `x-api-key` header.
+# persona gets its OWN inbox (not the principal's Gmail). Hosted MCP, `x-api-key`.
+#
+# The send tools ARE excluded here as of ss#2258, reversing the earlier posture.
+# ADR 0025's principle — autonomous send is a configurable per-action ceiling,
+# not a hard ban — is unchanged and still enforced; what changed is which tool
+# carries it. The key this server receives is inbox-scoped WITHOUT message_send,
+# so these four would 403, and sending now runs through `smd_send_message`
+# (hermes-smd-trust), same EXTERNAL_SEND class and same ceiling, executed by the
+# broker. Excluding them no longer hides a capability from its governing layer;
+# it points the capability at the layer that can actually hold it.
 MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
     "agentmail": McpConnectorSpec(
         name="agentmail",
@@ -122,14 +124,33 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         url="https://mcp.agentmail.to/mcp",
         auth_header="x-api-key",
         secret_env="AGENTMAIL_API_KEY",
-        # Inbox-admin and destructive thread/message mutations are excluded at
-        # the menu layer: no Operator routine provisions inboxes or rewrites
-        # message state, and unlike sends there is no authored ceiling that
-        # would ever enable them (provisioning is Captain-side). This is
-        # surface reduction, not governance — send/draft/read tools all stay
-        # on the menu for the trust layer (comment above). Measured on
-        # pilot-smokeball 2026-07-15: the full 26-tool catalog costs ~5.2k
-        # tokens of prompt-cache write on every turn; these 8 are dead weight.
+        # Two different reasons for exclusion live in this one tuple.
+        #
+        # SURFACE REDUCTION (the original eight): inbox-admin and destructive
+        # thread/message mutations. No Operator routine provisions inboxes or
+        # rewrites message state, and provisioning is Captain-side. Measured on
+        # pilot-smokeball 2026-07-15: the full 26-tool catalog costs ~5.2k tokens
+        # of prompt-cache write per turn; these were dead weight.
+        #
+        # GOVERNANCE (the four sends, added for ss#2258): every AgentMail tool
+        # that TRANSMITS is off the menu, because the key materialized into
+        # config.yaml for this MCP server is now inbox-scoped with message_send
+        # and draft_send withheld — the vendor would refuse these calls anyway,
+        # and a tool that is advertised but always 403s is worse than one that is
+        # absent: the agent retries it, and the failure surfaces as a mystery
+        # rather than as a routing decision.
+        #
+        # This is NOT a capability removal. Sending still happens — through the
+        # broker verb, which fences the recipient against the seat's own authored
+        # config and writes the audit row itself. What is removed is the agent's
+        # ability to transmit directly, at ANY exposure ceiling. That last part
+        # matters: enforce.py allows a direct MCP send at the `autonomous` tier,
+        # so leaving send_message on the menu would leave the autonomous tier
+        # wired to a credential that cannot send.
+        #
+        # reply_to_message is here for a third reason worth stating: the reply
+        # channel owns that path (hermes-smd-reply hooks create_draft and relays),
+        # so a model-invoked reply was never the intended route.
         blocked_tools=(
             "create_inbox",
             "delete_inbox",
@@ -139,6 +160,11 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             "delete_thread",
             "update_thread",
             "update_message",
+            # --- transmit (ss#2258) ---
+            "send_message",
+            "send_draft",
+            "reply_to_message",
+            "forward_message",
         ),
     ),
     # Clio (oktopeak/clio-mcp v2.0.0, MIT) — practice-management system of record

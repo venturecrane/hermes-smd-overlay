@@ -245,6 +245,15 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     #
     # --- live runtime names (mcp_agentmail_*) — the ONLY form the agent emits
     "mcp_agentmail_send_message": ActionClass.EXTERNAL_SEND,
+    # ss#2258: the broker-mediated replacement for the MCP send. Same action
+    # class, so the SAME exposure ceiling governs it — draft_for_review still
+    # withholds and routes through the confirm round-trip, autonomous still
+    # sends. What changed is only WHO executes: the broker, which fences the
+    # recipient against the seat's authored config and writes the audit row.
+    # An unmapped tool is REFUSED, so this entry is what keeps the authored
+    # `external_send_internal: autonomous` tier alive after the MCP send tools
+    # left the menu.
+    "smd_send_message": ActionClass.EXTERNAL_SEND,
     "mcp_agentmail_send_draft": ActionClass.EXTERNAL_SEND,
     "mcp_agentmail_reply_to_message": ActionClass.EXTERNAL_SEND,
     "mcp_agentmail_forward_message": ActionClass.EXTERNAL_SEND,

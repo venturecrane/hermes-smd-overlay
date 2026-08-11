@@ -953,13 +953,26 @@ def test_translate_materializes_agentmail_mcp_server(tmp_path, monkeypatch):
 
 
 def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
-    """ADR 0025: agentmail send tools are NOT excluded from the MCP toolset.
+    """ss#2258: agentmail TRANSMIT tools are excluded; reads and drafts are not.
 
-    Exposure is a configurable per-action trust ceiling, not an MCP-level
-    exclusion — the sends stay on the menu so the trust layer can govern them.
-    The materialized ``tools.exclude`` (tool-surface trim, 2026-07-15) carries
-    only inbox-admin / destructive-mutation tools; every send, draft, and read
-    tool stays on the menu.
+    This reverses the ADR 0025 posture for the four send tools, and the reason
+    matters. ADR 0025 said exposure is a configurable ceiling rather than an
+    MCP-level exclusion, so sends stayed on the menu for the trust layer to
+    govern. The 2026-08 incident showed the flaw: a path that never reached the
+    trust layer sent four fabricated messages to a real client principal with no
+    audit row. Governance that can be routed around is not governance.
+
+    So the credential changed, and the menu follows it. The gateway's AgentMail
+    key is now inbox-scoped WITHOUT ``message_send``/``draft_send``, so these
+    four would 403 at the vendor — and a tool advertised but permanently failing
+    is worse than an absent one: the agent retries it and the failure reads as a
+    mystery instead of a routing decision.
+
+    ADR 0025's actual principle survives intact. Sending is still governed by the
+    authored per-action ceiling, not banned — it just executes through
+    ``smd_send_message``, which carries the same EXTERNAL_SEND class and reaches
+    the broker. Reads and drafts stay on the menu because the no-send key still
+    performs them, and the reply channel depends on ``create_draft`` firing.
     """
     monkeypatch.setenv("AGENTMAIL_API_KEY", "am_us_test_key")
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=AGENTMAIL_YAML)
@@ -971,6 +984,7 @@ def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
     excluded = set(config["mcp_servers"]["agentmail"]["tools"]["exclude"])
     assert excluded == {
+        # surface reduction (2026-07-15)
         "create_inbox",
         "delete_inbox",
         "update_inbox",
@@ -979,18 +993,16 @@ def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
         "delete_thread",
         "update_thread",
         "update_message",
-    }
-    # The governed surface stays on the menu for the trust layer.
-    for tool in (
+        # governance: transmit moved behind the broker (ss#2258)
         "send_message",
         "send_draft",
         "reply_to_message",
         "forward_message",
-        "create_draft",
-        "get_thread",
-        "list_messages",
-        "get_attachment",
-    ):
+    }
+    # Reads and drafts MUST stay: the no-send key still performs them, the reply
+    # channel triggers on create_draft, and the intake skill authors it. Dropping
+    # one of these would silently break the Operator's mailbox.
+    for tool in ("create_draft", "get_thread", "list_messages", "get_attachment"):
         assert tool not in excluded
 
 
@@ -1180,26 +1192,46 @@ def test_translate_skips_smokeball_when_environment_unset(tmp_path, monkeypatch)
     assert "smokeball" not in servers
 
 
-def test_agentmail_sends_are_external_send_not_banned():
-    """ADR 0025: agentmail sends are reclassified, not banned.
+def test_sending_is_relocated_not_removed():
+    """ss#2258: the capability survives the menu change; only the executor moved.
 
-    The send tools are NO LONGER in BANNED_TOOLS — they are EXTERNAL_SEND in
-    the action-class map, governed by the resolved trust ceiling. The registry
-    blocks only inbox-admin / destructive-mutation tools (tool-surface trim,
-    2026-07-15) — never a send."""
+    This is the assertion that would have caught the mistake this change could
+    easily have been. Both live seats author ``external_send_internal:
+    autonomous`` — the Operator may answer a rostered colleague with no human in
+    the loop. Dropping the MCP send tools WITHOUT a replacement would have
+    revoked that silently, which is the same failure shape as the incident: a
+    change whose real effect is invisible from the diff.
+
+    So: the four MCP sends are off the menu, ``smd_send_message`` is on it with
+    the SAME action class, and sends remain reclassified rather than banned.
+    """
     from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
     from shared.action_classes import (
         BANNED_TOOLS,
         TOOL_ACTION_CLASS_MAP,
         ActionClass,
     )
+    from shared.outbound_recipient import CLASSIFIED_SEND_TOOLS
 
     spec = MCP_CONNECTOR_REGISTRY["agentmail"]
-    assert not any("send" in t or "reply" in t or "forward" in t for t in spec.blocked_tools)
     for tool in ("send_message", "send_draft", "reply_to_message", "forward_message"):
-        prefixed = f"agentmail:{tool}"
-        assert prefixed not in BANNED_TOOLS
-        assert TOOL_ACTION_CLASS_MAP[prefixed] == ActionClass.EXTERNAL_SEND
+        assert tool in spec.blocked_tools, f"{tool} must not be directly callable"
+        # Still classified, never banned — a ceiling decides, as ADR 0025 requires.
+        assert f"agentmail:{tool}" not in BANNED_TOOLS
+
+    # The replacement carries the same class, so the same ceiling governs it, and
+    # is recipient-classified so INTERNAL/CLIENT/VENDOR reclassification applies.
+    assert TOOL_ACTION_CLASS_MAP["smd_send_message"] == ActionClass.EXTERNAL_SEND
+    assert "smd_send_message" in CLASSIFIED_SEND_TOOLS
+
+
+def test_the_broker_send_tool_is_actually_registered(fake_ctx):
+    """A mapped-but-unregistered tool is inert — the failure that left the first
+    escalation tools dead at runtime. Registration is the wiring; assert it."""
+    from tests.conftest import load_plugin
+
+    load_plugin("hermes-smd-trust").register(fake_ctx)
+    assert "smd_send_message" in fake_ctx.tools
 
 
 # ---------------------------------------------------------------------------

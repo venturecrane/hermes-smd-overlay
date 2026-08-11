@@ -92,16 +92,10 @@ def relay_mod(monkeypatch, tmp_path):
     fake_d1 = _FakeD1Client()
     sent: list[dict] = []
 
-    def _fake_send(*, api_key, inbox_id, message_id, text, html, **_kw):
-        sent.append(
-            {
-                "api_key": api_key,
-                "inbox_id": inbox_id,
-                "message_id": message_id,
-                "text": text,
-                "html": html,
-            }
-        )
+    # ss#2258: send_reply no longer takes a key or an inbox — the broker pins
+    # both. The fixture records exactly what the agent process can still express.
+    def _fake_send(*, message_id, text, html, **_kw):
+        sent.append({"message_id": message_id, "text": text, "html": html})
         return "msg_sent_1"
 
     yaml_path = tmp_path / "customer.yaml"
@@ -177,7 +171,9 @@ def test_happy_path_sends_to_recorded_inbox_and_message(relay_mod) -> None:
     # Sent, keyed on the RECORDED inbox + message (structural recipient-lock),
     # not on anything the draft named.
     assert len(sent) == 1
-    assert sent[0]["inbox_id"] == "inbox_x"
+    # ss#2258: the agent no longer names the inbox — the broker pins it from the
+    # seat's own config, so identity is absent from what this process can express.
+    assert "inbox_id" not in sent[0]
     assert sent[0]["message_id"] == "msg_in"
     # Audit row carries digest + recipient, never the body.
     events = d1.events()
@@ -201,7 +197,9 @@ def test_runtime_mcp_tool_name_fires_relay(relay_mod) -> None:
         session_id="s1",
     )
     assert len(sent) == 1
-    assert sent[0]["inbox_id"] == "inbox_x"
+    # ss#2258: the agent no longer names the inbox — the broker pins it from the
+    # seat's own config, so identity is absent from what this process can express.
+    assert "inbox_id" not in sent[0]
     assert sent[0]["message_id"] == "msg_in"
 
 
@@ -222,7 +220,9 @@ def test_recovers_origin_when_session_id_mismatches(relay_mod) -> None:
         session_id="agent-20260613-013303",
     )
     assert len(sent) == 1
-    assert sent[0]["inbox_id"] == "inbox_x"
+    # ss#2258: the agent no longer names the inbox — the broker pins it from the
+    # seat's own config, so identity is absent from what this process can express.
+    assert "inbox_id" not in sent[0]
     assert sent[0]["message_id"] == "msg_in"
 
 
@@ -712,40 +712,51 @@ def test_recipient_locked_pure() -> None:
     assert r.recipient_locked({"to": ["a@x.test"]}, "") is False
 
 
-def test_send_reply_builds_request() -> None:
+def test_send_reply_delegates_to_the_broker_and_carries_no_credential() -> None:
+    """ss#2258: the reply transport is a broker verb, not a REST call from here.
+
+    What this pins is the ABSENCE of authority in this process: no api_key, no
+    inbox id, no recipient. The agent supplies content and the source message id;
+    everything about who may receive it is decided by the process holding the key.
+    """
     mod = load_plugin("hermes-smd-reply")
     captured = {}
 
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return b'{"messageId":"msg_out"}'
-
-    def _opener(req, timeout=None):
-        captured["url"] = req.full_url
-        captured["method"] = req.get_method()
-        captured["auth"] = req.headers.get("Authorization")
-        captured["body"] = json.loads(req.data.decode())
-        return _Resp()
+    def _sender(*, message_id, text, html):
+        captured.update(message_id=message_id, text=text, html=html)
+        return "msg_out"
 
     out = mod.relay.send_reply(
-        api_key="sek",
-        inbox_id="inbox_x",
-        message_id="msg_in",
-        text="hello",
-        html="<p>hello</p>",
-        opener=_opener,
+        message_id="msg_in", text="hello", html="<p>hello</p>", sender=_sender
     )
     assert out == "msg_out"
-    assert captured["url"].endswith("/inboxes/inbox_x/messages/msg_in/reply")
-    assert captured["method"] == "POST"
-    assert captured["auth"] == "Bearer sek"
-    assert captured["body"] == {"text": "hello", "html": "<p>hello</p>"}
+    assert captured == {"message_id": "msg_in", "text": "hello", "html": "<p>hello</p>"}
+
+
+def test_send_reply_surfaces_a_broker_refusal_as_a_send_error() -> None:
+    """A refusal must reach the caller's audited REPLY_FAILED path, with its reason.
+
+    The broker refuses when the original sender is not on inbound_allow_from —
+    anyone can email a seat's inbox, so that check is the reply lane's fence.
+    """
+    mod = load_plugin("hermes-smd-reply")
+
+    def _refuse(**_kw):
+        raise mod.relay.agentmail_broker.BrokerError("sender is not on inbound_allow_from")
+
+    with pytest.raises(mod.relay.RelaySendError, match="inbound_allow_from"):
+        mod.relay.send_reply(message_id="m", text="t", html="", sender=_refuse)
+
+
+def test_send_reply_distinguishes_an_unreachable_broker_from_a_refusal() -> None:
+    """A socket failure is not a policy decision and must not read as one."""
+    mod = load_plugin("hermes-smd-reply")
+
+    def _down(**_kw):
+        raise mod.relay.agentmail_broker.AgentMailBrokerUnavailable("socket missing")
+
+    with pytest.raises(mod.relay.RelaySendError, match="unavailable"):
+        mod.relay.send_reply(message_id="m", text="t", html="", sender=_down)
 
 
 # ---------------------------------------------------------------------------
