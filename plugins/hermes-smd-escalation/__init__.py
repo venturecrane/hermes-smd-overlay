@@ -13,7 +13,9 @@ These two tools close the gap without widening any entitlement:
 * ``escalation_append`` — one validated event through the broker's uid-gated
   ``escalation_event_append`` verb (the broker still owns ALL validation: schema,
   event vocabulary, and the acked-must-reference-a-prior-raise rule). The tool is
-  a socket courier, not a second validator.
+  a socket courier, not a second validator. Identity is supplied ONCE, on the
+  ``derive_only`` call; the write presents the handle that call returned (ss
+  #2304 — see the derive-handle block below).
 * ``escalation_state`` — folds the read-only ledger twin
   (``/opt/data/audit/escalation-ledger.jsonl``; the hermes uid is in
   ``audit-readers``) into per-item state + ACK tokens via the vendored
@@ -30,7 +32,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import socket
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import asdict
 from typing import Any
 
@@ -45,6 +51,78 @@ _TIMEOUT_SECONDS = 10
 
 STRING = {"type": "string"}
 NULLABLE_STRING = {"type": ["string", "null"]}
+
+# ---------------------------------------------------------------------------
+# Derive handles (ss #2304)
+# ---------------------------------------------------------------------------
+# ``derive_only`` and the append used to be two calls with INDEPENDENTLY supplied
+# identity components, and the append re-derived from whatever tuple it was
+# handed that call. The ACK code a human was shown came from call 1; the ledger
+# row was keyed off call 2; nothing bound them. A transposition (one row off in a
+# batch of nine) wrote an item the quoted code does not name — the ack is refused,
+# or it resolves to a DIFFERENT open item and silences the wrong deadline. Both
+# calls are individually well-formed, so no validator could see it.
+#
+# The fix removes the second derivation. A ``derive_only`` call mints a
+# single-use handle for the identity it just derived; the append presents the
+# handle and supplies NO identity components at all. So the components of a
+# ledger row are typed exactly once, ever, and "the code shown" and "the row
+# written" are the same derivation by construction rather than by agreement.
+#
+# Supplying components to an append is a REFUSAL, not a silently ignored
+# argument: the turn that would have transposed a component must see that its
+# second call cannot name an item.
+#
+# Module-level state, deliberately. The handles never outlive the process (a
+# restart between derive and append refuses the append, which writes nothing and
+# re-fires next run — the safe direction, ss #1935). The map is capped and
+# time-bounded; an evicted or expired handle refuses just as loudly as an unknown
+# one. This is the issue's option 1 with the state in the tool rather than the
+# broker: the broker keeps no per-turn state and gains none here.
+_HANDLE_PREFIX = "EDH-"
+_MAX_OPEN_HANDLES = 256
+_HANDLE_TTL_SECONDS = 3600
+_IDENTITY_ARGS = ("matter_id", "source_id", "label", "authored_date")
+
+_handles: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_handles_lock = threading.Lock()
+
+
+def _mint_handle(record: dict[str, Any]) -> str:
+    handle = _HANDLE_PREFIX + secrets.token_hex(16)
+    with _handles_lock:
+        _handles[handle] = {**record, "minted_at": time.monotonic()}
+        while len(_handles) > _MAX_OPEN_HANDLES:
+            _handles.popitem(last=False)
+    return handle
+
+
+def _refuse_handle(handle: str) -> ValueError:
+    return ValueError(
+        f"append_handle {handle!r} was not issued by a derive_only call in this "
+        "process, or it expired, or it was already used to write a row. Call "
+        "escalation_append with derive_only=true for THIS item and present the "
+        "handle it returns — never reuse a handle, and never retype the identity "
+        "components on the append (ss #2304: the ACK code quoted to a human must "
+        "be the code of the row that gets written)"
+    )
+
+
+def _peek_handle(handle: str) -> dict[str, Any]:
+    with _handles_lock:
+        record = _handles.get(handle)
+        if record is None:
+            raise _refuse_handle(handle)
+        if time.monotonic() - float(record["minted_at"]) > _HANDLE_TTL_SECONDS:
+            _handles.pop(handle, None)
+            raise _refuse_handle(handle)
+    return record
+
+
+def _consume_handle(handle: str) -> None:
+    with _handles_lock:
+        _handles.pop(handle, None)
+
 
 # The tool derives item_key + token from the IDENTITY COMPONENTS — the agent
 # never hashes. The first live probe (ss #1915 WP-D) proved why: with item_key
@@ -63,7 +141,10 @@ _APPEND_SCHEMA = {
         },
         "matter_id": {
             **NULLABLE_STRING,
-            "description": "Smokeball matter id; null for seat-level sentinel items.",
+            "description": (
+                "Smokeball matter id; null for seat-level sentinel items. "
+                "DERIVE ONLY — an append presents append_handle instead."
+            ),
         },
         "source_id": {
             **NULLABLE_STRING,
@@ -115,13 +196,25 @@ _APPEND_SCHEMA = {
         "derive_only": {
             "type": "boolean",
             "description": (
-                "When true, derive and return item_key + ACK token from the "
-                "identity components WITHOUT writing any event. Use this BEFORE "
-                "composing an alert so the sent body quotes the real broker-"
-                "derived codes (ss #1935: an alert composed before the ledger "
-                "writes printed invented or wrong-item codes). Not valid with "
-                "ack_token. The send-then-record failure direction is preserved: "
-                "derive, send, then append the raise."
+                "When true, derive and return item_key + ACK token + "
+                "append_handle from the identity components WITHOUT writing any "
+                "event. Use this BEFORE composing an alert so the sent body "
+                "quotes the real broker-derived codes (ss #1935: an alert "
+                "composed before the ledger writes printed invented or "
+                "wrong-item codes). Not valid with ack_token or append_handle. "
+                "The send-then-record failure direction is preserved: derive, "
+                "send, then append the raise with the handle."
+            ),
+        },
+        "append_handle": {
+            **NULLABLE_STRING,
+            "description": (
+                "REQUIRED on every non-acked append: the single-use EDH-xxxx "
+                "handle returned by this item's derive_only call. The append "
+                "carries NO identity components — it writes the item the derive "
+                "identified, so the ACK code quoted to a human is necessarily the "
+                "code of the row written (ss #2304). One handle writes one row; "
+                "passing identity components alongside it is refused."
             ),
         },
     },
@@ -193,18 +286,63 @@ def _resolve_token_identity(ack_token: str) -> tuple[str, str | None]:
 def _escalation_append(args: dict[str, Any], **_: Any) -> str:
     kind = str(args["event"])
     ack_token = args.get("ack_token")
+    handle = args.get("append_handle")
     derive_only = bool(args.get("derive_only"))
+    # Presence, not truthiness: `authored_date: null` is a deliberate value at
+    # derive time (the verification chase's identity convention), so an append
+    # that names the argument at all is retyping identity even when it is null.
+    supplied_identity = [name for name in _IDENTITY_ARGS if name in args]
     if derive_only and ack_token:
         raise ValueError(
             "derive_only resolves identity for a raise you have not written yet; "
             "an acked event already has its token — pass one or the other"
         )
+    if derive_only and handle:
+        raise ValueError(
+            "append_handle is what a derive RETURNS, not something you pass to "
+            "one; drop it to derive this item's identity, or drop derive_only to "
+            "write the row the handle already names"
+        )
     if ack_token:
         if kind != "acked":
             raise ValueError("ack_token is only valid for acked events")
+        if handle or supplied_identity:
+            extra = sorted(supplied_identity + (["append_handle"] if handle else []))
+            raise ValueError(
+                "an acked event takes its identity from the quoted ACK code and "
+                f"nothing else; drop {extra}"
+            )
         key, matter_id = _resolve_token_identity(str(ack_token))
         token: str | None = str(ack_token)
-    else:
+    elif handle:
+        # THE BINDING (ss #2304). The append derives nothing. It writes the item
+        # the derive identified, so the ACK code quoted to a human cannot name a
+        # different row than the one written — not "checked", unrepresentable.
+        if supplied_identity:
+            raise ValueError(
+                "an append with append_handle must carry NO identity components — "
+                f"drop {sorted(supplied_identity)}. The handle already names the "
+                "item, and a retyped component is exactly the transposition that "
+                "wrote a row the quoted ACK code did not name (ss #2304). If the "
+                "components are the ones you meant, derive again and present the "
+                "handle THAT call returns"
+            )
+        record = _peek_handle(str(handle))
+        if record["skill"] != str(args["skill"]):
+            raise ValueError(
+                f"append_handle was derived for skill {record['skill']!r} but this "
+                f"append says {str(args['skill'])!r}; a row filed under the wrong "
+                "skill is invisible to that skill's state fold"
+            )
+        if record["event"] != kind:
+            raise ValueError(
+                f"append_handle was derived for a {record['event']!r} event but "
+                f"this append says {kind!r}; derive the event you intend to write"
+            )
+        key = str(record["item_key"])
+        token = record["token"]
+        matter_id = record["matter_id"]
+    elif derive_only:
         # Derived, never model-authored: the sha256 identity key and its ACK
         # token come from the same vendored helpers the pre_run gates use, so
         # the join can never fork on a hand-typed key (the first live probe's
@@ -229,13 +367,40 @@ def _escalation_append(args: dict[str, Any], **_: Any) -> str:
             if escalation_ledger.has_stable_identity(source_id, matter_id)
             else None
         )
+    else:
+        raise ValueError(
+            "a non-acked append requires append_handle: call escalation_append "
+            "with derive_only=true for this item, quote the ACK token it returns, "
+            "then present its append_handle here. Identity components are accepted "
+            "on the derive ONLY — re-supplying them on the append is how the code "
+            "shown to a human came to name a different row than the one written "
+            "(ss #2304)"
+        )
     if derive_only:
         # Identity only — NOTHING is written. The turn quotes these codes in the
         # alert it is about to send, then appends the raise after a successful
         # send. A failed send therefore still records nothing (the item re-fires
         # next run: annoying, never dangerous — ss #1935).
+        #
+        # The handle is the receipt for THIS derivation. It is the only thing the
+        # append will accept, and it is single-use: one derive, one row.
         return json.dumps(
-            {"ok": True, "derive_only": True, "written": False, "item_key": key, "token": token},
+            {
+                "ok": True,
+                "derive_only": True,
+                "written": False,
+                "item_key": key,
+                "token": token,
+                "append_handle": _mint_handle(
+                    {
+                        "item_key": key,
+                        "token": token,
+                        "matter_id": matter_id,
+                        "skill": str(args["skill"]),
+                        "event": kind,
+                    }
+                ),
+            },
             ensure_ascii=False,
         )
     event = {
@@ -254,6 +419,11 @@ def _escalation_append(args: dict[str, Any], **_: Any) -> str:
     # the derived identity so the turn can quote the token in the alert body.
     if isinstance(response, dict):
         response = {**response, "item_key": key, "token": token}
+    # Consumed only once a row exists. A broker refusal leaves the handle alive so
+    # the turn can retry the SAME identity; a written row retires it, so one
+    # derive can never become two rows.
+    if handle and isinstance(response, dict) and response.get("ok"):
+        _consume_handle(str(handle))
     return json.dumps(response, ensure_ascii=False)
 
 
@@ -303,10 +473,11 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "escalation_append": (
         "Append one escalation-ledger event (fired/chased/acked/handed_off/resolved) "
         "through the validated broker seam. The broker stamps ts/id and rejects an "
-        "acked event whose token has no prior raise. With derive_only=true, returns "
-        "the derived item_key + ACK token WITHOUT writing — call this before "
-        "composing an alert so the sent body quotes real codes, then append the "
-        "raise after the send succeeds.",
+        "acked event whose token has no prior raise. Two steps, always: "
+        "derive_only=true with the identity components returns item_key + ACK token "
+        "+ a single-use append_handle and writes NOTHING; the write then presents "
+        "append_handle and NO components, so the code quoted to a human is the code "
+        "of the row written. acked events identify by ack_token instead.",
         _APPEND_SCHEMA,
         _escalation_append,
     ),

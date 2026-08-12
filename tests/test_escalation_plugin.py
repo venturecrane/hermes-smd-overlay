@@ -11,6 +11,7 @@ closes was surfaced).
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -32,23 +33,40 @@ def escalation(monkeypatch):
     return plugin, requests
 
 
+def _derive_then_append(plugin, components: dict) -> tuple[dict, dict]:
+    """The two-step contract (ss #2304). Identity components are supplied ONCE, on
+    the derive; the write presents the single-use handle that derive returned and
+    names no identity of its own."""
+    derived = json.loads(plugin._escalation_append({**components, "derive_only": True}))
+    written = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": components["skill"],
+                "event": components["event"],
+                "attempt": components["attempt"],
+                "append_handle": derived["append_handle"],
+            }
+        )
+    )
+    return derived, written
+
+
 def test_append_derives_item_key_and_token_from_components(escalation):
     """The tool hashes the identity tuple ITSELF (the first live probe proved
     a model-authored item_key forks the pre_run join: it wrote a colon-joined
     composite the sha256 join never matched)."""
     plugin, requests = escalation
-    out = json.loads(
-        plugin._escalation_append(
-            {
-                "skill": "client-verification-tracker",
-                "matter_id": "m-1",
-                "source_id": "task-1",
-                "label": "client-verification",
-                "authored_date": None,
-                "event": "chased",
-                "attempt": 2,
-            }
-        )
+    _, out = _derive_then_append(
+        plugin,
+        {
+            "skill": "client-verification-tracker",
+            "matter_id": "m-1",
+            "source_id": "task-1",
+            "label": "client-verification",
+            "authored_date": None,
+            "event": "chased",
+            "attempt": 2,
+        },
     )
     expected_key = escalation_ledger.item_key("m-1", "task-1", "client-verification", None)
     expected_token = escalation_ledger.token_for(expected_key)
@@ -96,23 +114,200 @@ def test_derive_only_returns_identity_and_writes_nothing(escalation):
 
 
 def test_derive_only_matches_the_later_real_append(escalation):
-    """Determinism guard: the token quoted in the alert (derive_only) and the
-    token recorded by the post-send append are the same value."""
+    """The token quoted in the alert (derive_only) and the token recorded by the
+    post-send append are the same value — since ss #2304 by construction, not by
+    two derivations agreeing: the append re-derives nothing."""
+    plugin, requests = escalation
+    derived, appended = _derive_then_append(
+        plugin,
+        {
+            "skill": "deadline-miss-escalator",
+            "matter_id": "m-1",
+            "source_id": "task-9",
+            "label": "lien-payoff",
+            "authored_date": None,
+            "event": "fired",
+            "attempt": 1,
+        },
+    )
+    assert derived["token"] == appended["token"]
+    assert derived["item_key"] == appended["item_key"]
+    assert len(requests) == 1  # only the second call wrote
+    assert requests[0]["event"]["item_key"] == derived["item_key"]
+
+
+def test_a_handle_writes_exactly_one_row(escalation):
+    """Single use. A retried append on a spent handle is refused rather than
+    writing the item twice — a second raise would inflate the attempt count the
+    chase ceiling reads."""
+    plugin, requests = escalation
+    derived, _ = _derive_then_append(
+        plugin,
+        {
+            "skill": "deadline-miss-escalator",
+            "matter_id": "m-1",
+            "source_id": "task-9",
+            "label": "lien-payoff",
+            "authored_date": None,
+            "event": "fired",
+            "attempt": 1,
+        },
+    )
+    with pytest.raises(ValueError, match="already used to write a row"):
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "fired",
+                "attempt": 1,
+                "append_handle": derived["append_handle"],
+            }
+        )
+    assert len(requests) == 1
+
+
+def test_a_handle_never_issued_is_refused(escalation):
+    """A fabricated or remembered handle writes nothing. The turn cannot invent
+    its way past the derive."""
+    plugin, requests = escalation
+    with pytest.raises(ValueError, match="was not issued by a derive_only call"):
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "fired",
+                "attempt": 1,
+                "append_handle": "EDH-0000000000000000000000000000000",
+            }
+        )
+    assert requests == []
+
+
+def test_an_expired_handle_is_refused_not_written(escalation, monkeypatch):
+    """A handle that outlived its window refuses. The turn re-derives, which is
+    free; the failure direction stays the safe one (nothing written, ss #1935)."""
+    plugin, requests = escalation
+    derived = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "matter_id": "m-1",
+                "source_id": "task-9",
+                "label": "lien-payoff",
+                "authored_date": None,
+                "event": "fired",
+                "attempt": 1,
+                "derive_only": True,
+            }
+        )
+    )
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(
+        plugin.time, "monotonic", lambda: real_monotonic() + plugin._HANDLE_TTL_SECONDS + 1
+    )
+    with pytest.raises(ValueError, match="expired"):
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "fired",
+                "attempt": 1,
+                "append_handle": derived["append_handle"],
+            }
+        )
+    assert requests == []
+
+
+def test_identity_components_on_an_append_are_refused_even_when_they_agree(escalation):
+    """The refusal is on the SHAPE, not on a comparison. A tool that only refused
+    disagreeing components would still accept the case the issue names as
+    uncatchable — a turn that re-reads the wrong row and copies every field off it
+    consistently. Identity is typed once per row or not at all."""
     plugin, requests = escalation
     components = {
         "skill": "deadline-miss-escalator",
-        "matter_id": "m-1",
-        "source_id": "task-9",
-        "label": "lien-payoff",
-        "authored_date": None,
+        "matter_id": "m-7",
+        "source_id": "task-42",
+        "label": "task-deadline",
+        "authored_date": "2026-08-11",
         "event": "fired",
         "attempt": 1,
     }
     derived = json.loads(plugin._escalation_append({**components, "derive_only": True}))
-    appended = json.loads(plugin._escalation_append(components))
-    assert derived["token"] == appended["token"]
-    assert derived["item_key"] == appended["item_key"]
-    assert len(requests) == 1  # only the second call wrote
+    with pytest.raises(ValueError, match="must carry NO identity components"):
+        plugin._escalation_append({**components, "append_handle": derived["append_handle"]})
+    assert requests == []
+
+
+def test_a_handle_cannot_be_spent_under_a_different_skill_or_event(escalation):
+    """The handle names an item AND the row it was derived for. A raise filed
+    under the wrong skill is invisible to that skill's state fold, and a derive
+    for a `fired` spent on a `handed_off` is a terminal write the turn did not
+    look up."""
+    plugin, requests = escalation
+    components = {
+        "skill": "client-verification-tracker",
+        "matter_id": "m-1",
+        "source_id": "task-1",
+        "label": "client-verification",
+        "authored_date": None,
+        "event": "chased",
+        "attempt": 2,
+    }
+    derived = json.loads(plugin._escalation_append({**components, "derive_only": True}))
+    with pytest.raises(ValueError, match="filed under the wrong skill"):
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "chased",
+                "attempt": 2,
+                "append_handle": derived["append_handle"],
+            }
+        )
+    with pytest.raises(ValueError, match="derive the event you intend to write"):
+        plugin._escalation_append(
+            {
+                "skill": "client-verification-tracker",
+                "event": "handed_off",
+                "attempt": 2,
+                "append_handle": derived["append_handle"],
+            }
+        )
+    assert requests == []
+
+
+def test_derive_only_rejects_an_append_handle(escalation):
+    plugin, requests = escalation
+    with pytest.raises(ValueError, match="what a derive RETURNS"):
+        plugin._escalation_append(
+            {
+                "skill": "s",
+                "matter_id": "m-1",
+                "source_id": "t-1",
+                "label": "x",
+                "event": "fired",
+                "attempt": 1,
+                "derive_only": True,
+                "append_handle": "EDH-abc",
+            }
+        )
+    assert requests == []
+
+
+def test_acked_refuses_identity_components_and_handles(escalation, tmp_path, monkeypatch):
+    """An acked event identifies by the quoted code and nothing else. Components
+    alongside it used to be accepted and silently ignored, which reads to a turn
+    as though they were honoured."""
+    plugin, requests = escalation
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(tmp_path / "empty.jsonl"))
+    with pytest.raises(ValueError, match="nothing else"):
+        plugin._escalation_append(
+            {
+                "skill": "s",
+                "event": "acked",
+                "attempt": 1,
+                "ack_token": "ACK-ABCDEF",
+                "source_id": "t-1",
+            }
+        )
+    assert requests == []
 
 
 def test_derive_only_rejects_ack_token(escalation):
@@ -132,18 +327,17 @@ def test_derive_only_rejects_ack_token(escalation):
 
 def test_append_idless_item_gets_no_token(escalation):
     plugin, requests = escalation
-    json.loads(
-        plugin._escalation_append(
-            {
-                "skill": "deadline-miss-escalator",
-                "matter_id": "m-1",
-                "source_id": None,
-                "label": "sol-date",
-                "authored_date": "2026-08-01",
-                "event": "fired",
-                "attempt": 1,
-            }
-        )
+    _derive_then_append(
+        plugin,
+        {
+            "skill": "deadline-miss-escalator",
+            "matter_id": "m-1",
+            "source_id": None,
+            "label": "sol-date",
+            "authored_date": "2026-08-01",
+            "event": "fired",
+            "attempt": 1,
+        },
     )
     assert requests[0]["event"]["token"] is None  # blanket-ack-only group
 
@@ -157,18 +351,17 @@ def test_sentinel_matter_item_gets_no_token(escalation):
     (and therefore the code) changes the instant the matter resolves. The alert
     would print a code that names nothing by the time anyone types it."""
     plugin, requests = escalation
-    out = json.loads(
-        plugin._escalation_append(
-            {
-                "skill": "deadline-miss-escalator",
-                "matter_id": "unknown-matter",
-                "source_id": "3c191bed-cdda-48b9-a6ed-a51a349f3f94",
-                "label": "task-deadline",
-                "authored_date": "2026-08-11",
-                "event": "fired",
-                "attempt": 1,
-            }
-        )
+    _, out = _derive_then_append(
+        plugin,
+        {
+            "skill": "deadline-miss-escalator",
+            "matter_id": "unknown-matter",
+            "source_id": "3c191bed-cdda-48b9-a6ed-a51a349f3f94",
+            "label": "task-deadline",
+            "authored_date": "2026-08-11",
+            "event": "fired",
+            "attempt": 1,
+        },
     )
     assert out["token"] is None  # blanket-ack-only
     assert requests[0]["event"]["token"] is None
@@ -183,7 +376,8 @@ def test_one_deadline_two_date_spellings_is_one_append_identity(escalation):
     each carried a different ACK code."""
     plugin, requests = escalation
     for spelling in ("2026-08-11", "2026-08-11T00:00:00Z", " 2026-08-11 "):
-        plugin._escalation_append(
+        _derive_then_append(
+            plugin,
             {
                 "skill": "deadline-miss-escalator",
                 "matter_id": "m-7",
@@ -192,7 +386,7 @@ def test_one_deadline_two_date_spellings_is_one_append_identity(escalation):
                 "authored_date": spelling,
                 "event": "fired",
                 "attempt": 1,
-            }
+            },
         )
     keys = {r["event"]["item_key"] for r in requests}
     tokens = {r["event"]["token"] for r in requests}
@@ -202,7 +396,8 @@ def test_one_deadline_two_date_spellings_is_one_append_identity(escalation):
 
 def test_unparseable_authored_date_is_refused_before_the_broker(escalation):
     """A date the module cannot canonicalize must not reach the ledger verbatim.
-    The turn sees the error while the argument is still fixable."""
+    The turn sees the error on the derive — while the argument is still fixable,
+    and before any code has been quoted to anyone."""
     plugin, requests = escalation
     with pytest.raises(ValueError, match="authored_date"):
         plugin._escalation_append(
@@ -214,6 +409,7 @@ def test_unparseable_authored_date_is_refused_before_the_broker(escalation):
                 "authored_date": "next Tuesday",
                 "event": "fired",
                 "attempt": 1,
+                "derive_only": True,
             }
         )
     assert requests == []
@@ -368,12 +564,7 @@ def test_acked_resolves_past_a_pre_epoch_raise_to_a_current_one(escalation, tmp_
 
 def test_append_returns_broker_rejection_verbatim(escalation, monkeypatch):
     plugin, _ = escalation
-    monkeypatch.setattr(
-        plugin,
-        "_broker_request",
-        lambda payload: {"ok": False, "error": "ValueError", "message": "no prior raise"},
-    )
-    out = json.loads(
+    derived = json.loads(
         plugin._escalation_append(
             {
                 "skill": "s",
@@ -382,11 +573,112 @@ def test_append_returns_broker_rejection_verbatim(escalation, monkeypatch):
                 "label": "x",
                 "event": "fired",
                 "attempt": 1,
+                "derive_only": True,
             }
         )
     )
+    monkeypatch.setattr(
+        plugin,
+        "_broker_request",
+        lambda payload: {"ok": False, "error": "ValueError", "message": "no prior raise"},
+    )
+    write = {
+        "skill": "s",
+        "event": "fired",
+        "attempt": 1,
+        "append_handle": derived["append_handle"],
+    }
+    out = json.loads(plugin._escalation_append(write))
     assert out["ok"] is False
     assert "no prior raise" in out["message"]
+    # A refused write leaves the handle alive: no row exists, so the turn can
+    # retry the SAME identity without re-deriving a code it has already quoted.
+    monkeypatch.setattr(plugin, "_broker_request", lambda payload: {"ok": True, "id": "evt-2"})
+    retried = json.loads(plugin._escalation_append(write))
+    assert retried["ok"] is True
+    assert retried["item_key"] == derived["item_key"]
+
+
+def test_a_code_shown_for_one_item_cannot_be_written_against_another(escalation):
+    """ss #2304, the defect itself. The turn derives item A, quotes A's ACK code
+    in the alert it sends, and then appends -- and the append used to re-derive
+    identity from whatever tuple it was handed THAT call. A transposition
+    (``task-42`` -> ``task-43``, one row off in a batch of nine) wrote a row the
+    human's code does not name: the ack is refused, or in a batch it resolves to a
+    DIFFERENT open item and silences the wrong deadline. Both calls are
+    individually well-formed, so nothing in the tool, the broker or the ledger
+    could see it.
+
+    The append no longer accepts identity at all -- it presents the handle its
+    derive returned -- so the divergence is not detected, it is unrepresentable."""
+    plugin, requests = escalation
+    item_a = {
+        "skill": "deadline-miss-escalator",
+        "matter_id": "m-7",
+        "source_id": "task-42",
+        "label": "task-deadline",
+        "authored_date": "2026-08-11",
+        "event": "fired",
+        "attempt": 1,
+    }
+    item_b = {**item_a, "source_id": "task-43"}
+    derived = json.loads(plugin._escalation_append({**item_a, "derive_only": True}))
+    shown_to_the_human = derived["token"]
+    try:
+        written = json.loads(plugin._escalation_append(item_b))
+    except ValueError as refusal:
+        assert "append_handle" in str(refusal)
+        assert requests == []  # nothing reached the broker
+        return
+    pytest.fail(
+        "the append was accepted and wrote a DIFFERENT item than the code the "
+        f"human was shown: shown {shown_to_the_human} ({derived['item_key']}), "
+        f"written {written['token']} ({written['item_key']}) -- two well-formed "
+        "calls, no derivation binds them, and nothing noticed"
+    )
+
+
+def test_the_single_item_path_still_round_trips_through_the_ack_resolver(
+    escalation, tmp_path, monkeypatch
+):
+    """Control for the test above: the normal derive -> send -> append path still
+    yields a code a human can actually type back. The row the append wrote is
+    replayed into a ledger file and the code shown in the alert is resolved
+    through ``_resolve_token_identity`` -- the same resolver the ack turn uses."""
+    plugin, requests = escalation
+    components = {
+        "skill": "deadline-miss-escalator",
+        "matter_id": "m-7",
+        "source_id": "task-42",
+        "label": "task-deadline",
+        "authored_date": "2026-08-11",
+        "event": "fired",
+        "attempt": 1,
+    }
+    derived = json.loads(plugin._escalation_append({**components, "derive_only": True}))
+    shown_to_the_human = derived["token"]
+    appended = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": components["skill"],
+                "event": components["event"],
+                "attempt": components["attempt"],
+                "append_handle": derived["append_handle"],
+            }
+        )
+    )
+    assert appended["item_key"] == derived["item_key"]
+    assert appended["token"] == shown_to_the_human
+    row = requests[0]["event"]
+    ledger_file = tmp_path / "ledger.jsonl"
+    ledger_file.write_text(
+        json.dumps({**row, "ts": "2026-08-11T09:00:00.000Z", "id": "evt-1"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
+    resolved_key, resolved_matter = plugin._resolve_token_identity(shown_to_the_human)
+    assert resolved_key == derived["item_key"]
+    assert resolved_matter == "m-7"
 
 
 def test_state_folds_ledger_file(escalation, tmp_path, monkeypatch):
