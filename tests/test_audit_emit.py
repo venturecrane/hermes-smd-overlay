@@ -591,7 +591,7 @@ def test_build_metadata_canonical_keys_present() -> None:
         action_class=mod.schemas.HookActionClass.INTERNAL_WRITE,
         outcome="ok",
         duration_ms=12.5,
-        trace_id="trace-test-0001",
+        tool_call_id="toolu-test-0001",
     )
     for key in (
         "per_tool_audit",
@@ -604,6 +604,10 @@ def test_build_metadata_canonical_keys_present() -> None:
         "outcome",
         "error_type",
         "duration_ms",
+        "tool_call_id",
+        # The deprecated alias of tool_call_id, still written so a correlation
+        # query reaches rows predating ss-console #2312. Retire with that issue's
+        # follow-on, once the audit retention window has cleared those rows.
         "trace_id",
     ):
         assert key in md, f"canonical key {key!r} missing from metadata"
@@ -613,7 +617,8 @@ def test_build_metadata_canonical_keys_present() -> None:
     assert md["action_class"] == "internal_write"
     assert md["outcome"] == "ok"
     assert md["duration_ms"] == 12.5
-    assert md["trace_id"] == "trace-test-0001"
+    assert md["tool_call_id"] == "toolu-test-0001"
+    assert md["trace_id"] == md["tool_call_id"]
 
 
 def test_build_metadata_no_unmapped_or_banned_flags_by_default() -> None:

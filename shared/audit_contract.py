@@ -80,6 +80,23 @@ CHAIN_COLUMN_ALTERS: tuple[str, ...] = (
     "ALTER TABLE audit_log ADD COLUMN row_hash TEXT",
 )
 
+# The tool-call correlation key, as spelled inside the ``metadata`` blob.
+#
+# audit_log has no tool_call_id COLUMN (see COLUMNS above), so correlating one
+# dispatch across emitters means json_extract(metadata, '$.tool_call_id') — and
+# that only works if every emitter agrees on the spelling. Six audit-metadata
+# writers already used this name; hermes-smd-audit's per-tool builder wrote the
+# same value as ``trace_id``, so a single query silently missed one side or the
+# other (ss-console #2312). Pinned here beside the column contract because this
+# is the same class of drift COLUMNS exists to prevent.
+#
+# ``trace_id`` is NOT a synonym: the safety substrate documents it as an opaque
+# request/turn id (ss-console operator/safety-substrate/trust_ceiling_log.py),
+# and a turn contains many tool calls. It survives on the per-tool path as a
+# deprecated alias only so queries still reach rows written before the fix.
+CANONICAL_TOOL_CALL_KEY = "tool_call_id"
+DEPRECATED_TOOL_CALL_KEY = "trace_id"
+
 CREATE_INDEX_SQL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
     "CREATE INDEX IF NOT EXISTS idx_audit_action_type ON audit_log(action_type, ts)",
@@ -171,6 +188,8 @@ __all__ = [
     "CREATE_TABLE_SQL",
     "CHAIN_COLUMN_ALTERS",
     "CREATE_INDEX_SQL",
+    "CANONICAL_TOOL_CALL_KEY",
+    "DEPRECATED_TOOL_CALL_KEY",
     "ACTOR_AGENT",
     "build_audit_params",
     "agent_event_params",

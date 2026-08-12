@@ -8,6 +8,7 @@ in-memory loaders.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import sys
 from collections.abc import Iterator
@@ -51,6 +52,8 @@ def _row_factory(mod):
         diff_digest=None,
         trust_ceiling: str = "draft_for_review",
         metadata: str = '{"k":1}',
+        prev_hash: str = "prev-0",
+        row_hash: str = "row-0",
     ):
         return mod.integrity.AuditRow(
             id=id,
@@ -65,6 +68,8 @@ def _row_factory(mod):
             diff_digest=diff_digest,
             trust_ceiling=trust_ceiling,
             metadata=metadata,
+            prev_hash=prev_hash,
+            row_hash=row_hash,
         )
 
     return _row
@@ -328,3 +333,134 @@ def test_report_initial_state_is_clean_and_empty() -> None:
     assert report.d1_rows_checked == 0
     assert report.mirror_rows_checked == 0
     assert report.loader_error is None
+
+
+# ---------------------------------------------------------------------------
+# Chain columns + ts normalization (ss-console #2312)
+#
+# compare_key() was documented as "every column except metadata" while silently
+# also excluding prev_hash and row_hash — the two columns the tamper-evidence
+# chain consists of. And ts sat raw INSIDE the compare key, so a cosmetic
+# rendering difference between the stores would mark every row in the window as
+# drifted.
+# ---------------------------------------------------------------------------
+
+
+_CHAIN_FIELDS = ("prev_hash", "row_hash")
+
+
+def _require_chain_fields(cls) -> None:
+    """Fail legibly when the row shape cannot represent chain drift at all."""
+    present = {f.name for f in dataclasses.fields(cls)}
+    missing = [name for name in _CHAIN_FIELDS if name not in present]
+    assert not missing, (
+        f"{cls.__name__} omits {missing}: the shape cannot even carry the "
+        "hash-chain columns, so drift in them is structurally invisible "
+        "(shared/audit_contract.py CREATE_TABLE_SQL defines both)"
+    )
+
+
+def test_audit_row_carries_the_chain_columns() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    _require_chain_fields(mod.integrity.AuditRow)
+
+
+def test_mirrored_row_carries_the_chain_columns() -> None:
+    """The mirror must supply them or every compared row would differ on None."""
+    mod = load_plugin("hermes-smd-audit")
+    _require_chain_fields(mod.immutability.MirroredAuditRow)
+
+
+def test_row_hash_drift_between_the_two_stores_is_reported() -> None:
+    """The one thing a tamper-evidence chain exists to detect."""
+    mod = load_plugin("hermes-smd-audit")
+    _require_chain_fields(mod.integrity.AuditRow)
+    row = _row_factory(mod)
+    d1 = _FakeLoader([row("01A", _OLD_TS, row_hash="aaaa")])
+    mirror = _FakeLoader([row("01A", _OLD_TS, row_hash="bbbb")])
+    report = mod.integrity.check_audit_integrity(
+        d1, mirror, start_ts=_OLD_TS, end_ts=_NOW_TS, now=lambda: _NOW
+    )
+    assert [f.kind for f in report.findings] == [mod.integrity.FindingKind.DIGEST_MISMATCH], (
+        "a row whose row_hash differs between D1 and the mirror must be a finding"
+    )
+
+
+def test_prev_hash_drift_between_the_two_stores_is_reported() -> None:
+    mod = load_plugin("hermes-smd-audit")
+    _require_chain_fields(mod.integrity.AuditRow)
+    row = _row_factory(mod)
+    d1 = _FakeLoader([row("01A", _OLD_TS, prev_hash="aaaa")])
+    mirror = _FakeLoader([row("01A", _OLD_TS, prev_hash="bbbb")])
+    report = mod.integrity.check_audit_integrity(
+        d1, mirror, start_ts=_OLD_TS, end_ts=_NOW_TS, now=lambda: _NOW
+    )
+    assert [f.kind for f in report.findings] == [mod.integrity.FindingKind.DIGEST_MISMATCH], (
+        "a row whose prev_hash differs between D1 and the mirror must be a finding"
+    )
+
+
+def test_compare_key_matches_its_docstring() -> None:
+    """Docstring parity: the excluded set is exactly {metadata}."""
+    mod = load_plugin("hermes-smd-audit")
+    row = _row_factory(mod)("01A", _OLD_TS)
+    for field in dataclasses.fields(mod.integrity.AuditRow):
+        if field.name == "metadata":
+            continue
+        mutated = dataclasses.replace(row, **{field.name: "MUTATED-VALUE"})
+        assert mutated.compare_key() != row.compare_key(), (
+            f"column {field.name!r} is documented load-bearing but does not affect compare_key()"
+        )
+    mutated_md = dataclasses.replace(row, metadata='{"k":999}')
+    assert mutated_md.compare_key() == row.compare_key(), (
+        "metadata is the one documented exclusion and must not affect compare_key()"
+    )
+
+
+def test_cosmetic_ts_rendering_difference_is_not_a_mismatch() -> None:
+    """A control that cries wolf gets muted.
+
+    ``2026-05-20T12:00:00.000Z`` and ``2026-05-20T12:00:00+00:00`` are the same
+    instant rendered two ways. Pre-fix ``ts`` sat raw inside the compare key, so
+    a store that re-serialized its timestamps marked EVERY row drifted.
+    """
+    mod = load_plugin("hermes-smd-audit")
+    row = _row_factory(mod)
+    d1 = _FakeLoader(
+        [row("01A", "2026-05-20T12:00:00.000Z"), row("01B", "2026-05-20T12:00:00.000Z")]
+    )
+    mirror = _FakeLoader(
+        [row("01A", "2026-05-20T12:00:00+00:00"), row("01B", "2026-05-20T12:00:00Z")]
+    )
+    report = mod.integrity.check_audit_integrity(
+        d1, mirror, start_ts=_OLD_TS, end_ts=_NOW_TS, now=lambda: _NOW
+    )
+    assert report.findings == [], (
+        f"cosmetic ts rendering must not read as drift; got {[f.detail for f in report.findings]}"
+    )
+
+
+def test_a_genuinely_different_instant_is_still_a_mismatch() -> None:
+    """The normalization's own falsifier — it must not swallow real ts drift."""
+    mod = load_plugin("hermes-smd-audit")
+    row = _row_factory(mod)
+    d1 = _FakeLoader([row("01A", "2026-05-20T12:00:00.000Z")])
+    mirror = _FakeLoader([row("01A", "2026-05-20T12:00:01.000Z")])
+    report = mod.integrity.check_audit_integrity(
+        d1, mirror, start_ts=_OLD_TS, end_ts=_NOW_TS, now=lambda: _NOW
+    )
+    assert [f.kind for f in report.findings] == [mod.integrity.FindingKind.DIGEST_MISMATCH], (
+        "a one-second difference is real drift and must still be reported"
+    )
+
+
+def test_unparseable_ts_falls_back_to_exact_string_comparison() -> None:
+    """Normalization must never make an unreadable timestamp compare equal."""
+    mod = load_plugin("hermes-smd-audit")
+    row = _row_factory(mod)
+    d1 = _FakeLoader([row("01A", "not-a-timestamp")])
+    mirror = _FakeLoader([row("01A", "also-not-a-timestamp")])
+    report = mod.integrity.check_audit_integrity(
+        d1, mirror, start_ts=_OLD_TS, end_ts=_NOW_TS, now=lambda: _NOW
+    )
+    assert [f.kind for f in report.findings] == [mod.integrity.FindingKind.DIGEST_MISMATCH]

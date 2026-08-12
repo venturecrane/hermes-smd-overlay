@@ -169,6 +169,14 @@ class MirroredAuditRow:
 
     Keys mirror the audit_log columns 1:1 so the integrity check can
     deep-compare D1 rows against the mirror archive without translation.
+
+    That includes ``prev_hash`` / ``row_hash`` (``shared/audit_contract.py``
+    ``CHAIN_COLUMN_ALTERS``). They were missing here until ss-console #2312,
+    which made the "1:1" claim above false in the most load-bearing place: a
+    mirror that never carried the hash chain could not be compared against
+    D1's, so tampering with either store's chain was undetectable. The capability
+    broker stamps them at append time, so a mirror written from a broker-appended
+    row has them; they default to ``None`` for pre-chain ledgers.
     """
 
     id: str
@@ -183,6 +191,8 @@ class MirroredAuditRow:
     diff_digest: str | None
     trust_ceiling: str | None
     metadata: str | None
+    prev_hash: str | None = None
+    row_hash: str | None = None
 
 
 class LogpushMirror(Protocol):

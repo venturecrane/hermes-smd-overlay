@@ -19,10 +19,14 @@ Three drift classes are detected:
      violation (D1 was deleted) or a Captain-cleared legal-hold redaction.
 
   3. ``DIGEST_MISMATCH`` — both stores carry the same id, but a
-     load-bearing column differs. The ``metadata`` column is excluded
-     from the comparison because nested JSON ordering may legitimately
-     vary; the audit writer canonicalizes its own metadata, but future
-     non-writer paths may not.
+     load-bearing column differs. The ``metadata`` column is the ONLY
+     exclusion, because nested JSON ordering may legitimately vary; the
+     audit writer canonicalizes its own metadata, but future non-writer
+     paths may not. The ``prev_hash`` / ``row_hash`` chain columns ARE
+     compared (ss-console #2312 — they had been silently excluded, which
+     hid the single drift class a tamper-evidence chain exists to detect),
+     and ``ts`` is normalized before comparison so a rendering difference
+     between the stores cannot mark every row in the window as drifted.
 
 The check is read-only and side-effect-free. Callers (a Cloudflare Cron
 Trigger Worker or the compliance-evidence-packet generator) decide what
@@ -103,10 +107,18 @@ class IntegrityReport:
 class AuditRow:
     """Row shape exchanged between the loaders and the comparator.
 
-    Matches the audit_log column set 1:1 so the comparator can do a
-    tuple-comparison on the load-bearing fields without per-source
-    translation. The metadata column is excluded from comparison but is
-    carried so the dashboard can surface the offending row if needed.
+    Matches the audit_log column set 1:1 — including the ``prev_hash`` /
+    ``row_hash`` chain columns (``shared/audit_contract.py``
+    ``CHAIN_COLUMN_ALTERS``) — so the comparator can do a tuple-comparison on
+    the load-bearing fields without per-source translation. The metadata column
+    is excluded from comparison but is carried so the dashboard can surface the
+    offending row if needed.
+
+    The chain columns default to ``None`` for pre-chain ledgers, whose rows
+    genuinely have no hashes. A loader that cannot read them must yield ``None``
+    from BOTH stores; supplying them from one side only reads as drift, which is
+    the correct answer — one store carrying a chain the other does not is
+    exactly what this check exists to catch.
     """
 
     id: str
@@ -121,12 +133,31 @@ class AuditRow:
     diff_digest: str | None
     trust_ceiling: str | None
     metadata: str | None
+    prev_hash: str | None = None
+    row_hash: str | None = None
 
     def compare_key(self) -> tuple:
-        """Tuple of load-bearing columns — every column except ``metadata``."""
+        """Tuple of load-bearing columns — every column except ``metadata``.
+
+        ``metadata`` is the single exclusion: nested JSON ordering may legitimately
+        vary between stores. Everything else participates, and that deliberately
+        includes ``prev_hash`` / ``row_hash``. They were absent from this shape
+        until ss-console #2312, which made drift in the tamper-evidence chain —
+        the one thing the chain exists to detect — invisible to the comparator.
+
+        ``ts`` is NORMALIZED rather than compared raw. The writer emits a single
+        rendering (``shared/ids.py`` ``iso_utc``: millisecond precision, ``Z``
+        suffix), but a mirror that round-trips its rows through any other JSON
+        datetime encoder can render the same instant as ``+00:00`` or drop
+        trailing-zero milliseconds. Raw comparison turned that into a
+        DIGEST_MISMATCH on EVERY row in the window, and a control that cries wolf
+        gets muted. Normalization cannot hide real drift: two different instants
+        still differ afterwards, and an unparseable timestamp falls back to its
+        exact string.
+        """
         return (
             self.id,
-            self.ts,
+            _normalize_ts(self.ts),
             self.action_type,
             self.actor,
             self.actor_role,
@@ -136,6 +167,8 @@ class AuditRow:
             self.output_digest,
             self.diff_digest,
             self.trust_ceiling,
+            self.prev_hash,
+            self.row_hash,
         )
 
 
@@ -174,16 +207,38 @@ def _drain(stream: Iterator[AuditRow]) -> dict[str, AuditRow]:
 
 
 def _parse_iso(ts: str) -> datetime | None:
-    """Parse an audit-log ``ts`` (ISO 8601 UTC, millisecond precision, Z suffix).
+    """Parse an audit-log ``ts`` into an aware UTC datetime, or ``None``.
 
-    Returns ``None`` on parse failure — the integrity check is best-effort
-    on timestamp comparison; a bad timestamp does not block the rest of
-    the comparison.
+    The writer emits one rendering (``shared/ids.py`` ``iso_utc``: millisecond
+    precision, ``Z`` suffix), but the two stores this module compares do not
+    have to agree on it — a mirror that round-trips its rows through another
+    JSON datetime encoder can emit ``+00:00``, or drop trailing-zero
+    milliseconds. Parsing tolerantly is what lets the comparator treat those as
+    the same instant instead of as drift.
+
+    Returns ``None`` on parse failure — the integrity check is best-effort on
+    timestamp comparison; a bad timestamp does not block the rest of the
+    comparison.
     """
-    try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
-    except (ValueError, TypeError):
+    if not isinstance(ts, str):
         return None
+    try:
+        parsed = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    # A naive timestamp is UTC by contract (the column is documented UTC).
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _normalize_ts(ts: str) -> str:
+    """Canonical rendering of ``ts`` for comparison purposes.
+
+    Falls back to the exact input string when it cannot be parsed, so an
+    unreadable timestamp is never made to compare equal to a different
+    unreadable one.
+    """
+    parsed = _parse_iso(ts)
+    return ts if parsed is None else parsed.isoformat()
 
 
 def _within_lag_grace(row_ts: str, now: datetime) -> bool:
