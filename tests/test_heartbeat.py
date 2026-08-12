@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 from shared import heartbeat as hb
 from shared.connector_check import ConnectorCheck
@@ -698,3 +699,48 @@ def test_read_cron_containment_reflects_sentinel(tmp_path, monkeypatch):
     assert hb._read_cron_containment() is False
     (tmp_path / "CRON_CONTAINMENT").write_text("ss#2258 containment\n")
     assert hb._read_cron_containment() is True
+
+
+def _payload_with_containment():
+    return hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        cron_containment=hb._read_cron_containment(),
+    )
+
+
+def test_uncontained_seat_still_reports_zero(tmp_path, monkeypatch):
+    """The negative must stay a real negative: a readable volume with no
+    sentinel is genuinely not contained and reaches the wire as 0, not as
+    'unknown' (ss-console#2291 must not trade one blind spot for another)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert _payload_with_containment()["cron_containment"] == 0
+
+
+def test_read_cron_containment_omits_when_sentinel_unreadable(tmp_path, monkeypatch):
+    """ss-console#2291: a volume we cannot read must report UNKNOWN (field
+    omitted), never a false 'not contained'. Pre-fix this returned False and
+    the wire carried cron_containment: 0 — a contained seat indistinguishable
+    from a normal one, which is exactly what ss-console#2276 exists to prevent."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def _denied(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "is_file", _denied)
+
+    assert hb._read_cron_containment() is None
+    assert "cron_containment" not in _payload_with_containment()
+
+
+def test_read_cron_containment_omits_when_volume_absent(tmp_path, monkeypatch):
+    """Same rule for the other half of the failure the wrapper named: if the
+    volume that would hold the sentinel is not mounted, containment state is
+    unknowable, not false."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "not-mounted"))
+
+    assert hb._read_cron_containment() is None
+    assert "cron_containment" not in _payload_with_containment()
