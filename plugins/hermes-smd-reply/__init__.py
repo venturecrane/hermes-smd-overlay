@@ -64,7 +64,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, matter_gate, msgraph_client, provenance, send_policy
+from shared import inbound, matter_gate, msgraph_broker, provenance, send_policy
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -149,16 +149,25 @@ def _send_msgraph_reply(graph_message_id: str, comment: str) -> str:
     Graph derives the recipients from the original message (POST
     /messages/{id}/reply), so the reply is structurally locked to the inbound
     thread — the same recipient-lock property the AgentMail transport has.
-    Fail-closed: a seat with no ``MSGRAPH_*`` creds raises :class:`RelaySendError`
-    (audited REPLY_FAILED) and NEVER falls back to another transport. Graph
-    returns 202 with no id, so a placeholder is surfaced for the audit row."""
-    client = msgraph_client.build_client_from_env()
-    if client is None:
-        raise relay.RelaySendError("msgraph reply unavailable: MSGRAPH_* env not configured")
+
+    ss#2258: this goes through the broker now. The lock above says the reply
+    cannot be REDIRECTED; it says nothing about whether this seat should be
+    answering that sender at all, and anyone on the internet can email the
+    operator mailbox. So the broker re-fetches the source message itself and
+    checks its sender against ``inbound_allow_from`` before replying — a check
+    this process cannot make credibly, since a caller that names the sender can
+    name any sender. It also writes the audit row, so a reply that left no trace
+    is no longer reachable.
+
+    Fail-closed as before: no broker path raises :class:`RelaySendError` (audited
+    REPLY_FAILED) and NEVER falls back to another transport. Graph returns 202
+    with no id, so a placeholder is surfaced for the audit row."""
     try:
-        client.reply(graph_message_id, comment)
-    except (msgraph_client.MsGraphApiError, msgraph_client.MsGraphAuthError) as exc:
-        raise relay.RelaySendError(f"msgraph reply failed: {exc}") from exc
+        msgraph_broker.send_reply(graph_message_id, comment)
+    except msgraph_broker.BrokerError as exc:
+        raise relay.RelaySendError(f"broker refused the msgraph reply: {exc}") from exc
+    except msgraph_broker.MsGraphBrokerUnavailable as exc:
+        raise relay.RelaySendError(f"msgraph reply unavailable: {exc}") from exc
     return "(sent via msgraph, id unavailable)"
 
 

@@ -1224,6 +1224,20 @@ def test_sending_is_relocated_not_removed():
     assert TOOL_ACTION_CLASS_MAP["smd_send_message"] == ActionClass.EXTERNAL_SEND
     assert "smd_send_message" in CLASSIFIED_SEND_TOOLS
 
+    # The msgraph half, for a reason the AgentMail half did not have. There, the
+    # gateway's key could not transmit, so an advertised send tool would have
+    # 403'd anyway. Here the credential CAN transmit: on an `autonomous` seat the
+    # gate returns allow and the MCP tool simply runs, reaching Graph with no
+    # recipient fence and no audit row. Leaving these two on the menu would have
+    # meant the fence covered only the seats that withhold.
+    graph = MCP_CONNECTOR_REGISTRY["msgraph-mail"]
+    for tool in ("send_message", "reply_message"):
+        assert tool in graph.blocked_tools, f"msgraph-mail:{tool} must not be directly callable"
+        assert f"msgraph-mail:{tool}" not in BANNED_TOOLS
+    # Reads and drafts stay reachable — this fences transmit, not the mailbox.
+    for tool in ("list_messages", "read_message", "create_draft", "poll_delta"):
+        assert tool not in graph.blocked_tools
+
 
 def test_the_broker_send_tool_is_actually_registered(fake_ctx):
     """A mapped-but-unregistered tool is inert — the failure that left the first

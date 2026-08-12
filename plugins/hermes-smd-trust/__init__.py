@@ -19,9 +19,6 @@ from pathlib import Path
 from typing import Any
 
 from shared import matter_binding, provenance, report_render, spec_stamp
-from shared.audit_client import audit_client_from_env
-from shared.audit_contract import INSERT_SQL as _AUDIT_INSERT_SQL
-from shared.audit_contract import agent_event_params
 from shared.broker_audit import write_decision
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
@@ -33,17 +30,28 @@ from . import approval, enforce, outbound, outbound_send, spec_read
 
 logger = logging.getLogger(__name__)
 
-# Out-of-band confirmed-send audit binding (ADR 0071 #1806 harden). The overlay
-# dispatches an approved send itself (the LLM does not reliably re-invoke), so the
-# send never passes through a tool call and the audit plugin's post_tool_call
-# never sees it — this plugin emits the row directly, mirroring hermes-smd-reply's
-# out-of-band relay audit. Best-effort: audit is observability, never a gate.
-_AUDIT_CLIENT: Any = None
+# ss#2258: the out-of-band confirmed-send audit binding that used to live here —
+# `_AUDIT_CLIENT`, `_emit_confirm_event`, and their INSERT — is DELETED, not left
+# unused. It was best-effort by construction and opened with
+# `if _AUDIT_CLIENT is None: return`, so on any seat where the binding failed to
+# configure, sends dispatched and rows silently did not. That is precisely the
+# shape of the incident this work exists for: four messages, zero rows. Both
+# transports are broker verbs now and the broker writes the row itself, before it
+# answers, from the process that holds the credential — a writer with no early
+# return and no way for the caller to skip it. Re-adding an emission here would
+# not add safety; it would double-count in the console reconciler, which is the
+# backstop that catches us when everything else is wrong.
+#
+# The slug survives because the dispatch path below needs it independently.
 _AUDIT_CUSTOMER_SLUG: str | None = None
 
-# The msgraph proactive-send tool (ADR 0078). When an approved confirm send fired
-# this tool, the out-of-band dispatch routes through Graph rather than AgentMail.
+# The msgraph proactive-send tool (ADR 0078). Blocked at the registry since
+# ss#2258, so no NEW pending record can carry it; kept here so a record captured
+# before that change still dispatches down the Graph path rather than silently
+# down the AgentMail one.
 _MSGRAPH_SEND_TOOL = "mcp_msgraph_mail_send_message"
+_ADAPTER_MSGRAPH = "msgraph"
+_ADAPTER_AGENTMAIL = "agentmail"
 
 
 def _attach_html_body(tool_name: str, args: dict) -> None:
@@ -366,26 +374,6 @@ def on_post_tool_call(**kwargs: Any) -> None:
         logger.debug("hermes-smd-trust: post_tool_call provenance record failed", exc_info=True)
 
 
-def _emit_confirm_event(action_type: str, metadata: dict) -> None:
-    """Write one confirmed-send audit row directly (ADR 0071 #1806 harden).
-
-    Mirrors hermes-smd-reply's out-of-band relay audit: shares the
-    ``shared.audit_contract`` row shape with the audit plugin so they never
-    desync. Metadata carries approval source + recipients + message id + reason
-    ONLY — never the send body. Best-effort; a failed emission is logged and
-    swallowed (the send decision already happened)."""
-    if _AUDIT_CLIENT is None or _AUDIT_CUSTOMER_SLUG is None:
-        return
-    try:
-        params = agent_event_params(
-            action_type=action_type,
-            metadata={"customer": _AUDIT_CUSTOMER_SLUG, "confirm_channel": True, **metadata},
-        )
-        _AUDIT_CLIENT.execute(_AUDIT_INSERT_SQL, *params)
-    except Exception as exc:  # noqa: BLE001 — audit must never break the hook
-        logger.warning("hermes-smd-trust: %s audit emission failed (%s)", action_type, exc)
-
-
 # ---------------------------------------------------------------------------
 # The broker-mediated send tool (ss#2258)
 # ---------------------------------------------------------------------------
@@ -432,6 +420,32 @@ _SEND_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
+def _seat_email_adapter() -> str:
+    """The seat's authored Email adapter, re-read live from customer.yaml.
+
+    Which transport a send takes is a property of the ENGAGEMENT, not of the tool
+    name — that was true before this tool existed and only became visible once one
+    tool served both channels. Reading it here (rather than branching on the tool
+    that fired) is also what keeps the confirm-dispatch path and the direct tool
+    path from disagreeing about the same seat.
+
+    Defaults to ``agentmail``, matching ``hermes-smd-reply``'s identical read: two
+    plugins that disagreed about a seat's transport would be worse than either
+    default, and every seat but one authors agentmail today.
+    """
+    from shared.customer_config import CustomerConfig  # local import (enforce.py idiom)
+
+    try:
+        record = CustomerConfig.from_volume().connectors.get("Email")
+    except Exception:  # noqa: BLE001 — an unreadable config must not raise into a send
+        return _ADAPTER_AGENTMAIL
+    if isinstance(record, dict):
+        adapter = record.get("adapter")
+        if isinstance(adapter, str) and adapter.strip():
+            return adapter.strip().lower()
+    return _ADAPTER_AGENTMAIL
+
+
 def _smd_send_message(**kwargs: Any) -> str:
     """Execute a send the gate has already authorized.
 
@@ -440,9 +454,20 @@ def _smd_send_message(**kwargs: Any) -> str:
     either allowed this call or blocked it. So there is no authorization decision
     left here — this is transport, and the broker independently re-fences the
     recipient anyway. Two checks in two processes, on purpose.
+
+    ONE tool, either transport. The msgraph connector's own ``send_message`` left
+    the menu for the same reason the AgentMail four did, and for a sharper one: on
+    a seat whose posture is ``autonomous`` the gate returns allow and the MCP tool
+    simply executes, so that path reached Graph directly — no recipient fence, no
+    broker row. Leaving it advertised would have meant the fence covered only
+    seats that withhold, which is the opposite of who needs it.
     """
+    payload = dict(kwargs)
     try:
-        message_id = outbound_send.send_message(payload=dict(kwargs))
+        if _seat_email_adapter() == _ADAPTER_MSGRAPH:
+            message_id = outbound_send.send_via_msgraph(payload)
+        else:
+            message_id = outbound_send.send_message(payload=payload)
     except outbound_send.OutboundSendError as exc:
         # Returned, not raised: a refused send is information the agent should
         # act on (pick a different recipient, ask the owner), not a tool crash.
@@ -498,12 +523,15 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     # the pending record was stored by the gate BEFORE the tool path's attach ran,
     # so a withheld-then-approved report arrives here as markdown-only.
     _attach_html_body(rec.tool_name, payload)
-    # Provider dispatch (ADR 0078), keyed on the tool that actually fired — which
-    # matches the payload shape (flat to/cc/subject/body_text for msgraph). A
-    # msgraph seat sends via Graph /sendMail (mailbox pinned from MSGRAPH_*), an
-    # agentmail seat via its REST send. Each fails closed on ITS missing
-    # credential; neither cross-falls.
-    is_msgraph = rec.tool_name == _MSGRAPH_SEND_TOOL
+    # Provider dispatch (ADR 0078), keyed on what the SEAT authors — not on which
+    # tool fired. It used to key on the tool name, which was right while each
+    # channel had its own send tool and became wrong the moment one broker-backed
+    # tool served both: a withheld send from `smd_send_message` on an msgraph seat
+    # would have dispatched down the AgentMail path. The legacy msgraph tool name
+    # is still honoured so a pending record captured before this change dispatches
+    # correctly. Each transport fails closed on ITS missing credential; neither
+    # cross-falls.
+    is_msgraph = rec.tool_name == _MSGRAPH_SEND_TOOL or _seat_email_adapter() == _ADAPTER_MSGRAPH
     try:
         if is_msgraph:
             message_id = outbound_send.send_via_msgraph(payload)
@@ -518,19 +546,12 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
             message_id = outbound_send.send_message(payload=payload)
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
-        # NOTE: no CONFIRM_SEND_FAILED emitted for the agentmail path — the broker
-        # already wrote it, and a second row here would make the console
-        # reconciler count one attempt twice. The msgraph path still emits below
-        # because it has no broker seam yet.
-        if is_msgraph:
-            _emit_confirm_event(
-                "CONFIRM_SEND_FAILED",
-                {
-                    "recipients": sorted(rec.recipients),
-                    "source": rec.approval_source,
-                    "reason": str(exc),
-                },
-            )
+        # NOTE: NEITHER path emits a row here any more. Both transports are broker
+        # verbs now, and the broker writes CONFIRM_SEND_DISPATCHED /
+        # CONFIRM_SEND_FAILED itself, before it answers. A second row from this
+        # process would make the console reconciler count one attempt twice — and
+        # the reconciler is the backstop for this whole control, so double-counting
+        # would corrupt the instrument that exists to catch us.
         return f"[Your approved send to {recipients} could not be delivered; it was not sent. You can ask me to retry.]"
     logger.info(
         "hermes-smd-trust: dispatched approved send to %s (source=%s, message=%s)",
@@ -538,15 +559,6 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
         rec.approval_source,
         message_id,
     )
-    if is_msgraph:
-        _emit_confirm_event(
-            "CONFIRM_SEND_DISPATCHED",
-            {
-                "recipients": sorted(rec.recipients),
-                "source": rec.approval_source,
-                "message_id": message_id,
-            },
-        )
     return f"[Dispatched your approved send to {recipients} (message {message_id}). Do not send it again.]"
 
 
@@ -647,19 +659,17 @@ def register(ctx) -> None:
     post_tool_call (provenance recording for the A1 identifier gate), and
     pre_llm_call (session-id note + confirm-approval capture + out-of-band
     dispatch of the approved send)."""
-    global _AUDIT_CLIENT, _AUDIT_CUSTOMER_SLUG
-    # Confirmed-send audit binding — best-effort (observability, not a gate). Mirror
-    # hermes-smd-reply: the broker-aware factory returns a tamper-resistant client
-    # when the broker is configured, else a D1 client; same .execute(sql, *params).
+    global _AUDIT_CUSTOMER_SLUG
+    # The seat's own slug, resolved once at register so the out-of-band dispatch
+    # path below does not re-read a secret per turn. No audit client is bound here
+    # any more (ss#2258): the broker writes every transmit row itself.
     try:
         _AUDIT_CUSTOMER_SLUG = get_secret("SMD_CUSTOMER_SLUG")
-        _AUDIT_CLIENT = audit_client_from_env(customer_slug=_AUDIT_CUSTOMER_SLUG)
     except KeyError as exc:
         _AUDIT_CUSTOMER_SLUG = None
-        _AUDIT_CLIENT = None
         logger.info(
-            "hermes-smd-trust: confirmed-send audit binding unconfigured (%s); "
-            "out-of-band sends will dispatch without emitting audit rows",
+            "hermes-smd-trust: SMD_CUSTOMER_SLUG unset (%s); the out-of-band "
+            "dispatch path will resolve it per call",
             exc,
         )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
