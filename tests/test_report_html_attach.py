@@ -125,7 +125,7 @@ def test_out_of_band_approved_send_also_attaches(mod, monkeypatch) -> None:
         return "msg-1"
 
     monkeypatch.setattr(mod.outbound_send, "send_message", _capture)
-    monkeypatch.setattr(mod, "_emit_confirm_event", lambda *a, **k: None)
+    # No audit emitter left to stub either: the broker writes the row (ss#2258).
 
     mod._dispatch_approved_send("s1", "pilot-smokeball")
     assert "<h2 " in sent.get("html", ""), "approved report send dispatched without an html half"

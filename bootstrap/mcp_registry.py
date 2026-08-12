@@ -281,7 +281,26 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             ("MSGRAPH_MAILBOX", "MSGRAPH_MAILBOX"),
         ),
         env_secrets_optional=(),
-        blocked_tools=(),
+        # ss#2258: the two EXTERNAL_SEND tools leave the menu, replaced by the
+        # broker-backed `smd_send_message` (hermes-smd-trust), which carries the
+        # same action class and so the same authored ceiling.
+        #
+        # The reason is sharper here than it was for AgentMail. There, the
+        # gateway's key simply could not transmit, so an advertised send tool
+        # would have 403'd. Here the credential CAN transmit — which is worse: on
+        # a seat whose posture is `autonomous` the gate returns allow and this
+        # tool executes, reaching Graph directly with no recipient fence and no
+        # audit row. That is the incident's own shape, still reachable, on
+        # precisely the seats that withhold least.
+        #
+        # reply_message goes for the additional reason its AgentMail counterpart
+        # did: the reply channel owns that path (hermes-smd-reply hooks
+        # create_draft and relays through the broker), so a model-invoked reply
+        # was never the intended route.
+        blocked_tools=(
+            "send_message",
+            "reply_message",
+        ),
     ),
     # NOTE: web search is NOT an mcp: connector. It is wired natively via Hermes'
     # bundled web providers (plugins/web/*, e.g. brave-free) and selected by

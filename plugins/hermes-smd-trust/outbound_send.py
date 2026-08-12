@@ -14,7 +14,11 @@ an INDEPENDENT recipient fence from the seat's own customer.yaml before it uses
 the key. Two checks, in two processes, because four fabricated messages once
 reached a real client principal by way of a path that consulted neither.
 
-The msgraph half below is still a direct transport; it has no broker seam yet.
+The msgraph half is behind the same broker seam now. It gets the recipient fence
+and the broker-written row, but NOT the vendor half of the AgentMail story: a
+Graph app-only token is always ``/.default``, so there is no send-incapable
+credential to leave the agent with, and it legitimately needs Graph for reads.
+``shared/msgraph_broker`` states that limit and what would close it.
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from shared import agentmail_broker, msgraph_client
+from shared import agentmail_broker, msgraph_broker
 
 logger = logging.getLogger(__name__)
 
@@ -110,38 +114,61 @@ def send_message(
     return message_id
 
 
-# The flat send-body fields the overlay forwards to Graph from the stored msgraph
-# payload (mcp_msgraph_mail_send_message args are flat, ADR 0078 D4). Anything
-# else on the args is NOT forwarded — the wire body is built from a closed
-# allowlist. cc may be absent; body_text carries the reply/send prose.
-_MSGRAPH_SEND_FIELDS: tuple[str, ...] = ("to", "cc", "subject", "body_text")
+# The send-body fields forwarded to the broker's Graph verb. Two payload shapes
+# reach it and both are covered here: the out-of-band confirm dispatch carries the
+# flat `mcp_msgraph_mail_send_message` args (`body_text`, ADR 0078 D4), while the
+# `smd_send_message` tool carries what its schema advertises (`text`, `html`,
+# `bcc`, `reply_to`). Anything else on the args is NOT forwarded — the wire body is
+# built from a closed allowlist at both ends.
+_MSGRAPH_SEND_FIELDS: tuple[str, ...] = (
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "body_text",
+    "text",
+    "html",
+    "reply_to",
+)
 
 
-def send_via_msgraph(payload: dict[str, Any]) -> str:
-    """POST an approved send via Microsoft Graph ``/users/{mailbox}/sendMail``.
+def send_via_msgraph(
+    payload: dict[str, Any],
+    *,
+    sender: Callable[..., Any] | None = None,
+) -> str:
+    """Ask the broker to send an approved message via Graph ``/sendMail``.
 
-    The msgraph counterpart of :func:`send_message`: the transport only — the
-    caller has already re-authorized the payload through the same
-    ``evaluate_tool_call`` gate. Builds the Graph client from ``MSGRAPH_*`` (via
-    the shared client's env builder) so the mailbox is pinned and no arg can
-    redirect the send. Fail-closed: a seat with no ``MSGRAPH_*`` creds raises
-    :class:`MsGraphSendError` — it NEVER falls back to AgentMail. Graph returns
-    202 with no id, so a placeholder is surfaced for the audit row."""
-    client = msgraph_client.build_client_from_env()
-    if client is None:
-        raise MsGraphSendError("msgraph send unavailable: MSGRAPH_* env not configured")
+    Was a direct Graph call built from ``MSGRAPH_*`` in this process. The mailbox
+    was already pinned there, so the identity half was sound — what was missing is
+    the half the incident turned on: nothing checked the RECIPIENT outside the
+    process that chose it, and nothing wrote a row that the sender could not skip.
+    Both now happen in the broker, against the seat's own customer.yaml.
+
+    The honest limit, because this reads like its AgentMail sibling and is not:
+    the agent still holds ``MSGRAPH_*`` for the delta poller and its mail tools,
+    and Graph app-only auth has no send-incapable credential to give it. So this
+    fences the path the seat TAKES, not every path that exists. See
+    ``shared/msgraph_broker`` for what closes the rest.
+
+    ``sender`` is injectable for tests. Raises :class:`MsGraphSendError` on
+    refusal or transport failure alike — the caller's contract is unchanged.
+    """
     body = {
         k: payload.get(k) for k in _MSGRAPH_SEND_FIELDS if payload.get(k) not in (None, "", [], {})
     }
     if not body.get("to"):
         raise MsGraphSendError("refusing to send: payload has no recipient")
+    send = sender or msgraph_broker.send_message
     try:
-        client.send_mail(
-            to=body["to"],
-            subject=str(body.get("subject") or ""),
-            body_text=str(body.get("body_text") or ""),
-            cc=body.get("cc"),
-        )
-    except (msgraph_client.MsGraphApiError, msgraph_client.MsGraphAuthError) as exc:
-        raise MsGraphSendError(f"graph sendMail failed: {exc}") from exc
+        send(body)
+    except msgraph_broker.BrokerError as exc:
+        # A refusal the broker made and recorded. Its message names the reason
+        # (an unauthored recipient, a blocked domain), which is far more useful
+        # to the operator than a generic delivery failure.
+        raise MsGraphSendError(f"broker refused the send: {exc}") from exc
+    except msgraph_broker.MsGraphBrokerUnavailable as exc:
+        raise MsGraphSendError(f"broker transmit unavailable: {exc}") from exc
+    # Graph answers sendMail with 202 and no body, so no id exists to return —
+    # unchanged by the reseam, and the reason the audit row leans on its digest.
     return "(sent via msgraph, id unavailable)"
