@@ -804,6 +804,8 @@ def _record_decision(
     authored_ceiling: Ceiling | None = None,
     vertical_floor: Ceiling | None = None,
     effective_ceiling: Ceiling | None = None,
+    session_id: str = "",
+    session_match: str = "",
 ) -> None:
     """Hand this decision to the audit plugin's ``post_tool_call`` (#2122).
 
@@ -815,6 +817,11 @@ def _record_decision(
     ``"unauthored"`` placeholder ``_ceiling_str`` renders for the log — the row
     must distinguish "no exposure was authored for this class" from "the
     resolver could not decide", and only the first is fail-closed by design.
+
+    ``session_match`` says HOW the session this call was gated under resolved
+    (ss-console #2288). Core drops ``session_id`` on this path (#141), so the
+    value keying the matter gate's party set and the spec/voice marks may be an
+    inference — and until now nothing recorded that it was one.
 
     Best-effort and never raises: the ledger is downstream of the decision, and
     a register fault must not change what the gate returns.
@@ -832,6 +839,8 @@ def _record_decision(
                 effective_ceiling=effective_ceiling.value if effective_ceiling else None,
                 persona=persona_slug,
                 reason=reason,
+                session_match=session_match,
+                session_resolved=session_id,
             ),
         )
     except Exception:  # noqa: BLE001 — the ledger handoff must never break the path
@@ -951,6 +960,7 @@ def evaluate_tool_call(
     customer_slug: str,
     session_id: str = "",
     tool_call_id: str = "",
+    session_match: str = "",
 ) -> dict | None:
     """Decide whether a tool call may proceed.
 
@@ -970,6 +980,14 @@ def evaluate_tool_call(
     confirmed-send dispatch re-authorizes a stored payload with no tool call
     behind it; that path records under the empty key, which no ``post_tool_call``
     can collect ahead of its own pre-hook decision.
+
+    ``session_id`` arrives ALREADY RESOLVED — the caller runs it through
+    ``shared.provenance`` because core drops the kwarg on this path (#141) — and
+    ``session_match`` is HOW it resolved. Both go onto the decision so the row
+    states which session gated the call and whether that session was keyed or
+    inferred (ss-console #2288). Every register read by session below is keyed
+    off that single value: the taint gate, the matter gate's party set, and the
+    spec and voice marks.
 
     Exception safety: any exception here is caught at the hook boundary; this
     function may raise internally and the caller's try/except in ``__init__.py``
@@ -1004,6 +1022,8 @@ def evaluate_tool_call(
             allowed=False,
             reason=message,
             effective_ceiling=Ceiling.REFUSED,
+            session_id=session_id,
+            session_match=session_match,
         )
         return {"action": "block", "message": f"Refused: {message}"}
 
@@ -1093,6 +1113,8 @@ def evaluate_tool_call(
                 audit_action="allow",
                 allowed=True,
                 reason="read allowed despite an indeterminate exposure resolution",
+                session_id=session_id,
+                session_match=session_match,
             )
             return None
         logger.exception(
@@ -1109,6 +1131,8 @@ def evaluate_tool_call(
             audit_action="refuse",
             allowed=False,
             reason="trust decision unavailable; failing closed",
+            session_id=session_id,
+            session_match=session_match,
         )
         return {
             "action": "block",
@@ -1134,6 +1158,8 @@ def evaluate_tool_call(
         authored_ceiling=decision.authored_ceiling,
         vertical_floor=decision.vertical_floor,
         effective_ceiling=decision.effective_ceiling,
+        session_id=session_id,
+        session_match=session_match,
     )
 
     # Capture a send withheld at the confirm ceiling so a later current-turn
@@ -1199,6 +1225,8 @@ def evaluate_tool_call(
                 authored_ceiling=decision.authored_ceiling,
                 vertical_floor=decision.vertical_floor,
                 effective_ceiling=decision.effective_ceiling,
+                session_id=session_id,
+                session_match=session_match,
             )
 
     # Content-sensitivity floor (ADR 0031). Applies to sends that LEAVE the firm:

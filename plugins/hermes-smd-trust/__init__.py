@@ -157,10 +157,19 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
                 customer_slug = ""
 
         # Overlay #141: core's pre_tool_call fire sites drop session_id (task_id
-        # only); resolve to the last real id seen (noted at pre_llm_call /
-        # post_tool_call) so the provenance register is consulted under the
-        # SAME key reads were recorded under.
-        session_id = provenance.resolve_session(kwargs.get("session_id") or "")
+        # only); resolve to the id THIS THREAD is working under (noted at
+        # pre_llm_call / post_tool_call) so the provenance register is consulted
+        # under the SAME key reads were recorded under.
+        #
+        # This is the resolution that matters, and the only one that can be an
+        # inference: by post_tool_call core supplies the real id again. So the
+        # mode is captured HERE and carried onto the audit row through the
+        # trust decision (ss-console #2288) — a row must not present an inferred
+        # session as a keyed one, for the same reason it may not present an
+        # inferred trust join as a keyed one.
+        session_id, session_match = provenance.resolve_session_with_mode(
+            kwargs.get("session_id") or ""
+        )
 
         # SEC-36/16: strip any agent-supplied `_current_turn_approval` flag before
         # the ceiling check. No trusted runtime path stamps it (grep: it is read,
@@ -206,6 +215,7 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
             customer_slug,
             session_id=session_id,
             tool_call_id=kwargs.get("tool_call_id") or "",
+            session_match=session_match,
         )
         if ceiling_block is not None:
             # The trust ceiling already refuses this call; no need to scan a

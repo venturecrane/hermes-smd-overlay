@@ -40,12 +40,19 @@ def mod():
 
 @pytest.fixture
 def blocked(mod, monkeypatch):
-    """Force the hook's body to raise from a known, non-ceiling location."""
+    """Force the hook's body to raise from a known, non-ceiling location.
+
+    Session resolution is the injection point only because it is the hook's
+    first statement — nothing here is about the resolver. Patch whatever the
+    hook actually calls there (``resolve_session_with_mode`` since ss#2288); a
+    stale target makes these tests pass vacuously on the banned-tool refusal
+    ``email_send`` produces anyway.
+    """
 
     def _explode(*_a, **_k):
         raise _Boom("client@example.invalid asked about the Henderson matter")
 
-    monkeypatch.setattr(mod.provenance, "resolve_session", _explode)
+    monkeypatch.setattr(mod.provenance, "resolve_session_with_mode", _explode)
     result = mod.on_pre_tool_call(tool_name="email_send", args={}, session_id="s1")
     assert result is not None
     return result

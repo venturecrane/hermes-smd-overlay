@@ -82,6 +82,18 @@ And the match is DECLARED. The audit row records which way it matched
 compliance ledger may not present an inferred join as a keyed one, and a row
 with no trust provenance must say so rather than look like a row that simply
 predates the field.
+
+THE SESSION RESOLUTION RIDES THE SAME RAIL (ss-console #2288)
+--------------------------------------------------------------
+
+``shared.provenance.resolve_session`` had the process-global slot this module
+argues against, keying every per-session safety register off it. It is now
+thread-local with a declared mode, and the decision carries that mode
+(``session_match`` / ``session_resolved``) so the row can state it. The ride is
+not incidental: the resolution that gates a call happens in the PRE-hook, this
+is the only structure that already carries a pre-hook fact to a post-hook row,
+and it is single-use and per-thread — the properties a resolution record needs
+for exactly the reasons set out above.
 """
 
 from __future__ import annotations
@@ -127,6 +139,17 @@ class TrustDecision:
     effective_ceiling: str | None = None
     persona: str = ""
     reason: str = ""
+    #: HOW the session this call was gated under was resolved — one of
+    #: ``shared.provenance``'s ``MODE_*`` values, and the session it landed on
+    #: (ss-console #2288). Carried here rather than read at post-time because
+    #: the resolution that MATTERS happened in the pre-hook: core drops
+    #: session_id there (#141), so that is the only point where a fallback can
+    #: have keyed the trust gate, the matter gate's party set, and the spec and
+    #: voice marks. By post_tool_call core supplies the real id again, and a
+    #: resolution taken then would report ``keyed`` for a call an inference
+    #: gated. Same reason ``TrustDecision`` exists at all.
+    session_match: str = ""
+    session_resolved: str = ""
 
 
 @dataclass

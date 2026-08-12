@@ -320,6 +320,12 @@ def build_per_tool_metadata(
     - trust_allowed:         bool — whether the call was permitted to dispatch
     - trust_reason:          str — the gate's own words for why
     - trust_persona:         str — the persona the exposure resolved for
+    - session_resolution:    str — how the gate resolved the session it keyed
+      every per-session register off (``shared.provenance`` ``MODE_*``:
+      ``keyed`` | ``thread`` | ``process_singleton`` | ``ambiguous`` | ``none``).
+      Core drops ``session_id`` on the pre-hook path (#141), so a fallback there
+      is routine; what was missing was any record that one occurred
+      (ss-console #2288).
 
     ``trust.effective_ceiling`` wins over the ``ceiling_level`` argument when a
     decision is supplied: the gate's resolution is authoritative, and the
@@ -352,6 +358,8 @@ def build_per_tool_metadata(
         metadata["trust_allowed"] = trust.allowed
         metadata["trust_reason"] = trust.reason
         metadata["trust_persona"] = trust.persona
+        if trust.session_match:
+            metadata["session_resolution"] = trust.session_match
 
     if unmapped:
         metadata["unmapped_tool"] = True
@@ -548,6 +556,27 @@ def emit_tool_event(
         metadata["session_id"] = session_id
     if task_id:
         metadata["task_id"] = task_id
+    # The cross-attribution detector (ss-console #2288). The pre-hook and the
+    # post-hook bracket ONE dispatch, so they are the same call in the same
+    # session — core simply drops the id on the way in (#141) and supplies it on
+    # the way out. If the gate resolved a DIFFERENT session than the one this row
+    # is being written for, a peer's registers gated this call, and the row is
+    # the only place that can ever say so. Presence is the signal; the value is
+    # the session an investigator needs to pull next.
+    if (
+        trust is not None
+        and trust.session_resolved
+        and session_id
+        and trust.session_resolved != session_id
+    ):
+        metadata["session_resolution_conflict"] = trust.session_resolved
+        logger.warning(
+            "audit: tool %s was gated under session %s but completed under %s "
+            "(cross-session resolution — ss-console #2288)",
+            tool_name,
+            trust.session_resolved,
+            session_id,
+        )
     if routine is not None:
         # The durable routine identity + the ephemeral job id it resolved
         # from. The name survives id rotation; the id lets an auditor tie the
