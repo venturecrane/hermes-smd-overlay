@@ -118,6 +118,7 @@ def test_out_of_band_approved_send_also_attaches(mod, monkeypatch) -> None:
 
     monkeypatch.setattr(mod.PENDING_SEND, "peek", lambda: _Rec())
     monkeypatch.setattr(mod.enforce, "evaluate_tool_call", lambda *a, **k: None)
+
     # ss#2258: no key and no inbox to stub — the broker owns both.
     def _capture(*, payload, **_kw):
         sent.update(payload)

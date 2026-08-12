@@ -29,7 +29,6 @@ withheld, so it could not transmit even if this code tried.
 from __future__ import annotations
 
 import os
-import socket
 from typing import Any
 
 from shared.workspace_broker import BrokerError, request
@@ -61,11 +60,10 @@ def _call(action: str, payload: dict[str, Any]) -> dict[str, Any]:
             f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
         )
     try:
-        return request(
-            {"action": action, "payload": payload}, timeout=SEND_TIMEOUT_SECONDS
-        )
-    except (OSError, socket.timeout) as exc:
-        # Transport-level: the broker may or may not have sent. Distinguished
+        return request({"action": action, "payload": payload}, timeout=SEND_TIMEOUT_SECONDS)
+    except OSError as exc:
+        # Transport-level (OSError covers socket timeouts: TimeoutError has
+        # subclassed it since 3.10). The broker may or may not have sent. Distinguished
         # from BrokerError (a decision the broker made and recorded) because
         # reporting "you may not write to this person" when the truth is "the
         # socket timed out" would be a lie in the ledger's own language.

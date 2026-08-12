@@ -135,7 +135,7 @@ def test_a_broker_refusal_maps_to_send_error_and_keeps_its_reason():
 
 
 def test_an_unreachable_broker_is_not_reported_as_a_refusal():
-    """"You may not write to this person" is a lie when the socket is down."""
+    """ "You may not write to this person" is a lie when the socket is down."""
     mod = _load()
     broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
 

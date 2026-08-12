@@ -18,9 +18,6 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
