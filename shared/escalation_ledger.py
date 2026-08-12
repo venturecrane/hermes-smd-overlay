@@ -85,10 +85,74 @@ def _now_iso() -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+# Placeholders a caller may hand in for a component it could not READ off the
+# source record. ``_matter_id_of`` in both skills' ``pre_run.py`` emits
+# "unknown-matter" when the Smokeball payload carries no resolvable matter link.
+# A sentinel is a fabricated component: an identity built on one moves the moment
+# the real value arrives, so it cannot carry a per-item ACK code
+# (see ``has_stable_identity``). It is NOT excluded from ``item_key`` — the item
+# still fires, it just acks with the blanket code.
+UNKNOWN_SENTINELS: frozenset[str] = frozenset({"unknown-matter"})
+
+
+def _normalize_id(value) -> str:
+    """Canonical form of an identifier component of the item key.
+
+    The connector reads Smokeball GUIDs off the wire and passes them through
+    verbatim (``_source_id_of`` returns ``str(value)``); the agent's tool arg is
+    schema-typed ``string`` and the model may pad or re-case what it retypes. Two
+    spellings of ONE id must not be two items, so both sides fold here — strip,
+    then case-fold. Smokeball ids are ASCII GUIDs, where case carries no meaning
+    and two ids differing only in case cannot exist.
+    """
+    if value is None:
+        return ""
+    return str(value).strip().casefold()
+
+
 def _as_iso_date(value) -> str:
+    """Canonical ``YYYY-MM-DD`` for the date component of the item key, or ``""``
+    when the caller's identity convention omits it (the verification chase does).
+
+    Every caller spells this differently and all of them mean one day. ``pre_run``
+    reads a ``date`` off the record; the append tool's ``authored_date`` is a
+    schema ``string``, so the model has written the bare day, the full timestamp
+    the Smokeball payload carried, and (via ``execute_code``) a ``datetime``
+    handed straight through — which the old ``isinstance(value, date)`` branch
+    turned into ``2026-08-11T14:32:07+00:00``, since ``datetime`` subclasses
+    ``date``. Each spelling was its own item.
+
+    The date is taken AS WRITTEN — no timezone conversion. The connector's
+    ``_parse_iso_date`` reads ``value[:10]``, so a 23:00-0700 record is the 11th
+    on both sides; shifting to UTC here would fork the join it exists to make.
+
+    Unparseable input RAISES rather than hashing verbatim: a component the module
+    cannot canonicalize is exactly how "tomorrow" and "2026-08-11" became two
+    identities, and a rejected tool arg is visible to the turn while it can still
+    be fixed. Silent acceptance is not.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, datetime):  # MUST precede date — datetime subclasses it
+        return value.date().isoformat()
     if isinstance(value, date):
         return value.isoformat()
-    return str(value or "")
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        raise ValueError(
+            f"authored_date {value!r} is not an ISO-8601 date or datetime; pass "
+            "YYYY-MM-DD (or null when the skill's identity convention omits the "
+            "date). An uncanonical date component forks item identity — the same "
+            "deadline becomes two items and every ACK code names one of them."
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -117,21 +181,47 @@ def item_key(matter_id, source_id, label, authored_date) -> str:
     and the overlay's escalation plugin) keep working without a lockstep cross-repo
     signature change. Nothing may put it back in the hash;
     ``test_item_key_ignores_label`` is the guard.
+
+    Every surviving component is NORMALIZED before hashing (ss #2289): ids are
+    stripped and case-folded, the date is canonicalized to ``YYYY-MM-DD`` and an
+    unparseable one raises. The residual of the same defect: ``label`` was not the
+    only key component the model typed by hand — ``matter_id``, ``source_id`` and
+    ``authored_date`` are all free-text tool args (see the append tool's schema),
+    so ``2026-08-11`` and ``2026-08-11T00:00:00Z`` were two items on one deadline
+    and nothing rejected the second.
     """
     raw = "\x1f".join(
         (
-            str(matter_id or ""),
-            str(source_id or ""),
+            _normalize_id(matter_id),
+            _normalize_id(source_id),
             _as_iso_date(authored_date),
         )
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def has_stable_identity(source_id) -> bool:
-    """True iff the item carries a stable Smokeball id and can hold a per-item
-    token. Idless items are blanket-ack only."""
-    return bool(source_id) and str(source_id).strip() not in ("", "unknown-matter")
+def has_stable_identity(source_id, matter_id) -> bool:
+    """True iff this item's identity tuple is built ENTIRELY from values read off
+    the source, so it can hold a per-item ACK token. Otherwise the item is
+    blanket-ack only: it still fires, it just has no code of its own.
+
+    Two ways to fail. No ``source_id`` — the item has no stable Smokeball id, and
+    a token keyed on the matter alone would silence every item on that matter.
+    Or a sentinel in either position — ``pre_run``'s ``_matter_id_of`` emits
+    ``"unknown-matter"`` when the payload carries no resolvable matter link, and
+    a key with a fabricated component moves the moment the real value arrives, so
+    the code printed today names nothing tomorrow.
+
+    ``matter_id`` is REQUIRED, not defaulted (ss #2289 fix 2). The guard used to
+    test ``source_id`` against the sentinel — but ``_source_id_of`` never emits
+    it and ``_matter_id_of`` does, so the exclusion could not fire on any row the
+    connector writes: a control pointed at the wrong field measures nothing. An
+    optional second argument would have restored exactly that hole for any caller
+    that omitted it.
+    """
+    if not _normalize_id(source_id):
+        return False
+    return not ({_normalize_id(source_id), _normalize_id(matter_id)} & UNKNOWN_SENTINELS)
 
 
 def token_for(key_hex: str) -> str:

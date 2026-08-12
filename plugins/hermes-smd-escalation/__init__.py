@@ -69,8 +69,10 @@ _APPEND_SCHEMA = {
             **NULLABLE_STRING,
             "description": (
                 "The item's STABLE Smokeball task/event id (the anti-collision "
-                "identity field). null only for items with no stable id — those "
-                "get no per-item token (blanket-ack-only group)."
+                "identity field), copied VERBATIM off the record. null only for "
+                "items with no stable id — those get no per-item token "
+                "(blanket-ack-only group), as does an item whose matter_id came "
+                "back as the 'unknown-matter' sentinel."
             ),
         },
         "label": {
@@ -86,7 +88,10 @@ _APPEND_SCHEMA = {
                 "The authored date component of the identity tuple (YYYY-MM-DD), "
                 "or null when the skill's identity convention omits it (the "
                 "verification chase uses null — a re-dated tracking task must "
-                "not change identity)."
+                "not change identity). An ISO datetime is accepted and reduced to "
+                "its date; anything else is REJECTED rather than hashed as typed, "
+                "because an uncanonical date forks item identity. Never compute "
+                "or reword this — copy the date off the record."
             ),
         },
         "event": {
@@ -213,7 +218,17 @@ def _escalation_append(args: dict[str, Any], **_: Any) -> str:
             None if args.get("authored_date") in (None, "") else str(args["authored_date"])
         )
         key = escalation_ledger.item_key(matter_id or "", source_id, str(label), authored_date)
-        token = escalation_ledger.token_for(key) if source_id is not None else None
+        # A per-item token only for items whose identity tuple is entirely READ
+        # values (ss #2289 fix 2). The old test was `source_id is not None`, which
+        # handed a code to an item whose matter came back as the "unknown-matter"
+        # sentinel — that key moves the moment the matter resolves, so the code
+        # printed in today's alert names nothing tomorrow. Idless and
+        # sentinel-keyed items are blanket-ack only.
+        token = (
+            escalation_ledger.token_for(key)
+            if escalation_ledger.has_stable_identity(source_id, matter_id)
+            else None
+        )
     if derive_only:
         # Identity only — NOTHING is written. The turn quotes these codes in the
         # alert it is about to send, then appends the raise after a successful
@@ -260,7 +275,23 @@ def _escalation_state(args: dict[str, Any], **_: Any) -> str:
     items = {}
     for key, state in states.items():
         row = _state_to_jsonable(state)
-        row["token"] = row.get("token") or escalation_ledger.token_for(key)
+        # ss #2289 fix 3: NO synthesized token. This used to fall back to
+        # token_for(key) whenever the ledger rows carried none — which is exactly
+        # the blanket-ack-only items, the ones _resolve_token_identity refuses by
+        # design (it matches a token stored on a prior raise, and these have no
+        # such row). So the turn was handed an ACK code that structurally could
+        # not be acked, and quoting it in an alert tells a human to type
+        # something that will come back "an alarm that never rang cannot be
+        # acked". Making it resolvable was the other option and it is the wrong
+        # one: the key of an idless item is (matter, "", date), so one code would
+        # silence every same-day item on that matter — the over-ack the
+        # blanket-only group exists to prevent.
+        #
+        # token is therefore whatever the ledger actually recorded, or null.
+        # `ackable` says which, so a turn composing an alert routes the item to
+        # the blanket-ack group instead of inventing a code for it.
+        row["token"] = row.get("token") or None
+        row["ackable"] = row["token"] is not None
         items[key] = row
     return json.dumps(
         {"event_count": len(events), "item_count": len(items), "items": items},
