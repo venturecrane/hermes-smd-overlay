@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections import OrderedDict
 from collections.abc import Iterator
 from typing import Any
@@ -56,35 +57,159 @@ _MAX_SESSIONS = 256
 _registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
 
 # ---------------------------------------------------------------------------
-# Session resolver (overlay #141)
+# Session resolver (overlay #141, rescoped ss-console #2288)
 #
 # Hermes core passes session_id to post_tool_call and pre_llm_call but NOT to
 # pre_tool_call — all three fire sites in run_agent.py (10930, 11093, 11471 at
 # the pinned ref) pass task_id only. Forensic proof: every tier3
 # IDENTIFIER_UNVERIFIED row ever emitted lacked a session_id key and carried
 # register_was_empty=true, while reads were recorded under the REAL id nobody
-# consulted. One Machine = one agent process = sequential sessions, so the
-# plugin keeps the last REAL id any hook observed and consulting hooks resolve
-# a missing id to it. The note lands at turn start (pre_llm_call carries the
-# real id) before any tool pre-hook fires, so the cross-session leak window is
-# nil in practice; a resolver miss degrades to the OLD behavior (empty
-# register: over-report / no exemption), never a widened one.
+# consulted. So the plugin keeps the REAL id hooks do observe and consulting
+# hooks resolve a missing id to it. A resolver miss degrades to the OLD
+# behavior (empty register: over-report / no exemption), never a widened one.
+#
+# WHY THE FALLBACK IS PER-THREAD AND NOT PROCESS-GLOBAL
+# -----------------------------------------------------
+#
+# The original version of this resolver kept ONE module-global last-seen id,
+# on the premise that "One Machine = one agent process = sequential sessions".
+# ``shared/trust_decision.py:55-72`` refutes that premise for the module next
+# door, and it is the same premise: core keeps a long-lived event loop per
+# worker thread (``/opt/hermes/model_tools.py:66-80``, ``_get_worker_loop`` —
+# "Each worker thread (e.g., delegate_task's ThreadPoolExecutor threads) gets
+# its own long-lived loop stored in thread-local storage"), and ADR 0021 has us
+# using ``delegate_task`` as a native primitive. Concurrent agent threads in one
+# process are a live configuration, not a hypothetical.
+#
+# What the resolved value KEYS makes that fatal rather than untidy. It is the
+# primary key of every per-session safety register: the provenance register
+# above, the matter gate's party sets (``matter_gate.evaluate`` ->
+# ``matter_binding.membership_for``), the authored-spec read marks
+# (``spec_status``), the voice live-gate mark (``voice_status``), and the
+# read-capture windows establishment stages from. A shared last-value slot hands
+# thread A's key to thread B, so A's reads certify B's citations and A's party
+# set gates B's send. ``hermes-smd-establishment`` already names this failure in
+# its own words — "one session's read would then satisfy another session's
+# stage" — and then depended on a resolver that allowed it.
+#
+# So the fallback is thread-local, mirroring core's own idiom and the module
+# next door. Three tiers, and the resolution SAYS which one answered:
+#
+#   keyed             the caller had a real id; nothing was inferred
+#   thread            this thread's own noted id
+#   process_singleton this thread never noted, and no two threads have ever
+#                     held DIFFERENT sessions in this process — so there is
+#                     exactly one session it could mean. This is the
+#                     configuration the original comment described, and it
+#                     keeps resolving exactly as it does today.
+#   ambiguous         this thread never noted, and threads HAVE held different
+#                     sessions. There is no basis to pick one, so it picks
+#                     none. Degrades to the empty register (over-report / no
+#                     exemption / no spec mark), never to a peer's state.
+#   none              nothing has been noted anywhere yet
+#
+# The ``process_singleton`` tier is what makes this behavior-preserving: a
+# thread whose FIRST hook is a consult has never noted (core drops the id
+# there), and on a single-agent Machine it must still find the one live session.
+# The tier switches itself off the moment two threads disagree — which is
+# exactly when guessing would cross-attribute — and never switches back, because
+# a process that has run a fan-out can run another.
+#
+# AND THE RESOLUTION IS DECLARED. ``trust_decision`` stamps
+# ``trust_decision_match`` on every audit row so an auditor never has to guess
+# how the join was made; session resolution had no equivalent, so a
+# cross-attribution left no trace at all. That is why this was invisible rather
+# than merely unfixed. :func:`resolve_session_with_mode` returns the mode, the
+# trust gate carries it onto the per-tool audit row as ``session_resolution``,
+# and :func:`last_resolution` exposes this thread's most recent one for logging.
 # ---------------------------------------------------------------------------
 
-_last_seen_session: str = ""
+#: How a session id was resolved. Stamped onto the per-tool audit row so a
+#: keyed resolution is distinguishable from an inferred one after the fact.
+MODE_KEYED = "keyed"
+MODE_THREAD = "thread"
+MODE_PROCESS = "process_singleton"
+MODE_AMBIGUOUS = "ambiguous"
+MODE_NONE = "none"
+
+_local = threading.local()
+_scope_lock = threading.Lock()
+
+#: The single session every noting thread has agreed on, and the thread that
+#: last noted it. Guarded by ``_scope_lock``.
+_process_session: str = ""
+_process_owner: int = 0
+#: Sticky: set once two threads have held DIFFERENT sessions. From then on a
+#: thread that never noted resolves to nothing rather than to a peer's session.
+_process_ambiguous: bool = False
 
 
 def note_session(session_id: str | None) -> None:
-    """Record the most recent REAL session id any hook observed."""
-    global _last_seen_session
+    """Record the REAL session id this hook observed, for THIS thread.
+
+    Also maintains the process-wide singleton used by threads that have never
+    noted one (see the module comment). A thread re-noting is succession, not
+    concurrency: only a DIFFERENT thread holding a DIFFERENT session marks the
+    process ambiguous.
+    """
+    global _process_session, _process_owner, _process_ambiguous
+    if not session_id:
+        return
+    _local.session = session_id
+    ident = threading.get_ident()
+    with _scope_lock:
+        if _process_session and _process_session != session_id and _process_owner != ident:
+            _process_ambiguous = True
+        _process_session = session_id
+        _process_owner = ident
+
+
+def resolve_session_with_mode(session_id: str | None) -> tuple[str, str]:
+    """``(resolved_id, mode)`` — the id to key registers under, and how it was
+    reached. ``mode`` is one of the ``MODE_*`` constants above.
+
+    The result is also stashed for :func:`last_resolution` on this thread.
+    """
     if session_id:
-        _last_seen_session = session_id
+        return _record(str(session_id), MODE_KEYED)
+    mine = getattr(_local, "session", "")
+    if mine:
+        return _record(mine, MODE_THREAD)
+    with _scope_lock:
+        shared_session, ambiguous = _process_session, _process_ambiguous
+    if ambiguous:
+        # Two sessions have been live on two threads. Whichever spoke last is
+        # not evidence about this one.
+        return _record("", MODE_AMBIGUOUS)
+    if shared_session:
+        return _record(shared_session, MODE_PROCESS)
+    return _record("", MODE_NONE)
 
 
 def resolve_session(session_id: str | None) -> str:
-    """The given id when present; otherwise the last real id seen this
-    process (core drops session_id on the pre_tool_call path — #141)."""
-    return session_id or _last_seen_session
+    """The given id when present; otherwise the id this thread is working under
+    (core drops session_id on the pre_tool_call path — #141).
+
+    Kept as the one-value entry point every consulting hook already calls. Use
+    :func:`resolve_session_with_mode` where the resolution itself must be
+    recorded.
+    """
+    return resolve_session_with_mode(session_id)[0]
+
+
+def _record(resolved: str, mode: str) -> tuple[str, str]:
+    _local.last_resolution = (resolved, mode)
+    return resolved, mode
+
+
+def last_resolution() -> tuple[str, str]:
+    """This thread's most recent ``(resolved_id, mode)``.
+
+    Per-thread and read by the thread that resolved, so it carries none of the
+    cross-attribution risk the resolver itself had. ``("", MODE_NONE)`` before
+    anything has resolved on this thread.
+    """
+    return getattr(_local, "last_resolution", ("", MODE_NONE))
 
 
 def record_read(session_id: str, text: str) -> None:
@@ -230,8 +355,33 @@ def _evict_if_needed() -> None:
 
 
 def _reset_for_tests() -> None:
-    """Clear all registers — test hook only."""
+    """Clear all registers and THIS thread's resolver state — test hook only.
+
+    Another thread's noted session is unreachable from here, which is the
+    property that makes the slot safe; a fixture must reset on the thread it
+    noted on (same contract as ``TrustDecisionRegister.clear``).
+    """
+    global _process_session, _process_owner, _process_ambiguous
     _registers.clear()
+    _local.session = ""
+    _local.last_resolution = ("", MODE_NONE)
+    with _scope_lock:
+        _process_session = ""
+        _process_owner = 0
+        _process_ambiguous = False
 
 
-__all__ = ["record_read", "register_for", "drop"]
+__all__ = [
+    "MODE_AMBIGUOUS",
+    "MODE_KEYED",
+    "MODE_NONE",
+    "MODE_PROCESS",
+    "MODE_THREAD",
+    "drop",
+    "last_resolution",
+    "note_session",
+    "record_read",
+    "register_for",
+    "resolve_session",
+    "resolve_session_with_mode",
+]

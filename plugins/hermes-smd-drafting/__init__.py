@@ -186,11 +186,20 @@ def _resolve_session(kwargs: dict[str, Any]) -> str:
     reconciles them, and the spec read register is keyed by its answer — so
     consulting it by any other key would look up an empty set and refuse a turn
     that did read.
+
+    A non-keyed resolution is LOGGED (ss-console #2288). This lane refuses on a
+    missing spec mark and writes no audit row of its own, so without the line an
+    operator seeing "you did not read the spec" on a turn that did read has
+    nothing to look at. The gated tool path records the same fact on its per-tool
+    row as ``session_resolution``.
     """
     try:
         from shared import provenance
 
-        return provenance.resolve_session(str(kwargs.get("session_id") or ""))
+        resolved, mode = provenance.resolve_session_with_mode(str(kwargs.get("session_id") or ""))
+        if mode != provenance.MODE_KEYED:
+            logger.info("smd_deliver_draft session resolved by %s", mode)
+        return resolved
     except Exception:  # noqa: BLE001 — an unresolvable session is not a delivery fault
         logger.debug("smd_deliver_draft: session resolution failed", exc_info=True)
         return str(kwargs.get("session_id") or "")

@@ -27,6 +27,7 @@ import threading
 
 import pytest
 
+from shared import provenance
 from shared.audit_chain import CHAIN_COLUMNS, GENESIS, compute_row_hash, verify_chain
 from shared.trust_decision import (
     MATCH_KEYED,
@@ -436,6 +437,101 @@ def test_pre_tool_call_hook_threads_the_tool_call_id(monkeypatch):
     got, match = TRUST_DECISIONS.take("call-hook", "email_create_draft")
     assert match == MATCH_KEYED
     assert got is not None and got.effective_ceiling == "autonomous"
+
+
+# ---------------------------------------------------------------------------
+# Session resolution rides the same rail (ss-console #2288)
+#
+# The resolved session is the primary key of every per-session safety register
+# the gate reads — taint, matter party sets, spec marks, voice marks. Core drops
+# session_id on the pre-hook path (#141), so that key is often an INFERENCE, and
+# until now no row said which. These pin that it does.
+# ---------------------------------------------------------------------------
+
+
+def test_the_decision_records_a_keyed_session_resolution(monkeypatch):
+    trust = _trust()
+    _setup_exposure(
+        monkeypatch,
+        trust.enforce,
+        {trust.enforce.ActionClass.INTERNAL_WRITE: trust.enforce.Ceiling.AUTONOMOUS},
+    )
+    monkeypatch.setattr(trust, "_paused_hard", lambda: False)
+    trust.provenance.note_session("s-noted")
+    trust.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "x"},
+        session_id="s1",  # core DID supply it — nothing is inferred
+        tool_call_id="call-keyed",
+        customer_slug="smd",
+    )
+    got, _ = TRUST_DECISIONS.take("call-keyed", "email_create_draft")
+    assert got is not None
+    assert got.session_match == provenance.MODE_KEYED
+    assert got.session_resolved == "s1"
+
+
+def test_the_decision_records_a_fallback_session_resolution(monkeypatch):
+    """The #141 path: core passes no session_id, so the gate keys every register
+    off this thread's noted id. That is a sound inference and a legitimate one —
+    and the row must still call it an inference."""
+    trust = _trust()
+    _setup_exposure(
+        monkeypatch,
+        trust.enforce,
+        {trust.enforce.ActionClass.INTERNAL_WRITE: trust.enforce.Ceiling.AUTONOMOUS},
+    )
+    monkeypatch.setattr(trust, "_paused_hard", lambda: False)
+    trust.provenance.note_session("s-noted")
+    trust.on_pre_tool_call(
+        tool_name="email_create_draft",
+        args={"body": "x"},
+        tool_call_id="call-fallback",
+        customer_slug="smd",
+    )
+    got, _ = TRUST_DECISIONS.take("call-fallback", "email_create_draft")
+    assert got is not None
+    assert got.session_match == provenance.MODE_THREAD
+    assert got.session_resolved == "s-noted"
+
+
+def test_the_row_states_how_the_session_resolved():
+    TRUST_DECISIONS.record(
+        "call-9",
+        "mcp_agentmail_send_message",
+        _decision(session_match=provenance.MODE_THREAD, session_resolved="s1"),
+    )
+    md = json.loads(_emit()["metadata"])
+    assert md["session_resolution"] == provenance.MODE_THREAD
+    assert "session_resolution_conflict" not in md
+
+
+def test_a_row_gated_under_another_session_says_so():
+    """The detector. The pre-hook and post-hook bracket one dispatch, so they
+    are the same call in the same session; a disagreement means a peer's
+    registers gated it, and the row is the only place that can ever record
+    that."""
+    TRUST_DECISIONS.record(
+        "call-9",
+        "mcp_agentmail_send_message",
+        _decision(session_match=provenance.MODE_PROCESS, session_resolved="someone-elses"),
+    )
+    md = json.loads(_emit(session_id="s1")["metadata"])
+    assert md["session_id"] == "s1"
+    assert md["session_resolution_conflict"] == "someone-elses"
+
+
+def test_an_unresolvable_session_is_not_reported_as_a_conflict():
+    """``ambiguous`` means the resolver declined to guess — the registers were
+    empty, nobody else's state was used, and the mode already says so."""
+    TRUST_DECISIONS.record(
+        "call-9",
+        "mcp_agentmail_send_message",
+        _decision(session_match=provenance.MODE_AMBIGUOUS, session_resolved=""),
+    )
+    md = json.loads(_emit(session_id="s1")["metadata"])
+    assert md["session_resolution"] == provenance.MODE_AMBIGUOUS
+    assert "session_resolution_conflict" not in md
 
 
 # ---------------------------------------------------------------------------
