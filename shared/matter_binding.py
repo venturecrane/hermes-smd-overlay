@@ -52,10 +52,29 @@ _MAX_EMAILS_PER_MATTER = 64
 class MatterMembership:
     """``matter_id -> (party emails, closed?)`` for one session."""
 
-    __slots__ = ("_by_matter", "_complete", "_alias", "_ambiguous")
+    __slots__ = (
+        "_by_matter",
+        "_by_matter_folded",
+        "_ambiguous_ids",
+        "_complete",
+        "_alias",
+        "_ambiguous",
+    )
 
     def __init__(self) -> None:
         self._by_matter: dict[str, set[str]] = {}
+        # Case-folded id -> the id as the connector spelled it. The extractor
+        # (matter_gate._MATTER_ID_RE) carries IGNORECASE and returns the match
+        # verbatim, so a body citing an uppercased GUID produced a token that
+        # `in self._by_matter` could never match, and the gate reported
+        # *unresolved* against a party set it had actually read (ss#2290). The
+        # number path was already folded by _norm_matter; this is the id path's
+        # missing half. Lookup only — nothing stored or displayed is rewritten.
+        self._by_matter_folded: dict[str, str] = {}
+        # Folded keys claimed by two distinct ids, kept for the same reason
+        # _ambiguous is: without it the loser's next read re-adds the key and
+        # the binding flip-flops.
+        self._ambiguous_ids: set[str] = set()
         self._complete: set[str] = set()
         # A matter's human-readable number ("2026-PI-101") -> its connector id.
         # Correspondence cites the number; the connector keys everything by the
@@ -73,6 +92,7 @@ class MatterMembership:
         if matter_id not in self._by_matter and len(self._by_matter) >= _MAX_MATTERS_PER_SESSION:
             return
         bucket = self._by_matter.setdefault(matter_id, set())
+        self._index_folded(matter_id)
         for raw in emails:
             addr = _norm(raw)
             if addr and len(bucket) < _MAX_EMAILS_PER_MATTER:
@@ -82,6 +102,30 @@ class MatterMembership:
         # downgrade it, and an open read must never upgrade a set to closed.
         if complete:
             self._complete.add(matter_id)
+
+    def _index_folded(self, matter_id: str) -> None:
+        """Make ``matter_id`` findable by a differently-cased citation.
+
+        Ambiguity is withdrawn, never guessed — the same rule ``add_alias``
+        follows, and for the same reason: two ids differing only by case are
+        two matters, and picking one would let the gate call a legitimate
+        recipient an outsider. A withdrawn key falls back to *unresolved*, and
+        an exactly-spelled citation still resolves for both.
+        """
+        # An already-folded id is indexed too, rather than short-circuited: it is
+        # a live claimant on the key, and skipping it would let a lower-case
+        # sibling registered earlier win the folded lookup unchallenged.
+        key = _norm_matter(matter_id)
+        if not key or key in self._ambiguous_ids:
+            return
+        existing = self._by_matter_folded.get(key)
+        if existing is not None:
+            if existing != matter_id:
+                del self._by_matter_folded[key]
+                self._ambiguous_ids.add(key)
+                logger.debug("matter_binding: folded id %s is ambiguous; withdrawn", key)
+            return
+        self._by_matter_folded[key] = matter_id
 
     def add_alias(self, alias: str, matter_id: str) -> None:
         """Record a matter's human-readable number as another name for its id.
@@ -111,12 +155,20 @@ class MatterMembership:
     def resolve(self, token: str) -> str:
         """The canonical matter id for a cited token — the id itself, or the
         matter whose number it is. Empty when this session read no such matter,
-        which the gate reads as *unresolved*."""
+        which the gate reads as *unresolved*.
+
+        Three lookups, most-exact first: the id as spelled, the id in any case,
+        then the number. The middle one exists because the extractor is
+        IGNORECASE and returns its match verbatim (ss#2290)."""
         if not isinstance(token, str) or not token:
             return ""
         if token in self._by_matter:
             return token
-        return self._alias.get(_norm_matter(token), "")
+        folded = _norm_matter(token)
+        matter_id = self._by_matter_folded.get(folded)
+        if matter_id:
+            return matter_id
+        return self._alias.get(folded, "")
 
     def parties(self, matter_id: str) -> set[str]:
         return set(self._by_matter.get(matter_id, ()))
@@ -151,10 +203,19 @@ def _norm(value: Any) -> str:
 
 
 def _norm_matter(value: Any) -> str:
-    """Case-folded matter number. Smokeball renders "2026-PI-101"; a body may
-    carry a different case, and two spellings of one number must not become two
-    matters. Whitespace only — no punctuation stripping, because the separators
-    are part of the number, not formatting."""
+    """Case-folded matter token — a number or a connector id.
+
+    Smokeball renders "2026-PI-101"; a body may carry a different case, and two
+    spellings of one matter must not become two matters. Whitespace only — no
+    punctuation stripping, because the separators are part of the number, not
+    formatting.
+
+    ONE folding function for both token kinds, deliberately: the id path
+    shipped without an equivalent and an uppercased GUID citation resolved to
+    nothing (ss#2290). Direction is arbitrary but must stay uniform — the
+    folded id index and the alias map share this key space, and a second
+    implementation folding the other way would silently rebuild the split.
+    """
     if not isinstance(value, str):
         return ""
     return value.strip().upper()

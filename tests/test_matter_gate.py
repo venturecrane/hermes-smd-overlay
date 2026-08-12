@@ -178,6 +178,70 @@ def test_number_citation_is_case_insensitive() -> None:
     assert v2.is_mismatch
 
 
+def test_id_citation_is_case_insensitive() -> None:
+    # The ID path's version of the test above, and it was the asymmetry in
+    # ss#2290: _MATTER_ID_RE carries IGNORECASE and returns the match VERBATIM,
+    # but resolve() compared that token against the raw connector ids with `in`.
+    # A body citing an uppercased GUID therefore resolved to nothing and the
+    # verdict came back *unresolved* against a CLOSED party set. Every test in
+    # this file seeded a lower-case UUID body, so nothing covered it.
+    _closed(M_A, CLIENT_A)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body=f"Regarding matter {M_A.upper()}, see attached.",
+        recipients={CLIENT_B},
+    )
+    assert v.is_mismatch and v.should_withhold
+    # The refusal names the matter the way the human reading it saw it.
+    assert M_A.upper() in v.reason
+
+
+def test_control_uppercase_id_correct_pairing_passes() -> None:
+    # The half that makes the test above mean something: case-folding must not
+    # turn every uppercased citation into a withhold.
+    _closed(M_A, CLIENT_A)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body=f"Regarding matter {M_A.upper()}, see attached.",
+        recipients={CLIENT_A},
+    )
+    assert v.status == "ok"
+    assert not v.should_withhold
+
+
+def test_mixed_case_id_resolves_to_the_stored_id() -> None:
+    # Folding is a lookup convenience, not a rewrite: the canonical id the rest
+    # of the module keys on (parties, is_closed, audit reasons) is unchanged.
+    _closed(M_A, CLIENT_A)
+    m = matter_binding.membership_for(SID)
+    assert m.resolve("AaAaAaAa-1111-2222-3333-444444444444") == M_A
+    assert m.known_matters() == {M_A}
+
+
+def test_case_variant_ids_are_ambiguous_and_withdrawn() -> None:
+    # Two distinct ids differing only by case: neither may claim the folded key.
+    # Same doctrine the alias path already follows — withdraw, never guess —
+    # because guessing here would call a legitimate client an outsider.
+    upper = M_A.upper()
+    _closed(M_A, CLIENT_A)
+    _closed(upper, CLIENT_B)
+    m = matter_binding.membership_for(SID)
+    # Exact matches still resolve; only the folded lookup is withdrawn.
+    assert m.resolve(M_A) == M_A
+    assert m.resolve(upper) == upper
+    assert m.resolve("AaAaAaAa-1111-2222-3333-444444444444") == ""
+
+
+def test_number_path_still_normalizes_to_upper() -> None:
+    # The number path was already protected by _norm_matter; folding the id path
+    # must not disturb it in either direction.
+    _closed(M_A, CLIENT_A)
+    m = matter_binding.membership_for(SID)
+    m.add_alias(NUM_A.lower(), M_A)
+    assert m.resolve(NUM_A) == M_A
+    assert m.resolve(NUM_A.lower()) == M_A
+
+
 def test_an_ambiguous_number_is_withdrawn_not_guessed() -> None:
     # Two matters claiming one number: neither binding may be used. Keeping
     # either would let the gate call a legitimate client an outsider on a
