@@ -18,7 +18,10 @@ DESIGN). While the sentinel exists:
   * every heartbeat carries ``cron_containment: 1``
     (:mod:`shared.heartbeat`), so the console sees "crons deliberately
     disabled" — a contained seat must never be indistinguishable from a
-    quietly broken one (Law 12: silence is never success).
+    quietly broken one (Law 12: silence is never success). The field is
+    tri-state on the wire: ``1`` contained, ``0`` genuinely not contained,
+    ABSENT when the volume could not be read at all (ss-console#2291) —
+    absent is never a verdict, and the console holds it as unknown.
 
 Placing and removing the sentinel are deliberate operator acts::
 
@@ -32,8 +35,11 @@ re-materializes the authored set as usual.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 SENTINEL_BASENAME = "CRON_CONTAINMENT"
 _DEFAULT_HOME = "/opt/data"
@@ -49,14 +55,45 @@ def sentinel_path(home: str | None = None) -> Path:
     return Path(root) / SENTINEL_BASENAME
 
 
-def containment_active(home: str | None = None) -> bool:
-    """True when the sentinel file exists. Never raises: an unreadable
-    volume reads as not-contained here, and bootstrap's own volume checks
-    fail loudly long before this is consulted."""
+def containment_state(home: str | None = None) -> bool | None:
+    """Tri-state sentinel read (ss-console#2291).
+
+    ``True`` contained, ``False`` genuinely not contained, ``None`` when the
+    state cannot be determined at all — the volume is unreadable, or the home
+    that would hold the sentinel is not there to read. Callers that report
+    containment outward (the heartbeat) must distinguish the third case:
+    collapsing it into ``False`` publishes a contained seat as a normal one,
+    which is the exact blindness ss-console#2276 exists to remove.
+
+    Known limit: a mount point that exists but is empty (volume failed to
+    attach) is indistinguishable from an uncontained seat and reads ``False``.
+    Nothing readable from this process separates those two.
+    """
+    path = sentinel_path(home)
     try:
-        return sentinel_path(home).is_file()
-    except OSError:
-        return False
+        if path.is_file():
+            return True
+        # No sentinel. That is "not contained" only if the directory that
+        # would hold one is actually present and readable.
+        return False if path.parent.is_dir() else None
+    except OSError as exc:
+        logger.warning(
+            "cron_containment: cannot read sentinel %s (%s); containment state UNKNOWN",
+            path,
+            exc,
+        )
+        return None
+
+
+def containment_active(home: str | None = None) -> bool:
+    """True when the sentinel file exists. Never raises, and treats an
+    unknown state as not-contained: bootstrap deliberately fails open here,
+    because its own volume checks fail loudly long before this is consulted.
+
+    Callers that publish containment state — the heartbeat — must use
+    :func:`containment_state` instead, so "could not tell" stays distinct from
+    "not contained" (ss-console#2291)."""
+    return containment_state(home) is True
 
 
 def containment_reason(home: str | None = None) -> str:

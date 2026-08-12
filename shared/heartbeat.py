@@ -531,12 +531,19 @@ class HeartbeatEmitter:
 
 def _read_cron_containment() -> bool | None:
     """Sentinel presence for the heartbeat (ss-console#2276). A cheap stat per
-    tick; None (omitted) only if the check itself fails, so a read error never
-    reports a false 'not contained'."""
-    try:
-        from shared.cron_containment import containment_active
+    tick. Tri-state by construction: True contained, False genuinely not
+    contained, None omitted when the volume cannot be read — a read error must
+    never report a false 'not contained'.
 
-        return containment_active()
+    That guarantee lives in ``containment_state``, not in the except clause
+    below: ``containment_active`` swallows OSError by design for bootstrap, so
+    calling it here made this wrapper's None path unreachable for the very
+    failure it claimed to cover (ss-console#2291). The except stays only for
+    the lazy import, which can genuinely fail."""
+    try:
+        from shared.cron_containment import containment_state
+
+        return containment_state()
     except Exception as exc:  # noqa: BLE001 — the check must never kill the beat
         logger.debug("heartbeat: cron-containment read failed: %s", exc)
         return None
