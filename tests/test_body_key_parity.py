@@ -63,23 +63,32 @@ def test_the_parity_check_catches_a_desynced_list() -> None:
 
 
 # ---------------------------------------------------------------------------
-# The two lists this file deliberately does NOT pin (ss#2290, reported not fixed)
+# The two lists this file deliberately does NOT pin (ss#2290 → ss#2297)
 #
 # Four body-key lists exist across the send path and only two of them claim to
-# be copies. The other two disagree with these and with each other:
+# be copies. The other two disagree with these and with each other. ss#2290
+# reported both disagreements without acting on either; ss#2297 resolved half of
+# it, and the halves went opposite ways for a stated reason:
 #
-#   enforce._SEND_BODY_ARG_KEYS   omits html_body and note
-#   outbound._BODY_ARG_KEYS       omits subject; first-match-wins, not concatenated
+#   enforce._SEND_BODY_ARG_KEYS   CONVERGED on html_body (ss#2297) — it assembles
+#                                 the whole visible surface, so an html half it
+#                                 could not see was a hole, not a definition.
+#                                 Still omits `note`, which is an annotation on a
+#                                 record rather than a surface a recipient reads.
+#   outbound._BODY_ARG_KEYS       STAYS narrow — omits subject, first-match-wins,
+#                                 because it resolves ONE authored draft body.
+#                                 `_DRAFT_SCAN_KEYS` is the explicit superset for
+#                                 the jobs that need the whole surface.
 #
-# Whether those SHOULD converge is a judgment about what "the body" means at
-# each gate, not a defect to sweep up in a case-folding fix. These assertions
-# pin the disagreement as it stands so a future convergence is a deliberate
-# edit to this file rather than a silent drift.
+# So this is not a list-alignment exercise. These assertions pin what each list
+# means, so a future change to either is a deliberate edit to this file.
 # ---------------------------------------------------------------------------
 
 
 def test_the_neighbouring_lists_disagree_as_documented() -> None:
     trust = load_plugin("hermes-smd-trust")
-    assert "html_body" not in trust.enforce._SEND_BODY_ARG_KEYS
+    # ss#2297: the floor reads the html half. Removing this key returns the gap
+    # where a benign subject beside sensitive html shipped autonomously.
+    assert "html_body" in trust.enforce._SEND_BODY_ARG_KEYS
     assert "note" not in trust.enforce._SEND_BODY_ARG_KEYS
     assert "subject" not in trust.outbound._BODY_ARG_KEYS
