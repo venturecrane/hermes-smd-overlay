@@ -148,6 +148,117 @@ def test_append_idless_item_gets_no_token(escalation):
     assert requests[0]["event"]["token"] is None  # blanket-ack-only group
 
 
+def test_sentinel_matter_item_gets_no_token(escalation):
+    """ss #2289 fix 2, at the seam that actually decides. ``pre_run``'s
+    ``_matter_id_of`` returns "unknown-matter" when the Smokeball payload carries
+    no resolvable matter link, and the agent passes that value straight through.
+    The item has a real task GUID, so the old ``source_id is not None`` test
+    handed it a per-item ACK code — but half its key is a placeholder, so the key
+    (and therefore the code) changes the instant the matter resolves. The alert
+    would print a code that names nothing by the time anyone types it."""
+    plugin, requests = escalation
+    out = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "matter_id": "unknown-matter",
+                "source_id": "3c191bed-cdda-48b9-a6ed-a51a349f3f94",
+                "label": "task-deadline",
+                "authored_date": "2026-08-11",
+                "event": "fired",
+                "attempt": 1,
+            }
+        )
+    )
+    assert out["token"] is None  # blanket-ack-only
+    assert requests[0]["event"]["token"] is None
+    # The item still FIRES — the sentinel costs it a per-item code, not its alarm.
+    assert requests[0]["event"]["item_key"]
+
+
+def test_one_deadline_two_date_spellings_is_one_append_identity(escalation):
+    """ss #2289 fix 1 through the tool the model actually calls. ``authored_date``
+    is a schema string; across runs the same deadline arrives spelled differently
+    and each spelling used to be its own item — fire-once counted them apart and
+    each carried a different ACK code."""
+    plugin, requests = escalation
+    for spelling in ("2026-08-11", "2026-08-11T00:00:00Z", " 2026-08-11 "):
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "matter_id": "m-7",
+                "source_id": "task-42",
+                "label": "task-deadline",
+                "authored_date": spelling,
+                "event": "fired",
+                "attempt": 1,
+            }
+        )
+    keys = {r["event"]["item_key"] for r in requests}
+    tokens = {r["event"]["token"] for r in requests}
+    assert len(keys) == 1, f"one deadline, {len(keys)} identities: {sorted(keys)}"
+    assert len(tokens) == 1
+
+
+def test_unparseable_authored_date_is_refused_before_the_broker(escalation):
+    """A date the module cannot canonicalize must not reach the ledger verbatim.
+    The turn sees the error while the argument is still fixable."""
+    plugin, requests = escalation
+    with pytest.raises(ValueError, match="authored_date"):
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "matter_id": "m-7",
+                "source_id": "task-42",
+                "label": "task-deadline",
+                "authored_date": "next Tuesday",
+                "event": "fired",
+                "attempt": 1,
+            }
+        )
+    assert requests == []
+
+
+def test_state_never_offers_a_token_that_cannot_resolve(escalation, tmp_path, monkeypatch):
+    """ss #2289 fix 3. ``escalation_state`` used to backfill ``token_for(key)``
+    for any item whose ledger rows carried no token — precisely the
+    blanket-ack-only items, which ``_resolve_token_identity`` refuses by design.
+    The turn was handed an ACK code that structurally could not be acked; quote it
+    in an alert and the human types a code that comes back "an alarm that never
+    rang cannot be acked".
+
+    Every token this tool reports must round-trip. Asserted here by actually
+    resolving it, not by inspecting the shape."""
+    plugin, _ = escalation
+    idless_key = escalation_ledger.item_key("m-1", None, "sol-date", "2026-08-01")
+    ledger_file = tmp_path / "ledger.jsonl"
+    ledger_file.write_text(
+        json.dumps(
+            escalation_ledger.make_event(
+                skill="deadline-miss-escalator",
+                matter_id="m-1",
+                item_key=idless_key,
+                event="fired",
+                attempt=1,
+                token=None,  # blanket-ack-only: the append wrote no token
+                ts="2026-08-01T09:00:00.000Z",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
+    out = json.loads(plugin._escalation_state({}))
+    row = out["items"][idless_key]
+    assert row["token"] is None
+    assert row["ackable"] is False
+    for key, item in out["items"].items():
+        if item["token"] is None:
+            continue
+        # Anything still offered as a token must resolve to this very item.
+        assert plugin._resolve_token_identity(item["token"])[0] == key
+
+
 def test_acked_resolves_identity_from_token(escalation, tmp_path, monkeypatch):
     """The acker knows the ACK code from the reply, not the identity tuple —
     the tool resolves the token against the ledger's prior raises."""
