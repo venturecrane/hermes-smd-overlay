@@ -342,16 +342,7 @@ def _escalation_append(args: dict[str, Any], **_: Any) -> str:
         key = str(record["item_key"])
         token = record["token"]
         matter_id = record["matter_id"]
-    elif not derive_only:
-        raise ValueError(
-            "a non-acked append requires append_handle: call escalation_append "
-            "with derive_only=true for this item, quote the ACK token it returns, "
-            "then present its append_handle here. Identity components are accepted "
-            "on the derive ONLY — re-supplying them on the append is how the code "
-            "shown to a human came to name a different row than the one written "
-            "(ss #2304)"
-        )
-    else:
+    elif derive_only:
         # Derived, never model-authored: the sha256 identity key and its ACK
         # token come from the same vendored helpers the pre_run gates use, so
         # the join can never fork on a hand-typed key (the first live probe's
@@ -375,6 +366,15 @@ def _escalation_append(args: dict[str, Any], **_: Any) -> str:
             escalation_ledger.token_for(key)
             if escalation_ledger.has_stable_identity(source_id, matter_id)
             else None
+        )
+    else:
+        raise ValueError(
+            "a non-acked append requires append_handle: call escalation_append "
+            "with derive_only=true for this item, quote the ACK token it returns, "
+            "then present its append_handle here. Identity components are accepted "
+            "on the derive ONLY — re-supplying them on the append is how the code "
+            "shown to a human came to name a different row than the one written "
+            "(ss #2304)"
         )
     if derive_only:
         # Identity only — NOTHING is written. The turn quotes these codes in the
