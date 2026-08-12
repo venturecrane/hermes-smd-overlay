@@ -93,7 +93,8 @@ _registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
 # stage" — and then depended on a resolver that allowed it.
 #
 # So the fallback is thread-local, mirroring core's own idiom and the module
-# next door. Three tiers, and the resolution SAYS which one answered:
+# next door. Three rungs resolve and two decline, and the resolution SAYS which
+# one answered:
 #
 #   keyed             the caller had a real id; nothing was inferred
 #   thread            this thread's own noted id
