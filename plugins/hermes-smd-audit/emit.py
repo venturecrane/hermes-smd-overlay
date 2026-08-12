@@ -44,11 +44,15 @@ from shared.action_classes import (
     classify_tool,
 )
 from shared.audit_client import AuditWriteError
+from shared.audit_contract import (
+    CANONICAL_TOOL_CALL_KEY,
+    DEPRECATED_TOOL_CALL_KEY,
+    build_audit_params,
+)
 from shared.audit_contract import CHAIN_COLUMN_ALTERS as _CHAIN_COLUMN_ALTERS
 from shared.audit_contract import CREATE_INDEX_SQL as _CREATE_INDEX_SQL
 from shared.audit_contract import CREATE_TABLE_SQL as _CREATE_TABLE_SQL
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
-from shared.audit_contract import build_audit_params
 from shared.cron_attribution import resolve_routine
 from shared.ids import iso_utc as _iso_utc
 from shared.ids import sha256 as _sha256
@@ -276,7 +280,7 @@ def build_per_tool_metadata(
     ceiling_level: str | None = None,
     error_type: str | None = None,
     duration_ms: float | None = None,
-    trace_id: str | None = None,
+    tool_call_id: str | None = None,
     arguments: dict | None = None,
     unmapped: bool = False,
     banned_reason: str | None = None,
@@ -298,7 +302,16 @@ def build_per_tool_metadata(
     - outcome:              str ("ok" | "error" | "blocked")
     - error_type:           str | None
     - duration_ms:          float | None
-    - trace_id:             str | None
+    - tool_call_id:         str | None — THE tool-call correlation key. audit_log
+                            has no column for it (shared/audit_contract.py
+                            COLUMNS), so correlating one dispatch across emitters
+                            is a json_extract on this name, and every emitter
+                            must spell it the same way (ss-console #2312).
+    - trace_id:             str | None — DEPRECATED alias of tool_call_id, same
+                            value. Kept only so a correlation query still reaches
+                            rows written before #2312, which carry the old name
+                            alone. Retire once the audit retention window has
+                            cleared those rows.
     - trust_decision_match: str ("tool_call_id" | "sequential" | "none")
     - unmapped_tool:        True iff the tool was not in the registry
     - banned_tool:          True iff the tool was banned
@@ -344,7 +357,10 @@ def build_per_tool_metadata(
         "outcome": outcome,
         "error_type": error_type,
         "duration_ms": duration_ms,
-        "trace_id": trace_id,
+        # Canonical first, deprecated alias second — same value under both names
+        # during the transition. See the docstring above and ss-console #2312.
+        CANONICAL_TOOL_CALL_KEY: tool_call_id,
+        DEPRECATED_TOOL_CALL_KEY: tool_call_id,
         # Always stamped, including "none": a row with no trust provenance must
         # SAY it has none rather than look like a row that predates the field.
         "trust_decision_match": trust_decision_match,
@@ -542,7 +558,7 @@ def emit_tool_event(
         skill_name=skill_name,
         error_type=error_type,
         duration_ms=float(duration_ms) if duration_ms is not None else None,
-        trace_id=tool_call_id or None,
+        tool_call_id=tool_call_id or None,
         arguments=args,
         unmapped=unmapped,
         banned_reason=banned_reason,
@@ -788,7 +804,7 @@ def emit_agent_skill_created_event(
         "skill_name_created": skill_name_created,
     }
     if tool_call_id:
-        metadata["tool_call_id"] = tool_call_id
+        metadata[CANONICAL_TOOL_CALL_KEY] = tool_call_id
     if skill_manage_args is not None:
         # Carry the args verbatim (no payload digest — the args are public
         # skill-metadata, not user content); useful for "what did the agent

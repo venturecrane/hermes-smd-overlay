@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from shared.audit_client import audit_client_from_env
-from shared.audit_contract import INSERT_SQL, agent_event_params
+from shared.audit_contract import CANONICAL_TOOL_CALL_KEY, INSERT_SQL, agent_event_params
 
 
 def _digest(value: Any) -> str:
@@ -30,7 +30,7 @@ def write_decision(
             "operation": operation,
             "payload_digest": payload_digest,
             "session_id": session_id,
-            "tool_call_id": tool_call_id,
+            CANONICAL_TOOL_CALL_KEY: tool_call_id,
         },
     )
     client.execute(INSERT_SQL, *params)

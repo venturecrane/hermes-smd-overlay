@@ -68,8 +68,8 @@ import logging
 from typing import Any
 
 from shared import spec_manifest
+from shared.audit_contract import CANONICAL_TOOL_CALL_KEY, agent_event_params
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
-from shared.audit_contract import agent_event_params
 from shared.audit_status import NoAuditWarner
 from shared.customer_config import CustomerConfig
 from shared.spec_gate import resolve_output_class
@@ -257,7 +257,7 @@ def _emit_voice_gate_audit(
         if session_id:
             metadata["session_id"] = session_id
         if tool_call_id:
-            metadata["tool_call_id"] = tool_call_id
+            metadata[CANONICAL_TOOL_CALL_KEY] = tool_call_id
         params = agent_event_params(action_type="VOICE_GATE_TRIGGERED", metadata=metadata)
         client.execute(_INSERT_SQL, *params)
     except Exception as exc:  # noqa: BLE001 — audit row is best-effort vs downgrade

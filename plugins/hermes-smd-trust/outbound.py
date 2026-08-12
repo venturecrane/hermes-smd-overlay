@@ -35,8 +35,8 @@ from typing import Any
 
 from shared import identifier_filter, provenance
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
+from shared.audit_contract import CANONICAL_TOOL_CALL_KEY, agent_event_params
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
-from shared.audit_contract import agent_event_params
 from shared.audit_status import NoAuditWarner
 from shared.outbound_gate import GateDecision, evaluate
 
@@ -401,7 +401,7 @@ def _emit_fabrication_audit(
         if session_id:
             metadata["session_id"] = session_id
         if tool_call_id:
-            metadata["tool_call_id"] = tool_call_id
+            metadata[CANONICAL_TOOL_CALL_KEY] = tool_call_id
 
         # body is never persisted — only marker ids / citation labels in metadata
         params = agent_event_params(
@@ -561,7 +561,7 @@ def _emit_identifier_audit(
     if session_id:
         metadata["session_id"] = session_id
     if tool_call_id:
-        metadata["tool_call_id"] = tool_call_id
+        metadata[CANONICAL_TOOL_CALL_KEY] = tool_call_id
     params = agent_event_params(action_type="IDENTIFIER_UNVERIFIED", metadata=metadata)
     client.execute(_INSERT_SQL, *params)
 
