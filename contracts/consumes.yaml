@@ -87,11 +87,16 @@ vars:
 
   # ---- Optional: plugin no-ops cleanly / a default applies when absent ----
   AGENTMAIL_API_KEY:
-    discovery: static
+    # ss#2258: no longer read by any plugin — it survives only as the
+    # ``secret_env`` FIELD VALUE on the agentmail MCP connector spec, which the
+    # translator materializes into the profile config. That is an indirect
+    # reference, not a literal read, and the conformance gate is right to insist
+    # on the distinction.
+    discovery: indirect
     stage: agent
     requirement: optional
-    consumed_by: [reply]
-    note: "AgentMail REST credential (Bearer) for the reply channel's threaded send; used when the inbound sender is on the organization roster (scope.inbound_allow_from). Absent => reply channel disables (no send). Also the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py)."
+    consumed_by: [mcp_registry]
+    note: "AgentMail READ/DRAFT credential — the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py). Inbox-scoped with message_send/draft_send WITHHELD since ss#2258, so it cannot transmit: the vendor refuses. NO overlay plugin reads it anymore; transmit is a broker verb keyed on AGENTMAIL_SEND_API_KEY, which never enters this process's environment."
   SMD_MCP_STORE_DIR:
     discovery: static
     stage: agent

@@ -43,6 +43,10 @@ from typing import Any
 DIRECT_TO_SEND_TOOLS: frozenset[str] = frozenset(
     {
         "mcp_agentmail_send_message",
+        # ss#2258 broker-mediated send: recipients ride the same flat ``to`` /
+        # ``cc`` / ``bcc`` args, so recipient extraction and the typed
+        # INTERNAL/CLIENT/VENDOR reclassification apply unchanged.
+        "smd_send_message",
         "mcp_agentmail_forward_message",
         "mcp_msgraph_mail_send_message",
     }

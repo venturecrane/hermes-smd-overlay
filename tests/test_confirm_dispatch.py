@@ -47,9 +47,11 @@ def _arm(monkeypatch, trust, *, sent):
     monkeypatch.setattr(enforce, "_resolve_vertical_floors", lambda: {})
     monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "agent-crane")
     monkeypatch.setattr(trust, "get_secret", lambda k: "am_key")
-    monkeypatch.setattr(trust.outbound_send, "resolve_inbox_id", lambda *a, **k: "inbox1")
 
-    def _send(*, api_key, inbox_id, payload, **k):
+    # ss#2258: no api_key and no inbox_id to arm — the broker holds the key and
+    # pins the inbox from the seat's own config. The dispatch path can express
+    # only the payload, which is the point.
+    def _send(*, payload, **k):
         sent.append(payload)
         return "msg_1"
 

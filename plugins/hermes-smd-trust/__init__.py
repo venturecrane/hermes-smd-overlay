@@ -26,6 +26,7 @@ from shared.broker_audit import write_decision
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
 from shared.spec_status import SPEC_STATUS
+from shared.tool_registration import register_wrapped_tool
 from shared.workspace_broker import GRANT_ARG, authorize
 
 from . import approval, enforce, outbound, outbound_send, spec_read
@@ -375,6 +376,71 @@ def _emit_confirm_event(action_type: str, metadata: dict) -> None:
         logger.warning("hermes-smd-trust: %s audit emission failed (%s)", action_type, exc)
 
 
+# ---------------------------------------------------------------------------
+# The broker-mediated send tool (ss#2258)
+# ---------------------------------------------------------------------------
+#
+# The four AgentMail MCP send tools left the menu because the gateway's AgentMail
+# key is now inbox-scoped WITHOUT message_send — it would 403, and an advertised
+# tool that always fails is worse than an absent one. But removing them without a
+# replacement would have SILENTLY BROKEN an authored capability: both live seats
+# author `external_send_internal: autonomous`, i.e. the Operator may answer a
+# rostered colleague without a human in the loop. Taking that away by deleting a
+# tool would be the same class of mistake as the incident itself — a change whose
+# real effect is invisible from the diff.
+#
+# So the capability survives, and only the executor changes. This tool carries the
+# same EXTERNAL_SEND action class (shared/action_classes.py), so the SAME ceiling
+# governs it: draft_for_review still withholds and routes through the Telegram
+# confirm round-trip; autonomous still sends. Underneath, it reaches the broker,
+# which fences the recipient against the seat's authored surface and writes the
+# audit row itself.
+_SEND_TOOL_NAME = "smd_send_message"
+_BROKER_SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
+_SEND_TOOL_DESCRIPTION = (
+    "Send an email from this Operator's own mailbox. Recipients must be people "
+    "this engagement's configuration names; anyone else is refused. Subject to "
+    "the authored send posture — an external send may be held for the owner's "
+    "approval rather than sent immediately."
+)
+_SEND_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "to": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Recipient email addresses.",
+        },
+        "cc": {"type": "array", "items": {"type": "string"}},
+        "bcc": {"type": "array", "items": {"type": "string"}},
+        "subject": {"type": "string"},
+        "text": {"type": "string", "description": "Plain-text body."},
+        "html": {"type": "string", "description": "Optional HTML body."},
+        "reply_to": {"type": "string"},
+    },
+    "required": ["to", "subject"],
+}
+
+
+def _smd_send_message(**kwargs: Any) -> str:
+    """Execute a send the gate has already authorized.
+
+    By the time a handler runs, ``pre_tool_call`` has classified the recipients,
+    applied the exposure ceiling, run the content and fabrication floors, and
+    either allowed this call or blocked it. So there is no authorization decision
+    left here — this is transport, and the broker independently re-fences the
+    recipient anyway. Two checks in two processes, on purpose.
+    """
+    try:
+        message_id = outbound_send.send_message(payload=dict(kwargs))
+    except outbound_send.OutboundSendError as exc:
+        # Returned, not raised: a refused send is information the agent should
+        # act on (pick a different recipient, ask the owner), not a tool crash.
+        # The broker has already recorded the attempt and the reason.
+        return f"Not sent: {exc}"
+    return f"Sent (message {message_id})."
+
+
 def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     """Execute an approved confirm send OUT OF BAND (ADR 0071 #1806 harden).
 
@@ -432,24 +498,29 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
         if is_msgraph:
             message_id = outbound_send.send_via_msgraph(payload)
         else:
-            api_key = get_secret("AGENTMAIL_API_KEY")
-            inbox_id = outbound_send.resolve_inbox_id(api_key)
-            message_id = outbound_send.send_message(
-                api_key=api_key, inbox_id=inbox_id, payload=payload
-            )
-    except KeyError:
-        logger.error("hermes-smd-trust: AGENTMAIL_API_KEY unset; cannot dispatch approved send")
-        return None
+            # ss#2258: AgentMail transmit is a broker verb now. No key is read
+            # here and no inbox is resolved here — the broker pins the seat's own
+            # inbox from the customer.yaml it trusts, fences the recipient against
+            # the seat's authored counterparty surface, and writes the audit row
+            # itself. The previous shape read an account-wide key and resolved the
+            # inbox from an account listing in THIS process, which is how a seat
+            # could send as (and to) someone it was never authored to touch.
+            message_id = outbound_send.send_message(payload=payload)
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
-        _emit_confirm_event(
-            "CONFIRM_SEND_FAILED",
-            {
-                "recipients": sorted(rec.recipients),
-                "source": rec.approval_source,
-                "reason": str(exc),
-            },
-        )
+        # NOTE: no CONFIRM_SEND_FAILED emitted for the agentmail path — the broker
+        # already wrote it, and a second row here would make the console
+        # reconciler count one attempt twice. The msgraph path still emits below
+        # because it has no broker seam yet.
+        if is_msgraph:
+            _emit_confirm_event(
+                "CONFIRM_SEND_FAILED",
+                {
+                    "recipients": sorted(rec.recipients),
+                    "source": rec.approval_source,
+                    "reason": str(exc),
+                },
+            )
         return f"[Your approved send to {recipients} could not be delivered; it was not sent. You can ask me to retry.]"
     logger.info(
         "hermes-smd-trust: dispatched approved send to %s (source=%s, message=%s)",
@@ -457,14 +528,15 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
         rec.approval_source,
         message_id,
     )
-    _emit_confirm_event(
-        "CONFIRM_SEND_DISPATCHED",
-        {
-            "recipients": sorted(rec.recipients),
-            "source": rec.approval_source,
-            "message_id": message_id,
-        },
-    )
+    if is_msgraph:
+        _emit_confirm_event(
+            "CONFIRM_SEND_DISPATCHED",
+            {
+                "recipients": sorted(rec.recipients),
+                "source": rec.approval_source,
+                "message_id": message_id,
+            },
+        )
     return f"[Dispatched your approved send to {recipients} (message {message_id}). Do not send it again.]"
 
 
@@ -583,4 +655,17 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
-    logger.info("hermes-smd-trust registered: pre_tool_call + post_tool_call + pre_llm_call")
+    register_wrapped_tool(
+        ctx,
+        name=_SEND_TOOL_NAME,
+        toolset="email",
+        schema=_SEND_TOOL_SCHEMA,
+        handler=_smd_send_message,
+        requires_env=[_BROKER_SOCKET_ENV],
+        description=_SEND_TOOL_DESCRIPTION,
+        emoji="",
+    )
+    logger.info(
+        "hermes-smd-trust registered: pre_tool_call + post_tool_call + pre_llm_call + %s",
+        _SEND_TOOL_NAME,
+    )

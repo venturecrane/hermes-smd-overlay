@@ -18,16 +18,13 @@ from __future__ import annotations
 import json
 import logging
 import threading
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from email.utils import parseaddr
 from typing import Any
 
-from shared import content_floor, outbound_gate
+from shared import agentmail_broker, content_floor, outbound_gate
 from shared import send_policy as send_policy_mod
 
 logger = logging.getLogger(__name__)
@@ -414,63 +411,41 @@ class RelaySendError(RuntimeError):
 
 def send_reply(
     *,
-    api_key: str,
-    inbox_id: str,
     message_id: str,
     text: str,
     html: str,
-    base_url: str = AGENTMAIL_API_BASE,
-    timeout_s: float = _SEND_TIMEOUT_S,
-    opener: Callable[..., Any] | None = None,
+    sender: Callable[..., Any] | None = None,
 ) -> str:
-    """POST a threaded reply via the AgentMail REST API; return the new msg id.
+    """Ask the broker to send a threaded reply; return the new msg id.
 
-    Endpoint: ``POST /v0/inboxes/{inbox_id}/messages/{message_id}/reply`` with a
-    ``{text, html}`` body and a ``Bearer`` token. The reply is keyed on the
-    recorded inbox + message, so AgentMail threads it to the original sender —
-    the recipient is structurally the inbound sender, independent of any address
-    the agent's draft named. ``opener`` is injectable for tests (defaults to
-    ``urllib.request.urlopen``). Raises :class:`RelaySendError` on any failure;
-    the caller is exception-safe and audits the failure.
+    Was a direct ``POST /v0/inboxes/{id}/messages/{id}/reply`` with a Bearer
+    token held in this process. It is now a broker verb, because ss#2258 showed
+    that a credential living in the agent's address space is reachable by paths
+    the trust hook never sees — four fabricated messages went to a real client
+    principal with no audit row, which is only possible if the sending code was
+    never gated.
+
+    What moved: the broker re-fetches the source message itself and checks the
+    ORIGINAL SENDER against ``inbound_allow_from`` before transmitting, and it
+    writes the audit row. What stayed: the recipient is still structural (AgentMail
+    threads to the original sender), so no address from the agent's draft is
+    honored here — it never was, and now that guarantee is enforced by the process
+    holding the key rather than by this one.
+
+    ``sender`` is injectable for tests. Raises :class:`RelaySendError` on any
+    failure — refusal or transport alike — because the caller's contract is
+    unchanged: it is exception-safe and audits a failed reply.
     """
-    path = (
-        f"/inboxes/{urllib.parse.quote(inbox_id, safe='')}"
-        f"/messages/{urllib.parse.quote(message_id, safe='')}/reply"
-    )
-    url = base_url + path
-    body: dict[str, str] = {}
-    if text:
-        body["text"] = text
-    if html:
-        body["html"] = html
-    data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    _open = opener or urllib.request.urlopen
+    send = sender or agentmail_broker.send_reply
     try:
-        with _open(req, timeout=timeout_s) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        raise RelaySendError(f"agentmail reply returned HTTP {exc.code}") from exc
-    except urllib.error.URLError as exc:
-        raise RelaySendError(f"agentmail reply unreachable: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise RelaySendError(f"agentmail reply timed out after {timeout_s}s") from exc
-    try:
-        parsed = json.loads(raw.decode("utf-8")) if raw else {}
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        parsed = {}
-    # AgentMail returns {"messageId": "..."} (SendMessageResponse). Surface it
-    # for the audit row; absence is non-fatal (the send succeeded — 2xx).
-    return str(parsed.get("messageId") or parsed.get("message_id") or "")
+        return str(send(message_id=message_id, text=text, html=html) or "")
+    except agentmail_broker.BrokerError as exc:
+        # The broker refused and has already recorded why. Surfacing its reason
+        # keeps the operator-visible message specific ("that sender is not on
+        # inbound_allow_from") rather than a generic delivery failure.
+        raise RelaySendError(f"broker refused the reply: {exc}") from exc
+    except agentmail_broker.AgentMailBrokerUnavailable as exc:
+        raise RelaySendError(f"broker transmit unavailable: {exc}") from exc
 
 
 __all__ = [

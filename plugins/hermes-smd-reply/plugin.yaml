@@ -3,10 +3,12 @@ version: "1.0.0"
 description: "Operator reply channel: sends the agent's GOVERNED draft back to the verified inbound sender when that sender is on the organization roster (scope.inbound_allow_from), recipient-locked, re-checking the content + fabrication floors. Defeats no agent floor (ADR 0055)."
 author: VentureCrane
 requires_env:
-  # Read at register time; the relay is fail-closed without them. AGENTMAIL_API_KEY
-  # is the REST send credential (Bearer). SMD_CUSTOMER_SLUG / SMD_D1_AUDIT_BINDING
-  # carry the reply-channel audit rows (observability — relay still sends without them).
-  - AGENTMAIL_API_KEY
+  # ss#2258: AGENTMAIL_API_KEY is NO LONGER declared here. The AgentMail reply
+  # is a broker verb, so this plugin holds no credential that can transmit — the
+  # broker socket is the dependency instead. SMD_CUSTOMER_SLUG /
+  # SMD_D1_AUDIT_BINDING carry the reply-channel audit rows (observability; the
+  # relay still sends without them, and the broker writes the transmit row).
+  - SMD_WORKSPACE_BROKER_SOCKET
   - SMD_CUSTOMER_SLUG
   - SMD_D1_AUDIT_BINDING
 provides_hooks:

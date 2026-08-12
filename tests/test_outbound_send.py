@@ -1,14 +1,23 @@
-"""Tests for the out-of-band AgentMail send transport (ADR 0071 / #1806 harden).
+"""Tests for the out-of-band AgentMail send seam (ADR 0071 / #1806, ss#2258).
 
-Transport only — the REST call, inbox resolution, body allowlisting, and error
-mapping. No network: the ``opener`` is injected. Authorization (the gate) is
-tested separately; this module never decides whether a send is allowed.
+This module used to test a REST transport: inbox resolution from an account
+listing, Bearer auth, and HTTP error mapping. **All of that moved to the broker**
+after four fabricated messages reached a real client principal with no audit row
+(ss#2258) — proof that a recipient check living in the agent process can be
+skipped by a path that never reaches it, and that a credential living here can be
+used by whatever gets to it.
+
+So what is left to test is deliberately small, and the most valuable assertions
+are about ABSENCE: this module can no longer name a sending inbox, cannot carry a
+credential, and cannot resolve identity from an account listing. The behaviour
+that remains is payload shaping and error typing.
+
+The fence itself (which recipients are permitted, which inbox is used, that a row
+is written) is tested broker-side in ss-console
+``operator/workspace_broker/tests/test_agentmail_send.py``, where it is enforced.
 """
 
 from __future__ import annotations
-
-import io
-import json
 
 import pytest
 
@@ -19,203 +28,119 @@ def _load():
     return load_plugin("hermes-smd-trust").outbound_send
 
 
-class _Resp:
-    def __init__(self, payload):
-        self._raw = json.dumps(payload).encode("utf-8") if payload is not None else b""
+def _sender(captured, message_id="msg_out"):
+    """A stand-in for the broker client that records the body it was handed."""
 
-    def read(self):
-        return self._raw
+    def _send(body):
+        captured.append(body)
+        return message_id
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-
-def _opener(captured, payload):
-    """An injectable urlopen that records the request and returns ``payload``."""
-
-    def _open(req, timeout=None):
-        captured.append(req)
-        return _Resp(payload)
-
-    return _open
-
-
-@pytest.fixture(autouse=True)
-def _reset_inbox_cache(monkeypatch):
-    mod = _load()
-    mod._INBOX_ID_BY_ADDRESS.clear()
-    # Pin the seat's identity for every test. Without this the module would fall
-    # back to the <slug>@agentmail.to convention off the ambient environment, and
-    # the suite's verdict would depend on the developer's shell (ss#2258).
-    monkeypatch.setenv("AGENTMAIL_INBOX_ADDRESS", "crane@x.agentmail.to")
-    yield
-    mod._INBOX_ID_BY_ADDRESS.clear()
+    return _send
 
 
 # ---------------------------------------------------------------------------
-# inbox resolution
+# The authority that is no longer here (ss#2258)
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_inbox_id_parses_and_caches():
+def test_the_module_cannot_resolve_a_sending_inbox_anymore():
+    """Identity resolution is gone, not merely unused.
+
+    ``resolve_inbox_id`` picked this seat's mailbox out of an account-wide
+    listing, and a bug in it had every seat ready to send as whichever inbox was
+    created most recently. A dead copy left behind is an invitation to call it,
+    so its absence is the assertion.
+    """
     mod = _load()
-    calls = []
-    inbox = mod.resolve_inbox_id(
-        "am_key", opener=_opener(calls, {"inboxes": [{"inbox_id": "crane@x.agentmail.to"}]})
-    )
-    assert inbox == "crane@x.agentmail.to"
-    # second call is cached — no second HTTP request.
-    inbox2 = mod.resolve_inbox_id("am_key", opener=_opener(calls, {"inboxes": []}))
-    assert inbox2 == "crane@x.agentmail.to"
-    assert len(calls) == 1
+    for gone in ("resolve_inbox_id", "seat_inbox_address", "_request_json"):
+        assert not hasattr(mod, gone), f"{gone} must not come back into the agent process"
 
 
-def test_resolve_inbox_id_errors_on_no_inbox():
-    mod = _load()
-    with pytest.raises(mod.AgentMailSendError):
-        mod.resolve_inbox_id("am_key", opener=_opener([], {"inboxes": []}))
+def test_send_takes_no_credential_and_no_inbox():
+    """The signature is the control: there is no argument through which a caller
+    could specify who the message is from."""
+    import inspect
+
+    params = set(inspect.signature(_load().send_message).parameters)
+    assert params == {"payload", "sender"}
 
 
 # ---------------------------------------------------------------------------
-# ss#2258 — the seat sends from ITS OWN inbox, or not at all
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_picks_its_own_inbox_not_the_first():
-    """The regression. The account listing is newest-first and account-wide: on
-    2026-08-11 it held 8 inboxes with the pilot seat's own at index 6. Taking
-    inboxes[0] meant sending from whichever inbox was created most recently."""
-    mod = _load()
-    listing = {
-        "inboxes": [
-            {"inbox_id": "ss-probe-admin@agentmail.to"},
-            {"inbox_id": "sim-opposing-counsel@agentmail.to"},
-            {"inbox_id": "crane@x.agentmail.to"},
-            {"inbox_id": "another-firm@agentmail.to"},
-        ]
-    }
-    assert mod.resolve_inbox_id("am_key", opener=_opener([], listing)) == "crane@x.agentmail.to"
-
-
-def test_resolve_refuses_when_its_own_inbox_is_absent():
-    """Fail closed. Sending from another firm's mailbox is worse than not sending,
-    so a listing without this seat's address raises instead of falling back."""
-    mod = _load()
-    listing = {
-        "inboxes": [
-            {"inbox_id": "ss-probe-admin@agentmail.to"},
-            {"inbox_id": "another-firm@agentmail.to"},
-        ]
-    }
-    with pytest.raises(mod.AgentMailSendError, match="not in the AgentMail account listing"):
-        mod.resolve_inbox_id("am_key", opener=_opener([], listing))
-
-
-def test_resolve_refuses_when_identity_is_unknowable(monkeypatch):
-    """No authored address and no slug ⇒ the seat cannot know which mailbox is
-    its own, so it must not pick one."""
-    mod = _load()
-    monkeypatch.delenv("AGENTMAIL_INBOX_ADDRESS", raising=False)
-    monkeypatch.delenv("SMD_CUSTOMER_SLUG", raising=False)
-    monkeypatch.delenv("CUSTOMER_SLUG", raising=False)
-    with pytest.raises(mod.AgentMailSendError, match="Refusing to guess"):
-        mod.resolve_inbox_id("am_key", opener=_opener([], {"inboxes": [{"inbox_id": "x@y"}]}))
-
-
-def test_seat_address_falls_back_to_slug_convention(monkeypatch):
-    mod = _load()
-    monkeypatch.delenv("AGENTMAIL_INBOX_ADDRESS", raising=False)
-    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "ashton-price")
-    assert mod.seat_inbox_address() == "ashton-price@agentmail.to"
-
-
-def test_authored_address_wins_over_the_convention(monkeypatch):
-    """A seat whose inbox does not follow the convention can still be pinned
-    without a code change."""
-    mod = _load()
-    monkeypatch.setenv("AGENTMAIL_INBOX_ADDRESS", "odd-name@agentmail.to")
-    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "ashton-price")
-    assert mod.seat_inbox_address() == "odd-name@agentmail.to"
-
-
-def test_cache_is_keyed_by_address(monkeypatch):
-    """A cache hit must never answer for a different address than was asked."""
-    mod = _load()
-    calls = []
-    first = {"inboxes": [{"inbox_id": "crane@x.agentmail.to"}]}
-    assert mod.resolve_inbox_id("am_key", opener=_opener(calls, first)) == "crane@x.agentmail.to"
-    monkeypatch.setenv("AGENTMAIL_INBOX_ADDRESS", "other@agentmail.to")
-    second = {"inboxes": [{"inbox_id": "other@agentmail.to"}]}
-    assert mod.resolve_inbox_id("am_key", opener=_opener(calls, second)) == "other@agentmail.to"
-    assert len(calls) == 2  # the second address did NOT read the first one's cache
-
-
-# ---------------------------------------------------------------------------
-# send body allowlisting + POST
+# Payload shaping — the part that stayed
 # ---------------------------------------------------------------------------
 
 
 def test_send_message_forwards_only_allowlisted_fields():
+    """Nothing beyond the closed body allowlist reaches the wire.
+
+    Internal keys (a broker grant, the stripped approval marker) live on the
+    stored args; forwarding one would leak overlay bookkeeping to the vendor.
+    """
     mod = _load()
-    calls = []
-    payload = {
-        "to": ["bob@acme.com"],
-        "subject": "Report",
-        "text": "the reviewed body",
-        "_current_turn_approval": True,  # internal flag — must NOT be forwarded
-        "_workspace_grant": "xyz",  # broker grant — must NOT be forwarded
-        "tool_call_id": "abc",  # noise — must NOT be forwarded
-    }
-    mid = mod.send_message(
-        api_key="am_key",
-        inbox_id="inbox1",
-        payload=payload,
-        opener=_opener(calls, {"message_id": "msg_123"}),
+    captured: list[dict] = []
+    mod.send_message(
+        payload={
+            "to": ["a@b.com"],
+            "cc": ["c@d.com"],
+            "subject": "s",
+            "text": "t",
+            "html": "<p>t</p>",
+            "reply_to": "r@s.com",
+            "_smd_workspace_grant": "internal",
+            "_approved": True,
+            "from": "someone-else@agentmail.to",
+        },
+        sender=_sender(captured),
     )
-    assert mid == "msg_123"
-    sent = json.loads(calls[0].data.decode("utf-8"))
-    assert sent == {"to": ["bob@acme.com"], "subject": "Report", "text": "the reviewed body"}
-    assert calls[0].get_header("Authorization") == "Bearer am_key"
-    assert "/inboxes/inbox1/messages/send" in calls[0].full_url
+    assert captured[0] == {
+        "to": ["a@b.com"],
+        "cc": ["c@d.com"],
+        "subject": "s",
+        "text": "t",
+        "html": "<p>t</p>",
+        "reply_to": "r@s.com",
+    }
 
 
 def test_send_message_refuses_without_recipient():
     mod = _load()
+    captured: list[dict] = []
     with pytest.raises(mod.AgentMailSendError):
-        mod.send_message(
-            api_key="am_key",
-            inbox_id="inbox1",
-            payload={"subject": "x", "text": "y"},
-            opener=_opener([], {}),
-        )
+        mod.send_message(payload={"text": "hi"}, sender=_sender(captured))
+    assert captured == []
 
 
 def test_send_message_tolerates_missing_message_id():
+    """A 2xx with no id is still a successful send; the turn must not fail."""
     mod = _load()
-    mid = mod.send_message(
-        api_key="am_key",
-        inbox_id="inbox1",
-        payload={"to": "a@b.com", "text": "hi"},
-        opener=_opener([], {}),
-    )
-    assert "sent" in mid
+    out = mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=lambda _b: "")
+    assert out == "(sent, id unavailable)"
 
 
-def test_http_error_maps_to_agentmail_send_error():
-    import urllib.error
+# ---------------------------------------------------------------------------
+# Error typing — a refusal and an outage must not read alike
+# ---------------------------------------------------------------------------
 
+
+def test_a_broker_refusal_maps_to_send_error_and_keeps_its_reason():
+    """The operator sees WHY, not a generic delivery failure."""
     mod = _load()
+    broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
 
-    def _boom(req, timeout=None):
-        raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, io.BytesIO(b""))
+    def _refuse(_body):
+        raise broker.BrokerError("recipient is not on this seat's authored surface")
 
-    with pytest.raises(mod.AgentMailSendError):
-        mod.send_message(
-            api_key="am_key",
-            inbox_id="inbox1",
-            payload={"to": "a@b.com", "text": "hi"},
-            opener=_boom,
-        )
+    with pytest.raises(mod.AgentMailSendError, match="authored surface"):
+        mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=_refuse)
+
+
+def test_an_unreachable_broker_is_not_reported_as_a_refusal():
+    """ "You may not write to this person" is a lie when the socket is down."""
+    mod = _load()
+    broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
+
+    def _down(_body):
+        raise broker.AgentMailBrokerUnavailable("socket missing")
+
+    with pytest.raises(mod.AgentMailSendError, match="unavailable"):
+        mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=_down)
