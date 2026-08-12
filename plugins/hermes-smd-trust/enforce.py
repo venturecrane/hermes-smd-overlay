@@ -688,10 +688,33 @@ def _resolve_vertical_floors() -> dict[ActionClass, Ceiling]:
 # ---------------------------------------------------------------------------
 
 
+# The visible surface of a send, as this floor defines it: everything a
+# recipient reads, concatenated. That is why ``subject`` is in here beside the
+# body keys and why every match is joined rather than the first one taken.
+#
+# ``html_body`` was missing until ss-console#2297. The cost was not an
+# uninspectable send — one carrying nothing on this list already fails closed
+# below. It was narrower: a send with a benign subject and its money / contract
+# language in the html half produced a non-empty body (the subject), classified
+# clean, and shipped autonomously. The floor did not decline to judge it; it
+# judged the envelope.
+#
+# Still deliberately absent: ``note``. A note is an annotation on a record, not
+# a surface a recipient reads, and adding it is a separate judgment about what
+# this floor governs (ss-console#2297 left it open). Also absent by design is
+# any structured arg (dates, titles, matter numbers) — those are the identifier
+# scan's domain (``outbound._DRAFT_SCAN_KEYS``), not this one's.
+#
+# Sibling lists that read a send body and are NOT copies of this one:
+# ``outbound._SEND_SCAN_KEYS`` and ``matter_gate._BODY_KEYS`` (declared copies of
+# each other, pinned by ``tests/test_body_key_parity.py``), and
+# ``outbound._BODY_ARG_KEYS``, which omits ``subject`` and is first-match-wins
+# because it resolves ONE authored draft body rather than assembling a surface.
 _SEND_BODY_ARG_KEYS: tuple[str, ...] = (
     "subject",
     "text",
     "html",
+    "html_body",
     "body",
     "body_plain",
     "body_text",
