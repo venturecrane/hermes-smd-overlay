@@ -46,8 +46,8 @@ def test_send_recipients_extracts_flat_to_for_msgraph():
     assert send_recipients(_MSGRAPH_SEND, {"to": ["Scott@smd.services"]}, "") == {
         "scott@smd.services"
     }
-    assert send_recipients(_MSGRAPH_SEND, {"to": "greg@ashtonandprice.com"}, "") == {
-        "greg@ashtonandprice.com"
+    assert send_recipients(_MSGRAPH_SEND, {"to": "greg@examplefirm.example"}, "") == {
+        "greg@examplefirm.example"
     }
 
 

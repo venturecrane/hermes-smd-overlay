@@ -26,7 +26,7 @@ from shared.person_prefs import (
 
 
 def test_normalize_accepts_a_person_and_normalizes_case_and_space():
-    assert normalize_person_address("  Chris@AshtonAndPrice.COM ") == "chris@ashtonandprice.com"
+    assert normalize_person_address("  Dana@ExampleFirm.EXAMPLE ") == "dana@examplefirm.example"
 
 
 @pytest.mark.parametrize(
@@ -53,8 +53,8 @@ def test_normalize_refuses_non_person_shapes(bad):
 
 
 def test_slug_is_deterministic_and_path_safe():
-    slug = person_slug("Chris@AshtonAndPrice.com")
-    assert slug == person_slug("chris@ashtonandprice.com")
+    slug = person_slug("Dana@ExampleFirm.example")
+    assert slug == person_slug("dana@examplefirm.example")
     assert all(ch.isascii() and (ch.isalnum() or ch == "-") for ch in slug)
     assert "/" not in slug and ".." not in slug
 
