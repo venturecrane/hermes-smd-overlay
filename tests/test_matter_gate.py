@@ -355,3 +355,88 @@ def test_incomplete_party_list_is_captured_but_not_closed() -> None:
     m = matter_binding.membership_for(SID)
     assert CLIENT_A in m.parties(M_A)
     assert not m.is_closed(M_A)
+
+
+# ---- the CONTACT axis (ss#2264) -------------------------------------------
+#
+# The matter axis needs `get_matter`, which fires on 8 of 86 reply turns, so the
+# gate ran on that lane and could almost never conclude anything. The contact axis
+# proves non-membership from the direction the reply lane actually reads.
+# Every withhold here is paired with its correct-pairing control, as above.
+
+
+def _contact_listing(contact_id: str, email: str, matters: list[str], *, complete: bool) -> None:
+    """The two reads the reply lane performs: the contact, then their matters."""
+    matter_binding.record_from_read(SID, {"id": contact_id, "person": {"email": email}})
+    matter_binding.record_from_read(
+        SID,
+        {
+            "matters_for_contact": contact_id,
+            "matters_for_contact_complete": complete,
+            "value": [{"id": m} for m in matters],
+        },
+    )
+
+
+def test_complete_contact_listing_withholds_a_matter_they_are_not_on() -> None:
+    # The full set of CLIENT_A's matters was read and M_A is not in it, so a body
+    # citing M_A addressed to them is a proven mismatch — with no `get_matter`
+    # anywhere in the turn, which is the whole point.
+    #
+    # M_A is seeded as a KNOWN matter (an ordinary listing read, the common shape:
+    # list_matters fires on 34 of 86 reply turns) because an unresolvable token can
+    # never produce a mismatch on either axis — see the test below.
+    _open(M_A, CLIENT_B)
+    _contact_listing("c9", CLIENT_A, [M_B], complete=True)
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_A}", recipients={CLIENT_A})
+    assert v.status == "mismatch"
+    assert v.should_withhold
+
+
+def test_an_unresolvable_token_never_mismatches_even_against_a_closed_contact() -> None:
+    # The load-bearing safety property the contact axis must not erode. The matter
+    # regex is deliberately loose (IGNORECASE, several shapes), and it is safe to be
+    # loose ONLY because a token that resolves to no known matter contributes to no
+    # verdict. If a closed contact set could convict an unresolved token, a reference
+    # number that merely LOOKS like a case number would withhold a correct reply —
+    # a control that blocks correct work, which gets removed rather than fixed.
+    _contact_listing("c9", CLIENT_A, [M_B], complete=True)
+    v = matter_gate.evaluate(session_id=SID, body="Re: PI-2026-9999", recipients={CLIENT_A})
+    assert v.status == "unresolved"
+    assert not v.should_withhold
+
+
+def test_complete_contact_listing_passes_a_matter_they_are_on() -> None:
+    # The control. Same closed set, correct pairing — a gate that withheld both
+    # would satisfy the test above while measuring nothing.
+    _contact_listing("c9", CLIENT_A, [M_A, M_B], complete=True)
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_A}", recipients={CLIENT_A})
+    assert v.status == "ok"
+    assert not v.should_withhold
+
+
+def test_incomplete_contact_listing_stays_unresolved() -> None:
+    # Byte-identical data to the withhold case except the completeness signal.
+    # Absence from an OPEN set proves nothing and must never read as non-membership.
+    _contact_listing("c9", CLIENT_A, [M_B], complete=False)
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_A}", recipients={CLIENT_A})
+    assert v.status == "unresolved"
+    assert not v.should_withhold
+
+
+def test_absent_completeness_signal_stays_unresolved() -> None:
+    # A connector that never learned to emit the flag (an older pin) must leave
+    # today's behaviour exactly as it was, not fail open OR newly withhold.
+    matter_binding.record_from_read(SID, {"id": "c9", "person": {"email": CLIENT_A}})
+    matter_binding.record_from_read(SID, {"matters_for_contact": "c9", "value": [{"id": M_B}]})
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_A}", recipients={CLIENT_A})
+    assert v.status == "unresolved"
+
+
+def test_contact_closure_does_not_close_the_matter_axis() -> None:
+    # The two axes stay distinct. Knowing every matter CLIENT_A is on says nothing
+    # about who ELSE is on M_B, so a different recipient is still unresolved there.
+    _contact_listing("c9", CLIENT_A, [M_B], complete=True)
+    assert not matter_binding.membership_for(SID).is_closed(M_B)
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_B}", recipients={CLIENT_B})
+    assert v.status == "unresolved"

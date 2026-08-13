@@ -57,6 +57,7 @@ class MatterMembership:
         "_by_matter_folded",
         "_ambiguous_ids",
         "_complete",
+        "_contact_complete",
         "_alias",
         "_ambiguous",
     )
@@ -76,6 +77,13 @@ class MatterMembership:
         # the binding flip-flops.
         self._ambiguous_ids: set[str] = set()
         self._complete: set[str] = set()
+        # ss#2264 — the CONTACT axis. `_complete` closes a MATTER's own party
+        # list; this closes the other direction: the addresses whose FULL set of
+        # matters was read this session. Both prove non-membership, and only this
+        # one is keyed off the read the reply lane actually performs (list_matters
+        # fires on 34 of 86 reply turns against get_matter's 8), which is why the
+        # gate could previously only ever return *unresolved* there.
+        self._contact_complete: set[str] = set()
         # A matter's human-readable number ("2026-PI-101") -> its connector id.
         # Correspondence cites the number; the connector keys everything by the
         # id, and without this join a real letter's citation resolved to nothing
@@ -176,6 +184,26 @@ class MatterMembership:
     def is_closed(self, matter_id: str) -> bool:
         """True only when the matter's OWN complete party list was read."""
         return matter_id in self._complete
+
+    def close_contact(self, email: str) -> None:
+        """Record that the FULL set of matters this address is party to was read
+        (ss#2264). Only ``record_from_read`` calls this, and only when the
+        connector proved the listing was unfiltered and untruncated
+        (``matters_for_contact_complete``)."""
+        addr = _norm(email)
+        if addr and len(self._contact_complete) < _MAX_MATTERS_PER_SESSION:
+            self._contact_complete.add(addr)
+
+    def is_contact_closed(self, email: str) -> bool:
+        """True only when this address's OWN complete matter list was read.
+
+        The contact-axis twin of :meth:`is_closed`, and it carries the same
+        warning: absence from an OPEN set proves nothing. A caller that treats
+        ``False`` as "not a party" collapses *unresolved* into *non-member* and
+        tells a paralegal a legitimate client is an outsider.
+        """
+        addr = _norm(email)
+        return bool(addr) and addr in self._contact_complete
 
     def known_matters(self) -> set[str]:
         return set(self._by_matter)
@@ -306,7 +334,13 @@ def record_from_read(session_id: str, result: Any) -> None:
             # for other reasons still teaches this session what its number means.
             if matter_id and isinstance(node.get("number"), str):
                 m.add_alias(node["number"], str(matter_id))
-            # Direction 2 — "the matters THIS person is party to" (never closed).
+            # Direction 2 — "the matters THIS person is party to". Each entry is
+            # open on the MATTER axis (a contact-keyed listing says nothing about
+            # who else is on a matter), but the SET can be closed on the contact
+            # axis when the connector proved the listing was unfiltered and
+            # untruncated — see `_contact_listing_is_complete` in the Smokeball
+            # connector, and `is_contact_closed` above. Absent or false, nothing
+            # closes and the verdict stays *unresolved*, exactly as before.
             contact_id = node.get("matters_for_contact")
             if contact_id:
                 # Same payload first, then the address this session read earlier.
@@ -314,6 +348,8 @@ def record_from_read(session_id: str, result: Any) -> None:
                     session_id, str(contact_id)
                 )
                 if email:
+                    if node.get("matters_for_contact_complete") is True:
+                        m.close_contact(email)
                     for item in _iter_dicts(node.get("value")):
                         mid = item.get("id")
                         if mid:
