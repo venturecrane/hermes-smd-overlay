@@ -47,6 +47,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from shared import (
+    gate_envelope_capture,
     gate_inbound_cap,
     gate_trigger_exclusions,
     gate_trigger_throttle,
@@ -1355,6 +1356,17 @@ class _Handler(BaseHTTPRequestHandler):
             )
             self._json(401, {"error": "invalid signature"})
             return
+
+        # Verbatim envelope capture (proving seats only, opt-in, off by default).
+        # Placed HERE — after signature verification, before every suppression
+        # path below — for two reasons. It must never see an unverified body, and
+        # it must see a SUPPRESSED one: a delivery parked by the guard, an
+        # authored exclusion, or the cooldown leaves no record of what it
+        # contained (`_audit_suppression` stores reason/route/request_id only),
+        # which made the one comparison worth making — an Operator echo against a
+        # human's in-app edit — unobservable. Fails CLOSED on a customer seat and
+        # on any config surprise; see shared/gate_envelope_capture.py.
+        gate_envelope_capture.capture(route=route, request_id=request_id, body=body)
 
         # ADR 0062 inbound wake guard: breaker HARD_STOP or the authored daily
         # wake cap parks the delivery — acknowledged (202, so the vendor does
