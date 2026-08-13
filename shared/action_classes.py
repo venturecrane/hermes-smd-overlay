@@ -409,6 +409,20 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # via the same two-stage upload as add_file. Internal write: it reaches
     # the firm's own record, never an outside recipient.
     "mcp_smokeball_render_docx_template": ActionClass.INTERNAL_WRITE,
+    # The FILLED-DRAFT producer (ss-console#2258). Its sibling above renders a
+    # TEMPLATE and refuses case content, because content in a template reaches
+    # every future matter the template is filled for. A filled draft is the
+    # opposite artifact — the case content IS the letter — so it needed its own
+    # tool with the inverted content gate. Without that, a demand letter could
+    # not become a .docx at all and was filed as .txt, which an attorney cannot
+    # edit in Word.
+    #
+    # SAME CLASS AS THE TEMPLATE TOOL, deliberately: both save the Operator's
+    # own work product into the firm's own record and send nothing outside. The
+    # two differ only in which artifact their content gate is written for, never
+    # in what they are permitted to do. Delivery to anyone outside the firm
+    # remains a separate act under a separate class.
+    "mcp_smokeball_render_docx_draft": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_get_upload_url": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_event": ActionClass.INTERNAL_WRITE,
