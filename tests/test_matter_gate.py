@@ -370,7 +370,9 @@ def test_module_performs_no_authored_posture_read() -> None:
         elif isinstance(node, ast.Name):
             names.add(node.id)
 
-    offenders = {n for n in names if "customerconfig" in n.lower() or "customer_config" in n.lower()}
+    offenders = {
+        n for n in names if "customerconfig" in n.lower() or "customer_config" in n.lower()
+    }
     assert not offenders, (
         f"matter_gate now reads authored posture ({sorted(offenders)}). That is a legitimate "
         "change (ss#2252 route 1), but the module docstring still records that no such read "
