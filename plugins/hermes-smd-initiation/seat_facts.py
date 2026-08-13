@@ -97,6 +97,7 @@ SECTIONS = (
     "voice",
     "cohort_discrepancies",
     "counts",
+    "working_rules",
 )
 
 #: Default Hermes home (overlay convention; ``HERMES_HOME`` overrides at
@@ -335,6 +336,113 @@ def _connections_section(cfg: Any) -> dict[str, Any]:
     }
 
 
+#: The identifier gate's operator-only rollback lever (hermes-smd-trust
+#: outbound.py). Unset or any value other than ``report`` = blocking. Read here
+#: rather than assumed, because "I refuse identifiers I cannot verify" is FALSE
+#: on a seat running the gate in report mode, and that is exactly the kind of
+#: sentence a firm would act on.
+_IDENTIFIER_MODE_ENV = "SMD_IDENTIFIER_GATE_MODE"
+
+#: The one working rule with no readable mechanism behind it. It is authored
+#: skill policy, so it is carried under its own key and labelled as policy —
+#: never mixed in with the three the seat can prove.
+_POLICY_RULES = (
+    {
+        "rule": "no_legal_advice",
+        "says": "I don't give legal advice or opinions on the merits.",
+        "basis": "authored skill policy — no runtime gate enforces this one",
+    },
+)
+
+
+def _working_rules_section(cfg: Any) -> dict[str, Any]:
+    """The rules a firm hears in an introduction — three of them READ (ss#2338).
+
+    WHY THIS IS A SECTION AND NOT A SENTENCE IN THE SKILL. The four rules were
+    already authored, in ``operator-introduce``'s fixed shape, before the
+    2026-08-12 rehearsal — and the rehearsal's introduction still stated none
+    of them. That skill's own body explains why (:64-68): on an email turn the
+    file is not in front of the model, so a rule living only there is a rule
+    nobody reads. The reply that came back mirrored THIS envelope's sections
+    exactly — identity, connections, matters, inbox, routines, voice, counts —
+    which is the evidence that the envelope, not the skill body, is what shapes
+    an email introduction. So the rules move to where the reading happens.
+
+    WHY THEY ARE READ AND NOT RECITED. Two of the four are seat-variable, and
+    stating them as constants would be the fabrication this whole tool exists
+    to prevent:
+
+    * **review-before-send** is per-class ``exposure``. On a seat authoring
+      ``external_send: autonomous`` the sentence "I don't send externally on my
+      own" is simply false — and ADR 0073 proved an authored autonomous send
+      really does send. So the posture is reported per class, as authored.
+    * **unverified identifiers** and **reads-never-computes** are the same A1
+      gate, and it carries an operator rollback lever
+      (``SMD_IDENTIFIER_GATE_MODE=report``). In report mode it observes and
+      does not refuse, so a seat running it there must not tell a firm it
+      refuses.
+
+    Only ``no_legal_advice`` has no mechanism to read; it is carried separately
+    and labelled as policy rather than dressed up as an observation.
+    """
+    posture: list[dict[str, Any]] = []
+    try:
+        persona = _persona(cfg)
+        entitlements = persona.get("entitlements")
+        exposure = entitlements.get("exposure") if isinstance(entitlements, dict) else None
+        if isinstance(exposure, dict):
+            for action, value in sorted(exposure.items()):
+                if not str(action).startswith("external_send"):
+                    continue
+                posture.append({"action_class": str(action), "exposure": str(value)})
+    except Exception:  # noqa: BLE001 — an unreadable persona degrades this section only
+        logger.warning("operator_seat_facts: exposure unreadable for working_rules", exc_info=True)
+        return _empty("working_rules")
+
+    mode = str(os.environ.get(_IDENTIFIER_MODE_ENV, "") or "").strip().lower()
+    refusing = mode != "report"
+    return {
+        "read": True,
+        "send_posture": posture,
+        "send_posture_note": (
+            (
+                "As authored on this seat, per outbound class. Say what these "
+                "values mean in the firm's own words — 'draft_for_review' is 'a "
+                "person reviews it before it goes', 'autonomous' is 'I send it "
+                "myself'. Never state a review promise for a class authored "
+                "autonomous, and never claim a blanket posture when the classes "
+                "disagree."
+            )
+            if posture
+            # An empty list is NOT "no restrictions" — it is the fail-closed
+            # state (ADR 0037 tenet 3: unconfigured is a safety state, never an
+            # identity). Saying so is the difference between "I send nothing
+            # outward" and the far worse "nothing stops me".
+            else (
+                "No outbound class is authored on this seat, which means outward "
+                "sending is refused rather than unrestricted. Say you cannot "
+                "send outward here — never that you are free to."
+            )
+        ),
+        "identifier_gate": {
+            "refusing": refusing,
+            "says": (
+                "I won't use a case number, date, or identifier I haven't read "
+                "from your records. If I can't verify it, I say so instead."
+                if refusing
+                else "I flag an identifier I could not verify, but I do not "
+                "refuse on it — this seat's identifier gate is in report mode."
+            ),
+            "also_covers": (
+                "The same gate is the backstop for never computing a legal "
+                "deadline: a computed date is in no source, so it is not in the "
+                "session's provenance register."
+            ),
+        },
+        "policy_rules": [dict(rule) for rule in _POLICY_RULES],
+    }
+
+
 def _voice_section(cfg: Any, spec_manifest: Any) -> dict[str, Any]:
     """Per-class installed-voice status, three-valued.
 
@@ -542,6 +650,12 @@ def _empty(section: str) -> dict[str, Any]:
         "routines": {"items": []},
         "voice": {"manifest_state": None, "classes": []},
         "cohort_discrepancies": {"unauthorized_dirs": []},
+        "working_rules": {
+            "send_posture": [],
+            "send_posture_note": None,
+            "identifier_gate": None,
+            "policy_rules": [],
+        },
         "counts": {
             "skill_entries": None,
             "enabled": None,
@@ -684,6 +798,17 @@ def build_facts(
     except Exception as exc:  # noqa: BLE001
         facts["cohort_discrepancies"] = _empty("cohort_discrepancies")
         unreadable.append({"section": "cohorts", "reason": f"cohort tree unreadable ({exc})"})
+
+    # working rules ----------------------------------------------------------
+    try:
+        facts["working_rules"] = _working_rules_section(cfg)
+        if not facts["working_rules"].get("read"):
+            unreadable.append(
+                {"section": "working_rules", "reason": "exposure unreadable; posture unprovable"}
+            )
+    except Exception as exc:  # noqa: BLE001
+        facts["working_rules"] = _empty("working_rules")
+        unreadable.append({"section": "working_rules", "reason": f"exposure unreadable ({exc})"})
 
     facts["unreadable"] = unreadable
     return facts

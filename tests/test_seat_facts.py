@@ -778,3 +778,119 @@ def test_handler_returns_an_authored_refusal_when_assembly_itself_fails(monkeypa
     parsed = json.loads(plugin._seat_facts_handler({}))
     assert "could not read my own seat" in parsed["error"]
     assert "from memory" in parsed["error"]
+
+
+# --------------------------------------------------------------------------- #
+# T9 — working rules (ss-console#2338)
+#
+# The four rules were ALREADY authored in operator-introduce's fixed shape
+# before the 2026-08-12 rehearsal, and the introduction still stated none of
+# them: on an email turn that file is not in front of the model, and the reply
+# that came back mirrored THIS envelope's sections exactly. So the rules belong
+# where the reading happens — and two of the four are seat-variable, which is
+# why they are read rather than recited.
+# --------------------------------------------------------------------------- #
+
+
+def _with_exposure(**exposure):
+    raw = _raw_config()
+    raw["personas"][0]["entitlements"] = {"exposure": exposure}
+    return raw
+
+
+def test_send_posture_is_read_per_class_not_asserted(sf, tmp_path):
+    """ "I don't send externally on my own" is FALSE on a seat authoring an
+    autonomous external send — ADR 0073 proved such a send really sends. So the
+    posture is reported per class, exactly as authored, and a mixed seat is
+    reported as mixed rather than flattened into a promise.
+
+    FALSIFIER: hardcode the review sentence and this fails on the autonomous
+    class below.
+    """
+    raw = _with_exposure(
+        internal_write="autonomous",
+        external_send="draft_for_review",
+        external_send_client="autonomous",
+        destructive="autonomous",
+    )
+    rules = _build(sf, tmp_path, raw=raw)["working_rules"]
+    assert rules["read"] is True
+    posture = {p["action_class"]: p["exposure"] for p in rules["send_posture"]}
+    assert posture == {
+        "external_send": "draft_for_review",
+        "external_send_client": "autonomous",
+    }, "only outbound classes belong here — internal_write/destructive are not send posture"
+    assert "never state a review promise" in rules["send_posture_note"].lower()
+
+
+def test_unauthored_exposure_reads_as_refused_never_as_unrestricted(sf, tmp_path):
+    """The empty list is the trap. Unconfigured is a safety state, not an
+    identity (ADR 0037 tenet 3), so an empty posture must render as "I cannot
+    send outward" and never as "nothing stops me"."""
+    rules = _build(sf, tmp_path)["working_rules"]  # fixture authors no entitlements
+    assert rules["read"] is True
+    assert rules["send_posture"] == []
+    note = rules["send_posture_note"].lower()
+    assert "refused rather than unrestricted" in note
+    assert "never that you are free to" in note
+
+
+def test_identifier_rule_follows_the_gate_mode_it_reads(sf, tmp_path, monkeypatch):
+    """The A1 gate carries an operator rollback lever
+    (SMD_IDENTIFIER_GATE_MODE=report). A seat running in report mode observes
+    and does not refuse, so it must not tell a firm it refuses.
+
+    FALSIFIER: state the refusal sentence unconditionally and the report-mode
+    branch fails.
+    """
+    monkeypatch.delenv("SMD_IDENTIFIER_GATE_MODE", raising=False)
+    blocking = _build(sf, tmp_path)["working_rules"]["identifier_gate"]
+    assert blocking["refusing"] is True
+    assert "I say so instead" in blocking["says"]
+
+    monkeypatch.setenv("SMD_IDENTIFIER_GATE_MODE", "report")
+    reporting = _build(sf, tmp_path)["working_rules"]["identifier_gate"]
+    assert reporting["refusing"] is False
+    assert "do not refuse" in reporting["says"]
+
+    # Fail-closed on anything that is not exactly the rollback value.
+    monkeypatch.setenv("SMD_IDENTIFIER_GATE_MODE", "block")
+    assert _build(sf, tmp_path)["working_rules"]["identifier_gate"]["refusing"] is True
+
+
+def test_never_computes_rides_the_same_gate_and_says_so(sf, tmp_path):
+    """reads-never-computes has no separate mechanism — it is a consequence of
+    the provenance register (a computed date is in no source). The section says
+    that rather than implying a second gate exists."""
+    gate = _build(sf, tmp_path)["working_rules"]["identifier_gate"]
+    assert "provenance register" in gate["also_covers"]
+
+
+def test_the_one_rule_with_no_mechanism_is_labelled_as_policy(sf, tmp_path):
+    """no_legal_advice is authored skill policy with no runtime gate. Carrying
+    it alongside the read rules without saying so would be exactly the
+    dressed-up assertion this tool exists to prevent."""
+    rules = _build(sf, tmp_path)["working_rules"]
+    policy = {r["rule"]: r for r in rules["policy_rules"]}
+    assert set(policy) == {"no_legal_advice"}
+    assert "no runtime gate" in policy["no_legal_advice"]["basis"]
+
+
+def test_working_rules_degrades_alone_when_the_persona_will_not_read(sf, tmp_path):
+    """Per-source fault isolation (T8) extends to the new section: an
+    unreadable persona costs this section and nothing else, and it lands in
+    unreadable[] rather than vanishing."""
+
+    class _Exploding(_FakeConfig):
+        @property
+        def personas(self):
+            raise RuntimeError("persona unreadable")
+
+    facts = sf.build_facts(
+        depth="introduction",
+        config_loader=lambda: _Exploding(_raw_config()),
+        spec_manifest_module=_FakeManifest(),
+        home=str(tmp_path),
+    )
+    assert facts["working_rules"]["read"] is False
+    assert any(u["section"] == "working_rules" for u in facts["unreadable"])
