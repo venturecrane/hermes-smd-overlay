@@ -44,12 +44,26 @@ rules, enforced here in code:
   OUTSIDE even if it matches the roster — an injected "send to X" can never
   promote X to internal.
 
-The typed outbound roster — CLIENT / VENDOR are independently-authored classes
+"May the Operator reply to you" is not "are you firm staff"
+-----------------------------------------------------------
+``scope.inbound_allow_from`` answers the first question. It was also used as the
+``internal_roster`` here, which answered the second — so a firm that authored
+"auto-reply to my client" silently also said "my client is staff", and staff are
+exempt from the content floor (ADR 0072) and from the matter-identity gate
+(ss#2167). ss#2263 split them: the typed outbound roster carries a ``firm_staff``
+class, :func:`_classify_one_typed` reads the typed roster FIRST, and the internal
+roster is consulted only where the typed roster is silent — which is what keeps
+every already-authored seat classifying exactly as it did. Read that function's
+docstring before changing the order back.
+
+The typed outbound roster — CLIENT / VENDOR / staff are independently-authored
 --------------------------------------------------------------------------------
 Beyond the two-way internal/outside split, :func:`classify_recipients_typed`
 resolves a send against a **typed outbound roster**: a human-authored list of
 ``(entry, class)`` pairs where ``class`` is a closed vocabulary of exactly
-``client`` (the firm's own client) and ``records_vendor`` (a records provider).
+``client`` (the firm's own client), ``records_vendor`` (a records provider), and
+``firm_staff`` (the firm's own people — the authored form of the fact that used
+to be inferred from the reply list).
 These map to the ``external_send_client`` / ``external_send_vendor`` action
 classes, each with its OWN authored, fail-closed ceiling — so an engagement can
 graduate "chase our own client" or "chase the records vendor" to autonomous with
@@ -248,9 +262,18 @@ def classify_recipients(
 
 # Closed vocabulary of the typed outbound-roster class strings → the recipient
 # class they resolve to. Anything not in this map is ignored (never guessed).
+#
+# ``firm_staff`` (ss#2263) is the authored form of "is firm staff". Before it,
+# that fact had no field of its own: it was DERIVED from
+# ``scope.inbound_allow_from``, which answers a different question ("may the
+# Operator autonomously reply to you"). A firm that added its own client to the
+# reply list therefore got that client treated as staff — exempt from the
+# content floor (ADR 0072 / ss#1932) and from the matter-identity gate
+# (ss#2167). Nothing warned. The two facts are now separately authorable.
 _TYPED_ROSTER_CLASSES: dict[str, RecipientClass] = {
     "client": RecipientClass.CLIENT,
     "records_vendor": RecipientClass.VENDOR,
+    "firm_staff": RecipientClass.INTERNAL,
 }
 
 
@@ -277,13 +300,40 @@ def _classify_one_typed(
     *,
     from_tainted: bool,
 ) -> RecipientClass:
-    """Classify a single recipient across the internal roster + typed roster.
+    """Classify a single recipient across the typed roster + the internal roster.
 
-    Order: unresolvable → UNKNOWN; tainted → OUTSIDE (before any match); internal
-    roster match → INTERNAL (a rostered internal recipient outranks a typed
-    class); else the typed roster decides CLIENT / VENDOR. Zero typed matches, OR
-    a defensive multi-class match (one address typed as more than one class),
-    resolves to OUTSIDE — the classifier never guesses.
+    Order: unresolvable → UNKNOWN; tainted → OUTSIDE (before any match); **the
+    typed roster decides** (CLIENT / VENDOR / INTERNAL via ``firm_staff``); only
+    if the typed roster is SILENT about this address does an internal-roster
+    match resolve INTERNAL; otherwise OUTSIDE. A defensive multi-class match (one
+    address typed as more than one class) resolves to OUTSIDE without consulting
+    the internal roster — the classifier never guesses, and never falls back into
+    a WIDER class than the one the authored collision left ambiguous.
+
+    THE PRECEDENCE IS THE FIX (ss#2263). It used to be the other way round: an
+    internal-roster match returned INTERNAL *before* the typed roster was read,
+    on the reasoning that "a rostered internal recipient outranks a typed class".
+    That reasoning holds only while the internal roster is firm staff, and
+    ``scope.inbound_allow_from`` is not that list — it is the list of people the
+    Operator may autonomously REPLY to. The two questions had one field, so
+    authoring "auto-reply to my client" silently also said "treat my client as
+    staff", which exempted them from the content floor and the matter gate.
+
+    Reading the typed roster first is what separates the two facts, and it moves
+    the content floor, the send ceilings and the matter gate together, because all
+    three read this one function. Nothing moves for a config that authors no
+    typed class: the internal-roster fallback below is byte-for-byte the old
+    behaviour, so a seat with no ``scope.outbound_roster`` (A&P today) classifies
+    exactly as it did before.
+
+    Specificity is deliberately NOT ranked between the two lists. If a domain
+    grant in the typed roster and an exact address in the internal roster both
+    match, the typed class wins by virtue of being read first. That resolves to
+    the STRICTER outcome (a client/vendor ceiling and a live content floor rather
+    than the internal exemption), and this module's standing rule is that an
+    over-strict match costs a draft while a loose one is a hole. A firm that
+    wants the other answer authors ``firm_staff`` for that address, which is
+    exactly the expressiveness this class exists to provide.
     """
     canon = _canonicalize_address(recipient)
     if canon is None:
@@ -291,9 +341,6 @@ def _classify_one_typed(
     if from_tainted:
         return RecipientClass.OUTSIDE
     _, _, canon_domain = canon.partition("@")
-    for entry in internal_roster:
-        if _roster_entry_matches(entry, canon, canon_domain):
-            return RecipientClass.INTERNAL
     matched: set[RecipientClass] = set()
     for entry, class_str in typed_roster:
         cls = _TYPED_ROSTER_CLASSES.get(class_str)
@@ -303,9 +350,15 @@ def _classify_one_typed(
             matched.add(cls)
     if len(matched) == 1:
         return next(iter(matched))
-    # Zero matches → outside. More than one class on one address → OUTSIDE too:
-    # the validators reject a cross-class collision, but the classifier does not
-    # depend on them and refuses to guess which class wins.
+    if matched:
+        # More than one class on one address. The validators reject this, but the
+        # classifier does not depend on them: refuse to guess, and do NOT fall
+        # through to the internal roster — an ambiguous authored class must not
+        # be resolved by widening it to the exemption.
+        return RecipientClass.OUTSIDE
+    for entry in internal_roster:
+        if _roster_entry_matches(entry, canon, canon_domain):
+            return RecipientClass.INTERNAL
     return RecipientClass.OUTSIDE
 
 
@@ -334,6 +387,10 @@ def classify_recipients_typed(
     ``internal_roster`` (``scope.inbound_allow_from``) and ``typed_roster``
     (``scope.outbound_roster`` as ``(entry, class)`` pairs) are both materialized
     once so a one-shot iterable is not exhausted across recipients.
+
+    ``internal_roster`` is the BACKSTOP, not the authority (ss#2263): the typed
+    roster is read first, and the reply list only classifies INTERNAL for an
+    address the typed roster says nothing about. See :func:`_classify_one_typed`.
     """
     internal_materialized = list(internal_roster)
     typed_materialized = list(typed_roster)

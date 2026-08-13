@@ -295,11 +295,21 @@ class CustomerConfig:
     def inbound_roster(self) -> list[str]:
         """Return the organization roster — ``scope.inbound_allow_from`` — normalized.
 
-        The roster is the set of correspondents the Operator converses with as a
-        colleague (ADR 0055): exact addresses and/or ``@domain`` entries. Entries
-        are lowercased + stripped; non-string / empty entries are dropped. Absent
-        or empty ⇒ ``[]`` — fail-closed: the Operator reads and drafts but never
-        autonomously replies to anyone until a roster is authored.
+        The roster answers exactly one question: **may the Operator autonomously
+        REPLY to you** (ADR 0055). Exact addresses and/or ``@domain`` entries.
+        Entries are lowercased + stripped; non-string / empty entries are dropped.
+        Absent or empty ⇒ ``[]`` — fail-closed: the Operator reads and drafts but
+        never autonomously replies to anyone until a roster is authored.
+
+        It is NOT a statement that the correspondent is firm staff. That fact has
+        its own authored form since ss#2263 — ``class: firm_staff`` in
+        :attr:`outbound_roster` — because the two were conflated here: this list
+        was passed as the ``internal_roster`` to the recipient classifier, so a
+        firm that authored "auto-reply to my client" also, silently, exempted that
+        client from the content floor and the matter-identity gate. The classifier
+        now reads the typed roster first and falls back to this list only where
+        the typed roster is silent, which is what preserves every seat authored
+        before the split.
         """
         raw = self.scope.get("inbound_allow_from") or []
         if not isinstance(raw, list):
@@ -319,7 +329,9 @@ class CustomerConfig:
         """Return the typed outbound roster — ``scope.outbound_roster`` — normalized.
 
         Each authored entry is ``{address, class, note?}`` where ``class`` is the
-        closed vocabulary ``client`` / ``records_vendor`` (ADR 0075). Returns a list
+        closed vocabulary ``client`` / ``records_vendor`` / ``firm_staff`` (ADR
+        0075; ``firm_staff`` added by ss#2263 so "is firm staff" is an authored
+        fact rather than one inferred from the reply list). Returns a list
         of ``(address, class)`` tuples with the address lowercased + stripped;
         entries that are not mappings, are missing ``address``/``class``, or carry a
         ``class`` outside the closed set are DROPPED (never guessed). Absent or empty
@@ -342,7 +354,7 @@ class CustomerConfig:
                 continue
             norm_addr = address.strip().lower()
             norm_class = class_str.strip().lower()
-            if not norm_addr or norm_class not in ("client", "records_vendor"):
+            if not norm_addr or norm_class not in ("client", "records_vendor", "firm_staff"):
                 continue
             out.append((norm_addr, norm_class))
         return out

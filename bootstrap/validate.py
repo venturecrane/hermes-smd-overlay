@@ -96,7 +96,7 @@ SEND_ACTION_CLASSES = {
 }
 
 # Closed vocabulary for a scope.outbound_roster entry's `class` (ADR 0075).
-OUTBOUND_ROSTER_CLASSES = {"client", "records_vendor"}
+OUTBOUND_ROSTER_CLASSES = {"client", "records_vendor", "firm_staff"}
 
 # Public-mail providers where a whole-@domain grant is meaningless (the domain is
 # shared by millions), so a DOMAIN-form outbound_roster entry is rejected — but an
@@ -830,19 +830,6 @@ def _canon_roster_address(raw: str) -> str | None:
     return f"{local}@{domain}"
 
 
-def _canonical_inbound_keys(scope: dict[str, Any]) -> set[str]:
-    """Canonical keys for ``scope.inbound_allow_from`` (for the collision check)."""
-    out: set[str] = set()
-    raw = scope.get("inbound_allow_from")
-    if isinstance(raw, list):
-        for entry in raw:
-            if isinstance(entry, str):
-                canon = _canon_roster_address(entry)
-                if canon is not None:
-                    out.add(canon)
-    return out
-
-
 def _validate_scope_admins(cfg: dict[str, Any], errors: list[str]) -> None:
     """Validate ``scope.admins`` — the Operator-admin allow list (ss ADR 0085 §2).
 
@@ -892,12 +879,23 @@ def _validate_outbound_roster(cfg: dict[str, Any], errors: list[str]) -> None:
     """Validate ``scope.outbound_roster`` (ADR 0075).
 
     Each entry is an object with ``address`` (a ``local@domain`` exact address or
-    an ``@domain`` grant), ``class`` in the closed set {client, records_vendor},
-    and an optional ``note``. A whole-@domain grant at a public-mail provider is
-    rejected (the domain is shared by millions) — but an EXACT address at such a
-    domain is valid (a PI client is a consumer on gmail). A canonical address
-    appearing under more than one outbound class, or also in
-    ``scope.inbound_allow_from``, is rejected: a recipient has exactly one class.
+    an ``@domain`` grant), ``class`` in the closed set {client, records_vendor,
+    firm_staff}, and an optional ``note``. A whole-@domain grant at a public-mail
+    provider is rejected (the domain is shared by millions) — but an EXACT address
+    at such a domain is valid (a PI client is a consumer on gmail). A canonical
+    address appearing under more than one outbound class is rejected: a recipient
+    has exactly one class.
+
+    An address on BOTH this roster and ``scope.inbound_allow_from`` is now ALLOWED
+    (ss#2263). It used to be rejected — "a recipient cannot be both internal and a
+    typed outbound class" — which read the reply list as a statement of class.
+    It is not one: it says who the Operator may autonomously reply to. Forbidding
+    the overlap meant a reply-authorized address could never carry a typed class,
+    so a firm's own client could only be made reply-able by being classified
+    staff, and the matter-identity gate's reply-lane branch was unreachable in
+    every authorable config (ss#2271). The two facts are now independent, and
+    :func:`shared.recipient_classifier._classify_one_typed` reads the typed class
+    first — so the overlap resolves to the typed class, deterministically.
     """
     scope = cfg.get("scope")
     if not isinstance(scope, dict):
@@ -908,16 +906,14 @@ def _validate_outbound_roster(cfg: dict[str, Any], errors: list[str]) -> None:
     if not isinstance(raw, list):
         _err(f"scope.outbound_roster must be a list; got {type(raw).__name__}", errors)
         return
-    inbound_keys = _canonical_inbound_keys(scope)
     seen_class: dict[str, str] = {}
     for i, entry in enumerate(raw):
-        _validate_one_outbound_entry(entry, i, inbound_keys, seen_class, errors)
+        _validate_one_outbound_entry(entry, i, seen_class, errors)
 
 
 def _validate_one_outbound_entry(
     entry: Any,
     i: int,
-    inbound_keys: set[str],
     seen_class: dict[str, str],
     errors: list[str],
 ) -> None:
@@ -948,13 +944,6 @@ def _validate_one_outbound_entry(
         _err(
             f"{prefix}.address: a whole-@domain grant at a public-mail provider "
             f"({canon[1:]}) is not allowed; author the exact address",
-            errors,
-        )
-        return
-    if canon in inbound_keys:
-        _err(
-            f"{prefix}.address: {canon!r} is already in scope.inbound_allow_from; a "
-            "recipient cannot be both internal and a typed outbound class",
             errors,
         )
         return

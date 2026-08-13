@@ -537,16 +537,63 @@ def test_validate_rejects_cross_class_collision(tmp_path):
     assert any("more than one outbound roster class" in e for e in errors)
 
 
-def test_validate_rejects_inbound_collision(tmp_path):
+def test_validate_accepts_reply_authorized_address_with_a_typed_class(tmp_path):
+    """ss#2263 — this used to be REJECTED, and the rejection was the defect.
+
+    "a recipient cannot be both internal and a typed outbound class" read
+    ``inbound_allow_from`` as a statement of class. It is not one: it says who the
+    Operator may autonomously REPLY to. Forbidding the overlap meant the only way
+    to make a firm's own client reply-able was to leave them classified as staff —
+    exempt from the content floor and the matter-identity gate — and it made the
+    gate's reply-lane branch unreachable in every authorable config (ss#2271).
+    """
     scope = (
         "  inbound_allow_from:\n"
-        "    - scott@smd.services\n"
+        "    - client@example.com\n"
         "  outbound_roster:\n"
-        "    - address: scott@smd.services\n"
+        "    - address: client@example.com\n"
         "      class: client\n"
     )
-    errors = validate_customer_yaml(_write(tmp_path, _with_scope_extra(scope)))
-    assert any("inbound_allow_from" in e for e in errors)
+    assert validate_customer_yaml(_write(tmp_path, _with_scope_extra(scope))) == []
+
+
+def test_validate_accepts_firm_staff_class(tmp_path):
+    """``firm_staff`` is the authored form of "is firm staff" — the fact that used
+    to be inferred from the reply list."""
+    scope = "  outbound_roster:\n    - address: paralegal@firm.example\n      class: firm_staff\n"
+    assert validate_customer_yaml(_write(tmp_path, _with_scope_extra(scope))) == []
+
+
+def test_reply_authorized_client_classifies_client_not_internal(tmp_path):
+    """The validator's acceptance and the classifier's verdict are asserted
+    together: accepting the config would be pointless if the runtime still read
+    the overlap as staff, and that pairing is the whole of ss#2263."""
+    from shared.recipient_classifier import RecipientClass, classify_recipients_typed
+
+    scope = (
+        "  inbound_allow_from:\n"
+        "    - client@example.com\n"
+        "    - '@firm.example'\n"
+        "  outbound_roster:\n"
+        "    - address: client@example.com\n"
+        "      class: client\n"
+    )
+    path = _write(tmp_path, _with_scope_extra(scope))
+    assert validate_customer_yaml(path) == []
+    cfg = CustomerConfig.from_volume(str(path))
+    # The reply-authorized client is a CLIENT — floored and matter-gated.
+    assert (
+        classify_recipients_typed(["client@example.com"], cfg.inbound_roster, cfg.outbound_roster)
+        is RecipientClass.CLIENT
+    )
+    # A colleague the typed roster says nothing about still resolves INTERNAL via
+    # the reply list — the back-compat path every pre-split seat depends on.
+    assert (
+        classify_recipients_typed(
+            ["paralegal@firm.example"], cfg.inbound_roster, cfg.outbound_roster
+        )
+        is RecipientClass.INTERNAL
+    )
 
 
 def test_validate_rejects_malformed_outbound_address(tmp_path):
