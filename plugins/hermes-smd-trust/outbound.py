@@ -725,11 +725,16 @@ def check_outbound_draft(
     cohort = _resolve_cohort()
     # Provenance-verified captions (ss #1758): a case name the agent READ this
     # session is quotable; empty register = no exemption (fail-closed).
+    # Provenance-verified MONEY (ss-console#2258): same shape, same fail-closed
+    # default. The skill authorizes a figure that exists in an authored source on
+    # the matter; without this the gate refused what the skill permitted.
+    _register = provenance.register_for(session_id)
     decision = evaluate(
         body,
         cohort,
         vertical,
-        allowed_case_names=provenance.register_for(session_id).captions(),
+        allowed_case_names=_register.captions(),
+        allowed_money=_register.money(),
     )
     if decision.allowed:
         # A1 identifier gate: refuse any identifier not traceable to a source
@@ -874,11 +879,16 @@ def check_outbound_send(
     cohort = _resolve_cohort()
     # Provenance-verified captions (ss #1758): a case name the agent READ this
     # session is quotable; empty register = no exemption (fail-closed).
+    # Provenance-verified MONEY (ss-console#2258): same shape, same fail-closed
+    # default. The skill authorizes a figure that exists in an authored source on
+    # the matter; without this the gate refused what the skill permitted.
+    _register = provenance.register_for(session_id)
     decision = evaluate(
         body,
         cohort,
         vertical,
-        allowed_case_names=provenance.register_for(session_id).captions(),
+        allowed_case_names=_register.captions(),
+        allowed_money=_register.money(),
     )
     if decision.allowed:
         # A1 identifier gate on the send surface — NO empty-register carve

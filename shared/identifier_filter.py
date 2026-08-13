@@ -227,6 +227,60 @@ _DATE_STRPTIME_FORMATS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
+#: A dollar figure: ``$`` then digits, with optional thousands separators and an
+#: optional two-decimal tail. Deliberately WIDER than the Tier-1 marker it
+#: exempts (``\$\s?\d``), on both axes:
+#:
+#: * it captures the WHOLE figure, where the marker only ever glimpses the first
+#:   digit, and the exemption has to compare the whole thing;
+#: * it allows ANY run of whitespace after the ``$``, where the marker allows at
+#:   most one space. Real billing summaries column-align their figures
+#:   (``$  4,820.00``), and a register that missed those would leave the
+#:   exemption unreachable on exactly the documents it exists for. Caught by
+#:   test_reading_a_billing_summary_registers_its_figures against a fixture
+#:   copied from a real seeded matter.
+#:
+#: Wider is the safe direction here: a figure this misses is simply not
+#: exempted, and stays blocked.
+MONEY_RE = re.compile(r"\$\s*\d[\d,]*(?:\.\d{1,2})?")
+
+
+def canon_money(raw: str) -> str:
+    """Fold a dollar figure to a comparable canonical form.
+
+    ``$41,515.00``, ``$ 41515``, and ``$41,515`` are the same amount and must
+    compare equal — a draft that writes a figure without the cents it was read
+    with has not fabricated anything. Returns ``""`` for anything unparseable,
+    and an empty canonical never matches, so a parse failure withholds the
+    exemption rather than granting it.
+    """
+    digits = raw.replace("$", "").replace(",", "").replace(" ", "").strip()
+    if not digits:
+        return ""
+    try:
+        value = float(digits)
+    except ValueError:
+        return ""
+    # Normalize the cents tail so 41515, 41515.0 and 41515.00 collapse together,
+    # while 41515.50 stays distinct from 41515.05.
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def extract_money(text: str) -> list[tuple[str, str]]:
+    """Every dollar figure in ``text`` as ``(raw, canonical)``.
+
+    Unparseable figures are dropped rather than registered: an amount nobody can
+    canonicalize cannot be matched later either, so keeping it would only make
+    the register look fuller than it is.
+    """
+    out: list[tuple[str, str]] = []
+    for match in MONEY_RE.finditer(text or ""):
+        canon = canon_money(match.group(0))
+        if canon:
+            out.append((match.group(0), canon))
+    return out
+
+
 def _canon_digits(raw: str, prefix: str = "") -> str:
     """Strip every non-alphanumeric char, upper-case, optional prefix."""
     core = re.sub(r"[^0-9A-Za-z]", "", raw).upper()
@@ -417,12 +471,17 @@ class ProvenanceRegister:
     # register without limit. Adds past the cap are IGNORED (the narrow
     # direction: an unregistered caption stays blocked, never the reverse).
     _MAX_CAPTIONS = 512
+    #: Same bound and same narrow direction for money figures. A matter record
+    #: with more than 512 distinct dollar amounts exists; a draft that needs all
+    #: of them does not, and an unregistered figure stays blocked.
+    _MAX_MONEY = 512
 
     def __init__(self) -> None:
         self._canon: set[str] = set()
         self._names: set[str] = set()
         self._pairs: set[str] = set()
         self._captions: set[str] = set()
+        self._money: set[str] = set()
 
     def add_read_text(self, text: str) -> None:
         """Register the structured-shape identifiers found in a blob the agent
@@ -435,9 +494,15 @@ class ProvenanceRegister:
         blob would register the cross-product and verify exactly the mispairings
         this is meant to catch. Pairs come from :meth:`add_record`, one record
         at a time, where the association is a fact rather than an inference.
+
+        **Money is registered here too, into its own set** (ss-console#2258).
+        It is NOT an ``IdKind`` and never reaches :meth:`verifies` — see
+        :meth:`money` for why that boundary is the whole point.
         """
         for hit in _extract(text, include_names=False):
             self.add(hit.kind, hit.canonical)
+        for _raw, canon in extract_money(text or ""):
+            self.add_money(canon)
 
     def add_record(self, case_number: str | None, dates: Iterable[str]) -> None:
         """Register one record's identifiers **and the associations within it**.
@@ -514,6 +579,34 @@ class ProvenanceRegister:
     def captions(self) -> frozenset[str]:
         """The session's provenance-verified case captions (canonical forms)."""
         return frozenset(self._captions)
+
+    def add_money(self, canonical_amount: str) -> None:
+        """Register a dollar figure the agent READ this session, canonicalized
+        by :func:`canon_money`.
+
+        Feeds the Tier-1 ``specific-dollar-amount`` exemption (ss-console#2258),
+        and NOTHING ELSE. See :meth:`money` for why that boundary matters.
+        """
+        if not canonical_amount or len(self._money) >= self._MAX_MONEY:
+            return
+        self._money.add(canonical_amount)
+
+    def money(self) -> frozenset[str]:
+        """The session's provenance-verified dollar figures (canonical forms).
+
+        DELIBERATELY NOT AN ``IdKind``, and this is the load-bearing part. The
+        kinds in :class:`IdKind` drive the A1 identifier gate, which REFUSES a
+        hit it cannot verify. Adding money there would start blocking every
+        dollar figure not read this session, on every draft, on every path — a
+        large tightening nobody asked for and one that would land as a fleet of
+        new refusals.
+
+        This mirrors :meth:`captions` instead: registered and exposed purely so
+        one Tier-1 marker can be exempted, invisible to :meth:`verifies`. The
+        only behavior change is that a figure the agent READ stops being treated
+        as fabricated.
+        """
+        return frozenset(self._money)
 
     def verifies(self, hit: IdentifierHit) -> bool:
         if hit.kind is IdKind.NAME:
