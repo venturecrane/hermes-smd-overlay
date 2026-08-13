@@ -273,3 +273,18 @@ def test_unknown_scope_is_refused(tmp_path):
     assert result["status"] == STATUS_REJECTED
     assert any("unknown scope" in r for r in result["reasons"])
     assert s3.puts == []
+
+
+def test_a_person_preference_names_no_corpus(tmp_path):
+    """Corpus provenance (ss-console#2339) belongs to the firm lane only.
+
+    A person's preference is their OWN authored instruction, not something
+    learned from documents — the person path stages nothing and reads nothing.
+    A provenance field here would imply the seat read that person's files to
+    derive it, which is precisely the claim letters 07 and 10 promise we do not
+    make. Absence is the correct shape, so it is asserted rather than assumed.
+    """
+    intake, s3, spool = make_intake(tmp_path)
+    intake.process_run(build_person_run(spool))
+    assert _read_result(spool)["status"] == STATUS_INSTALLED
+    assert "provenance" not in json.loads(s3.objects[PREF_KEY])

@@ -603,3 +603,46 @@ def test_default_spool_dir_is_outside_the_agent_home():
 
     assert not _DEFAULT_SPOOL_DIR.startswith("/opt/data")
     assert _DEFAULT_SPOOL_DIR == "/var/lib/smd-establish-spool"
+
+
+# ---------------------------------------------------------------------------
+# Corpus provenance on install (ss-console#2339)
+#
+# The run already synthesizes this at install time for the leak check's
+# proper-noun scan, and it dies with the run directory. Card 4 asked the seat
+# what it reviewed and it could not say. This carries the answer onto the
+# installed spec.
+# ---------------------------------------------------------------------------
+
+
+def test_install_records_which_documents_the_spec_was_learned_from(tmp_path):
+    spec_dir = tmp_path / "specs"
+    intake, s3, spool = make_intake(tmp_path, s3=FakeS3({}, spec_dir=spec_dir))
+    intake.process_run(build_run(spool))
+    assert _read_result(spool)["status"] == STATUS_INSTALLED
+
+    prov = json.loads(s3.objects[MAIN_KEY])["classes"]["work_product"]["voice"]["provenance"]
+    assert prov["run_id"] == "run-1"
+    assert prov["document_count"] == 2
+    assert [d["name"] for d in prov["documents"]] == ["letter-01.md", "letter-02.md"]
+    # The digest of each source document, so the record is checkable later.
+    assert [d["sha256"] for d in prov["documents"]] == [_sha(d["text"]) for d in DOCS]
+
+
+def test_provenance_carries_no_document_text(tmp_path):
+    """Letters 07 and 10 promise the firm we keep no copy of their matter
+    files. The record of WHAT WE READ must not become a second copy of it.
+
+    FALSIFIER: include the staged text and this finds the client names the
+    fixture documents open with.
+    """
+    spec_dir = tmp_path / "specs"
+    intake, s3, spool = make_intake(tmp_path, s3=FakeS3({}, spec_dir=spec_dir))
+    intake.process_run(build_run(spool))
+
+    serialized = json.dumps(
+        json.loads(s3.objects[MAIN_KEY])["classes"]["work_product"]["voice"]["provenance"]
+    )
+    assert "Reyes" not in serialized
+    assert "Cho" not in serialized
+    assert "Short sentences" not in serialized

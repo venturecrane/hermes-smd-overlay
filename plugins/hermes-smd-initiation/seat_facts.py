@@ -464,23 +464,72 @@ def _voice_section(cfg: Any, spec_manifest: Any) -> dict[str, Any]:
         if not isinstance(output_class, str) or not isinstance(block, dict):
             continue
         voice_spec = str(block.get("voice_spec", "none")).strip().lower()
+        learned_from: dict[str, Any] | None = None
         if unreadable:
             status = VOICE_UNREADABLE
         else:
-            installed = any(
-                entry.prop == "voice" and spec_manifest.verify(entry)
+            verified = [
+                entry
                 for entry in spec_manifest.entries_for_class(output_class)
-            )
-            status = VOICE_INSTALLED if installed else VOICE_NOT_INSTALLED
+                if entry.prop == "voice" and spec_manifest.verify(entry)
+            ]
+            status = VOICE_INSTALLED if verified else VOICE_NOT_INSTALLED
+            learned_from = _learned_from(verified)
         classes.append(
             {
                 "class": output_class,
                 "firm_words": _CLASS_FIRM_WORDS.get(output_class),
                 "voice_spec": voice_spec,
                 "status": status,
+                # ss-console#2339. None means the question is unanswerable for
+                # this class — nothing installed, or what is installed predates
+                # provenance. It NEVER means "read nothing".
+                "learned_from": learned_from,
             }
         )
     return {"read": True, "manifest_state": state, "classes": classes}
+
+
+def _learned_from(verified: list[Any]) -> dict[str, Any] | None:
+    """The corpus behind an installed voice, or ``None`` if unanswerable.
+
+    WHY (ss-console#2339, rehearsal card 4). Asked what it reviewed to learn the
+    firm's voice, the seat could not say — "I cannot name the individual corpus
+    documents by title here" — while letter 23 commits us in writing to
+    self-initialization that reads the firm's matters to synthesize its voice.
+    Provenance now rides the root-owned manifest, so the answer comes from a
+    surface the agent cannot author.
+
+    THE ``None`` IS THE LOAD-BEARING PART. A spec installed before provenance
+    existed carries none, and rendering that as an empty document list would
+    tell the firm we read nothing — a false answer, and a worse one than the
+    honest "I cannot name them". The seat's original refusal was CORRECT
+    behaviour; this must not regress it into a confident empty list.
+    """
+    docs: list[dict[str, Any]] = []
+    run_ids: list[str] = []
+    for entry in verified:
+        prov = getattr(entry, "provenance", None)
+        if not isinstance(prov, dict) or not prov:
+            continue
+        run_id = prov.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            run_ids.append(run_id)
+        for doc in prov.get("documents") or []:
+            if isinstance(doc, dict) and str(doc.get("name") or "").strip():
+                docs.append({"name": str(doc["name"])})
+    if not docs:
+        return None
+    return {
+        "document_count": len(docs),
+        "documents": docs,
+        "run_ids": sorted(set(run_ids)),
+        "note": (
+            "Names only — the seat keeps no copy of these documents. Report the "
+            "count and the names; never claim a cohort or an audience for a "
+            "document, because the record carries none."
+        ),
+    }
 
 
 def _cohort_section(cfg: Any, home: str | None = None) -> dict[str, Any]:

@@ -213,6 +213,13 @@ class ParsedSpec:
     #: from the customer's vault object into the ROOT-OWNED manifest, which is
     #: the only place the gate reads them from — the agent can write neither.
     assertions: dict = field(default_factory=dict)
+    #: What this spec was learned from — document names, digests, and a count,
+    #: never text (ss-console#2339). Carried the same way and for the same
+    #: reason as ``assertions``: the answer to "what did you read to learn our
+    #: voice" must come from a surface the agent cannot author, or it is not an
+    #: answer. Empty for a spec installed before provenance existed — and that
+    #: absence must keep rendering as "I cannot name them", never as "none".
+    provenance: dict = field(default_factory=dict)
 
     @property
     def rel_path(self) -> str:
@@ -307,9 +314,22 @@ def _parse_one(slug: str, prop: str, raw: Any) -> tuple[ParsedSpec | None, list[
     assertions = raw.get("assertions", {})
     if not isinstance(assertions, dict):
         return None, [f"{path}.assertions: must be an object when present"]
+    # Provenance is optional for the same reason and refused the same way. A
+    # malformed value must not be dropped: the firm would then be told "I cannot
+    # name what I read" by a seat that was handed a corpus list and discarded
+    # it, which is a worse answer than the honest one AND indistinguishable
+    # from it.
+    provenance = raw.get("provenance", {})
+    if not isinstance(provenance, dict):
+        return None, [f"{path}.provenance: must be an object when present"]
     return (
         ParsedSpec(
-            output_class=slug, prop=prop, body=encoded, digest=actual or "", assertions=assertions
+            output_class=slug,
+            prop=prop,
+            body=encoded,
+            digest=actual or "",
+            assertions=assertions,
+            provenance=provenance,
         ),
         [],
     )
@@ -456,6 +476,11 @@ def _install(
             # against itself.
             "sha256": sha256(spec.body),
             "bytes": len(spec.body),
+            # Root-recorded beside the digest so the answer to "what did you
+            # read to learn our voice" comes from a surface the agent cannot
+            # author (ss-console#2339). Absent for specs installed before this
+            # existed — the reader must render that as "I cannot name them".
+            "provenance": spec.provenance,
             # Root-recorded alongside the digest, so the gate reads shape rules
             # from the same trusted surface it reads the hash from.
             "assertions": spec.assertions,

@@ -55,6 +55,17 @@ class SpecEntry:
     #: the customer's vault object; the format gate reads them from here and
     #: never from anything the agent can write.
     assertions: dict = field(default_factory=dict)
+    #: What this spec was learned from — ``{run_id, document_count, documents:
+    #: [{name, sha256}]}`` — or ``{}`` (ss-console#2339). Root-recorded by the
+    #: applier from the vault object, so "what did you read to learn our voice"
+    #: is answerable from a surface the agent cannot author. Names and digests
+    #: only, never text: the answer must not become a second copy of the
+    #: documents (letters 07 and 10 promise the firm we keep none).
+    #:
+    #: EMPTY IS "I CANNOT NAME THEM", NOT "NONE". Specs installed before this
+    #: field existed carry no provenance, and a reader that renders that as an
+    #: empty corpus tells the firm we read nothing.
+    provenance: dict = field(default_factory=dict)
 
     def path_under(self, spec_dir: Path) -> Path:
         return spec_dir / self.rel_path
@@ -161,12 +172,14 @@ def load_entries(directory: Path | None = None) -> dict[str, SpecEntry]:
         ):
             continue
         raw_assertions = meta.get("assertions")
+        raw_provenance = meta.get("provenance")
         entries[rel] = SpecEntry(
             rel_path=rel,
             output_class=output_class,
             prop=prop,
             sha256=digest,
             assertions=raw_assertions if isinstance(raw_assertions, dict) else {},
+            provenance=raw_provenance if isinstance(raw_provenance, dict) else {},
         )
     return entries
 

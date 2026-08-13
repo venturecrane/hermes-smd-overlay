@@ -120,6 +120,42 @@ def spec_object_key(slug: str) -> str:
     return f"vaults/{slug}/output-classes.json"
 
 
+def _corpus_provenance(run_id: str, docs: list[dict[str, Any]]) -> dict[str, Any]:
+    """What this spec was learned from, in a form the agent can read later.
+
+    WHY (ss-console#2339, rehearsal card 4, 2026-08-12). Asked "show me what you
+    learned about how we write — and what you reviewed to learn it", the seat
+    answered the first half in depth and the second not at all: "I cannot read
+    the establishment tool's audit log from this turn, so I cannot name the
+    individual corpus documents by title here." Letter 23 commits us in writing
+    to self-initialization that "includes reading matters in Smokeball to
+    synthesize the firm's voice", and this firm's diligence thread is about
+    retention and confidentiality (letters 07 and 10). "I read your documents
+    but cannot tell you which" is the worst available answer to that reader.
+
+    The run already synthesizes exactly this at install time — the
+    ``provenance.json`` written for the leak check's proper-noun scan — but it
+    dies with the run directory. This carries it onto the installed spec, so the
+    question is answerable from an ordinary turn with no run id.
+
+    NAMES AND DIGESTS ONLY, never text. Same rule as the leak-check file it
+    mirrors, and the reason letters 07 and 10 can stay true: the firm's answer to
+    "what did you read" must not itself become a copy of what was read.
+
+    NO COHORT FIELD. The staged docs carry ``doc_id``/``name``/``sha256`` and
+    nothing else — inferring which audience each document belonged to is
+    precisely the invention the seat correctly refused to commit. A caller that
+    needs cohorts must stage them.
+    """
+    return {
+        "run_id": run_id,
+        "document_count": len(docs),
+        "documents": [
+            {"name": str(d.get("name") or ""), "sha256": str(d.get("sha256") or "")} for d in docs
+        ],
+    }
+
+
 def _resolve_broker_uid() -> int | None:
     """The workspace-broker uid, or ``None`` off-box (dev/test machines have no
     such user; the uid check is then skipped WITH a warning — same posture as
@@ -641,6 +677,7 @@ class EstablishIntake:
             spec_body=spec_body,
             digest=digest,
             assertions=assertions,
+            provenance=_corpus_provenance(run_id, docs),
             demotions=demotions,
             gate_states=gate_states,
             warnings=warnings,
@@ -660,6 +697,7 @@ class EstablishIntake:
         spec_body: str,
         digest: str,
         assertions: dict[str, Any],
+        provenance: dict[str, Any],
         demotions: list[dict[str, Any]],
         gate_states: dict[str, str],
         warnings: list[str],
@@ -710,6 +748,8 @@ class EstablishIntake:
         entry: dict[str, Any] = {"body": spec_body, "sha256": digest}
         if assertions:
             entry["assertions"] = assertions
+        if provenance:
+            entry["provenance"] = provenance
         merged_classes.setdefault(output_class, {})
         if not isinstance(merged_classes[output_class], dict):
             merged_classes[output_class] = {}
