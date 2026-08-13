@@ -288,6 +288,65 @@ def test_nudge_rides_admin_turns_only(establishment):
     assert _turn(plugin, "") is None
 
 
+def test_person_nudge_advertises_the_same_direction_the_pointer_reads(establishment):
+    """The write side must not be narrower than the read side (ss#2151).
+
+    Rehearsal card 7 says "here's how I want things SENT TO ME". The nudge
+    used to advertise only the other direction — a person's own drafts and
+    documents — so that statement matched no predicate, nothing was recorded,
+    and the model still answered "Got it, I'll work that way going forward".
+    Meanwhile ``_person_pref_pointer`` already told the model these are
+    "preferences for work produced FOR THEM". One half of the same feature
+    described a wider thing than the other, and the gap is where the unearned
+    confirmation lived.
+
+    FALSIFIER: revert the nudge to "THEIR OWN work ... their drafts, their
+    documents" and this fails on both phrases.
+    """
+    plugin, _ = establishment
+    nudge = plugin._PERSON_NUDGE.lower()
+    assert "for them" in nudge, "the nudge must cover work produced FOR the person"
+    assert "send them" in nudge, "the nudge must name the delivery direction card 7 speaks"
+
+
+def test_person_nudge_names_the_limit_that_actually_exists(establishment):
+    """A recorded preference does NOT reach a scheduled delivery, so the nudge
+    says so rather than letting the model confirm a cadence it cannot change.
+
+    The second half of this test is the proof that the limit is structural and
+    not a style choice. An installed preference reaches the model only through
+    the pointer ``on_pre_llm_call`` injects, and that hook returns ``None`` on
+    a turn with no ``sender_id``. Cron and self-wake turns are exactly those.
+    So "send me short bullets daily" is half recordable (shape) and half seat
+    config (cadence), and a reply confirming both would trade one
+    over-confirmation for a worse one.
+
+    FALSIFIER: if the hook ever starts returning context on an unattributed
+    turn, the limit stops being true and this fails — at which point the
+    nudge's wording is what should change, not this assertion.
+    """
+    plugin, _ = establishment
+    nudge = plugin._PERSON_NUDGE.lower()
+    assert "scheduled routine" in nudge
+    assert "operator admin" in nudge, "a named limit must name who can act on it"
+    for unattributed in (None, "", 0):
+        assert (
+            plugin.on_pre_llm_call(session_id="sess-cron", sender_id=unattributed, user_message="x")
+            is None
+        ), "an unattributed turn must carry no person pointer — that is why the limit holds"
+
+
+def test_person_nudge_forbids_confirming_what_was_not_recorded(establishment):
+    """The one-line rule this surface exists to install: state what happened,
+    what did not, and what would make it happen. The card-7 failure was a bare
+    "got it" on a turn carrying no establishment event, so the nudge binds the
+    confirmation to the tool actually returning."""
+    plugin, _ = establishment
+    nudge = plugin._PERSON_NUDGE.lower()
+    assert "until" in nudge and "returns" in nudge, "nothing is in effect until submit returns"
+    assert "confirm only what you actually recorded" in nudge
+
+
 # ---------------------------------------------------------------------------
 # 6. Wire shape — the C0 contract
 # ---------------------------------------------------------------------------

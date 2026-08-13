@@ -431,11 +431,37 @@ _REFUSAL_MESSAGE = (
     "an admin can review and apply it."
 )
 
+#: WHY THIS COVERS BOTH DIRECTIONS (ss#2151, rehearsal card 7, 2026-08-12). The
+#: card tells the firm to say "here's how I want things sent to me: format,
+#: cadence, channel". The nudge used to advertise only the OTHER direction —
+#: "how THEIR OWN work should sound (their drafts, their documents)" — so a
+#: delivery preference matched no predicate, the model called nothing, and
+#: still answered "Got it, I'll work that way going forward". The turn carries
+#: no establishment event and no correction row: a confirmed effect that was
+#: never produced. The read side was already the wider of the two —
+#: ``_person_pref_pointer`` renders "personal preferences for work produced FOR
+#: THEM" — so the write side was the half that was narrow.
+#:
+#: AND WHY IT NAMES A LIMIT. Recording is not the same as taking effect
+#: everywhere. An installed preference reaches the model through
+#: ``_person_pref_pointer``, which is injected from ``on_pre_llm_call`` — and
+#: that hook returns early on a turn with no ``sender_id``. Cron and self-wake
+#: turns are exactly that (:1138), so a SCHEDULED delivery never sees it. The
+#: shape half of "short bullets daily" is real and binds; the cadence half is
+#: seat cron config. Confirming both would trade one over-confirmation for a
+#: worse one, so the nudge makes the model split them and name the next act —
+#: the shape of the card-11 reply this plan holds up as the bar.
 _PERSON_NUDGE = (
-    "If this person tells you how THEIR OWN work should sound or be shaped "
-    f"(their drafts, their documents), record it with {TOOL_SUBMIT} — scope "
-    "'person', person set to exactly their address. It takes effect for their "
-    "work immediately and never changes the firm's standards."
+    "If this person tells you how work FOR THEM should read — their own drafts "
+    "and documents, or the shape and voice of what you send them (bullets "
+    "rather than prose, a length, a tone, what to lead with) — record it with "
+    f"{TOOL_SUBMIT}: scope 'person', person set to exactly their address. That "
+    "binds what you write for them and never changes the firm's standards. Two "
+    "limits you must state rather than paper over: it does not change WHEN a "
+    "scheduled routine runs or WHICH channel it uses — that is seat "
+    "configuration, and an Operator admin changes it — and nothing is in "
+    f"effect until {TOOL_SUBMIT} returns. So confirm only what you actually "
+    "recorded: name it, name any part you could not record, and name who can."
 )
 
 _PERSON_MISMATCH_MESSAGE = (
