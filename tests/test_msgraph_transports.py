@@ -337,11 +337,19 @@ def _both_transports(monkeypatch, trust):
     return graph, agentmail
 
 
+# Every call below passes the payload as ONE POSITIONAL DICT, which is how Hermes
+# dispatches (`entry.handler(args, **kwargs)`). These tests previously called the
+# handler by keyword — the shape the handler was mistakenly written for — so they
+# passed while every real invocation raised TypeError (SMD-OPERATOR-1B). Calling
+# it any other way here would restore that blind spot.
+_SEND_ARGS = {"to": [_TO], "subject": "S", "text": "B"}
+
+
 def test_send_tool_routes_by_authored_adapter_msgraph(monkeypatch, tmp_path):
     trust = load_plugin("hermes-smd-trust")
     _seat_yaml(monkeypatch, tmp_path, _MSGRAPH_ROSTERED_YAML)
     graph, agentmail = _both_transports(monkeypatch, trust)
-    trust._smd_send_message(to=[_TO], subject="S", text="B")
+    trust._smd_send_message(dict(_SEND_ARGS))
     assert len(graph) == 1 and agentmail == []
     # `text` reaches the Graph verb under its own name; the broker accepts either
     # spelling, so nothing is silently dropped on the way.
@@ -352,7 +360,67 @@ def test_send_tool_routes_by_authored_adapter_agentmail(monkeypatch, tmp_path):
     trust = load_plugin("hermes-smd-trust")
     _seat_yaml(monkeypatch, tmp_path, _AGENTMAIL_SEAT_YAML)
     graph, agentmail = _both_transports(monkeypatch, trust)
-    trust._smd_send_message(to=[_TO], subject="S", text="B")
+    trust._smd_send_message(dict(_SEND_ARGS))
+    assert len(agentmail) == 1 and graph == []
+    # THE BODY, not just the call count. A handler that took the positional dict
+    # but still read its payload from **kwargs would send an EMPTY message and
+    # report "Sent" — invisible to a length assertion. Its msgraph twin above has
+    # always checked this; the agentmail side had not, which is the gap that let
+    # `payload = dict(kwargs)` ship.
+    assert agentmail[0]["payload"]["to"] == [_TO]
+    assert agentmail[0]["payload"]["subject"] == "S"
+    assert agentmail[0]["payload"]["text"] == "B"
+
+
+def test_send_tool_refuses_when_the_seat_authors_no_email_connector(monkeypatch, tmp_path):
+    """No Email connector authored => refuse by name, never fall back to agentmail.
+
+    `_seat_email_adapter()` defaults to agentmail when nothing is authored, which
+    is right for its other callers but wrong here: on such a seat that default
+    means a broker call for a mailbox and credential that were never provisioned.
+    Before the SMD-OPERATOR-1B fix this was masked by the TypeError; afterwards it
+    would have become a soft "Not sent" the agent reads as a mild failure. Both
+    ashton-price and smd author no Email connector today, so this is the live
+    shape, not a hypothetical.
+    """
+    trust = load_plugin("hermes-smd-trust")
+    _seat_yaml(monkeypatch, tmp_path, "customer_id: acme\nvertical: law-firm\nconnectors: {}\n")
+    graph, agentmail = _both_transports(monkeypatch, trust)
+
+    result = trust._smd_send_message(dict(_SEND_ARGS))
+
+    assert graph == [] and agentmail == [], "an unauthored seat must reach NEITHER transport"
+    assert result.startswith("Not sent:")
+    assert "no Email connector" in result
+
+
+def test_send_tool_still_sends_when_the_config_cannot_be_read(monkeypatch, tmp_path):
+    """An UNREADABLE config must not start refusing sends on an authored seat.
+
+    The refusal above keys on "read fine, authors nothing". A transient read
+    fault is a different condition and keeps the pre-existing agentmail default,
+    so a config blip on a healthy seat does not silently stop its mail.
+    """
+    trust = load_plugin("hermes-smd-trust")
+    _seat_yaml(monkeypatch, tmp_path, _AGENTMAIL_SEAT_YAML)
+    graph, agentmail = _both_transports(monkeypatch, trust)
+
+    def _boom():
+        raise RuntimeError("volume unavailable")
+
+    # Patch the REAL module the handler imports (the import is local to
+    # `_authored_email_adapter`, so a `trust.CustomerConfig` attribute would not
+    # be the object under test — it would make this test pass without exercising
+    # the branch at all).
+    from shared.customer_config import CustomerConfig
+
+    monkeypatch.setattr(CustomerConfig, "from_volume", staticmethod(_boom))
+
+    # Guard the guard: prove the patch actually reaches the handler's read path.
+    assert trust._authored_email_adapter() == trust._ADAPTER_UNREADABLE
+
+    trust._smd_send_message(dict(_SEND_ARGS))
+
     assert len(agentmail) == 1 and graph == []
 
 
