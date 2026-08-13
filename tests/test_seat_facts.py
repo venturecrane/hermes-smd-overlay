@@ -894,3 +894,137 @@ def test_working_rules_degrades_alone_when_the_persona_will_not_read(sf, tmp_pat
     )
     assert facts["working_rules"]["read"] is False
     assert any(u["section"] == "working_rules" for u in facts["unreadable"])
+
+
+# T10 — voice corpus provenance (ss-console#2339)
+#
+# Asked "what did you review to learn how we write", the rehearsal seat could
+# not say. Letter 23 commits us in writing to self-initialization that reads
+# the firm's matters to synthesize its voice, and this firm's diligence thread
+# is about retention — so "I read your documents but cannot tell you which" is
+# the worst available answer. The provenance now rides the root-owned manifest.
+#
+# The load-bearing test is the ABSENCE one: a spec installed before provenance
+# existed must keep rendering as "I cannot name them" and must never become a
+# confident empty list. The seat's original refusal was correct behaviour.
+# --------------------------------------------------------------------------- #
+
+
+class _ProvEntry(_FakeEntry):
+    def __init__(self, output_class: str, prop: str, provenance: dict | None = None):
+        super().__init__(output_class, prop)
+        self.provenance = provenance or {}
+
+
+class _ProvManifest(_FakeManifest):
+    """A manifest whose entries carry provenance, as the applier records it."""
+
+    def __init__(self, entries: dict[str, list]):
+        super().__init__(state="ok")
+        self._by_class = entries
+
+    def entries_for_class(self, output_class: str) -> list:
+        return self._by_class.get(output_class, [])
+
+
+def test_installed_voice_names_the_corpus_it_learned_from(sf, tmp_path):
+    """The answer letter 23 promises. Names and a count — never text, and never
+    a cohort the record does not carry."""
+    manifest = _ProvManifest(
+        {
+            "work_product": [
+                _ProvEntry(
+                    "work_product",
+                    "voice",
+                    {
+                        "run_id": "run-7",
+                        "document_count": 2,
+                        "documents": [
+                            {"name": "demand-letter-2025.docx", "sha256": "a" * 64},
+                            {"name": "status-update.docx", "sha256": "b" * 64},
+                        ],
+                    },
+                )
+            ]
+        }
+    )
+    voice = _build(sf, tmp_path, manifest=manifest)["voice"]
+    wp = next(c for c in voice["classes"] if c["class"] == "work_product")
+    assert wp["status"] == "installed"
+    learned = wp["learned_from"]
+    assert learned["document_count"] == 2
+    assert [d["name"] for d in learned["documents"]] == [
+        "demand-letter-2025.docx",
+        "status-update.docx",
+    ]
+    assert learned["run_ids"] == ["run-7"]
+    assert "never claim a cohort" in learned["note"]
+
+
+def test_no_document_text_reaches_the_answer(sf, tmp_path):
+    """Letters 07 and 10 promise the firm we keep no copy of matter files. The
+    answer to "what did you read" must not itself become a second copy.
+
+    FALSIFIER: pass the staged text through and this finds it.
+    """
+    manifest = _ProvManifest(
+        {
+            "work_product": [
+                _ProvEntry(
+                    "work_product",
+                    "voice",
+                    {
+                        "run_id": "run-7",
+                        "documents": [
+                            {
+                                "name": "demand.docx",
+                                "sha256": "c" * 64,
+                                "text": "Dear Ms. Alvarez, we represent",
+                            }
+                        ],
+                    },
+                )
+            ]
+        }
+    )
+    serialized = json.dumps(_build(sf, tmp_path, manifest=manifest))
+    assert "Alvarez" not in serialized
+    assert "we represent" not in serialized
+
+
+def test_a_spec_without_provenance_stays_unanswerable_not_empty(sf, tmp_path):
+    """THE one that matters. A spec installed before this field existed carries
+    no provenance. Rendering that as an empty document list would tell the firm
+    we read nothing — false, and worse than the honest "I cannot name them"
+    the seat already said on its own.
+
+    FALSIFIER: return {"documents": []} instead of None and this fails.
+    """
+    manifest = _ProvManifest({"work_product": [_ProvEntry("work_product", "voice", {})]})
+    voice = _build(sf, tmp_path, manifest=manifest)["voice"]
+    wp = next(c for c in voice["classes"] if c["class"] == "work_product")
+    assert wp["status"] == "installed", "the spec IS installed — only its corpus is unknown"
+    assert wp["learned_from"] is None
+
+
+def test_a_class_with_nothing_installed_has_no_corpus_to_name(sf, tmp_path):
+    manifest = _ProvManifest({})
+    voice = _build(sf, tmp_path, manifest=manifest)["voice"]
+    for entry in voice["classes"]:
+        assert entry["status"] == "not_installed"
+        assert entry["learned_from"] is None
+
+
+def test_a_spec_that_no_longer_verifies_names_no_corpus(sf, tmp_path):
+    """Under-claim is the safe direction. A file that no longer hashes to what
+    root recorded is reported not_installed, and a corpus attributed to a spec
+    the seat cannot verify would be a claim about a document it no longer has.
+    """
+    manifest = _ProvManifest(
+        {"work_product": [_ProvEntry("work_product", "voice", {"documents": [{"name": "x.docx"}]})]}
+    )
+    manifest.verify_result = False
+    voice = _build(sf, tmp_path, manifest=manifest)["voice"]
+    wp = next(c for c in voice["classes"] if c["class"] == "work_product")
+    assert wp["status"] == "not_installed"
+    assert wp["learned_from"] is None

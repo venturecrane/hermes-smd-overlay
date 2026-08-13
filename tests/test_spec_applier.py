@@ -309,3 +309,71 @@ def test_oversize_body_is_refused(tmp_path):
 
     _, errors = parse_and_verify(_doc({"staff": {"voice": "x" * (MAX_SPEC_BYTES + 1)}}))
     assert any("ceiling" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# Corpus provenance (ss-console#2339)
+#
+# "What did you read to learn our voice" must be answerable from a surface the
+# AGENT CANNOT AUTHOR, or it is not an answer. So provenance rides the vault
+# object into the root-owned manifest, exactly as `assertions` does.
+# ---------------------------------------------------------------------------
+
+
+def _prov_doc(provenance) -> bytes:
+    text = "Write plainly.\n"
+    return json.dumps(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "classes": {
+                "staff": {
+                    "voice": {
+                        "body": text,
+                        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        "provenance": provenance,
+                    }
+                }
+            },
+        }
+    ).encode()
+
+
+def test_provenance_is_carried_verbatim_from_the_vault_object():
+    prov = {
+        "run_id": "run-7",
+        "document_count": 1,
+        "documents": [{"name": "demand.docx", "sha256": "a" * 64}],
+    }
+    specs, errors = parse_and_verify(_prov_doc(prov))
+    assert errors == []
+    assert specs[0].provenance == prov
+
+
+def test_provenance_is_optional_and_absent_means_empty():
+    """Every spec installed before ss-console#2339 has none. Absent must parse
+    cleanly — a refusal here would strand every existing seat's voice spec."""
+    specs, errors = parse_and_verify(_doc({"staff": {"voice": "Write plainly.\n"}}))
+    assert errors == []
+    assert specs[0].provenance == {}
+
+
+def test_malformed_provenance_refuses_the_whole_document():
+    """Same discipline as `assertions`, for a sharper reason: silently dropping
+    a corpus list would make the seat answer "I cannot name what I read" while
+    holding the list — an answer indistinguishable from the honest one.
+
+    FALSIFIER: drop it instead of refusing, and this passes with errors == [].
+    """
+    specs, errors = parse_and_verify(_prov_doc("demand.docx, status.docx"))
+    assert specs == []
+    assert any("provenance" in e for e in errors)
+
+
+def test_the_manifest_records_provenance_beside_the_digest(tmp_path):
+    """Root-recorded, so the reader gets it from the same trusted surface it
+    gets the hash from."""
+    prov = {"run_id": "run-7", "documents": [{"name": "demand.docx"}]}
+    apply(s3_client=FakeS3({KEY: _prov_doc(prov)}), bucket=BUCKET, slug=SLUG, spec_dir=tmp_path)
+    manifest = json.loads((tmp_path / MANIFEST_NAME).read_text())
+    entry = manifest["specs"]["classes/staff/voice.md"]
+    assert entry["provenance"] == prov
