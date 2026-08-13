@@ -27,10 +27,23 @@ matter X.*
 
 UNRESOLVED IS NOT NON-MEMBERSHIP
 --------------------------------
-Membership is only a closed set when the matter's own complete party list was
-read. Otherwise a recipient's absence proves nothing, and the verdict is
-``unresolved`` — a different sentence to a reviewer, deliberately. Collapsing
-the two would tell a paralegal that a legitimate client is an outsider.
+Membership is only a closed set when one of two things was READ. Otherwise a
+recipient's absence proves nothing, and the verdict is ``unresolved`` — a
+different sentence to a reviewer, deliberately. Collapsing the two would tell a
+paralegal that a legitimate client is an outsider.
+
+The two axes, both valid, both requiring an explicit completeness signal from the
+connector (ss#2264):
+
+* **matter axis** — this matter's own full party list (``parties_complete``, from
+  ``get_matter``). "This recipient is not among its parties."
+* **contact axis** — this address's full set of matters
+  (``matters_for_contact_complete``, from a contact-filtered, unfiltered,
+  untruncated ``list_matters``). "This matter is not among their matters."
+
+The contact axis exists because the matter axis is nearly unreachable on the reply
+lane: ``get_matter`` fires on 8 of 86 reply turns and ``list_matters`` on 34, so
+the gate ran there and could almost never conclude anything.
 
 POSTURE — read this before deciding it is safe to enable somewhere
 ------------------------------------------------------------------
@@ -50,10 +63,13 @@ What is actually true, and what the safety argument should rest on:
 
 * a mismatch **downgrades to a human draft**; it never refuses outright;
 * an ``unresolved`` membership does not withhold at all;
-* a withhold additionally requires a CLOSED party set, which today only arrives
-  via ``get_matter`` — so the gate is *narrow*, but that narrowness is an
-  emergent property of the data flow, NOT a designed opt-in, and it will erode
-  as party capture spreads. Do not lean on it as if it were a switch.
+* a withhold additionally requires a CLOSED set on one of the two axes above —
+  so the gate is *narrow*, but that narrowness is an emergent property of the
+  data flow, NOT a designed opt-in, and it erodes as membership capture spreads.
+  Do not lean on it as if it were a switch. ss#2264 widened it deliberately: the
+  contact axis raises the withhold-capable share of reply turns from ~9% toward
+  ~40% on today's read mix, so the narrowness argument is now weaker than it was
+  when it was written, exactly as predicted.
 """
 
 from __future__ import annotations
@@ -255,7 +271,16 @@ def evaluate(
             for addr in sorted(addrs):
                 if addr in parties:
                     continue  # proven party
-                if closed:
+                # Membership is closed on EITHER axis (ss#2264). The matter axis
+                # — this matter's own full party list — was the only one
+                # implemented, and only ``get_matter`` produces it (8 of 86 reply
+                # turns), so the reply lane could almost never conclude anything.
+                # The contact axis proves it just as validly from the other
+                # direction: if the FULL set of matters this address is party to
+                # was read, and the cited matter is not in it, the address is not
+                # a party. Absence from an OPEN set on either axis still proves
+                # nothing and stays *unresolved*.
+                if closed or membership.is_contact_closed(addr):
                     offenders.append(f"{addr} is not a party to {token}")
                 else:
                     unresolved_matters.append(f"{addr} vs {token}")
