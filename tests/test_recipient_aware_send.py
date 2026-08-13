@@ -248,10 +248,58 @@ def test_reclassify_vendor_recipient(monkeypatch):
     assert got is enforce.ActionClass.EXTERNAL_SEND_VENDOR
 
 
-def test_reclassify_internal_outranks_typed(monkeypatch):
+def test_reclassify_reply_roster_is_the_fallback_when_typed_is_silent(monkeypatch):
+    """Back-compat, and the reason ss#2263 is safe to ship in one release.
+
+    ``scott@smd.services`` is on the reply roster and typed nowhere, which is the
+    shape of every seat authored before the split (A&P authors no
+    ``outbound_roster`` at all). The typed roster says nothing, so the reply
+    roster still resolves INTERNAL — byte-for-byte the old behaviour.
+    """
     enforce = _load_enforce()
     got = _reclass(
         monkeypatch, enforce, "mcp_agentmail_send_message", {"to": ["scott@smd.services"]}
+    )
+    assert got is enforce.ActionClass.EXTERNAL_SEND_INTERNAL
+
+
+def test_reclassify_reply_authorized_client_is_client_not_internal(monkeypatch):
+    """ss#2263 — the defect, on the proactive lane.
+
+    A firm enables autonomous replies to its own client by adding them to
+    ``scope.inbound_allow_from``. Before the split that ALSO classified them
+    INTERNAL, which routed the send to EXTERNAL_SEND_INTERNAL — a class the matter
+    gate deliberately does not run on (enforce.py, "firm staff are not expected to
+    be parties") and which the content floor exempts. The client's own matter
+    content could reach them under a staff exemption they never authored.
+    """
+    enforce = _load_enforce()
+    monkeypatch.setattr(enforce, "_resolve_roster", lambda: [*ROSTER, "jane@gmail.com"])
+    monkeypatch.setattr(enforce, "_resolve_typed_roster", lambda: list(TYPED_ROSTER))
+    got = enforce._reclassify_send(
+        "mcp_agentmail_send_message",
+        {"to": ["jane@gmail.com"]},
+        enforce.ActionClass.EXTERNAL_SEND,
+        "s1",
+        False,
+    )
+    assert got is enforce.ActionClass.EXTERNAL_SEND_CLIENT
+
+
+def test_reclassify_firm_staff_class_is_internal(monkeypatch):
+    """``firm_staff`` is the authored form of the fact the reply list used to
+    imply — and it types someone the firm never authorized replies FROM."""
+    enforce = _load_enforce()
+    monkeypatch.setattr(enforce, "_resolve_roster", lambda: [])
+    monkeypatch.setattr(
+        enforce, "_resolve_typed_roster", lambda: [("paralegal@firm.example", "firm_staff")]
+    )
+    got = enforce._reclassify_send(
+        "mcp_agentmail_send_message",
+        {"to": ["paralegal@firm.example"]},
+        enforce.ActionClass.EXTERNAL_SEND,
+        "s1",
+        False,
     )
     assert got is enforce.ActionClass.EXTERNAL_SEND_INTERNAL
 

@@ -433,6 +433,14 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # firm-internal coordination legitimately names deadlines, signatures,
         # attorneys; flooring it held ack confirmations in drafts). Mirror it
         # with the SAME classifier and the SAME rosters the send path resolves.
+        #
+        # INTERNAL is an AUTHORED fact as of ss#2263, not one inferred from the
+        # reply list. Before that split this line exempted every relayed reply by
+        # construction — including a reply to the firm's own client, whom the firm
+        # had put on `inbound_allow_from` for the sole purpose of enabling replies.
+        # The floor is the larger of the two exposures the split moves (the matter
+        # gate is the other); they move together, in one release, because they
+        # read this one `recipient_class`.
         # ``from_tainted`` stays False deliberately: taint guards MODEL-CHOSEN
         # recipients, but this recipient is structurally pinned to the
         # Svix-verified inbound sender by the recipient-lock above — an injected
@@ -501,60 +509,40 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # The recipient is structurally pinned to the verified inbound sender by
         # the recipient-lock at (b), so `origin.sender_address` IS the recipient
         # set — no model-chosen address participates.
-        # The exemption cannot be `recipient_class is INTERNAL` on this lane, and
-        # getting that wrong would have shipped a control that can never fire.
-        # `sender_on_roster` above IS `scope.inbound_allow_from`, and
-        # `_classify_one_typed` returns INTERNAL on an inbound-roster match
+        # The exemption used to be unable to say `recipient_class is INTERNAL` on
+        # this lane, and getting that wrong would have shipped a control that can
+        # never fire. `sender_on_roster` above IS `scope.inbound_allow_from`, and
+        # `_classify_one_typed` USED TO return INTERNAL on an inbound-roster match
         # BEFORE consulting the typed roster ("a rostered internal recipient
-        # outranks a typed class"). So every relayed reply classifies INTERNAL by
-        # construction, and an INTERNAL exemption would skip 100% of this lane.
+        # outranks a typed class"). So every relayed reply classified INTERNAL by
+        # construction, and an INTERNAL exemption would have skipped 100% of this
+        # lane.
         #
-        # The conflation is the real hazard: `inbound_allow_from` answers "may I
-        # reply to you", not "are you firm staff". A firm that authors a client
-        # onto it to enable autonomous replies silently makes that client
-        # INTERNAL — exempt from matter identity AND from the content floor.
-        # So for THIS decision the typed roster is consulted on its own terms
-        # (empty internal roster), and a recipient the client typed as CLIENT is
-        # never exempt, whatever the inbound roster also says.
+        # That conflation is fixed at the source as of ss#2263, and this call site
+        # got simpler because of it. `inbound_allow_from` answers "may I reply to
+        # you"; `scope.outbound_roster` answers "what are you to this firm", and
+        # `_classify_one_typed` now reads the typed roster FIRST. So the single
+        # `recipient_class` computed for the content floor above is already the
+        # right input here: a reply-authorized address the firm typed as a client
+        # classifies CLIENT — floored AND gated — instead of INTERNAL.
         #
-        # READ THIS BEFORE BELIEVING THE LANE IS COVERED. It is NOT. The branch
-        # below where the gate actually runs is unreachable in any AUTHORABLE
-        # configuration, and that is a stronger statement than "no seat has
-        # configured it yet". A reply only happens for a sender on
-        # `scope.inbound_allow_from`; the console validator
-        # (src/lib/operator/customer-yaml/sections-scope.ts:268) REJECTS any
-        # address that is on that list and also typed in `scope.outbound_roster`
-        # — "a recipient cannot be both internal and a typed outbound class". So
-        # a reply recipient can never be typed CLIENT, `typed_only` is never
-        # CLIENT here, and the exemption always resolves True.
+        # This block used to reclassify against an EMPTY internal roster to route
+        # around the old precedence. That workaround is deleted rather than kept:
+        # it could only ever have fired for a config the validators rejected
+        # ("a recipient cannot be both internal and a typed outbound class"), so
+        # it protected nothing, and leaving two classifications on one path is how
+        # the floor and the gate drift apart again. One classifier, one verdict.
         #
-        # This is kept, not deleted, because the logic is right and becomes live
-        # the moment that schema gap closes (ss#2263 decides how a firm should
-        # express "auto-reply to this person AND treat them as a client";
-        # ss#2271 is the activation checklist, gated on a firm actually asking
-        # for client replies). Until then: say "the proactive lane, when the
-        # matter's party list is complete" — never "the reply lane is covered".
-        # The ss#2167 cases in tests/test_reply.py author the both-lists config
-        # the validator rejects, so they pin the logic, not a reachable state.
-        try:
-            typed_only = classify_recipients_typed([origin.sender_address], [], cfg.outbound_roster)
-        except Exception:  # noqa: BLE001 — a fault must not take the reply path
-            # Unknown typing pairs with the None recipient_class the fault above
-            # already produced, so the exemption resolves False and the gate
-            # RUNS. A classification we could not perform is not evidence that
-            # this recipient is firm staff.
-            logger.exception(
-                "hermes-smd-reply: typed-roster classification raised; matter gate will run"
-            )
-            typed_only = None
+        # A classification FAULT above leaves `recipient_class` None, which is in
+        # neither exempt class, so the gate RUNS. A classification we could not
+        # perform is not evidence that this recipient is firm staff.
         matter_verdict = matter_gate.evaluate(
             session_id=session_id,
             body=scan_text,
             recipients={origin.sender_address},
             # Firm staff and records vendors are not expected to be parties
             # (ADR 0072, the same carve-out enforce.py applies).
-            recipient_is_exempt=typed_only is not RecipientClass.CLIENT
-            and recipient_class in (RecipientClass.INTERNAL, RecipientClass.VENDOR),
+            recipient_is_exempt=recipient_class in (RecipientClass.INTERNAL, RecipientClass.VENDOR),
         )
         if matter_verdict.should_withhold and matter_gate.mode() == "block":
             _held(

@@ -24,6 +24,7 @@ import itertools
 import json
 
 import pytest
+import yaml
 
 from shared import inbound, matter_binding
 from tests.conftest import load_plugin
@@ -1079,21 +1080,21 @@ def test_unread_caption_still_blocks(relay_mod) -> None:
 # A test of the gate's verdict logic cannot catch that, which is the whole point:
 # the verdict logic was correct the entire time. Only a test of THIS path can.
 #
-# WHAT THESE DO AND DO NOT PROVE (read before citing them as coverage).
-# They pin the logic. They do NOT demonstrate a reachable production state. The
-# roster below puts one address on `scope.inbound_allow_from` AND types it as a
-# client in `scope.outbound_roster` — a combination the console validator
-# REJECTS (src/lib/operator/customer-yaml/sections-scope.ts:268, "a recipient
-# cannot be both internal and a typed outbound class"). Since a reply only fires
-# for a sender on `inbound_allow_from`, and such a sender therefore can never
-# carry a typed class, the gate's enforcing branch is unreachable in any
-# AUTHORABLE config — not merely unconfigured today.
+# WHAT THESE PROVE, AND THE CHECK THAT KEEPS IT TRUE.
+# Until ss#2263 they pinned logic against an UNAUTHORABLE config, and said so:
+# the roster below puts one address on `scope.inbound_allow_from` AND types it in
+# `scope.outbound_roster`, which both validators used to reject ("a recipient
+# cannot be both internal and a typed outbound class"). A reply only fires for a
+# sender on `inbound_allow_from`, so such a sender could never carry a typed
+# class, and the gate's enforcing branch was unreachable in every AUTHORABLE
+# config — a stronger statement than "unconfigured today".
 #
-# They are kept because the logic is correct and goes live the moment that gap
-# closes: ss#2263 decides how a firm expresses "auto-reply to this person AND
-# treat them as a client"; ss#2271 is the activation checklist. Re-point the
-# roster below at whatever ss#2263 makes authorable, and only then does a green
-# run here mean the reply lane is covered.
+# ss#2263 made exactly this config authorable, so these now exercise a reachable
+# state. That claim is not left to prose: `test_client_typed_yaml_is_authorable`
+# below runs the SEAT'S OWN validator over the literal yaml these tests write. If
+# the schema ever re-forbids the overlap, that test fails and takes this section's
+# meaning down with it, rather than letting a green run keep asserting coverage
+# the config can no longer reach.
 # ---------------------------------------------------------------------------
 
 _M_A = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -1121,6 +1122,41 @@ _CLIENT_TYPED_YAML = (
 
 def _type_sender_as_client(mod) -> None:
     mod._YAML_PATH.write_text(_CLIENT_TYPED_YAML)
+
+
+def test_client_typed_yaml_is_authorable(tmp_path):
+    """The falsifier for this whole section (ss#2263, ss#2271).
+
+    Every reply-lane matter-gate test below writes ``_CLIENT_TYPED_YAML``. That
+    config used to be REJECTED — one address on ``scope.inbound_allow_from`` and
+    also typed in ``scope.outbound_roster`` — which made those tests pin logic no
+    firm could ever author. Nothing in a passing run of them said so; only a
+    comment did, and a comment cannot fail.
+
+    So the acceptance is asserted against the seat's OWN validator, on the literal
+    bytes the tests write. If the overlap is ever re-forbidden, this fails and the
+    section's coverage claim fails with it, instead of quietly reverting to
+    unreachable-but-green.
+    """
+    from bootstrap.validate import _validate_outbound_roster
+
+    cfg = yaml.safe_load(_CLIENT_TYPED_YAML)
+    errors: list[str] = []
+    _validate_outbound_roster(cfg, errors)
+    assert errors == []
+
+    # And the classifier agrees with the validator: this sender is a CLIENT, not
+    # firm staff — which is what makes the gate below run at all.
+    from shared.customer_config import CustomerConfig
+    from shared.recipient_classifier import RecipientClass, classify_recipients_typed
+
+    path = tmp_path / "customer.yaml"
+    path.write_text(_CLIENT_TYPED_YAML)
+    conf = CustomerConfig.from_volume(str(path))
+    assert (
+        classify_recipients_typed([_SENDER], conf.inbound_roster, conf.outbound_roster)
+        is RecipientClass.CLIENT
+    )
 
 
 def _seed_closed(party: str) -> None:
