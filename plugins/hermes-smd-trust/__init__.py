@@ -420,6 +420,38 @@ _SEND_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
+#: Returned by :func:`_authored_email_adapter` when customer.yaml could not be
+#: read at all. Deliberately distinct from ``None`` ("read fine, and this seat
+#: authors no Email connector"): the first is a degraded seat, the second is an
+#: authoring fact. Only the second is safe to refuse on — see
+#: :func:`_smd_send_message`.
+_ADAPTER_UNREADABLE = "__unreadable__"
+
+
+def _authored_email_adapter() -> str | None:
+    """The Email adapter this seat AUTHORS, without substituting a default.
+
+    Returns the authored adapter string; ``None`` when the config was read and
+    names no Email connector; :data:`_ADAPTER_UNREADABLE` when the config could
+    not be read at all.
+
+    Split out from :func:`_seat_email_adapter` so a caller that needs to tell
+    "authored agentmail" from "authored nothing" can, which the defaulting
+    version structurally cannot.
+    """
+    from shared.customer_config import CustomerConfig  # local import (enforce.py idiom)
+
+    try:
+        record = CustomerConfig.from_volume().connectors.get("Email")
+    except Exception:  # noqa: BLE001 — an unreadable config must not raise into a send
+        return _ADAPTER_UNREADABLE
+    if isinstance(record, dict):
+        adapter = record.get("adapter")
+        if isinstance(adapter, str) and adapter.strip():
+            return adapter.strip().lower()
+    return None
+
+
 def _seat_email_adapter() -> str:
     """The seat's authored Email adapter, re-read live from customer.yaml.
 
@@ -431,22 +463,17 @@ def _seat_email_adapter() -> str:
 
     Defaults to ``agentmail``, matching ``hermes-smd-reply``'s identical read: two
     plugins that disagreed about a seat's transport would be worse than either
-    default, and every seat but one authors agentmail today.
+    default, and every seat but one authors agentmail today. That default is
+    unchanged and deliberately shared; the send tool checks
+    :func:`_authored_email_adapter` separately rather than tightening it here.
     """
-    from shared.customer_config import CustomerConfig  # local import (enforce.py idiom)
-
-    try:
-        record = CustomerConfig.from_volume().connectors.get("Email")
-    except Exception:  # noqa: BLE001 — an unreadable config must not raise into a send
+    authored = _authored_email_adapter()
+    if authored is None or authored == _ADAPTER_UNREADABLE:
         return _ADAPTER_AGENTMAIL
-    if isinstance(record, dict):
-        adapter = record.get("adapter")
-        if isinstance(adapter, str) and adapter.strip():
-            return adapter.strip().lower()
-    return _ADAPTER_AGENTMAIL
+    return authored
 
 
-def _smd_send_message(**kwargs: Any) -> str:
+def _smd_send_message(args: dict[str, Any], **_: Any) -> str:
     """Execute a send the gate has already authorized.
 
     By the time a handler runs, ``pre_tool_call`` has classified the recipients,
@@ -461,8 +488,33 @@ def _smd_send_message(**kwargs: Any) -> str:
     simply executes, so that path reached Graph directly — no recipient fence, no
     broker row. Leaving it advertised would have meant the fence covered only
     seats that withhold, which is the opposite of who needs it.
+
+    ``args`` IS POSITIONAL, and the payload is read from it. Hermes dispatches
+    ``entry.handler(args, **kwargs)``; this handler originally declared
+    ``(**kwargs)`` and so raised ``TypeError`` on every call, which is Sentry
+    SMD-OPERATOR-1B — the seat's only send tool, dead from the day it shipped.
+    Reading ``args`` rather than ``kwargs`` is also what makes the gate's own
+    mutations visible: ``on_pre_tool_call`` writes ``args[GRANT_ARG]`` and runs
+    ``_attach_html_body`` on this same dict before dispatch, so the html half of
+    a send and the grant marker arrive here only through the positional object.
     """
-    payload = dict(kwargs)
+    authored = _authored_email_adapter()
+    if authored is None:
+        # The config was READ and names no Email connector. Refuse plainly rather
+        # than falling through to the shared `agentmail` default, which on such a
+        # seat means a broker call for a mailbox and credential that were never
+        # provisioned — a soft "Not sent" the agent reads as a mild failure. The
+        # crash this tool used to raise was at least loud; a fix must not trade
+        # loud-and-broken for quiet-and-broken (ashton-price and smd both author
+        # no Email connector today). `_ADAPTER_UNREADABLE` deliberately does NOT
+        # refuse: a transient config read fault on a properly authored seat must
+        # not start declining sends.
+        return (
+            "Not sent: this engagement authors no Email connector, so there is no "
+            "mailbox to send from. Report this rather than retrying."
+        )
+
+    payload = dict(args)
     try:
         if _seat_email_adapter() == _ADAPTER_MSGRAPH:
             message_id = outbound_send.send_via_msgraph(payload)

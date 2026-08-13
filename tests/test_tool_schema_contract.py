@@ -145,3 +145,58 @@ def test_real_registry_emits_non_empty_parameters():
         deregister = getattr(registry, "deregister", None)
         if callable(deregister):
             deregister(probe_name)
+
+
+def test_real_registry_dispatches_the_payload_positionally():
+    """The dispatch contract itself, pinned where it can actually be falsified.
+
+    ``tests/test_tool_handler_dispatch_contract.py`` asserts every overlay handler
+    accepts ``handler(args, **kwargs)``, but it derives that shape from a Sentry
+    stack frame — it is a model of Hermes, not an observation of it. If Hermes
+    ever changed dispatch to, say, ``handler(**args)``, that guard would stay
+    green while every tool broke.
+
+    This closes the loop wherever Hermes IS importable: register a probe through
+    the same chokepoint the plugins use, dispatch it, and assert the tool
+    arguments arrived as a single positional dict. It skips in overlay CI (Hermes
+    core is not installed there) and runs on a seat and in staging, which is the
+    only place the premise is falsifiable at all.
+    """
+    registry_mod = pytest.importorskip(
+        "tools.registry",
+        reason="Hermes core not importable in overlay CI; staging tools[] pull is the gate",
+    )
+    registry = registry_mod.registry
+
+    probe_name = "smd_dispatch_contract_probe"
+    seen: list[tuple[tuple, dict]] = []
+
+    class _RealCtx:
+        def register_tool(self, **kwargs):
+            registry.register(**kwargs)
+
+    try:
+        register_wrapped_tool(
+            _RealCtx(),
+            name=probe_name,
+            toolset="smd_contract_probe",
+            schema={"type": "object", "properties": {"q": {"type": "string"}}},
+            handler=lambda *a, **k: seen.append((a, k)) or "{}",
+            description="probe tool for the dispatch contract test",
+        )
+        registry.dispatch(probe_name, {"q": "hello"})
+
+        assert seen, "the real registry never invoked the probe handler"
+        positional, _keyword = seen[0]
+        assert positional, (
+            "Hermes dispatched with NO positional argument. The overlay's handler "
+            "signatures and tests/test_tool_handler_dispatch_contract.py both assume "
+            "handler(args, **kwargs); if that changed, they are now wrong."
+        )
+        assert positional[0] == {"q": "hello"}, (
+            f"expected the tool arguments as the first positional dict, got {positional[0]!r}"
+        )
+    finally:
+        deregister = getattr(registry, "deregister", None)
+        if callable(deregister):
+            deregister(probe_name)
