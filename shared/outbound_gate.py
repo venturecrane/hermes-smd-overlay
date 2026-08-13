@@ -38,7 +38,7 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from shared import citation_filter
+from shared import citation_filter, identifier_filter
 from shared.fabrication_markers import FabricationMarkersError, load_markers
 
 logger = logging.getLogger(__name__)
@@ -114,11 +114,35 @@ def _is_law_or_indeterminate(vertical: str | None) -> bool:
     return False
 
 
+#: The one Tier-1 marker a provenance exemption applies to. Named as a constant
+#: so the narrowness is legible: the other thirteen markers are unaffected by
+#: anything a session read, because none of them describes a fact that CAN be
+#: read from a matter record. "We'll reach out" is not more true for having been
+#: read somewhere.
+_PROVENANCE_EXEMPT_MARKER = "specific-dollar-amount"
+
+
+def _unverified_money(body: str, allowed_money: Iterable[str] | None) -> list[str]:
+    """Dollar figures in ``body`` the agent did NOT read this session.
+
+    Empty list means every figure traces to a source read this session, which is
+    the only condition under which the ``specific-dollar-amount`` marker is
+    waived. An empty allowed set therefore returns every figure in the body —
+    fail-closed, and identical to today's behavior.
+    """
+    allowed = {str(a) for a in (allowed_money or ())}
+    found = identifier_filter.extract_money(body)
+    if not allowed:
+        return sorted({raw for raw, _canon in found})
+    return sorted({raw for raw, canon in found if canon not in allowed})
+
+
 def evaluate(
     body: str,
     cohort: str | None,
     vertical: str | None,
     allowed_case_names: Iterable[str] | None = None,
+    allowed_money: Iterable[str] | None = None,
 ) -> GateDecision:
     """Decide whether a draft ``body`` may be produced.
 
@@ -135,6 +159,20 @@ def evaluate(
             ss-console #1758). Exempts only the Tier-2 case-name pattern;
             fabricated-authority patterns (reporter cites, statutes, rules)
             and every Tier-1 marker are unaffected. Empty/None = no exemption.
+        allowed_money: Provenance-verified dollar FIGURES the agent actually read
+            this session (the runtime register's ``money()`` — ss-console#2258),
+            in :func:`identifier_filter.canon_money` form. Exempts ONLY the
+            Tier-1 ``specific-dollar-amount`` marker, and only when EVERY figure
+            in the body is verified. Empty/None = no exemption, which is exactly
+            today's behavior.
+
+            WHY THIS EXISTS. The marker is the regex ``\\$\\s?\\d`` — any dollar
+            sign followed by a digit — while ``demand-letter-drafter``'s own
+            SKILL.md authorizes "a specific dollar figure ... when it exists in
+            an authored source on the matter, and name that source in the same
+            sentence." The gate forbade what the skill permitted, so a demand
+            letter's medical specials were refused on the delivery path even
+            though the agent had just read them off the billing summary.
 
     Returns:
         A :class:`GateDecision`. ``allowed=False`` means the draft tool must be
@@ -182,14 +220,39 @@ def evaluate(
             tier="load_error",
         )
 
+    # Provenance exemption, applied to ONE marker and only when the whole body
+    # clears (ss-console#2258). Deliberately all-or-nothing: a body carrying one
+    # verified figure and one invented figure is not partly honest, and dropping
+    # the hit would let the invented one through beside the real one. The refusal
+    # names the unverified figures, because "your draft has a dollar amount" is
+    # not actionable and "$88,000.00 is in no source you read" is.
+    if marker_hits and any(h.marker_id == _PROVENANCE_EXEMPT_MARKER for h in marker_hits):
+        try:
+            unverified = _unverified_money(body, allowed_money)
+        except Exception:  # noqa: BLE001 — an exemption that cannot be computed is not granted
+            logger.exception("outbound_gate: money provenance check raised; keeping the marker hit")
+            unverified = ["(provenance check failed)"]
+        if not unverified:
+            marker_hits = [h for h in marker_hits if h.marker_id != _PROVENANCE_EXEMPT_MARKER]
+        # Otherwise the hit stands; the refusal below names the unverified figures.
+
     if marker_hits:
         hit_ids = tuple(h.marker_id for h in marker_hits)
         first = marker_hits[0]
+        detail = first.reason
+        if first.marker_id == _PROVENANCE_EXEMPT_MARKER:
+            missing = _unverified_money(body, allowed_money)
+            detail = (
+                f"{first.reason} Not traceable to anything read this session: "
+                f"{', '.join(missing[:5])}"
+                f"{' and more' if len(missing) > 5 else ''}. Re-read the source "
+                "record that carries the figure, or remove it."
+            )
         return GateDecision(
             allowed=False,
             reason=(
                 f"Refused: draft body contains a banned fabrication marker "
-                f"({first.marker_id}: {first.reason})"
+                f"({first.marker_id}: {detail})"
             ),
             audit_action=AUDIT_BLOCK,
             tier="tier1_marker",
