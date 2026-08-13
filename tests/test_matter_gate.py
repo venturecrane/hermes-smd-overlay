@@ -313,6 +313,92 @@ def test_mode_is_fail_closed_on_a_typo(monkeypatch) -> None:
     assert matter_gate.mode() == "report"
 
 
+# ---- posture parity (ss#2252) -----------------------------------------------
+#
+# THE DEFECT THESE CLOSE. This module was shipped claiming it was "additive and
+# SILENT when unauthored, matching the spec gate's precedent", in the module
+# docstring, two PR bodies, a Dockerfile bump comment, and verbally. The claim
+# was false — there is no CustomerConfig read anywhere here — and it was the
+# argument used to say the pin could not disturb a client seat during a rebuild
+# window. ss#2252 withdrew the claim rather than implementing it.
+#
+# Withdrawing prose fixes the statement once. These tests are what stop the two
+# drifting apart again, and they are deliberately written in BOTH directions:
+# one fails if the behaviour changes without the prose, the other fails if the
+# prose changes without the behaviour. A guard on only one side would let the
+# next author reintroduce the claim in a docstring and stay green.
+#
+# If someone later BUILDS the authored posture (route 1 in ss#2252, which the
+# "no imposed defaults" doctrine implies is the right end state), these fail —
+# correctly. They are not a veto on that work; they force the claim and the code
+# to move in the same commit.
+
+
+def test_gate_is_on_by_default_not_silent_when_unauthored(monkeypatch) -> None:
+    """The behaviour half: unset env means BLOCK, not silence.
+
+    The pre-existing typo test never covered the unset case, which is the one the
+    false claim was about — a seat that authored nothing. A gate that returned
+    something falsy here would be the "silent when unauthored" property, and its
+    absence is precisely what ss#2252 recorded.
+    """
+    monkeypatch.delenv("SMD_MATTER_GATE_MODE", raising=False)
+    assert matter_gate.mode() == "block"
+
+
+def test_module_performs_no_authored_posture_read() -> None:
+    """The structural half: no CustomerConfig read in CODE, prose excluded.
+
+    Parsed with ast rather than grepped on purpose. The docstring *names*
+    CustomerConfig when explaining the correction, so a text search would either
+    trip on that sentence or be loosened until it caught nothing. The AST sees
+    imports and attribute access and cannot see prose at all.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(matter_gate))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.add(node.module or "")
+            names.update(a.name for a in node.names)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+
+    offenders = {n for n in names if "customerconfig" in n.lower() or "customer_config" in n.lower()}
+    assert not offenders, (
+        f"matter_gate now reads authored posture ({sorted(offenders)}). That is a legitimate "
+        "change (ss#2252 route 1), but the module docstring still records that no such read "
+        "exists — update the claim in the same commit as the code."
+    )
+
+
+def test_docstring_still_states_the_true_posture() -> None:
+    """The prose half, asserted POSITIVELY rather than as a banned phrase.
+
+    The first draft of this test banned "silent when unauthored" unless the
+    docstring also carried withdrawal markers. That is defeatable by the very
+    history it documents: the withdrawal paragraph is permanent, so its markers
+    are always present, so the ban could never fire again. A guard that cannot
+    fire has measured nothing.
+
+    Pinning the CORRECTION instead has no such hole. To reassert the false claim
+    an author has to delete this sentence, and deleting it fails here.
+    """
+    doc = " ".join((matter_gate.__doc__ or "").lower().split())
+    assert "no customerconfig read" in doc, (
+        "matter_gate's docstring no longer records that the module performs no "
+        "authored-posture read. That sentence is the ss#2252 correction: the gate is ON "
+        "by default and SMD_MATTER_GATE_MODE is the only lever. If the authored posture "
+        "was actually built, update this test and the claim together."
+    )
+
+
 def test_evaluation_never_raises() -> None:
     v = matter_gate.evaluate(session_id=SID, body=None, recipients={CLIENT_A})  # type: ignore[arg-type]
     assert v.status in {"not_applicable", "unresolved"}
