@@ -184,8 +184,14 @@ _SEAT_FACTS_DESCRIPTION = (
     "The matters and inbox counts are deliberately not read here — observe "
     "those yourself with your own connector tools this turn and report only "
     "what you observed. Print the 'counts' line in your reply, both depths, so "
-    "a mis-parse is visible to the reader. The result carries no run history, "
-    "no client names, and no matter identifiers, and you must not add any."
+    "a mis-parse is visible to the reader. On depth 'introduction' also state "
+    "the 'working_rules' section in the firm's own words — how you send, what "
+    "you refuse to make up, and that you do not give legal advice — because "
+    "that section is what sets a firm's expectations before it discovers a "
+    "refusal and reads it as a malfunction. Say those rules as the section "
+    "reports them for THIS seat; two of them vary per seat, which is why they "
+    "are read rather than fixed. The result carries no run history, no client "
+    "names, and no matter identifiers, and you must not add any."
 )
 
 #: One line, appended on webhook turns from a rostered sender whose message
