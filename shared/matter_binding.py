@@ -25,6 +25,14 @@ turn the gate into a generator of confident wrong verdicts.
 Hence ``complete`` is per-matter and is only ever set by the first direction. A
 recipient absent from an incomplete set is *unresolved*, never *not a party*.
 
+A third source ADDS parties and closes nothing: ``get_roles_on_matter`` /
+``get_relationships_on_matter``, the reads ADR 0086 names canonical for "who is
+on this matter". A role record is where opposing counsel and adjusters attach —
+parties on neither ``clientIds`` nor ``otherSideIds``, so invisible to the first
+direction, so liable to be called outsiders on a matter whose party list had
+closed. Add-only is the whole safety argument: it can make an address a proven
+party, never a proven non-party.
+
 Why the second direction exists at all: measured on the pilot 2026-08-10
 (vfy_01KZQ200CB8XE84E1M38PQ5WGB), ``get_matter`` does not fire on reply turns —
 4 of 77 replies against a 3 of 77 control — and replies are ~74% of all sends.
@@ -360,6 +368,30 @@ def record_from_read(session_id: str, result: Any) -> None:
                             # 86 reply turns, get_matter on 8).
                             if isinstance(item.get("number"), str):
                                 m.add_alias(item["number"], str(mid))
+            # Direction 3 — a ROLE / RELATIONSHIP record: "this person holds a
+            # role on this matter" (ADR 0086's named seeding sources,
+            # get_roles_on_matter / get_relationships_on_matter).
+            #
+            # ADD-ONLY, and never closing. The direction it moves the gate is the
+            # one the ADR ranks above the true positive: a party who is neither on
+            # `clientIds` nor `otherSideIds` — opposing counsel, an adjuster, the
+            # OUTSIDE recipients that must pair — was invisible to Direction 1, so
+            # on a matter whose party list HAD closed, a correct letter to them
+            # read as a mismatch and named a legitimate recipient an outsider. A
+            # roles read can only ever make more addresses provable parties.
+            #
+            # The key is the connector's explicit assertion, not an inference from
+            # co-occurrence: `party_of_matter` is attached in code from a resolved
+            # contact fetch (smokeball server.py `_attach_matter_party_join`). A
+            # record the connector could not resolve carries no key, supplies no
+            # membership, and leaves the verdict *unresolved*.
+            party_matter = node.get("party_of_matter")
+            if party_matter:
+                addr = _norm(node.get("email"))
+                if addr:
+                    m.add(str(party_matter), [addr], complete=False)
+                    if isinstance(node.get("matterNumber"), str):
+                        m.add_alias(node["matterNumber"], str(party_matter))
     except Exception:  # noqa: BLE001 — capture must never perturb the tool path
         logger.debug("matter_binding: read capture failed", exc_info=True)
 
