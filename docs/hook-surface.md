@@ -89,6 +89,8 @@ hooks:
 
 **Return-value semantics:** Observer only. Returns are collected but not interpreted by the firing site.
 
+**Observer-only is load-bearing, and it cost a delivery.** Anything this hook decides is invisible to the model unless some other seam carries it. `hermes-smd-reply` makes its send/hold decision here, wrote `REPLY_HELD` to D1 and Sentry, and returned `None` — so on 2026-08-13 the Operator filed a demand letter on 2026-PI-104, had its reply held on a Tier-1 marker, and the turn ended 23 seconds later with the model believing `create_draft -> ok` (ss-console#2367). The authored redraft-once recovery in `demand-letter-drafter/SKILL.md` could not fire against a signal that never arrived. The fix is `transform_tool_result` (hook #5 in the appendix), which fires immediately after this hook for the same `tool_call_id` and CAN replace the result.
+
 ### 3. `pre_llm_call`
 
 **Purpose (overlay):** voice-sample injection (`hermes-smd-voice` — adds per-customer voice samples to the user message before the model sees it) AND untrusted-inbound quarantine (`hermes-smd-inbound`, ADR 0027 — drains the per-session pending inbound register and injects each item wrapped in a nonce-fenced quarantine block). Both are observers that contribute injected context; returns are merged (no "first wins"), so the two plugins coexist on this hook. This is the SINGLE chokepoint for inbound quarantine — it also fires for skill-triggered LLM calls, so no per-skill duplication is needed.
@@ -198,7 +200,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `pre_tool_call` | yes | trust ceiling |
 | `post_tool_call` | yes | audit |
 | `transform_terminal_output` | no | terminal-output canonicalization (not relevant) |
-| `transform_tool_result` | yes | inbound quarantine of untrusted tool-result reads (`hermes-smd-inbound`, ADR 0027 / OP-P0-4 read fencing) |
+| `transform_tool_result` | yes | inbound quarantine of untrusted tool-result reads (`hermes-smd-inbound`, ADR 0027 / OP-P0-4 read fencing) + held-reply notification (`hermes-smd-reply`, ss-console#2367 — the only seam that can put a delivery-path hold in front of the model in the same turn). The two never contend for the single replacing return: `create_draft` is a write and is not in the fenced-read set. |
 | `transform_llm_output` | yes | Layer-2 structural voice reshape — `hermes-smd-voice` fires `transform_draft()` post-LLM; first non-empty string returned replaces the response |
 | `pre_llm_call` | yes | voice sample injection + inbound quarantine (ADR 0027) |
 | `post_llm_call` | yes | LLM audit |

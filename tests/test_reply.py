@@ -1257,3 +1257,375 @@ def test_report_mode_records_nothing_and_holds_nothing(relay_mod, monkeypatch) -
     assert len(sent) == 1
     assert not [m for a, m in d1.events() if a == "REPLY_HELD"]
     matter_binding._reset_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# 15. The money register on the reply channel (ss-console#2367)
+#
+# The caption half above fixed one exemption on one path. ss#2258 then gave
+# ``specific-dollar-amount`` a provenance-scoped exemption on the DRAFTING path
+# and said, deliberately, "no change to any other output path". This is the
+# consequence, one path over: on 2026-08-13 the Operator read fifteen documents
+# on 2026-PI-104, filed the demand letter through the checked seam, and its
+# reply naming the filing was held ``fabrication:tier1_marker`` on the Kaiser
+# lien and the MedFin payoff. Both figures were read that session off the firm's
+# own records; both were cited to their source in the sentence that carried
+# them. The firm asked for a demand letter and got silence.
+#
+# Both directions are tested, because a narrowing that only proves the permit
+# direction is a hole: an INVENTED figure in a reply must still block.
+# ---------------------------------------------------------------------------
+
+# The two documents the Operator actually read that session, in the shape a
+# read returns them.
+_KAISER_READ = (
+    "Kaiser Third-Party Liability Assertion, dated 2026-07-14: total asserted lien $9,310.02."
+)
+_MEDFIN_READ = "MedFin Payoff Statement, dated 2026-07-29: payoff amount $12,500.00."
+
+
+def _reply_with_money(mod, session_id, text, message_id, *, tool_call_id=None):
+    """Run one create_draft through the relay for a body carrying figures."""
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        session_id,
+        inbound.InboundOrigin("greg@whitfield.example", message_id, inbox_id="inbox_x"),
+    )
+    kwargs = {
+        "tool_name": "agentmail:create_draft",
+        "args": _draft(["greg@whitfield.example"], text=text),
+        "session_id": session_id,
+    }
+    if tool_call_id is not None:
+        kwargs["tool_call_id"] = tool_call_id
+    mod.on_post_tool_call(**kwargs)
+
+
+def test_a_figure_read_this_session_is_relayable(relay_mod) -> None:
+    """Direction one, and the delivery that was lost. A figure traced to a
+    document read this session passes on the reply path exactly as it does on
+    the drafting path."""
+    from shared import provenance
+
+    mod, d1, sent = relay_mod
+    provenance._reset_for_tests()
+    session_id = "s_money_ok"
+    provenance.note_session(session_id)
+    provenance.record_read(session_id, _KAISER_READ)
+    provenance.record_read(session_id, _MEDFIN_READ)
+    _reply_with_money(
+        mod,
+        session_id,
+        "The demand is filed on the matter. Two figures need your resolution: "
+        "the Kaiser lien of $9,310.02 per the Third-Party Liability Assertion "
+        "dated 2026-07-14, and the MedFin payoff of $12,500.00 per the payoff "
+        "statement dated 2026-07-29.",
+        "msg_money_ok",
+    )
+    assert len(sent) == 1, [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert not [m for a, m in d1.events() if a == "REPLY_HELD"]
+    provenance._reset_for_tests()
+
+
+def test_an_invented_figure_in_a_reply_still_blocks(relay_mod) -> None:
+    """Direction two. Without this the narrowing is a hole: the exemption is
+    provenance, not amnesty, and a figure in no source the agent read is exactly
+    the fabrication the gate exists for."""
+    from shared import provenance
+
+    mod, d1, sent = relay_mod
+    provenance._reset_for_tests()
+    session_id = "s_money_invented"
+    provenance.note_session(session_id)
+    provenance.record_read(session_id, _KAISER_READ)
+    _reply_with_money(
+        mod,
+        session_id,
+        "The demand is filed. We value this claim at $88,000.00 to resolve.",
+        "msg_money_invented",
+    )
+    assert sent == [], "an invented figure was relayed to a client"
+    assert [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"] == [
+        "fabrication:tier1_marker"
+    ]
+    provenance._reset_for_tests()
+
+
+def test_one_invented_figure_holds_a_reply_full_of_verified_ones(relay_mod) -> None:
+    """All-or-nothing on this path too. A body with one read figure and one
+    invented figure is not partly honest, and waiving the marker there would
+    let the invented one ride out beside the real one."""
+    from shared import provenance
+
+    mod, d1, sent = relay_mod
+    provenance._reset_for_tests()
+    session_id = "s_money_mixed"
+    provenance.note_session(session_id)
+    provenance.record_read(session_id, _KAISER_READ)
+    _reply_with_money(
+        mod,
+        session_id,
+        "The Kaiser lien is $9,310.02 per the assertion on the matter, and we "
+        "will demand $88,000.00.",
+        "msg_money_mixed",
+    )
+    assert sent == []
+    assert [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"] == [
+        "fabrication:tier1_marker"
+    ]
+    provenance._reset_for_tests()
+
+
+def test_a_session_that_read_nothing_gets_no_exemption(relay_mod) -> None:
+    """The fail-closed default is unchanged. An empty register exempts nothing,
+    so this path degrades to exactly the behaviour that shipped before."""
+    from shared import provenance
+
+    mod, d1, sent = relay_mod
+    provenance._reset_for_tests()
+    session_id = "s_money_empty"
+    provenance.note_session(session_id)
+    _reply_with_money(
+        mod,
+        session_id,
+        "The Kaiser lien is $9,310.02 per the assertion on the matter.",
+        "msg_money_empty",
+    )
+    assert sent == []
+    assert [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"] == [
+        "fabrication:tier1_marker"
+    ]
+    provenance._reset_for_tests()
+
+
+def test_the_money_register_does_not_widen_the_other_markers(relay_mod) -> None:
+    """Scope control. The exemption is one marker wide: a full money register
+    does not rescue a body that trips a different Tier-1 marker."""
+    from shared import provenance
+
+    mod, d1, sent = relay_mod
+    provenance._reset_for_tests()
+    session_id = "s_money_other"
+    provenance.note_session(session_id)
+    provenance.record_read(session_id, _KAISER_READ)
+    _reply_with_money(
+        mod,
+        session_id,
+        "The lien is $9,310.02. We'll reach out to schedule kickoff.",
+        "msg_money_other",
+    )
+    assert sent == []
+    assert [m["reason"] for a, m in d1.events() if a == "REPLY_HELD"] == [
+        "fabrication:tier1_marker"
+    ]
+    provenance._reset_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# 16. A hold the agent can act on (ss-console#2367)
+#
+# ``post_tool_call`` returns are collected and ignored by the firing site
+# (docs/hook-surface.md §2), so every hold this plugin made went to two places
+# the model cannot read: a D1 row and a Sentry message. That is why the authored
+# redraft-once recovery in demand-letter-drafter/SKILL.md never fired on
+# 2026-08-13. It was not a compliance failure; the signal never arrived.
+# ``transform_tool_result`` fires immediately after, for the same tool_call_id,
+# and its first str return replaces the tool result. These tests pin that the
+# hold reaches that surface, that a delivered reply says nothing, and that a
+# reply queued for automatic release is never reported as undelivered.
+# ---------------------------------------------------------------------------
+
+_DRAFT_RESULT = '{"draft_id": "dft_123", "status": "ok"}'
+
+
+def _transform(mod, tool_call_id, result=_DRAFT_RESULT, tool_name="agentmail:create_draft"):
+    return mod.on_transform_tool_result(
+        tool_name=tool_name,
+        args={},
+        result=result,
+        session_id="s_notice",
+        tool_call_id=tool_call_id,
+    )
+
+
+def test_registers_transform_tool_result(fake_ctx, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("SMD_CUSTOMER_YAML_PATH", str(tmp_path / "absent.yaml"))
+    mod = load_plugin("hermes-smd-reply")
+    mod.register(fake_ctx)
+    assert "transform_tool_result" in fake_ctx.registered
+
+
+def test_a_held_reply_is_told_to_the_agent(relay_mod) -> None:
+    """The whole issue in one assertion: the turn that held the reply now ends
+    with the hold in the model's context instead of ``create_draft -> ok``."""
+    from shared import provenance
+
+    mod, _d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    provenance._reset_for_tests()
+    session_id = "s_notice_held"
+    provenance.note_session(session_id)
+    _reply_with_money(
+        mod,
+        session_id,
+        "We value this claim at $88,000.00.",
+        "msg_notice_held",
+        tool_call_id="tc_held",
+    )
+    assert sent == []
+    out = _transform(mod, "tc_held")
+    assert isinstance(out, str)
+    assert "WAS NOT SENT" in out
+    assert "fabrication:tier1_marker" in out
+    assert "greg@whitfield.example" in out
+    assert "Redraft once" in out
+    # The draft id survives: the agent needs it to update the draft it is about
+    # to redraft, so the notice is appended, never substituted.
+    assert "dft_123" in out
+    provenance._reset_for_tests()
+
+
+def test_the_notice_never_carries_the_draft_body(relay_mod) -> None:
+    """Same rule as the audit row. The hold is reported by reason, never by
+    quoting what was withheld."""
+    from shared import provenance
+
+    mod, _d1, _sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    provenance._reset_for_tests()
+    body = "We value this claim at $88,000.00."
+    _reply_with_money(mod, "s_notice_body", body, "msg_notice_body", tool_call_id="tc_body")
+    out = _transform(mod, "tc_body")
+    assert out is not None
+    assert "$88,000.00" not in out
+    assert body not in out
+    provenance._reset_for_tests()
+
+
+def test_a_delivered_reply_says_nothing(relay_mod) -> None:
+    """The control that makes the test above mean something: a notice on every
+    draft would satisfy "the agent is told" while telling it nothing true."""
+    mod, _d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    _record_origin(message_id="msg_notice_sent")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        session_id="s1",
+        tool_call_id="tc_sent",
+    )
+    assert len(sent) == 1
+    assert _transform(mod, "tc_sent") is None
+
+
+def test_a_hold_is_told_exactly_once(relay_mod) -> None:
+    """One hold, one telling. A second transform for the same call (a retried
+    dispatch, another registrant) must not re-announce it."""
+    from shared import provenance
+
+    mod, _d1, _sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    provenance._reset_for_tests()
+    _reply_with_money(
+        mod, "s_notice_once", "We value this claim at $88,000.00.", "msg_once", tool_call_id="tc_1"
+    )
+    assert _transform(mod, "tc_1") is not None
+    assert _transform(mod, "tc_1") is None
+    provenance._reset_for_tests()
+
+
+def test_a_hold_is_told_only_on_the_call_that_produced_it(relay_mod) -> None:
+    """Keyed on the dispatch, not the session: an unrelated draft call in the
+    same turn is not handed someone else's hold."""
+    from shared import provenance
+
+    mod, _d1, _sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    provenance._reset_for_tests()
+    _reply_with_money(
+        mod,
+        "s_notice_key",
+        "We value this claim at $88,000.00.",
+        "msg_key",
+        tool_call_id="tc_mine",
+    )
+    assert _transform(mod, "tc_other") is None
+    assert _transform(mod, "tc_mine") is not None
+    provenance._reset_for_tests()
+
+
+def test_a_non_draft_result_is_never_touched(relay_mod) -> None:
+    mod, _d1, _sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    assert _transform(mod, "tc_x", tool_name="mcp_smokeball_read_document") is None
+
+
+def test_a_queued_reply_is_not_reported_as_undelivered(relay_mod) -> None:
+    """A rate-held reply that WILL be released is not silence. Reporting it as
+    undelivered would provoke a redraft and deliver the answer twice."""
+    mod, d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    mod._YAML_PATH.write_text(_RELEASE_YAML)
+    for i in range(3):
+        inbound.SESSION_INBOUND_ORIGIN.record(
+            f"s_q{i}",
+            inbound.InboundOrigin("greg@whitfield.example", f"msg_q{i}", inbox_id="inbox_x"),
+        )
+        mod.on_post_tool_call(
+            tool_name="agentmail:create_draft",
+            args=_draft(["greg@whitfield.example"]),
+            session_id=f"s_q{i}",
+            tool_call_id=f"tc_q{i}",
+        )
+    assert len(sent) == 2
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert [h["held_for_release"] for h in held] == [True]
+    assert _transform(mod, "tc_q2") is None, "a queued reply was reported as lost"
+
+
+def test_a_dropped_rate_hold_is_still_told(relay_mod) -> None:
+    """The other half: with no release authored the reply is genuinely dropped,
+    and that IS silence the agent has to know about."""
+    mod, _d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    mod._YAML_PATH.write_text(_ROSTERED_YAML + "send_policy:\n  reply:\n    per_sender_max: 1\n")
+    for i in range(2):
+        inbound.SESSION_INBOUND_ORIGIN.record(
+            f"s_d{i}",
+            inbound.InboundOrigin("greg@whitfield.example", f"msg_d{i}", inbox_id="inbox_x"),
+        )
+        mod.on_post_tool_call(
+            tool_name="agentmail:create_draft",
+            args=_draft(["greg@whitfield.example"]),
+            session_id=f"s_d{i}",
+            tool_call_id=f"tc_d{i}",
+        )
+    assert len(sent) == 1
+    out = _transform(mod, "tc_d1")
+    assert out is not None and "rate_limited" in out
+
+
+def test_a_second_hold_for_one_message_stops_the_redraft_loop(relay_mod) -> None:
+    """The authored recovery says redraft ONCE and then deliver the minimal
+    factual note. A notice that said "redraft" forever would author a loop."""
+    from shared import provenance
+
+    mod, _d1, _sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    provenance._reset_for_tests()
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "s_loop",
+        inbound.InboundOrigin("greg@whitfield.example", "msg_loop", inbox_id="inbox_x"),
+    )
+    for n, call in enumerate(("tc_r1", "tc_r2")):
+        mod.on_post_tool_call(
+            tool_name="agentmail:create_draft",
+            args=_draft(["greg@whitfield.example"], text=f"We value this claim at $88,00{n}.00."),
+            session_id="s_loop",
+            tool_call_id=call,
+        )
+    first = _transform(mod, "tc_r1")
+    second = _transform(mod, "tc_r2")
+    assert first is not None and "Redraft once" in first
+    assert second is not None
+    assert "Do NOT redraft" in second, second
+    provenance._reset_for_tests()

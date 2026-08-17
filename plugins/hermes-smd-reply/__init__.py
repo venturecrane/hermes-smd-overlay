@@ -6,12 +6,19 @@ sender is a colleague on the roster — actually sends it. This plugin is that
 last step: it relays the agent's already-governed draft back to the verified
 inbound sender, OUTSIDE the model's governed tool path, with fixed behavior.
 
-Attaches to one hook at the pinned Hermes ref (v2026.5.16):
+Attaches to two hooks at the pinned Hermes ref (v2026.5.16):
 
 - ``post_tool_call`` (``model_tools.py:826-836``) — fires after every tool
   dispatch. The relay acts only on the AgentMail draft-creation tool, which
   reaches the hook under its live Hermes MCP runtime name
   ``mcp_agentmail_create_draft`` (``mcp_<server>_<tool>``).
+- ``transform_tool_result`` (``model_tools.py:847-857``) — fires immediately
+  after ``post_tool_call`` for the SAME ``tool_call_id``, and its first ``str``
+  return REPLACES the tool result. This is how a hold becomes something the
+  agent can act on (ss-console#2367): ``post_tool_call`` returns are collected
+  and ignored by the firing site, so before this the agent's turn saw
+  ``create_draft -> ok`` while the reply sat undelivered, and no authored
+  recovery could fire against a signal that never arrived.
 
 What it does:
 
@@ -47,6 +54,11 @@ What it does:
      back to draft (reason only — never the body), ``REPLY_FAILED`` on a send
      error, ``MATTER_UNRESOLVED`` when membership could be neither confirmed nor
      denied. Digest + recipient + message id only; never the content.
+  7. **The hold is told to the agent (ss-console#2367).** A hold that means the
+     reply is NOT being delivered is appended to the draft tool's own result at
+     ``transform_tool_result``, in the same turn, naming the reason and the
+     recovery. A rate-hold durably queued for automatic release says nothing:
+     that reply IS going out, and announcing it would provoke a duplicate.
 
 It defeats NO agent floor — the trust gate, taint-gate, content floor, and
 fabrication gate are byte-for-byte unchanged. "Autonomous reply" lives in this
@@ -61,6 +73,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +87,7 @@ from shared.secrets import get_secret
 
 from . import (
     held_store,
+    notice,
     relay,  # noqa: F401 - surface for tests
     sweeper,
 )
@@ -171,6 +185,20 @@ def _send_msgraph_reply(graph_message_id: str, comment: str) -> str:
     return "(sent via msgraph, id unavailable)"
 
 
+# Holds the agent is told about (ss-console#2367). Populated by ``_held`` under
+# the tool_call_id of the dispatch being processed, drained ONCE by
+# ``on_transform_tool_result``. Module-level like every other piece of this
+# plugin's register-time state; bounded and thread-safe (see notice.py).
+_HOLD_NOTICES = notice.HoldNoticeStore()
+
+# The tool_call_id of the dispatch this thread is inside. ``_held`` is called
+# from eight sites with a signature that predates the notice, so the id rides
+# a thread-local rather than eight touched call sites. Set at hook entry and
+# cleared on the way out; an absent id degrades to the empty key, which the
+# transform hook still matches for the very next drained call in the same turn.
+_CURRENT_CALL = threading.local()
+
+
 def _emit_reply_event(*, action_type: str, metadata: dict) -> None:
     """Write one reply-channel audit row directly via D1Client (mirror-don't-gate).
 
@@ -215,6 +243,22 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
             **extra,
         },
     )
+    # ss-console#2367: the audit row is the record, not the telling. Record the
+    # hold so ``on_transform_tool_result`` can put it in front of the model in
+    # this same turn. A reply durably enqueued for automatic release is NOT
+    # silence and gets no notice: it is going out on its own, and a redraft
+    # would duplicate it.
+    if extra.get("held_for_release"):
+        return
+    try:
+        _HOLD_NOTICES.record(
+            tool_call_id=getattr(_CURRENT_CALL, "tool_call_id", "") or "",
+            reason=reason,
+            recipient=origin.sender_address,
+            message_id=origin.message_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — telling must never break the hook
+        logger.warning("hermes-smd-reply: hold notice not recorded (%s)", exc)
 
 
 def _notify_hold(
@@ -323,6 +367,11 @@ def on_post_tool_call(**kwargs: Any) -> None:
     try:
         if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
             return
+
+        # Bind this dispatch's id so any hold below is recorded against the call
+        # whose result the agent is about to read (ss-console#2367).
+        tool_call_id = kwargs.get("tool_call_id")
+        _CURRENT_CALL.tool_call_id = tool_call_id if isinstance(tool_call_id, str) else ""
 
         # (0) The draft must actually exist. ``post_tool_call`` fires after every
         # dispatch, including one that returned an error, and the relay used to
@@ -463,22 +512,33 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # matters read from Smokeball was overturned here as
         # fabrication:tier2_citation, leaving the sender with silence. A fault
         # degrades to the empty register — no exemption, today's behaviour.
+        #
+        # ss-console#2367 adds the MONEY half of the same register. ss#2258 gave
+        # ``specific-dollar-amount`` a provenance-scoped exemption on the
+        # drafting path only, so this path still refused what the skill permits:
+        # a demand letter was filed on 2026-PI-104 and the reply naming it was
+        # held on the Kaiser lien and the MedFin payoff, both read this session
+        # off the firm's own records and both cited to their source in the
+        # sentence that carried them. The firm asked for a letter and got
+        # silence. One register, read once, feeding both exemptions.
         try:
-            allowed_captions = provenance.register_for(
-                provenance.resolve_session(session_id)
-            ).captions()
+            _register = provenance.register_for(provenance.resolve_session(session_id))
+            allowed_captions = _register.captions()
+            allowed_money = _register.money()
         except Exception:  # noqa: BLE001 — an unreadable register grants nothing
             logger.debug(
                 "hermes-smd-reply: provenance register unavailable; no caption exemption",
                 exc_info=True,
             )
             allowed_captions = frozenset()
+            allowed_money = frozenset()
         gate = relay.gate_body(
             scan_text,
             vertical=vertical,
             cohort=_CUSTOMER_SLUG,
             internal_recipient=internal,
             allowed_case_names=allowed_captions,
+            allowed_money=allowed_money,
         )
         if not gate.allowed:
             _held(gate.reason, origin, categories=list(gate.categories))
@@ -675,6 +735,46 @@ def on_post_tool_call(**kwargs: Any) -> None:
         )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-reply: post_tool_call handler error: %s", exc)
+    finally:
+        _CURRENT_CALL.tool_call_id = ""
+
+
+def on_transform_tool_result(**kwargs: Any) -> str | None:
+    """Tell the agent, in this turn, that its reply was held (ss-console#2367).
+
+    Hermes contract (``model_tools.py:847-861``): the first hook return that is
+    a ``str`` REPLACES the tool result, and this hook fires immediately after
+    ``post_tool_call`` for the same ``tool_call_id``
+    (``plugins/hermes-smd-hook-probe/README.md:67``). So the hold reaches the
+    model attached to the very call that produced it, in-band, before the turn
+    can end.
+
+    Returns ``None`` — leaving the result untouched — for every tool that is not
+    a draft creation and for every draft that was relayed, held for automatic
+    release, or never reached the relay at all. The only str this returns is the
+    draft's own result with the hold appended; the draft id is preserved because
+    the agent needs it to update the draft it is about to redraft.
+
+    ``hermes-smd-inbound`` also registers this hook, but ``create_draft`` is not
+    in its fenced-read set (it is a write), so it returns ``None`` here and the
+    two never contend for the single replacing return.
+    """
+    try:
+        if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
+            return None
+        tool_call_id = kwargs.get("tool_call_id")
+        held = _HOLD_NOTICES.take(tool_call_id if isinstance(tool_call_id, str) else "")
+        if held is None:
+            return None
+        result = kwargs.get("result")
+        return notice.append_notice(result if isinstance(result, str) else "", held)
+    except Exception as exc:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.warning(
+            "hermes-smd-reply: transform_tool_result raised (%s); the hold stands, "
+            "the agent is simply not told about it",
+            exc,
+        )
+        return None
 
 
 def _release_send(row: held_store.HeldReply) -> str:
@@ -770,7 +870,7 @@ def _start_held_release() -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point. Wires ``post_tool_call``.
+    """Plugin entry point. Wires ``post_tool_call`` + ``transform_tool_result``.
 
     Resolves the send infrastructure at register time — the AgentMail API key,
     the customer slug, the audit binding, the rate-limiter — and sets
@@ -815,8 +915,12 @@ def register(ctx) -> None:
     _start_held_release()
     _INFRA_READY = True
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    # ss-console#2367: a hold the agent is never told about is silence to the
+    # person who wrote in. This is the seam that tells it, in the same turn.
+    ctx.register_hook("transform_tool_result", on_transform_tool_result)
     logger.info(
         "hermes-smd-reply registered (infra_ready=True, customer=%s); "
-        "replies gated on the live organization roster (scope.inbound_allow_from)",
+        "replies gated on the live organization roster (scope.inbound_allow_from); "
+        "held replies reported to the agent at transform_tool_result",
         _CUSTOMER_SLUG,
     )

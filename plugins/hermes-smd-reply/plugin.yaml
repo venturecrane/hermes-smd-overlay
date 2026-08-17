@@ -13,5 +13,10 @@ requires_env:
   - SMD_D1_AUDIT_BINDING
 provides_hooks:
   - post_tool_call
+  # ss-console#2367: a held reply is reported to the agent on the draft tool's
+  # own result, in the same turn. post_tool_call returns are ignored by the
+  # firing site, so the hold was invisible to the model until this attachment.
+  - transform_tool_result
 hooks:
   - post_tool_call
+  - transform_tool_result
