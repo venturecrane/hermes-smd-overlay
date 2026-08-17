@@ -528,3 +528,131 @@ def test_contact_closure_does_not_close_the_matter_axis() -> None:
     assert not matter_binding.membership_for(SID).is_closed(M_B)
     v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_B}", recipients={CLIENT_B})
     assert v.status == "unresolved"
+
+
+# ---- the ROLES axis (ADR 0086's named seeding sources) ----------------------
+#
+# ``get_roles_on_matter`` / ``get_relationships_on_matter`` are the reads ADR 0086
+# names canonical for "who is on this matter", and until the connector landed the
+# (matterNumber, email) join on them they taught this register nothing: a role
+# record names its contact by id, and the matter appears only in the request path.
+#
+# Roles seeding is ADD-ONLY — it can make an address a proven party, never a
+# proven non-party — so the false-positive control (a roles-known party PASSES on
+# a closed matter) is the case that outranks the true positive here, per ADR 0086
+# accepted gap #4.
+
+COUNSEL = "counsel@opposing.example"
+
+
+def _roles_read(matter_id: str, *emails: str, number: str | None = None) -> None:
+    """What get_roles_on_matter returns once the connector lands the join."""
+    matter_binding.record_from_read(
+        SID,
+        {
+            "value": [
+                dict(
+                    {"id": f"role-{i}", "party_of_matter": matter_id, "email": email},
+                    **({"matterNumber": number} if number else {}),
+                )
+                for i, email in enumerate(emails)
+            ]
+        },
+    )
+
+
+def test_roles_read_makes_a_non_client_party_provable() -> None:
+    # THE CONTROL, and the reason this seeding exists. Opposing counsel sits on
+    # neither clientIds nor otherSideIds, so `parties` never carried them: a
+    # correct letter to counsel on a matter whose party list had CLOSED came back
+    # a mismatch, naming a legitimate recipient an outsider. With the roles read in
+    # the same turn, that send passes.
+    _closed(M_A, CLIENT_A)
+    _roles_read(M_A, CLIENT_A, COUNSEL)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body=f"Regarding matter {M_A}, our client's response to your demand.",
+        recipients={COUNSEL},
+    )
+    assert v.status == "ok"
+    assert not v.should_withhold
+
+
+def test_roles_seeded_party_still_mismatches_on_another_matter() -> None:
+    # The kill test the control makes meaningful. Counsel is a party to M_A only,
+    # and M_B's own party list is closed, so M_B's content addressed to counsel is
+    # a proven mismatch — the seeding widens nothing past the matter it read.
+    _roles_read(M_A, COUNSEL)
+    _closed(M_B, CLIENT_B)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body=f"Regarding matter {M_B}, please find the deposition summary attached.",
+        recipients={COUNSEL},
+    )
+    assert v.status == "mismatch"
+    assert v.should_withhold
+    assert COUNSEL in v.reason
+
+
+def test_roles_read_teaches_the_number_to_id_join() -> None:
+    # Correspondence cites the NUMBER; the connector keys everything by the id. A
+    # roles read carrying both performs that join, so a number-cited body is
+    # checkable against the party the same read proved — both directions.
+    _closed(M_A, CLIENT_A)
+    _roles_read(M_A, CLIENT_A, COUNSEL, number=NUM_A)
+    ok = matter_gate.evaluate(
+        session_id=SID, body=f"Re: {NUM_A} — response enclosed.", recipients={COUNSEL}
+    )
+    assert ok.status == "ok"
+    bad = matter_gate.evaluate(
+        session_id=SID, body=f"Re: {NUM_A} — response enclosed.", recipients={CLIENT_B}
+    )
+    assert bad.status == "mismatch"
+    assert bad.should_withhold
+
+
+def test_a_roles_read_never_closes_a_matter() -> None:
+    # A roles listing is not provably the whole membership of a matter (it pages,
+    # and a party can exist with no role record). If it closed the set, a paged
+    # response would withhold correct sends to everyone it left out.
+    _roles_read(M_A, COUNSEL)
+    assert not matter_binding.membership_for(SID).is_closed(M_A)
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_A}", recipients={CLIENT_A})
+    assert v.status == "unresolved"
+    assert not v.should_withhold
+
+
+def test_an_unenriched_roles_payload_seeds_nothing() -> None:
+    # The mutation companion. The vendor's OWN shape — a role naming its contact by
+    # id, carrying neither address nor matter — must teach the register nothing. If
+    # this ever starts seeding, something is INFERRING a join rather than reading
+    # one, which is how a wrong party gets attached to a matter.
+    matter_binding.record_from_read(
+        SID, {"value": [{"id": "role-1", "name": "Client", "contactId": "c1"}]}
+    )
+    m = matter_binding.membership_for(SID)
+    assert m.parties(M_A) == set()
+    assert m.known_matters() == set()
+
+
+def test_a_role_record_without_an_address_seeds_nothing() -> None:
+    # The connector withholds the key when the contact carries no email — the
+    # measured majority case on the pilot (8 of 9 matters, vfy_01KZRZH044CH4N5EEKH
+    # Q9A6KHW). Unresolved stays unresolved rather than registering an addressless
+    # matter that a later read could mistake for a party set.
+    matter_binding.record_from_read(
+        SID, {"value": [{"id": "role-1", "party_of_matter": M_A, "matterNumber": NUM_A}]}
+    )
+    assert matter_binding.membership_for(SID).parties(M_A) == set()
+
+
+def test_roles_seeding_addresses_are_normalized() -> None:
+    # A recipient arrives lower-cased; a party captured as the vendor spelled it
+    # must compare equal, or the seeding would prove nothing while looking seeded.
+    _closed(M_A, CLIENT_A)
+    matter_binding.record_from_read(
+        SID,
+        {"value": [{"id": "r1", "party_of_matter": M_A, "email": "Counsel@Opposing.Example"}]},
+    )
+    v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_A}", recipients={COUNSEL})
+    assert v.status == "ok"
