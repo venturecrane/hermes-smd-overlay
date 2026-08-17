@@ -240,6 +240,7 @@ def gate_body(
     cohort: str | None,
     internal_recipient: bool = False,
     allowed_case_names: Iterable[str] | None = None,
+    allowed_money: Iterable[str] | None = None,
 ) -> GateResult:
     """Re-run the content-sensitivity floor + fabrication gate on the draft body.
 
@@ -268,6 +269,19 @@ def gate_body(
     vfy_01KYTG0B88R3B5K0D7FKPACRZT). An empty/omitted register grants no
     exemption, so the degradation direction is still fail-closed.
 
+    ``allowed_money`` is the other half of that same disagreement, one path over
+    (ss-console#2367). ss#2258 gave the Tier-1 ``specific-dollar-amount`` marker
+    a provenance-scoped exemption on the DRAFTING path and said, deliberately,
+    "no change to any other output path" — so on this path the gate still forbade
+    what the skill permits. On 2026-08-13 a demand letter was filed on
+    2026-PI-104 and the reply naming it was held ``fabrication:tier1_marker`` on
+    two figures the agent had just read off the firm's own records (the Kaiser
+    lien and the MedFin payoff), each cited to its source in the sentence that
+    carried it. The firm asked for a demand letter and got silence. Same
+    register, same canonical form, same all-or-nothing rule as the drafting path:
+    an INVENTED figure in a reply still blocks, and an empty/omitted register
+    grants no exemption at all.
+
     Any exception is treated as a refuse (fail closed) — a body we cannot
     certify clean does not leave.
     """
@@ -284,7 +298,11 @@ def gate_body(
 
     try:
         decision = outbound_gate.evaluate(
-            scan_text, cohort, vertical, allowed_case_names=allowed_case_names
+            scan_text,
+            cohort,
+            vertical,
+            allowed_case_names=allowed_case_names,
+            allowed_money=allowed_money,
         )
     except Exception:  # noqa: BLE001 — fail closed on a raising gate
         logger.exception("reply-channel: outbound gate raised; refusing to reply")
