@@ -24,6 +24,11 @@ from shared.msgraph_poller import DeltaState, MsGraphPoller
 _SECRET = "whook-secret"
 
 
+def _rid(message_id: str) -> str:
+    """The poller's X-Request-ID for a message: sha256 hex (collision-safe, 64 chars)."""
+    return hashlib.sha256(message_id.encode()).hexdigest()
+
+
 class _FakeClient:
     """Stand-in Graph client: fixed mailbox, scripted poll_delta batches."""
 
@@ -75,13 +80,16 @@ def _write_yaml(tmp_path, *, adapter="msgraph", enabled=True, poll_seconds=None)
     return str(path)
 
 
-def _poller(tmp_path, client, forwarder, *, yaml_path=None, secret=_SECRET) -> MsGraphPoller:
+def _poller(
+    tmp_path, client, forwarder, *, yaml_path=None, secret=_SECRET, **kwargs
+) -> MsGraphPoller:
     return MsGraphPoller(
         signing_secret=secret,
         yaml_path=yaml_path or _write_yaml(tmp_path),
         state_path=str(tmp_path / "state.json"),
         client_factory=lambda: client,
         forward_fn=forwarder,
+        **kwargs,
     )
 
 
@@ -151,7 +159,10 @@ def test_new_message_forwarded_as_stamped_signed_webhook(tmp_path):
     # Signed with the route secret so the Hermes adapter re-verifies (the fence path).
     expected = hmac.new(_SECRET.encode(), post["body"], hashlib.sha256).hexdigest()
     assert post["signature"] == expected
-    assert post["request_id"] == "m1"
+    # The idempotency key is a HASH of the message id, never a prefix truncation —
+    # Graph ids vary at the END, so a [:64] prefix can collide across messages.
+    assert post["request_id"] == _rid("m1")
+    assert len(post["request_id"]) == 64
 
 
 def test_cursor_persisted_after_batch(tmp_path):
@@ -244,3 +255,163 @@ def test_poll_failure_is_swallowed_and_cursor_untouched(tmp_path):
     poller = _poller(tmp_path, client, _Forwarder())
     poller._ready()
     assert poller.poll_once() == 0  # no raise; cycle skipped
+
+
+# ---------------------------------------------------------------------------
+# overlay#275 — a per-item failure must HOLD the cursor, never orphan the item
+# ---------------------------------------------------------------------------
+
+
+class _FlakyForwarder(_Forwarder):
+    """Raises (or rejects) the first ``fail_first`` POSTs, then succeeds.
+
+    Models the observed overlay#275 trigger: the poller's first cycle firing
+    before the gate's HTTP server bound (connection refused)."""
+
+    def __init__(self, fail_first: int = 1, *, reject_status: int | None = None) -> None:
+        super().__init__()
+        self._failures_left = fail_first
+        self._reject_status = reject_status
+
+    def __call__(self, *, body: bytes, signature: str, request_id: str):
+        if self._failures_left > 0:
+            self._failures_left -= 1
+            if self._reject_status is not None:
+                self.posts.append({"body": body, "signature": signature, "request_id": request_id})
+                return self._reject_status
+            raise ConnectionRefusedError("gate not up yet")
+        return super().__call__(body=body, signature=signature, request_id=request_id)
+
+
+def test_failed_item_holds_cursor_and_is_forwarded_exactly_once_next_cycle(tmp_path):
+    # Cycle 1: forward raises (gate not bound) — the message must NOT be lost:
+    # cursor stays put, so cycle 2 (old cursor re-lists the message) forwards it.
+    msg = _raw("m1", "greg@wf.example")
+    client = _FakeClient(
+        "op@client.example",
+        [([msg], "delta-1", False), ([msg], "delta-2", False)],
+    )
+    fwd = _FlakyForwarder(fail_first=1)
+    poller = _poller(tmp_path, client, fwd)
+    poller._ready()
+
+    assert poller.poll_once() == 0  # failure swallowed, nothing forwarded
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] is None  # cursor HELD — not advanced past m1
+    assert "m1" not in saved["seen_ids"]  # unhandled item is not "seen"
+    assert client.calls == [None]
+
+    assert poller.poll_once() == 1  # retry succeeds
+    assert [json.loads(p["body"])["event_id"] for p in fwd.posts] == ["m1"]  # exactly once
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] == "delta-2"  # cursor advances only after success
+    assert "m1" in saved["seen_ids"]
+    assert client.calls == [None, None]  # cycle 2 re-polled from the held cursor
+
+
+def test_partial_batch_failure_persists_handled_items_but_holds_cursor(tmp_path):
+    # m1 forwards, m2 fails: the seen ledger must durably record m1 (so the retry
+    # cycle dedupes it) while the cursor holds (so m2 is re-listed, not orphaned).
+    m1, m2 = _raw("m1", "a@x.example"), _raw("m2", "b@x.example")
+
+    class _FailSecond(_Forwarder):
+        m2_failures = 1
+
+        def __call__(self, *, body: bytes, signature: str, request_id: str):
+            if json.loads(body)["event_id"] == "m2" and self.m2_failures > 0:
+                self.m2_failures -= 1
+                raise ConnectionRefusedError("blip on m2 only")
+            return super().__call__(body=body, signature=signature, request_id=request_id)
+
+    client = _FakeClient(
+        "op@client.example",
+        [([m1, m2], "delta-1", False), ([m1, m2], "delta-1b", False)],
+    )
+    fwd = _FailSecond()
+    poller = _poller(tmp_path, client, fwd)
+    poller._ready()
+
+    assert poller.poll_once() == 1  # m1 through, m2 failed
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert "m1" in saved["seen_ids"] and "m2" not in saved["seen_ids"]
+    assert saved["delta_link"] is None  # held
+
+    assert poller.poll_once() == 1  # m2 only; m1 deduped by the seen ledger
+    assert [json.loads(p["body"])["event_id"] for p in fwd.posts] == ["m1", "m2"]
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] == "delta-1b"
+
+
+def test_rejected_forward_status_is_a_failure_not_a_success(tmp_path):
+    # A non-2xx adapter response means the message was NOT accepted — same loss
+    # class as a raised forward. Cursor holds; the item retries and lands.
+    msg = _raw("m1", "greg@wf.example")
+    client = _FakeClient(
+        "op@client.example",
+        [([msg], "delta-1", False), ([msg], "delta-2", False)],
+    )
+    fwd = _FlakyForwarder(fail_first=1, reject_status=500)
+    poller = _poller(tmp_path, client, fwd)
+    poller._ready()
+
+    assert poller.poll_once() == 0
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] is None and "m1" not in saved["seen_ids"]
+
+    assert poller.poll_once() == 1
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] == "delta-2" and "m1" in saved["seen_ids"]
+    # Two POSTs total (the rejected one + the accepted retry) with the SAME
+    # X-Request-ID — the adapter's idempotency key absorbs the duplicate.
+    assert [p["request_id"] for p in fwd.posts] == [_rid("m1"), _rid("m1")]
+
+
+def test_poison_item_dead_letters_at_the_retry_bound(tmp_path):
+    # An item the gate rejects DETERMINISTICALLY must not wedge the cursor
+    # forever (the unbounded-hold failure mode): at the retry bound the payload
+    # is preserved to the dead-letter dir, the item is marked seen, and the
+    # cursor advances. Bounded, loud, payload-preserved — never silent loss.
+    msg = _raw("m1", "greg@wf.example")
+    batches = [([msg], f"delta-{n}", False) for n in (1, 2, 3)]
+    client = _FakeClient("op@client.example", batches)
+    fwd = _FlakyForwarder(fail_first=99)  # never recovers
+    poller = _poller(tmp_path, client, fwd, max_item_failures=3)
+    poller._ready()
+
+    assert poller.poll_once() == 0  # retry 1/3 — held
+    assert poller.poll_once() == 0  # retry 2/3 — held
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] is None
+    assert saved["failures"] == {"m1": 2}  # counts are durable across restarts
+
+    assert poller.poll_once() == 0  # bound hit — dead-lettered, cursor released
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] == "delta-3"  # cursor advances past the poison item
+    assert "m1" in saved["seen_ids"]  # never re-evaluated
+    assert saved["failures"] == {}
+    dead = list((tmp_path / "dead-letter").glob("*.json"))
+    assert len(dead) == 1
+    letter = json.loads(dead[0].read_text())
+    assert letter["message_id"] == "m1" and letter["raw"]["subject"] == "Hi"
+
+
+def test_transient_failure_count_clears_on_success(tmp_path):
+    # A failure count must not accumulate across unrelated blips: once the item
+    # forwards, its counter is gone (it can never creep toward the dead-letter
+    # bound over weeks of occasional gate restarts).
+    msg = _raw("m1", "greg@wf.example")
+    client = _FakeClient(
+        "op@client.example",
+        [([msg], "delta-1", False), ([msg], "delta-2", False)],
+    )
+    fwd = _FlakyForwarder(fail_first=1)
+    poller = _poller(tmp_path, client, fwd, max_item_failures=3)
+    poller._ready()
+
+    assert poller.poll_once() == 0
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["failures"] == {"m1": 1}
+
+    assert poller.poll_once() == 1
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["failures"] == {}

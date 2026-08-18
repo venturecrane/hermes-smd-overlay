@@ -66,9 +66,18 @@ _SIGNING_SECRET_ENV = "WEBHOOK_SECRET_MSGRAPH"
 
 DEFAULT_POLL_SECONDS = 45
 _MIN_POLL_SECONDS = 5
-# Bound the seen-id ledger. A delta batch is small; this covers many cycles of
-# reset-dedupe while staying a trivially-serializable slice of the volume.
-_MAX_SEEN_IDS = 1000
+# Bound the seen-id ledger. Sized well above any freshly-provisioned operator
+# mailbox so a 410 full-inbox re-sync can never out-run the dedupe window —
+# eviction during a re-list would re-forward old mail as fresh turns. Still a
+# trivially-serializable slice of the volume (~1.5 MB worst case).
+_MAX_SEEN_IDS = 10000
+# A per-item failure holds the cursor and retries next cycle (overlay#275). This
+# caps the retries for one item: after this many consecutive failures (~30 min at
+# the 45s default) the raw payload is written to the dead-letter dir on the
+# volume, the item is marked seen, and the cursor may advance — bounded, loud,
+# payload-preserved loss instead of an unbounded cursor hold behind a poison
+# message (which would grow the re-list window and eventually 429 Graph).
+_MAX_ITEM_FAILURES = 40
 _EMAIL_CAPABILITY = "Email"
 _FORWARD_TIMEOUT_S = 30.0
 
@@ -97,6 +106,9 @@ class DeltaState:
         self.delta_link: str | None = None
         self._seen: list[str] = []
         self._seen_set: set[str] = set()
+        # message id -> consecutive per-item failure count (the overlay#275 retry
+        # bound). Small by construction: an id leaves on success or dead-letter.
+        self._failures: dict[str, int] = {}
         self._load()
 
     def _load(self) -> None:
@@ -118,9 +130,23 @@ class DeltaState:
                 if isinstance(mid, str) and mid and mid not in self._seen_set:
                     self._seen.append(mid)
                     self._seen_set.add(mid)
+        failures = data.get("failures")
+        if isinstance(failures, dict):
+            for mid, count in failures.items():
+                if isinstance(mid, str) and mid and isinstance(count, int) and count > 0:
+                    self._failures[mid] = count
 
     def has_seen(self, message_id: str) -> bool:
         return message_id in self._seen_set
+
+    def record_failure(self, message_id: str) -> int:
+        """Bump and return the consecutive failure count for one message id."""
+        count = self._failures.get(message_id, 0) + 1
+        self._failures[message_id] = count
+        return count
+
+    def clear_failure(self, message_id: str) -> None:
+        self._failures.pop(message_id, None)
 
     def mark_seen(self, message_id: str) -> None:
         if not message_id or message_id in self._seen_set:
@@ -132,13 +158,18 @@ class DeltaState:
             self._seen_set.discard(evicted)
 
     def persist(self, delta_link: str | None) -> None:
-        """Atomically write the current cursor + seen ledger. A persist failure is
-        logged, not raised — the next cycle simply re-forwards from the last durable
-        cursor (at-least-once, deduped by the seen ledger)."""
+        """Atomically write the current cursor + seen ledger + failure counts.
+
+        ``delta_link=None`` KEEPS the current cursor — the hold-on-failure path
+        (overlay#275): the ledger of handled items is made durable while the
+        cursor stays behind the unhandled ones. A persist failure is logged, not
+        raised — the next cycle simply re-forwards from the last durable cursor
+        (at-least-once, deduped by the seen ledger)."""
         if delta_link:
             self.delta_link = delta_link
         payload = json.dumps(
-            {"delta_link": self.delta_link, "seen_ids": self._seen}, separators=(",", ":")
+            {"delta_link": self.delta_link, "seen_ids": self._seen, "failures": self._failures},
+            separators=(",", ":"),
         ).encode("utf-8")
         try:
             os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
@@ -222,12 +253,14 @@ class MsGraphPoller:
         forward_fn: Callable[..., int] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
         default_poll_seconds: int = DEFAULT_POLL_SECONDS,
+        max_item_failures: int = _MAX_ITEM_FAILURES,
     ) -> None:
         self._signing_secret = signing_secret
         self._yaml_path = yaml_path
         self._state_path = state_path or _default_state_path()
         self._client_factory = client_factory or msgraph_client.build_client_from_env
         self._forward_fn = forward_fn or _default_forward
+        self._max_item_failures = max(1, max_item_failures)
         self._default_poll_seconds = max(_MIN_POLL_SECONDS, default_poll_seconds)
         self._stop = threading.Event()
         self._sleep_fn = sleep_fn or self._stop.wait
@@ -298,19 +331,87 @@ class MsGraphPoller:
             logger.info("msgraph poller: delta cursor reset (410); re-syncing with dedupe")
 
         forwarded = 0
+        failed = 0
         mailbox = (client.mailbox or "").strip().lower()
         for raw in raw_messages:
             try:
                 if self._handle_message(raw, mailbox=mailbox, state=state):
                     forwarded += 1
             except Exception as exc:  # noqa: BLE001 — one bad item must not drop the rest
-                logger.warning(
-                    "msgraph poller: failed to handle a delta item (%s); skipping it", exc
-                )
+                if not self._note_item_failure(raw, state, exc):
+                    failed += 1
         # Persist AFTER forwarding so a crash mid-batch re-forwards from the last
         # durable cursor (at-least-once; the seen ledger dedupes the replay).
-        state.persist(delta_link)
+        # A per-item failure HOLDS the cursor for the same reason (overlay#275):
+        # advancing past an unhandled item orphans it forever — Graph delta never
+        # re-returns it. The old cursor re-lists the batch next cycle; the seen
+        # ledger (persisted either way) dedupes the items that did get through,
+        # and new mail still arrives because the old cursor covers it too. The
+        # retry is BOUNDED: past _MAX_ITEM_FAILURES the item dead-letters (see
+        # _note_item_failure) so a poison message cannot wedge the cursor.
+        if failed:
+            logger.warning(
+                "msgraph poller: %d delta item(s) unhandled; cursor held for retry", failed
+            )
+            state.persist(None)
+        else:
+            state.persist(delta_link)
         return forwarded
+
+    def _note_item_failure(self, raw: Any, state: DeltaState, exc: Exception) -> bool:
+        """Record one per-item failure. Returns True when the item was DEAD-LETTERED
+        (payload preserved on the volume, marked seen — the cursor may advance) and
+        False when it should retry next cycle (the cursor must hold).
+
+        An item with no extractable id cannot be counted or deduped, so it
+        dead-letters immediately — retrying it forever would wedge the cursor with
+        no way to ever mark it handled."""
+        message_id = str(raw.get("id") or "") if isinstance(raw, dict) else ""
+        if not message_id:
+            # Unidentifiable: cannot be counted, deduped, or ever marked handled —
+            # retrying forever would wedge the cursor. Preserve what we can, move on.
+            self._dead_letter(raw, message_id, exc)
+            return True
+        count = state.record_failure(message_id)
+        if count < self._max_item_failures:
+            logger.warning(
+                "msgraph poller: failed to handle a delta item (%s); retry %d/%d next cycle",
+                exc,
+                count,
+                self._max_item_failures,
+            )
+            return False
+        if not self._dead_letter(raw, message_id, exc):
+            return False  # payload NOT preserved — keep retrying rather than drop
+        state.mark_seen(message_id)
+        state.clear_failure(message_id)
+        return True
+
+    def _dead_letter(self, raw: Any, message_id: str, exc: Exception) -> bool:
+        """Preserve a permanently-failing item's payload on the volume, loudly.
+        Returns False when the write itself failed (payload NOT preserved)."""
+        digest = hashlib.sha256(
+            (message_id or json.dumps(raw, sort_keys=True, default=str)).encode("utf-8")
+        ).hexdigest()[:16]
+        path = os.path.join(os.path.dirname(self._state_path), "dead-letter", f"{digest}.json")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"reason": str(exc), "message_id": message_id, "raw": raw}, fh)
+        except (OSError, TypeError, ValueError) as write_exc:
+            logger.error(
+                "msgraph poller: dead-letter write failed (%s) for item that failed with %s",
+                write_exc,
+                exc,
+            )
+            return False
+        logger.error(
+            "msgraph poller: delta item exhausted retries (%s); payload preserved at %s — "
+            "this message will NOT reach the agent without manual replay",
+            exc,
+            path,
+        )
+        return True
 
     def _handle_message(self, raw: Any, *, mailbox: str, state: DeltaState) -> bool:
         if not isinstance(raw, dict):
@@ -331,6 +432,7 @@ class MsGraphPoller:
             return False
         self._forward(dto, message_id)
         state.mark_seen(message_id)
+        state.clear_failure(message_id)
         return True
 
     def _forward(self, dto: dict[str, Any], message_id: str) -> None:
@@ -344,9 +446,21 @@ class MsGraphPoller:
             separators=(",", ":"),
         ).encode("utf-8")
         signature = _hex_hmac_sha256(body, self._signing_secret or "")
-        status = self._forward_fn(body=body, signature=signature, request_id=message_id[:64])
-        if status not in (200, 202):
-            logger.warning("msgraph poller: forward for message returned HTTP %d", status)
+        # X-Request-ID is the adapter's idempotency key. Hash rather than truncate:
+        # Graph message ids are long base64 whose VARYING bytes are at the end, so
+        # a [:64] prefix can collide across messages in one mailbox — and a
+        # colliding key would dedupe a fresh message as a replay (silent loss, the
+        # overlay#275 class). sha256 hex is exactly 64 chars and collision-free.
+        request_id = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
+        status = self._forward_fn(body=body, signature=signature, request_id=request_id)
+        if not 200 <= status < 300:
+            # A rejected forward is the same loss class as a raised one: the adapter
+            # did NOT accept the message, so marking it seen + advancing the cursor
+            # would orphan it (overlay#275). Raise into poll_once's per-item failure
+            # path so the cursor holds and the item retries next cycle (any 2xx on
+            # the retry — including an idempotent-replay answer — counts as accepted;
+            # a persistently non-2xx item dead-letters at the retry bound).
+            raise RuntimeError(f"forward returned HTTP {status}")
 
     # ---- thread lifecycle -------------------------------------------------
     def start(self) -> bool:
