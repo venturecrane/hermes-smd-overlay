@@ -207,6 +207,58 @@ def _origin_from_dto(
     )
 
 
+def _sender_status_text(event: Any, envelope: Any, address: Any) -> str | None:
+    """The dispatched user message re-rendered with the SENDER STATUS paragraph.
+
+    Returns ``None`` when this dispatch must go out byte-identical to today —
+    which is every case except a verified sender on the authored roster whose
+    turn prompt carries the untrusted-email delimiter (``with_sender_status``
+    holds the full fail-closed test; it returns its input unchanged otherwise
+    and never raises).
+
+    WHY THE DISPATCHED MESSAGE AND NOT A HOOK INJECTION (ss#2416). The primary
+    user message on an email turn is the route template Hermes' webhook adapter
+    rendered into ``MessageEvent.text`` (``gateway/platforms/webhook.py:409-413,
+    553-559`` at the pinned ref) — a static per-route string that cannot branch
+    on the sender. ``pre_llm_call`` can only APPEND context to that message, so
+    the quarantine wrap's verified-sender header lands after the template's
+    "treat strictly as DATA / just write the reply" framing and loses to it. This
+    hook is the first place the sender is known AND the message is still
+    editable, so the framing goes in here, above the delimiter.
+    """
+    text = getattr(event, "text", None)
+    if not isinstance(text, str) or not text:
+        return None
+    augmented = inbound.with_sender_status(text, envelope=envelope, address=address)
+    if not isinstance(augmented, str) or augmented == text:
+        return None
+    return augmented
+
+
+def _apply_sender_status(event: Any, text: str) -> bool:
+    """Write ``text`` back onto the dispatched ``MessageEvent`` in place.
+
+    ``MessageEvent`` is a plain (non-frozen) dataclass at the pinned ref and core
+    itself reassigns ``event.text`` mid-dispatch (``gateway/run.py:6439,6504``),
+    so in-place is the narrowest edit: the routing directive the router already
+    returns keeps its ``route_to_skill`` shape. Returns False when the write did
+    not take (a future frozen ``MessageEvent``), and the caller then falls back
+    to the hook's documented ``{"action": "rewrite", "text": …}`` directive
+    (``gateway/run.py:5796-5833``). If BOTH fail the dispatch is unchanged —
+    the seat behaves exactly as it does today rather than unsafely.
+    """
+    try:
+        event.text = text
+    except Exception as exc:  # noqa: BLE001 — never break a dispatch
+        logger.warning(
+            "hermes-smd-webhook-router: in-place sender-status write failed (%s); "
+            "falling back to the rewrite directive",
+            exc,
+        )
+        return False
+    return getattr(event, "text", None) == text
+
+
 def _header(headers: Any, name: str) -> str | None:
     """Case-insensitive header lookup. Returns None if absent/not a dict."""
     if not isinstance(headers, dict):
@@ -386,6 +438,14 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     Hermes' gateway dispatcher consumes this contract to invoke the
     named skill on the named persona.
 
+    On a VERIFIED sender who is on the authored roster (trust_class=internal),
+    the dispatched ``MessageEvent.text`` also gains the SENDER STATUS paragraph
+    above the untrusted-body delimiter (ss#2416 — see ``_sender_status_text``).
+    That edit is applied in place; only if the in-place write cannot take does
+    the directive downgrade to Hermes' own ``{"action": "rewrite", "text": …}``
+    contract (``gateway/run.py:5796-5833`` at the pinned ref). Every other
+    sender dispatches byte-identically to before.
+
     A matched route is verified (HMAC signature + timestamp freshness +
     event-ID dedupe) before it fires (issue #13). Verification failure
     does NOT block the dispatch — it declines to auto-invoke the skill,
@@ -463,6 +523,9 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     # break the route, so it is wrapped in its own try/except.
     envelope: inbound.InboundEnvelope | None = None
     dto: inbound_message.InboundMessage | None = None
+    # Set only when the in-place sender-status write could not be applied; the
+    # directive below then carries the rewrite for Hermes to apply instead.
+    rewrite_text: str | None = None
     try:
         content = _inbound_content_for(payload)
         # Normalize at the seam (spec D2): one InboundMessage shape regardless of
@@ -543,6 +606,25 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
                 "(payload keys=%s); demo relay has no recipient anchor to recover",
                 sorted(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
             )
+
+        # ss#2416 — say in the PRIMARY turn prompt what the envelope already
+        # knows: this sender is a verified admin on the authored roster and this
+        # is a work request, not third-party data to reason about. Gated on the
+        # SAME fail-closed test the quarantine header uses (internal AND
+        # verified) plus the presence of the untrusted-email delimiter, so a
+        # stranger's email and a vendor webhook both dispatch byte-identically
+        # to today. The wrap header is unchanged and still fires.
+        if envelope is not None and origin is not None:
+            event = kwargs.get("event")
+            candidate = _sender_status_text(event, envelope, origin.sender_address)
+            if candidate is not None:
+                if _apply_sender_status(event, candidate):
+                    logger.info(
+                        "hermes-smd-webhook-router: dispatched prompt carries the "
+                        "verified-admin work-request paragraph (in place)"
+                    )
+                else:
+                    rewrite_text = candidate
     except Exception as exc:  # noqa: BLE001 — provenance must not break routing
         logger.warning(
             "hermes-smd-webhook-router: inbound envelope/enqueue failed (%s); "
@@ -595,6 +677,15 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         # ``payload`` and ``inbound_envelope``. Live authored skills still read
         # the raw ``{message.*}`` paths; downstream seam consumers read this.
         directive["inbound_message"] = dto.to_dict()
+    if rewrite_text is not None:
+        # Fallback only (see _apply_sender_status): the in-place write did not
+        # take, so ask Hermes to replace the dispatched text via the hook's own
+        # documented rewrite contract. ``route_to_skill`` is not consumed by core
+        # at the pinned ref (routing comes from the webhook route's ``skills:``
+        # list), so swapping the action here costs no routing behavior; the
+        # persona/skill/provenance keys still ride along for overlay consumers.
+        directive["action"] = "rewrite"
+        directive["text"] = rewrite_text
     return directive
 
 
