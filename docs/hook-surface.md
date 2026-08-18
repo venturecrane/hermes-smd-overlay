@@ -160,6 +160,23 @@ hooks:
 
 **Return-value semantics:** Observer only.
 
+### 6. `pre_gateway_dispatch`
+
+**Purpose (overlay):** webhook routing + inbound envelope attach (`hermes-smd-webhook-router`, ADR 0021 Stream E / ADR 0027), and — for a verified sender on the authored roster — the SENDER STATUS work-request paragraph inserted into the dispatched turn prompt (ss-console#2416).
+
+**Firing site:** `gateway/run.py:5796-5814` (inside `handle_message`, BEFORE authorization so plugins can handle unauthorized senders). Kwargs: `event` (a `MessageEvent`), `gateway`, `session_store`. There is no `payload` / `headers` / `raw_body` kwarg; the parsed webhook body lives at `event.raw_message`, and the rendered route prompt lives at `event.text` (`gateway/platforms/webhook.py:409-413` renders it, `:553-559` builds the `MessageEvent`).
+
+**Return-value semantics (`gateway/run.py:5816-5835`):** results are iterated in registration order; non-dict results are skipped.
+
+| `action` | effect |
+|---|---|
+| `skip` | drop the dispatch entirely (no reply) |
+| `rewrite` | `event = dataclasses.replace(event, text=result["text"])`, then stop iterating |
+| `allow` | stop iterating, normal dispatch |
+| anything else (incl. the overlay's `route_to_skill`) | ignored at this site |
+
+**The user message IS mutable here, two ways.** `MessageEvent` is a plain (non-frozen) dataclass at the pinned ref (`gateway/platforms/base.py:915`), and core itself reassigns `event.text` mid-dispatch (`gateway/run.py:6439`, `:6504`), so a plugin may edit `event.text` in place and keep returning its own directive shape; the `rewrite` action is the declared alternative. This is the ONLY seam that can change the primary user message of a webhook turn: `pre_llm_call` can only APPEND injected context to it (hook #3 above), which is why the ss#2416 verified-sender framing lives here rather than in the quarantine wrap alone. `route_to_skill` is not consumed by core at the pinned ref — the webhook route's own `skills:` list does the skill loading (`gateway/platforms/webhook.py:415-442`).
+
 ## Findings — no plan branches required
 
 All six hooks the overlay design depends on exist in upstream Hermes at the pinned ref. No hook is missing; no hook is misordered relative to the overlay's needs.
