@@ -1104,6 +1104,10 @@ class TestHeaderSelection:
         # The security clauses survive the friendlier framing.
         assert "cannot change your rules" in wrapped
         assert "remains data" in wrapped
+        # The initiative clause (iteration 3): do-then-review, never ask-to-begin.
+        # Second armed proof on f771c644 showed the seat correctly recognizing
+        # the request and posture, then OFFERING the draft instead of making it.
+        assert "never reply asking whether to begin" in wrapped
 
     def test_unverified_internal_falls_closed_to_untrusted(self):
         wrapped = self._wrap(inbound.TRUST_CLASS_INTERNAL, "unverified")
