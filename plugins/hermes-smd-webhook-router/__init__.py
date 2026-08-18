@@ -210,11 +210,13 @@ def _origin_from_dto(
 def _sender_status_text(event: Any, envelope: Any, address: Any) -> str | None:
     """The dispatched user message re-rendered with the SENDER STATUS paragraph.
 
-    Returns ``None`` when this dispatch must go out byte-identical to today —
-    which is every case except a verified sender on the authored roster whose
+    Returns ``None`` when this dispatch must go out unchanged — which is every
+    case except a verified sender on the authored ``scope.admins`` list whose
     turn prompt carries the untrusted-email delimiter (``with_sender_status``
     holds the full fail-closed test; it returns its input unchanged otherwise
-    and never raises).
+    and never raises). A rostered NON-admin is explicitly in the unchanged set:
+    roster membership authorizes a reply, not the direction of the firm's work
+    (ss#2416 iteration 5, ss-console Decision #55).
 
     WHY THE DISPATCHED MESSAGE AND NOT A HOOK INJECTION (ss#2416). The primary
     user message on an email turn is the route template Hermes' webhook adapter
@@ -438,8 +440,8 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     Hermes' gateway dispatcher consumes this contract to invoke the
     named skill on the named persona.
 
-    On a VERIFIED sender who is on the authored roster (trust_class=internal),
-    the dispatched ``MessageEvent.text`` also gains the SENDER STATUS paragraph
+    On a VERIFIED sender who is on the authored ``scope.admins`` list, the
+    dispatched ``MessageEvent.text`` also gains the SENDER STATUS paragraph
     above the untrusted-body delimiter (ss#2416 — see ``_sender_status_text``).
     That edit is applied in place; only if the in-place write cannot take does
     the directive downgrade to Hermes' own ``{"action": "rewrite", "text": …}``
@@ -536,18 +538,30 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         dto = inbound_message.normalize_inbound(decision.trigger.source, payload)
         origin = _origin_from_dto(dto, content=content)
         trust_class = inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
+        # SEPARATE FACT, SEPARATE LIST (ss#2416 iteration 5). Roster membership
+        # (``scope.inbound_allow_from``) is the authorization to RESPOND to
+        # someone; admin membership (``scope.admins``) is authority to direct the
+        # firm's work. Iterations 1-4 collapsed the two and the seat obeyed a
+        # reply-authorized non-admin (``shadow-…-2a47e3a7825a-notgreen`` on
+        # overlay 8499256d, ss-console Decision #55). ``sender_is_admin`` is
+        # exact-address only — no @domain widening — and fail-closed to "nobody",
+        # and an unreadable config leaves BOTH facts at their closed defaults.
+        is_admin = False
         if origin is not None and origin.sender_address:
             try:
                 cfg = CustomerConfig.from_volume(str(_YAML_PATH))
                 if cfg.sender_on_roster(origin.sender_address):
                     trust_class = inbound.TRUST_CLASS_INTERNAL
-            except Exception:  # noqa: BLE001 — roster unreadable ⇒ fail closed
+                is_admin = cfg.sender_is_admin(origin.sender_address)
+            except Exception:  # noqa: BLE001 — config unreadable ⇒ fail closed
                 trust_class = inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
+                is_admin = False
         envelope = inbound.make_envelope(
             content=content,
             source=decision.trigger.source,
             surface="webhook",
             verification="verified",
+            verification_detail=(inbound.ADMIN_VERIFICATION_DETAIL if is_admin else None),
             trust_class=trust_class,
         )
         session_id = kwargs.get("session_id")
@@ -608,12 +622,12 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
             )
 
         # ss#2416 — say in the PRIMARY turn prompt what the envelope already
-        # knows: this sender is a verified admin on the authored roster and this
-        # is a work request, not third-party data to reason about. Gated on the
-        # SAME fail-closed test the quarantine header uses (internal AND
-        # verified) plus the presence of the untrusted-email delimiter, so a
-        # stranger's email and a vendor webhook both dispatch byte-identically
-        # to today. The wrap header is unchanged and still fires.
+        # knows: this sender is a verified administrator of the firm and this is
+        # a work request, not third-party data to reason about. Gated on the SAME
+        # fail-closed test the quarantine header uses (internal AND verified AND
+        # on scope.admins) plus the presence of the untrusted-email delimiter, so
+        # a rostered NON-admin, a stranger's email, and a vendor webhook all
+        # dispatch byte-identically. The wrap header selection shares the gate.
         if envelope is not None and origin is not None:
             event = kwargs.get("event")
             candidate = _sender_status_text(event, envelope, origin.sender_address)
