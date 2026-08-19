@@ -342,12 +342,16 @@ def test_translate_emits_delegation_block_from_escalation_model(tmp_path):
     )
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
     assert config["model"] == "claude-sonnet-4-6"
-    assert config["delegation"] == {"model": "claude-opus-4-8"}
+    assert config["delegation"]["model"] == "claude-opus-4-8"
+    # The v0.18 fan-out cap rides alongside the escalation model (see the
+    # v0.20 pin test below); the model key is the only escalation-specific one.
+    assert config["delegation"]["max_concurrent_children"] == 3
 
 
-def test_translate_omits_delegation_when_no_escalation_model(tmp_path):
-    """No `escalation_model` ⇒ no `delegation` block. Single-tier seats stay
-    byte-identical; delegated work inherits the main model (ADR 0049)."""
+def test_translate_omits_delegation_model_when_no_escalation_model(tmp_path):
+    """No `escalation_model` ⇒ no `delegation.model`; delegated work inherits
+    the main model (ADR 0049). The block itself is still emitted, carrying only
+    the pinned v0.18 fan-out cap (Hermes v0.20 pin)."""
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)  # VALID_YAML, no escalation_model
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
@@ -355,7 +359,38 @@ def test_translate_omits_delegation_when_no_escalation_model(tmp_path):
         skills_dir=str(skills_dir),
     )
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
-    assert "delegation" not in config
+    assert config["delegation"] == {"max_concurrent_children": 3}
+    assert "model" not in config["delegation"]
+
+
+def test_translate_pins_upstream_defaults_that_flipped_in_v0_20(tmp_path):
+    """Hermes v2026.8.18 (0.20.4) flipped defaults the seats never authored:
+    approvals.mode manual->smart, agent.max_turns 90->500, tools.tool_search
+    "auto" now activates on ANY MCP tool (hiding them behind bridge tools the
+    trust plugin refuses), delegation fan-out 3->10. Every seat must carry the
+    v0.18 behaviour explicitly so a pin bump never changes posture or cost as a
+    side effect. display.show_reasoning is explicit posture (gateway already
+    resolves it False). The three pin-only keys are appended LAST so the rest
+    of config.yaml stays byte-stable (sort_keys=False)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    raw = (hermes_home / "profiles" / "marcus" / "config.yaml").read_text()
+    config = yaml.safe_load(raw)
+    assert config["agent"]["max_turns"] == 90
+    assert config["delegation"]["max_concurrent_children"] == 3
+    # max_iterations is deliberately NOT pinned: Hermes' migration 36 rewrites
+    # an explicit 50 to 250 at every boot, so a pin would only fight it.
+    assert "max_iterations" not in config["delegation"]
+    assert config["tools"] == {"tool_search": {"enabled": "off"}}
+    assert config["approvals"] == {"mode": "manual"}
+    # No timeout key: the gateway approval wait is 300s at both tags.
+    assert "timeout" not in config["approvals"]
+    assert config["display"] == {"show_reasoning": False}
+    assert list(config)[-3:] == ["tools", "approvals", "display"]
 
 
 def test_translate_emits_disabled_toolsets_fleet_default(tmp_path):
