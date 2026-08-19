@@ -285,6 +285,26 @@ vars:
       customer.yaml. BLOCK here means a proven cross-matter send is downgraded
       to a human draft; it never refuses outright, and an UNRESOLVED membership
       is reported rather than enforced.
+  SMD_MULTI_MATTER_MODE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: >-
+      operator-only lever for the matter-MIXING signal (ss#2167), which is a
+      different control from SMD_MATTER_GATE_MODE beside it: that one governs
+      whether a proven cross-matter CITATION withholds a send, this one governs
+      whether a session may read a SECOND matter's content at all. Values: off |
+      report | block. Unset or unrecognized = block (fail-closed). BLOCK refuses
+      the second memo/document read outright, so a draft carrying two clients'
+      facts is never composed — the send-time controls beside it all fire after
+      composition, by which point the mixed draft is already in a paralegal's
+      queue, and a firm finding it there is the event the engagement does not
+      survive whether or not it was sent. REPORT keeps the send-time annotation
+      without the read fence. Metadata reads (get_matter, list_matters,
+      list_tasks) are never fenced, which is what makes the refusal affordable.
+      Never client-authorable — integrity controls do not appear in
+      customer.yaml.
   CUSTOMER_SLUG:
     discovery: static
     stage: agent
