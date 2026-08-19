@@ -313,4 +313,65 @@ def evaluate(
         return MatterVerdict("unresolved", "matter-identity evaluation raised")
 
 
-__all__ = ["MatterVerdict", "evaluate", "cited_matters", "mode"]
+# ---------------------------------------------------------------------------
+# The MIXING signal (ss#2167) — provenance, not membership
+# ---------------------------------------------------------------------------
+#
+# ``evaluate`` above answers "is this recipient a party to the matter this letter
+# CITES". It is silent by construction when the body cites nothing (see the
+# ``if not cited`` branch), which leaves the likelier failure uncovered: content
+# lifted from a second matter and never named.
+#
+# This answers a different, cheaper question — "did this session read more than
+# one matter's substance before sending?" — and it deliberately needs NO party
+# data. That matters: a party set closes on only ~40.7% of the firm's matters
+# (census vfy_01M0BT2TF3GDFT3FZDBYZAVMNX), so every membership-based control is
+# capped there. This one is not.
+#
+# It is NOT evidence that a send is wrong. Reading two matters and writing about
+# one is ordinary work. It is evidence that a human should look, which is why
+# Phase 1 only records and cannot withhold.
+
+
+def multi_matter_mode() -> str:
+    """``off`` | ``report``. Default ``report``.
+
+    Fail-closed in the same SHAPE as :func:`mode` — an unrecognized value keeps
+    the signal on — but the two levers do not mean the same thing, and conflating
+    them would be a safety error: ``mode()``'s enforcing state WITHHOLDS a send,
+    while this signal's strongest state only annotates one. There is no ``block``
+    here on purpose. Enforcement is Phase 2 and needs firing-rate data that does
+    not exist yet; adding the value before the data would invite someone to set
+    it."""
+    raw = (os.environ.get("SMD_MULTI_MATTER_MODE") or "").strip().lower()
+    return "off" if raw == "off" else "report"
+
+
+def multi_matter_session(session_id: str) -> tuple[str, ...]:
+    """The matters whose content this session read, when there is more than one.
+
+    Empty when the session read fewer than two — and empty unconditionally for a
+    falsy session id. That guard is not defensive tidiness: ``resolve_session``
+    returns ``""`` under MODE_AMBIGUOUS / MODE_NONE, and every unkeyed context
+    shares that one bucket, so a flag raised from it could belong to two innocent
+    sessions rather than one mixing session."""
+    try:
+        if not session_id or multi_matter_mode() == "off":
+            return ()
+        read = matter_binding.membership_for(session_id).content_read_matters()
+        if len(read) < 2:
+            return ()
+        return tuple(sorted(read))
+    except Exception:  # noqa: BLE001 — must never perturb the send path
+        logger.debug("matter_gate: multi-matter evaluation failed", exc_info=True)
+        return ()
+
+
+__all__ = [
+    "MatterVerdict",
+    "evaluate",
+    "cited_matters",
+    "mode",
+    "multi_matter_mode",
+    "multi_matter_session",
+]

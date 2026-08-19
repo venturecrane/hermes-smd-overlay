@@ -285,6 +285,22 @@ vars:
       customer.yaml. BLOCK here means a proven cross-matter send is downgraded
       to a human draft; it never refuses outright, and an UNRESOLVED membership
       is reported rather than enforced.
+  SMD_MULTI_MATTER_MODE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: >-
+      operator-only lever for the matter-MIXING signal (ss#2167), which is a
+      different control from SMD_MATTER_GATE_MODE beside it: that one governs
+      whether a proven cross-matter CITATION withholds a send, this one governs
+      whether a session that read more than one matter's CONTENT is annotated.
+      Values are "off" and "report" ONLY. Unset or unrecognized = report
+      (fail-closed in shape, so a typo cannot silently disable it). There is
+      deliberately no "block" — the signal is observe-only until its firing rate
+      is measured on real traffic, and shipping the value early would invite
+      someone to set it. Never client-authorable — integrity controls do not
+      appear in customer.yaml.
   CUSTOMER_SLUG:
     discovery: static
     stage: agent

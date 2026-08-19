@@ -369,7 +369,13 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # so "who is a party to which matter" has to be captured while the agent
         # reads it. Structured capture, deliberately separate from the
         # provenance register above, which stringifies.
-        matter_binding.record_from_read(resolved, result)
+        # tool_name + args are needed for the content-read set (ss#2167 mixing):
+        # which matter a memo listing or a document read was performed AGAINST
+        # lives in the args, and the result shape alone cannot say which tool
+        # produced it. Party capture below is unchanged.
+        matter_binding.record_from_read(
+            resolved, result, tool_name=tool_name, args=kwargs.get("args")
+        )
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: post_tool_call provenance record failed", exc_info=True)
 

@@ -31,6 +31,8 @@ enforce = trust.enforce
 
 SID = "s-placement"
 M_A = "aaaaaaaa-1111-2222-3333-444444444444"
+M_B = "bbbbbbbb-1111-2222-3333-444444444444"
+MEMOS = "mcp_smokeball_get_memos_on_matter"
 CLIENT_A = "alvarez@example.com"
 CLIENT_B = "okafor@example.com"
 SEND = "mcp_agentmail_send_message"
@@ -119,3 +121,126 @@ def test_report_mode_stamps_nothing(seat, recorded, monkeypatch) -> None:
 
     stamped = [c for c in recorded if "MATTER_MISMATCH" in (c.get("reason") or "")]
     assert not stamped
+
+
+# A seat where a CLIENT send is actually permitted. The seat fixture above
+# authors draft_for_review, which means decision.allowed is False for every send
+# — fine for the placement tests, useless for the falsifier below, which needs a
+# permitted send for an enforcing regression to show up in.
+AUTONOMOUS_YAML = """
+schema_version: "1"
+customer_id: testco
+scope:
+  outbound_roster:
+    - address: alvarez@example.com
+      class: client
+personas:
+  - slug: marcus
+    entitlements:
+      exposure:
+        external_send_client: autonomous
+        internal_write: autonomous
+"""
+
+
+@pytest.fixture()
+def autonomous_seat(tmp_path, monkeypatch):
+    yaml_path = tmp_path / "customer.yaml"
+    yaml_path.write_text(AUTONOMOUS_YAML)
+    monkeypatch.setenv("SMD_CUSTOMER_YAML_PATH", str(yaml_path))
+    monkeypatch.setenv("SMD_EXPOSURE_OVERRIDE_DB_PATH", str(tmp_path / "ovr.db"))
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "testco")
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "marcus")
+    monkeypatch.setenv("SMD_MATTER_GATE_MODE", "block")
+    matter_binding._reset_for_tests()
+    yield
+    matter_binding._reset_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# The MIXING signal (ss#2167) — observe-only
+# ---------------------------------------------------------------------------
+
+
+def _content_read(matter_id: str) -> None:
+    matter_binding.record_from_read(SID, "{}", tool_name=MEMOS, args={"matter_id": matter_id})
+
+
+def test_multi_matter_session_is_stamped(seat, recorded) -> None:
+    _content_read(M_A)
+    _content_read(M_B)
+    _send(CLIENT_A, "Following up as discussed.")
+
+    stamped = [c for c in recorded if "MULTI_MATTER_SESSION" in (c.get("reason") or "")]
+    assert stamped, (
+        "a send in a session that read two matters' content was not annotated — "
+        "the mixing signal is not reaching the audit row"
+    )
+
+
+def test_control_single_matter_read_stamps_nothing(seat, recorded) -> None:
+    """The half that makes the test above mean something. Without it, a detector
+    that annotated EVERY send would pass."""
+    _content_read(M_A)
+    _send(CLIENT_A, "Following up as discussed.")
+
+    stamped = [c for c in recorded if "MULTI_MATTER_SESSION" in (c.get("reason") or "")]
+    assert not stamped
+
+
+def test_both_fragments_survive_on_one_send(seat, recorded) -> None:
+    """The worst send there is: it cites a matter the recipient is not a party to
+    AND was composed in a session that read two matters.
+
+    ``TrustDecisionRegister.record`` overwrites unconditionally by
+    ``tool_call_id``, so two ``_record_decision`` calls would not produce two
+    annotations — the second would erase the first. This test fails if anyone
+    splits the re-record back into two calls."""
+    _seed_closed_party_set()
+    _content_read(M_A)
+    _content_read(M_B)
+    _send(CLIENT_B, f"Regarding matter {M_A}, please see attached.")
+
+    both = [
+        c
+        for c in recorded
+        if "MATTER_MISMATCH" in (c.get("reason") or "")
+        and "MULTI_MATTER_SESSION" in (c.get("reason") or "")
+    ]
+    assert both, (
+        "the mismatch and mixing annotations did not survive on the same row — "
+        "one _record_decision call clobbered the other"
+    )
+
+
+def test_multi_matter_changes_no_decision(autonomous_seat, recorded) -> None:
+    """THE FALSIFIER for Phase 1 — and it is run on an AUTONOMOUS posture on
+    purpose.
+
+    The first version of this test ran on the seat's authored
+    ``draft_for_review``, where ``decision.allowed`` is False for every send. A
+    deliberate mutation making the mixing signal ENFORCING (``if multi_read and
+    decision.allowed: return block``) left all eight tests green — the mutant
+    branch simply never executed. The test could not fail, so it had measured
+    nothing, which is the exact defect class this file's header warns about.
+
+    ``autonomous_seat`` types the recipient as a client and authors that class
+    autonomous, so ``decision.allowed`` is True and an enforcing regression has
+    somewhere to show up. Comparing with-signal against without-signal then pins that the mixing
+    verdict alters no outcome."""
+    _content_read(M_A)
+    baseline = _send(CLIENT_A, "Following up as discussed.")
+    assert baseline is None or baseline.get("action") != "block", (
+        "the baseline send was not permitted — this test cannot detect an "
+        "enforcing regression and would pass vacuously"
+    )
+
+    matter_binding._reset_for_tests()
+    _content_read(M_A)
+    _content_read(M_B)
+    with_signal = _send(CLIENT_A, "Following up as discussed.")
+
+    assert with_signal == baseline, (
+        "a multi-matter session changed the send decision — Phase 1 is supposed "
+        "to be observe-only and is now enforcing"
+    )

@@ -66,6 +66,7 @@ class MatterMembership:
         "_ambiguous_ids",
         "_complete",
         "_contact_complete",
+        "_content_read",
         "_alias",
         "_ambiguous",
     )
@@ -92,6 +93,19 @@ class MatterMembership:
         # fires on 34 of 86 reply turns against get_matter's 8), which is why the
         # gate could previously only ever return *unresolved* there.
         self._contact_complete: set[str] = set()
+        # ss#2167 (mixing) — the matters whose CONTENT this session read, which is
+        # a different question from every set above. Those answer "who is a party
+        # to what"; this one answers "whose facts could have reached the model".
+        #
+        # `_by_matter` cannot serve: a contact-filtered `list_matters` adds every
+        # matter that ONE person is on (Direction 2 below), so a single reply turn
+        # can register thirty matters nobody read the substance of.
+        #
+        # Populated only by `record_from_read`, only for the tools in
+        # `_CONTENT_READ_TOOLS`, and never for an empty session id — see the guard
+        # there for why the empty-session case is more dangerous for this set than
+        # for the others.
+        self._content_read: set[str] = set()
         # A matter's human-readable number ("2026-PI-101") -> its connector id.
         # Correspondence cites the number; the connector keys everything by the
         # id, and without this join a real letter's citation resolved to nothing
@@ -216,6 +230,20 @@ class MatterMembership:
     def known_matters(self) -> set[str]:
         return set(self._by_matter)
 
+    def note_content_read(self, matter_id: str) -> None:
+        """Record that this session read the CONTENT of ``matter_id``."""
+        if not matter_id:
+            return
+        if len(self._content_read) >= _MAX_MATTERS_PER_SESSION:
+            return
+        self._content_read.add(str(matter_id))
+
+    def content_read_matters(self) -> set[str]:
+        """The matters whose content this session read. Never party data — this
+        set says nothing about membership and must not be used for a verdict
+        about who is a party to what."""
+        return set(self._content_read)
+
     def matters_for(self, email: str) -> set[str]:
         """Every matter this address is known to be a party to."""
         addr = _norm(email)
@@ -308,12 +336,85 @@ def _iter_dicts(node: Any, depth: int = 0):
             yield from _iter_dicts(item, depth + 1)
 
 
-def record_from_read(session_id: str, result: Any) -> None:
+# ss#2167 (mixing) — the reads that put one matter's SUBSTANCE in front of the
+# model, keyed by the tool that performed them. Deliberately short, and the
+# exclusions matter more than the inclusions:
+#
+# * ``get_memos_on_matter`` — the connector itself names this the vector: "A memo
+#   is where one matter's facts most easily reach another matter's record" (the
+#   2026-07-14 merge, provenance audit §3.4). No wedge skill reads memos, so the
+#   signal carries no routine fan-out.
+# * ``read_document`` — actual document text, and ``matter_id`` is its first
+#   parameter. It also taints the session, but taint only forces a send to
+#   OUTSIDE, and on a seat whose posture is already ``draft_for_review`` every
+#   send is human-fronted anyway — so taint does NOT subsume this. Excluding it
+#   would have left the highest-value blend (a memo from A, a document from B)
+#   raising nothing at all.
+#
+# NOT here, on purpose:
+#
+# * ``get_matter`` — a FAN-OUT read. It appears in seven of the eight law-firm
+#   wedge skills, and ``new-matter-intake`` reads several matters BY DESIGN for
+#   the conflict cross-check. Including it would fire this detector on the firm's
+#   own conflict detection every time, and a flag that fires on routine work
+#   trains a reviewer to ignore it — worse than no flag.
+# * ``list_matters`` / ``list_tasks`` / ``list_events`` — span many matters by
+#   construction.
+# * roles / relationships — membership records, add-only, not content.
+# * ``get_files_on_matter`` — metadata only, pinned by
+#   ``test_smokeball_document_read_taint.py``.
+_CONTENT_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp_smokeball_get_memos_on_matter",
+        "mcp_smokeball_read_document",
+    }
+)
+
+
+def _content_matter_id(args: Any) -> str:
+    """The matter a content read was performed against, from its ARGS.
+
+    Args, not the result: a memo listing is a list of memos and a document read
+    is text — neither reliably echoes the matter it came from, while both tools
+    take ``matter_id`` as a parameter."""
+    if not isinstance(args, dict):
+        return ""
+    raw = args.get("matter_id") or args.get("matterId") or ""
+    return str(raw) if raw else ""
+
+
+def record_from_read(
+    session_id: str, result: Any, *, tool_name: str = "", args: Any = None
+) -> None:
     """Capture membership from one read-class tool result. Best-effort by
     contract — a hook must never raise, and a miss costs a withheld send
-    (recoverable), while a wrong capture costs a wrong verdict (not)."""
+    (recoverable), while a wrong capture costs a wrong verdict (not).
+
+    ``tool_name`` and ``args`` are keyword-only and default to empty so every
+    existing caller keeps working; they exist for the content-read set, which
+    cannot be derived from the result shape alone."""
     try:
         payload = _as_payload(result)
+        if payload is None and tool_name not in _CONTENT_READ_TOOLS:
+            return
+        # ss#2167 (mixing) — content capture BEFORE the payload walk, and guarded
+        # on a non-empty session id.
+        #
+        # `provenance.record_read` has carried this guard since #141; this module
+        # never did, because for the party sets an empty-id bucket was harmless:
+        # pooled reads only ever ADD parties, which pushes every verdict toward
+        # *allow* — the fail-safe direction the whole module is built around.
+        #
+        # This consumer inverts that. Extra matters push toward FLAG, so pooling
+        # two concurrent sessions into the shared "" bucket (which is what
+        # `resolve_session_with_mode` returns under MODE_AMBIGUOUS / MODE_NONE)
+        # would manufacture a mixing signal out of two innocent sessions. The
+        # store's tolerated imprecision was tolerated on a directional argument
+        # that does not hold here.
+        if session_id and tool_name in _CONTENT_READ_TOOLS:
+            matter_id = _content_matter_id(args)
+            if matter_id:
+                membership_for(session_id).note_content_read(matter_id)
         if payload is None:
             return
         m = membership_for(session_id)

@@ -1220,23 +1220,48 @@ def evaluate_tool_call(
             # about; the roster that types it is the CLIENT's, not ours.
             recipient_is_exempt=effective_action is ActionClass.EXTERNAL_SEND_VENDOR,
         )
-        if matter_verdict.should_withhold and matter_gate.mode() == "block":
-            if decision.allowed:
-                return {
-                    "action": "block",
-                    "message": (
-                        "Refused: this message cites "
-                        f"{', '.join(matter_verdict.matters) or 'a matter'} but "
-                        f"{matter_verdict.reason}; routing to draft for human review "
-                        "(ss#2167 matter identity)"
-                    ),
-                }
+        mismatch_withholds = matter_verdict.should_withhold and matter_gate.mode() == "block"
+        if mismatch_withholds and decision.allowed:
+            return {
+                "action": "block",
+                "message": (
+                    "Refused: this message cites "
+                    f"{', '.join(matter_verdict.matters) or 'a matter'} but "
+                    f"{matter_verdict.reason}; routing to draft for human review "
+                    "(ss#2167 matter identity)"
+                ),
+            }
+
+        # ss#2167 (mixing) — did this session read more than one matter's
+        # substance? Independent of the citation verdict above, and OBSERVE-ONLY:
+        # it annotates, it never withholds. Reading two matters and writing about
+        # one is ordinary work, so until the firing rate is measured on real
+        # traffic this signal is not evidence enough to hold a send.
+        multi_read = matter_gate.multi_matter_session(session_id)
+
+        # ONE re-record, carrying every fragment that applies.
+        #
+        # Two _record_decision calls would NOT produce two annotations:
+        # TrustDecisionRegister.record overwrites unconditionally by
+        # tool_call_id (shared/trust_decision.py), so the second call would erase
+        # the first fragment — and it would do so on precisely the worst send
+        # there is, one that both cites a mismatched matter AND blended two.
+        #
+        # Re-record rather than rebuild, for the reason the mismatch path has
+        # always had: rebuilding the row from scratch writes the ceiling fields
+        # back to None and re-breaks the null-ceiling defect #2122 fixed.
+        fragments: list[str] = []
+        if mismatch_withholds:
             # The ceiling already withheld this send, so there is nothing left to
             # stop — but a reviewer working the draft queue must be able to tell a
-            # suspected cross-matter send from ordinary review traffic. Re-record
-            # carries the FULL original trail plus the augmented reason: rebuilding
-            # the row from scratch would write the ceiling fields back to None and
-            # re-break the null-ceiling defect #2122 fixed.
+            # suspected cross-matter send from ordinary review traffic.
+            fragments.append(f"MATTER_MISMATCH: {matter_verdict.reason}")
+        if multi_read:
+            fragments.append(
+                f"MULTI_MATTER_SESSION: session read content from {len(multi_read)} "
+                f"matters ({', '.join(multi_read)})"
+            )
+        if fragments:
             _record_decision(
                 tool_call_id,
                 tool_name,
@@ -1244,7 +1269,7 @@ def evaluate_tool_call(
                 action_class=decision.action_class.value,
                 audit_action=decision.audit_action,
                 allowed=decision.allowed,
-                reason=f"{decision.reason} | MATTER_MISMATCH: {matter_verdict.reason}",
+                reason=" | ".join([decision.reason, *fragments]),
                 authored_ceiling=decision.authored_ceiling,
                 vertical_floor=decision.vertical_floor,
                 effective_ceiling=decision.effective_ceiling,
