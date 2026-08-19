@@ -143,9 +143,9 @@ def test_evicted_session_yields_no_verdict() -> None:
 # ---- the lever --------------------------------------------------------------
 
 
-def test_mode_defaults_to_report(monkeypatch) -> None:
+def test_mode_defaults_to_block(monkeypatch) -> None:
     monkeypatch.delenv("SMD_MULTI_MATTER_MODE", raising=False)
-    assert matter_gate.multi_matter_mode() == "report"
+    assert matter_gate.multi_matter_mode() == "block"
 
 
 def test_mode_off_silences_the_signal(monkeypatch) -> None:
@@ -164,12 +164,64 @@ def test_unrecognized_mode_keeps_the_signal_on(monkeypatch) -> None:
     assert matter_gate.multi_matter_session(SID) != ()
 
 
-def test_there_is_no_block_value(monkeypatch) -> None:
-    """``block`` is deliberately absent from this lever's vocabulary. Enforcement
-    is Phase 2 and depends on firing-rate data that does not exist yet; shipping
-    the value early would invite someone to set it."""
-    monkeypatch.setenv("SMD_MULTI_MATTER_MODE", "block")
+def test_report_mode_annotates_without_fencing(monkeypatch) -> None:
+    """``report`` keeps the send-time annotation but opens the read fence — the
+    escape hatch for a seat that wants visibility before enforcement."""
+    monkeypatch.setenv("SMD_MULTI_MATTER_MODE", "report")
     _read(MEMOS, M_A)
+    assert matter_gate.content_read_refusal(SID, MEMOS, {"matter_id": M_B}) is None
     _read(MEMOS, M_B)
-    # "block" is unrecognized, so it falls to report — it does NOT enforce.
-    assert matter_gate.multi_matter_mode() == "report"
+    assert matter_gate.multi_matter_session(SID) != ()
+
+
+# ---- the fence: what stops a mixed draft being COMPOSED ---------------------
+
+
+def test_second_matters_memo_read_is_refused() -> None:
+    """The kill-test. A session holding matter A's substance may not read B's."""
+    _read(MEMOS, M_A)
+    refusal = matter_gate.content_read_refusal(SID, MEMOS, {"matter_id": M_B})
+    assert refusal is not None and M_B in refusal
+
+
+def test_same_matter_read_again_is_allowed() -> None:
+    """The control. A fence that refused every content read would satisfy the
+    kill-test above and have measured nothing — and would also make the Operator
+    useless, since reading one matter twice is ordinary work."""
+    _read(MEMOS, M_A)
+    assert matter_gate.content_read_refusal(SID, MEMOS, {"matter_id": M_A}) is None
+
+
+def test_first_content_read_is_always_allowed() -> None:
+    assert matter_gate.content_read_refusal(SID, MEMOS, {"matter_id": M_A}) is None
+
+
+def test_document_read_on_a_second_matter_is_refused() -> None:
+    _read(MEMOS, M_A)
+    assert matter_gate.content_read_refusal(SID, DOC, {"matter_id": M_B}) is not None
+
+
+def test_metadata_reads_are_never_fenced() -> None:
+    """A status digest or stalled-matter sweep reads metadata across many matters
+    and must be untouched. This is what makes a hard refusal affordable."""
+    _read(MEMOS, M_A)
+    for tool in (GET_MATTER, LIST_MATTERS, "mcp_smokeball_list_tasks"):
+        assert matter_gate.content_read_refusal(SID, tool, {"matter_id": M_B}) is None
+
+
+def test_fence_opens_when_mode_is_off(monkeypatch) -> None:
+    monkeypatch.setenv("SMD_MULTI_MATTER_MODE", "off")
+    _read(MEMOS, M_A)
+    assert matter_gate.content_read_refusal(SID, MEMOS, {"matter_id": M_B}) is None
+
+
+def test_unresolvable_session_does_not_fence() -> None:
+    """Fail-open, and a known hole rather than a design choice: with no session
+    key there is no read-set to compare against, and refusing every content read
+    on an unkeyed session would brick ordinary work."""
+    assert matter_gate.content_read_refusal("", MEMOS, {"matter_id": M_B}) is None
+
+
+def test_missing_matter_id_does_not_fence() -> None:
+    _read(MEMOS, M_A)
+    assert matter_gate.content_read_refusal(SID, MEMOS, {}) is None

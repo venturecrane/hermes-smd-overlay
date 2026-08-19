@@ -1050,6 +1050,32 @@ def evaluate_tool_call(
         )
         return {"action": "block", "message": f"Refused: {message}"}
 
+    # 1b. The matter-mixing fence (ss#2167). Placed HERE, ahead of exposure
+    # resolution, because it is not an exposure question: no ceiling a firm can
+    # author should permit two clients' facts into one composition, so this
+    # refuses before the persona's entitlements are even consulted.
+    #
+    # It is also the only placement that works. Every other control in this file
+    # runs when a SEND is attempted, by which point the mixed draft exists and is
+    # in a paralegal's queue — and a firm finding that draft is the event the
+    # engagement does not survive, whether or not it was ever sent. Routing it to
+    # human review does not prevent that discovery, it schedules it.
+    mixing_refusal = matter_gate.content_read_refusal(session_id, tool_name, args or {})
+    if mixing_refusal is not None:
+        _record_decision(
+            tool_call_id,
+            tool_name,
+            _resolve_active_persona(),
+            action_class=ActionClass.READ.value,
+            audit_action="refuse",
+            allowed=False,
+            reason=f"MATTER_MIXING_FENCE: {mixing_refusal}",
+            effective_ceiling=Ceiling.REFUSED,
+            session_id=session_id,
+            session_match=session_match,
+        )
+        return {"action": "block", "message": f"Refused: {mixing_refusal}"}
+
     # 2. Resolve the active persona's exposure from the TRUSTED config + the
     # vertical floors, then enforce.
     #
@@ -1233,11 +1259,34 @@ def evaluate_tool_call(
             }
 
         # ss#2167 (mixing) — did this session read more than one matter's
-        # substance? Independent of the citation verdict above, and OBSERVE-ONLY:
-        # it annotates, it never withholds. Reading two matters and writing about
-        # one is ordinary work, so until the firing rate is measured on real
-        # traffic this signal is not evidence enough to hold a send.
+        # substance? Independent of the citation verdict above.
+        #
+        # Under `block` (the default) an otherwise-PERMITTED send is downgraded to
+        # a human draft. It is never refused and nothing is discarded: the same
+        # disposition the mismatch branch above uses, for the same reason — the
+        # safe answer to "this might mix two matters" is a person reading it, not
+        # a lost letter.
+        #
+        # This annotated without holding for one revision. The reasoning was that
+        # a firing rate should be measured first, and it was calibrated against an
+        # earlier signal keyed on `get_matter` that fired on ordinary work. After
+        # the signal narrowed to memo and document reads that reasoning no longer
+        # held and was not re-checked. The errors are asymmetric: a false positive
+        # costs one human read of a draft this seat already reads, a false
+        # negative is one client's facts in another client's letter. Waiting on
+        # data would have meant carrying that exposure for the length of the
+        # measurement.
         multi_read = matter_gate.multi_matter_session(session_id)
+        if multi_read and decision.allowed and matter_gate.multi_matter_mode() == "block":
+            return {
+                "action": "block",
+                "message": (
+                    "Refused: this session read content from "
+                    f"{len(multi_read)} matters ({', '.join(multi_read)}) before "
+                    "composing this send; routing to draft for human review "
+                    "(ss#2167 matter mixing)"
+                ),
+            }
 
         # ONE re-record, carrying every fragment that applies.
         #

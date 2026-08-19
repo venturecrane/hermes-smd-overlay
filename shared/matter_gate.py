@@ -78,6 +78,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from shared import matter_binding
 
@@ -334,17 +335,30 @@ def evaluate(
 
 
 def multi_matter_mode() -> str:
-    """``off`` | ``report``. Default ``report``.
+    """``off`` | ``report`` | ``block``. Default ``block``, fail-closed.
 
-    Fail-closed in the same SHAPE as :func:`mode` — an unrecognized value keeps
-    the signal on — but the two levers do not mean the same thing, and conflating
-    them would be a safety error: ``mode()``'s enforcing state WITHHOLDS a send,
-    while this signal's strongest state only annotates one. There is no ``block``
-    here on purpose. Enforcement is Phase 2 and needs firing-rate data that does
-    not exist yet; adding the value before the data would invite someone to set
-    it."""
+    ``block`` here means what it means for :func:`mode`: an otherwise-permitted
+    send is DOWNGRADED TO A HUMAN DRAFT. It never refuses outright and never
+    discards work.
+
+    This shipped observe-only for one revision, on the reasoning that the firing
+    rate should be measured before anything enforced. That reasoning was
+    calibrated against an earlier, much noisier signal keyed on ``get_matter``,
+    and it was not re-derived after the signal narrowed to memo and document
+    reads. It should have been, because the two errors are wildly asymmetric:
+
+    * a false positive costs ONE HUMAN READ of a draft the firm already reads —
+      every outbound send on the client seat sits at ``draft_for_review`` today;
+    * a false negative is one client's facts in another client's letter.
+
+    Measuring first is right when enforcement is expensive. Here it is nearly
+    free, and waiting on data meant carrying the exposure for the length of the
+    measurement. ``report`` still exists for a seat that wants the annotation
+    without the downgrade."""
     raw = (os.environ.get("SMD_MULTI_MATTER_MODE") or "").strip().lower()
-    return "off" if raw == "off" else "report"
+    if raw == "off":
+        return "off"
+    return "report" if raw == "report" else "block"
 
 
 def multi_matter_session(session_id: str) -> tuple[str, ...]:
@@ -367,6 +381,59 @@ def multi_matter_session(session_id: str) -> tuple[str, ...]:
         return ()
 
 
+def content_read_refusal(session_id: str, tool_name: str, args: Any) -> str | None:
+    """Refuse a content read that would put a SECOND matter's substance into a
+    session that already holds one. ``None`` means allow.
+
+    THIS IS THE CONTROL. Everything else in this module reports on a send that
+    has already been composed, and by then the damage this exists to prevent has
+    happened: a draft containing two clients' facts is sitting in a paralegal's
+    queue. Routing that draft to human review is not protection — it is the
+    delivery mechanism. The firm discovering the Operator mixed two matters is
+    the event the engagement does not survive, and it does not require the letter
+    to have been sent.
+
+    So the fence is at READ time. A session that has read matter A's substance
+    cannot read matter B's, which means the mixed draft is never composed and
+    there is nothing for anyone to find.
+
+    Deliberately narrow, so ordinary work is untouched: only memo and document
+    reads are fenced. A status digest or stalled-matter sweep reads matter
+    METADATA across many matters and never trips this — which is why the signal
+    was narrowed off ``get_matter`` earlier, and that narrowing is what makes a
+    hard refusal affordable here.
+
+    The refusal is recoverable by construction. Nothing is discarded and no work
+    is lost: the agent finishes the matter it is on, and the second matter is
+    read in a fresh session.
+
+    Fail-open on an unresolvable session id, and that is a real hole rather than
+    a design choice: with no session key there is no read-set to compare against,
+    and refusing every content read on an unkeyed session would brick ordinary
+    work on any seat where resolution degrades. The send-time annotation below
+    stays as the second layer for exactly that case."""
+    try:
+        if multi_matter_mode() != "block":
+            return None
+        if not session_id or not matter_binding.is_content_read(tool_name):
+            return None
+        matter_id = matter_binding.content_matter_id(args)
+        if not matter_id:
+            return None
+        held = matter_binding.membership_for(session_id).content_read_matters()
+        if not held or matter_id in held:
+            return None
+        return (
+            f"this session already read matter {', '.join(sorted(held))}; reading "
+            f"matter {matter_id} as well would put two matters' content in one "
+            "composition. Finish the matter you are on, then read the other in a "
+            "new session (ss#2167 matter mixing)"
+        )
+    except Exception:  # noqa: BLE001 — must never perturb the read path
+        logger.debug("matter_gate: content-read fence failed", exc_info=True)
+        return None
+
+
 __all__ = [
     "MatterVerdict",
     "evaluate",
@@ -374,4 +441,5 @@ __all__ = [
     "mode",
     "multi_matter_mode",
     "multi_matter_session",
+    "content_read_refusal",
 ]

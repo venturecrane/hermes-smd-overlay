@@ -383,6 +383,17 @@ def _content_matter_id(args: Any) -> str:
     return str(raw) if raw else ""
 
 
+def is_content_read(tool_name: str) -> bool:
+    """True for a tool that puts one matter's SUBSTANCE in front of the model."""
+    return tool_name in _CONTENT_READ_TOOLS
+
+
+def content_matter_id(args: Any) -> str:
+    """Public name for :func:`_content_matter_id` — the matter a content read
+    targets, taken from its args."""
+    return _content_matter_id(args)
+
+
 def record_from_read(
     session_id: str, result: Any, *, tool_name: str = "", args: Any = None
 ) -> None:
@@ -553,6 +564,8 @@ __all__ = [
     "MatterMembership",
     "membership_for",
     "record_from_read",
+    "is_content_read",
+    "content_matter_id",
     "record_contact",
     "contact_email",
     "drop",

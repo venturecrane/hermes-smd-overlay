@@ -213,34 +213,72 @@ def test_both_fragments_survive_on_one_send(seat, recorded) -> None:
     )
 
 
-def test_multi_matter_changes_no_decision(autonomous_seat, recorded) -> None:
-    """THE FALSIFIER for Phase 1 — and it is run on an AUTONOMOUS posture on
-    purpose.
+def test_the_read_fence_refuses_the_second_matter_end_to_end(seat, recorded) -> None:
+    """THE control, driven through the real entry point.
 
-    The first version of this test ran on the seat's authored
-    ``draft_for_review``, where ``decision.allowed`` is False for every send. A
-    deliberate mutation making the mixing signal ENFORCING (``if multi_read and
-    decision.allowed: return block``) left all eight tests green — the mutant
-    branch simply never executed. The test could not fail, so it had measured
-    nothing, which is the exact defect class this file's header warns about.
-
-    ``autonomous_seat`` types the recipient as a client and authors that class
-    autonomous, so ``decision.allowed`` is True and an enforcing regression has
-    somewhere to show up. Comparing with-signal against without-signal then pins that the mixing
-    verdict alters no outcome."""
+    Everything else in this file inspects a SEND. By the time a send is
+    evaluated the mixed draft already exists and is in a paralegal's queue — and
+    a firm finding that draft is the event the engagement does not survive,
+    whether or not it was ever sent. Routing it to review does not prevent the
+    discovery, it schedules it. So the fence has to refuse the READ, and this
+    test drives ``evaluate_tool_call`` to prove it does."""
     _content_read(M_A)
-    baseline = _send(CLIENT_A, "Following up as discussed.")
-    assert baseline is None or baseline.get("action") != "block", (
-        "the baseline send was not permitted — this test cannot detect an "
-        "enforcing regression and would pass vacuously"
+    result = enforce.evaluate_tool_call(
+        MEMOS,
+        {"matter_id": M_B},
+        "testco",
+        session_id=SID,
+        tool_call_id="tc-read-2",
     )
+    assert result is not None and result.get("action") == "block", (
+        "a second matter's memo read was permitted — the mixed draft can still "
+        "be composed and the fence is not in the read path"
+    )
+    assert "MATTER_MIXING_FENCE" in " ".join(str(c.get("reason") or "") for c in recorded)
 
-    matter_binding._reset_for_tests()
+
+def test_the_read_fence_allows_the_same_matter(seat, recorded) -> None:
+    """The control. A fence that refused every content read would satisfy the
+    test above and would have measured nothing."""
+    _content_read(M_A)
+    result = enforce.evaluate_tool_call(
+        MEMOS, {"matter_id": M_A}, "testco", session_id=SID, tool_call_id="tc-read-1"
+    )
+    assert result is None
+
+
+def test_the_read_fence_does_not_touch_metadata_reads(seat) -> None:
+    """A digest sweep reads metadata across many matters. If this refuses, the
+    Operator stops doing ordinary work and the firm turns the control off."""
+    _content_read(M_A)
+    result = enforce.evaluate_tool_call(
+        "mcp_smokeball_get_matter",
+        {"matter_id": M_B},
+        "testco",
+        session_id=SID,
+        tool_call_id="tc-meta",
+    )
+    assert result is None
+
+
+def test_multi_matter_send_is_downgraded_when_the_fence_was_bypassed(
+    autonomous_seat, recorded
+) -> None:
+    """Defence in depth. The fence fails open on an unresolvable session id, so a
+    send composed from two matters can still reach this point. When it does, an
+    otherwise-PERMITTED send is downgraded to a human draft rather than going
+    out — never refused outright, nothing discarded."""
     _content_read(M_A)
     _content_read(M_B)
-    with_signal = _send(CLIENT_A, "Following up as discussed.")
+    result = _send(CLIENT_A, "Following up as discussed.")
 
-    assert with_signal == baseline, (
-        "a multi-matter session changed the send decision — Phase 1 is supposed "
-        "to be observe-only and is now enforcing"
-    )
+    assert result is not None and result.get("action") == "block"
+    assert "matter mixing" in (result.get("message") or "")
+
+
+def test_single_matter_send_is_not_downgraded(autonomous_seat, recorded) -> None:
+    """The control for the test above. Without it, a gate that blocked every send
+    would pass and the Operator would simply never work."""
+    _content_read(M_A)
+    result = _send(CLIENT_A, "Following up as discussed.")
+    assert result is None or result.get("action") != "block"
