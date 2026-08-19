@@ -431,6 +431,12 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: "poller cadence fallback (seconds) when customer.yaml connectors.Email.poll_seconds is absent; defaults to 45. The authored per-seat value wins."
+  MSGRAPH_MAILBOX:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "read statically ONLY by the dead-letter replay tool (shared/msgraph_replay.py) as the --mailbox default for DTO normalization. The poller/client read the full MSGRAPH_* credential set via shared.secrets.get_secret with non-literal names (the dynamic seam noted under WEBHOOK_SECRET_MSGRAPH)."
   SMD_MSGRAPH_STATE_PATH:
     discovery: static
     stage: agent
