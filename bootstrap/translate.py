@@ -916,11 +916,22 @@ def _persona_config(
     # with delegation.provider empty, Hermes' _resolve_delegation_credentials
     # inherits the parent agent's provider, key, and api_mode (verified in
     # tools/delegate_tool.py) — so an Anthropic main + an Anthropic escalation
-    # model share one credential, swapping only the model. Omitted entirely when
-    # unset, so single-tier seats stay byte-identical to before.
+    # model share one credential, swapping only the model.
+    #
+    # `max_concurrent_children` pins the v0.18 (v2026.7.1) fan-out cap of 3.
+    # Hermes v0.20 raised the default to 10 (config_defaults.py:1865 @
+    # v2026.8.18) and unified the async cap into it; a pin bump must not 3x the
+    # parallel-subagent cost ceiling as a side effect. `max_iterations` (50 ->
+    # 250 upstream) is deliberately NOT pinned: Hermes' config migration 36
+    # rewrites an explicit 50 back to 250 at every boot
+    # (hermes_cli/config_migrations.py:757-786 @ v2026.8.18), so pinning it would
+    # only produce a per-boot rewrite war; 250 is accepted and recorded in
+    # ss-console docs/runbooks/operator/hermes-v0.20-upgrade-plan.md.
     escalation_model = (customer.get("escalation_model") or "").strip()
+    delegation: dict[str, Any] = {"max_concurrent_children": 3}
     if escalation_model:
-        config["delegation"] = {"model": escalation_model}
+        delegation["model"] = escalation_model
+    config["delegation"] = delegation
 
     # Materialize `mcp:` connector backends into the Hermes-native
     # `mcp_servers` block Hermes actually reads. The `connectors` map above is
@@ -1001,7 +1012,47 @@ def _persona_config(
     # Google credential and the tools are dead schema weight — drop them.
     if not customer.get("google_auth"):
         disabled_toolsets.append("workspace")
-    config["agent"] = {"disabled_toolsets": disabled_toolsets}
+    # `max_turns` pins the v0.18 (v2026.7.1) per-turn tool-iteration budget of
+    # 90. Hermes v0.20 raised the default to 500 (config_defaults.py:46 @
+    # v2026.8.18; bridged into HERMES_MAX_ITERATIONS by gateway/run.py:1979-2022).
+    # A runaway turn must not spend 5.5x more iterations because the fleet pin
+    # moved; raising it is a Captain cost-posture decision, not a side effect.
+    config["agent"] = {"disabled_toolsets": disabled_toolsets, "max_turns": 90}
+
+    # ------------------------------------------------------------------
+    # Pins for upstream defaults that FLIPPED between Hermes v2026.7.1 (0.18)
+    # and v2026.8.18 (0.20.4). Every key below reproduces the behaviour the
+    # seats are proven on today; changing any of them is a Captain posture
+    # decision, never a pin-bump side effect. Appended LAST on purpose: yaml
+    # is dumped with sort_keys=False, so the rest of config.yaml stays
+    # byte-stable and these read as one block. If any of these ever become
+    # customer.yaml-authorable they belong in
+    # config_applier/safety.py:_NEVER_LIVE_WRITABLE_PREFIXES (translate renders
+    # at boot only).
+    #
+    # tools.tool_search: "auto" changed MEANING. At 7.1 it activated only when
+    #   deferrable (MCP) schemas exceeded 10% of context (tools/tool_search.py:
+    #   12-13 @ v2026.7.1); at 8.18 it activates whenever ANY MCP/plugin tool
+    #   exists (config_defaults.py:2639-2651) and hides every MCP tool behind
+    #   `tool_search`/`tool_describe`/`tool_call` bridge tools. The trust
+    #   plugin has no class for those names and refuses unknown tools, so the
+    #   model's discovery calls would be blocked on every turn. Live probe
+    #   2026-08-19: the A&P seat has zero `tool_search activated` lines, so
+    #   "off" (eager schemas) IS today's behaviour. Turning the bridge on for
+    #   its token saving is a follow-on that first maps the bridge tools.
+    # approvals.mode: 7.1 default "manual" (a dangerous command on an
+    #   unattended gateway turn times out and is DENIED); 8.18 default "smart"
+    #   (an auxiliary LLM may approve it with no human). No `timeout` key: the
+    #   gateway wait is 300s at both tags (7.1 read approvals.gateway_timeout,
+    #   8.18 reads approvals.timeout, both default 300), so pinning 60 would
+    #   tighten it, not preserve it.
+    # display.show_reasoning: explicit posture only. The gateway reads it from
+    #   the raw profile config with default=False (gateway/run.py:9335-9341 @
+    #   v2026.8.18; display_config.py defaults False per platform); the 8.18
+    #   flip to True is CLI/TUI-only. Written so the seat's intent is on disk.
+    config["tools"] = {"tool_search": {"enabled": "off"}}
+    config["approvals"] = {"mode": "manual"}
+    config["display"] = {"show_reasoning": False}
 
     return config
 
