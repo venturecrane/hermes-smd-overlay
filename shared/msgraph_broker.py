@@ -79,18 +79,26 @@ def send_message(payload: dict[str, Any]) -> str:
     return str(_call("msgraph_send", payload).get("message_id") or "")
 
 
-def send_reply(message_id: str, comment: str) -> str:
+def send_reply(message_id: str, comment: str, *, html: str = "") -> str:
     """Reply in-thread to an inbound Graph message.
 
     The recipient is structural — Graph derives it from the source message — and
     the broker independently re-fetches that message to check its sender against
     ``inbound_allow_from``. This module cannot name the recipient, which is the
     point: anyone on the internet can email the operator mailbox.
+
+    ``html`` (ss#2489) carries the rendered body. It is OPTIONAL on the wire so
+    the two sides can be deployed in either order: a broker that predates the
+    field ignores it and replies exactly as it does today, and a caller that
+    sends none gets today's plain ``comment``. ``comment`` still rides along
+    even when ``html`` is present — the broker keeps it as the plain-text
+    fallback and it is what the audit digest is taken over, so the ledger keeps
+    recording the words rather than the markup.
     """
-    return str(
-        _call("msgraph_reply", {"message_id": message_id, "comment": comment}).get("message_id")
-        or ""
-    )
+    payload: dict[str, Any] = {"message_id": message_id, "comment": comment}
+    if html.strip():
+        payload["html"] = html
+    return str(_call("msgraph_reply", payload).get("message_id") or "")
 
 
 __all__ = [

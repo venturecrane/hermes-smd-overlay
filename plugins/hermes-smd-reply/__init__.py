@@ -77,7 +77,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, matter_gate, msgraph_broker, provenance, send_policy
+from shared import (
+    inbound,
+    matter_gate,
+    msgraph_broker,
+    provenance,
+    report_render,
+    send_policy,
+)
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params
@@ -157,7 +164,7 @@ _HELD_STORE: held_store.HeldReplyStore | None = None
 _SWEEPER: Any | None = None
 
 
-def _send_msgraph_reply(graph_message_id: str, comment: str) -> str:
+def _send_msgraph_reply(graph_message_id: str, text: str, html: str = "") -> str:
     """Reply in-thread via Microsoft Graph, keyed on the recorded message id.
 
     Graph derives the recipients from the original message (POST
@@ -175,9 +182,35 @@ def _send_msgraph_reply(graph_message_id: str, comment: str) -> str:
 
     Fail-closed as before: no broker path raises :class:`RelaySendError` (audited
     REPLY_FAILED) and NEVER falls back to another transport. Graph returns 202
-    with no id, so a placeholder is surfaced for the audit row."""
+    with no id, so a placeholder is surfaced for the audit row.
+
+    ss#2489 — WHY AN HTML BODY IS NOT COSMETIC HERE. Graph's ``/reply`` action
+    composes the reply message IN HTML (the reference says so where it explains
+    the ``Prefer: outlook.timezone`` header), so a plain-text ``comment`` lands
+    inside an HTML body and every newline in it collapses under HTML whitespace
+    rules. Live on hermes-ashton-price 2026-08-20: four replies arrived as one
+    unbroken block, sections and lists gone. The raw MIME shows the cause —
+    the text/html part carries the model's text inline with ZERO ``<br>``, and
+    the text/plain alternative is that HTML with the tags stripped, which is why
+    both halves were equally unreadable.
+
+    So the body is rendered here, unconditionally, rather than gated on
+    ``looks_like_report``. That gate exists on the AgentMail path to keep prose
+    sends byte-identical, and it is right there: AgentMail delivers a real
+    text/plain part, so prose already renders. On this transport there is no
+    such part — an unrendered prose reply is the wall. ``render_markdown`` turns
+    blank-line-separated prose into paragraphs, which is the floor we need.
+
+    The renderer runs AFTER the gates, on the text they scanned, which is sound
+    for the same reason it is sound in ``hermes-smd-trust``: the transform is
+    pure and presentational, adding no token of content the fabrication scan,
+    the content floor, and the matter gate have not already evaluated. A
+    composer-authored ``html`` wins, exactly as it does there."""
+    body_html = (
+        html if html.strip() else (report_render.render_markdown(text) if text.strip() else "")
+    )
     try:
-        msgraph_broker.send_reply(graph_message_id, comment)
+        msgraph_broker.send_reply(graph_message_id, text, html=body_html)
     except msgraph_broker.BrokerError as exc:
         raise relay.RelaySendError(f"broker refused the msgraph reply: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
@@ -696,7 +729,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # never falls back to AgentMail.
         try:
             if adapter == _ADAPTER_MSGRAPH:
-                sent_id = _send_msgraph_reply(origin.message_id, send_text or send_html)
+                sent_id = _send_msgraph_reply(origin.message_id, send_text or send_html, send_html)
             else:
                 sent_id = relay.send_reply(
                     message_id=origin.message_id,
@@ -780,7 +813,7 @@ def on_transform_tool_result(**kwargs: Any) -> str | None:
 def _release_send(row: held_store.HeldReply) -> str:
     """Transmit one released reply through the same transports the live path uses."""
     if row.adapter == _ADAPTER_MSGRAPH:
-        return _send_msgraph_reply(row.message_id, row.send_text or row.send_html)
+        return _send_msgraph_reply(row.message_id, row.send_text or row.send_html, row.send_html)
     return relay.send_reply(
         message_id=row.message_id,
         text=row.send_text,
