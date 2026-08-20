@@ -67,6 +67,12 @@ def _resolve_server(tool_name: str) -> str | None:
     Imports the mapping at call time (not register time): MCP servers
     register after plugin load, and the dict is module state that fills as
     they do.
+
+    ``tool_name`` here MUST be the WIRE name (Hermes' own registry spelling —
+    ``mcp__server__tool`` from v0.19, ``mcp_server_tool`` before it), because
+    the dict this reads is Hermes'. Every other overlay consumer sees the
+    canonical single-underscore form the umbrella fan-out rewrites to; this is
+    the one place that deliberately does not (ss-console#2444).
     """
     global _MAPPING_BROKEN
     try:
@@ -105,7 +111,13 @@ def on_post_tool_call(**kwargs: Any) -> None:
         tool_name = kwargs.get("tool_name")
         if not isinstance(tool_name, str) or not tool_name:
             return
-        server = _resolve_server(tool_name)
+        # The fan-out canonicalizes ``tool_name`` for policy tables and hands
+        # the runtime's own spelling through as ``tool_name_wire``. Hermes'
+        # server-name dict is keyed by the latter, so prefer it and fall back
+        # to ``tool_name`` (pre-v0.19 seats, or a direct non-fan-out load).
+        wire_name = kwargs.get("tool_name_wire")
+        lookup_name = wire_name if isinstance(wire_name, str) and wire_name else tool_name
+        server = _resolve_server(lookup_name)
         if server is None:
             return
         if status == "ok":
