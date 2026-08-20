@@ -56,28 +56,36 @@ def test_reference_surprise_is_fail_closed_refused() -> None:
     assert verdict.unmapped is True
 
 
-def test_smokeball_vision_key_is_a_scoped_remap_never_the_org_key() -> None:
+def test_smokeball_vision_credential_is_the_seats_own_anthropic_key() -> None:
     """ss-console#2464: the connector's scanned-document transcription credential.
 
-    Two facts worth pinning, both security posture rather than plumbing.
+    This supersedes the remap this test originally pinned. That row routed the
+    connector to a purpose-made SMOKEBALL_VISION_ANTHROPIC_KEY on the premise
+    that the alternative was putting a SHARED org key on every seat's volume.
+    The premise was false: ss-console provisioning already stages a PER-SEAT
+    Anthropic workspace key (ANTHROPIC_API_KEY__<CUSTOMER_ID>, ADR 0062), and
+    the seat's runtime already keeps that credential at rest on the same volume
+    in the profile's auth.json. A second credential bought no containment and
+    cost a console act per seat.
 
-    First, the row is a REMAP: the subprocess reads ``ANTHROPIC_API_KEY`` but the
-    value comes from the per-seat ``SMOKEBALL_VISION_ANTHROPIC_KEY``. translate.py
-    writes registry env values literally into the profile config on the per-seat
-    volume (ADR 0010), so a straight ``("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")``
-    row would put the org key at rest on every seat's disk. That is the mistake
-    this test exists to catch.
-
-    Second, it is OPTIONAL: an unstaged key skips the row and leaves the server
-    wired (translate.py's optional loop), so seats that never get the key keep
-    behaving exactly as they do today.
+    So the row is now a plain source-name pass-through, and the name
+    SMOKEBALL_VISION_ANTHROPIC_KEY is RETIRED — a reappearance is the regression
+    this test guards, because a half-retired secret name is the shape that
+    leaves a seat wired to a credential nobody stages.
     """
     spec = MCP_CONNECTOR_REGISTRY["smokeball"]
-    assert ("ANTHROPIC_API_KEY", "SMOKEBALL_VISION_ANTHROPIC_KEY") in spec.env_secrets_optional
-    # Never required (a missing key must not unwire the connector), and never
-    # sourced from the org key under any policy.
+    assert ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY") in spec.env_secrets_optional
+    # OPTIONAL, never required: an unstaged key must leave the connector wired
+    # (translate.py skips the row) so seats without one behave as they do today.
     assert not any(target == "ANTHROPIC_API_KEY" for target, _ in spec.env_secrets)
-    assert all(source != "ANTHROPIC_API_KEY" for _, source in spec.env_secrets_optional)
+    # The retired name appears NOWHERE in the registry — any spec, either side.
+    for name, other in MCP_CONNECTOR_REGISTRY.items():
+        rows = tuple(other.env_secrets) + tuple(other.env_secrets_optional)
+        flat = [v for row in rows for v in row] + [other.secret_env or ""]
+        assert "SMOKEBALL_VISION_ANTHROPIC_KEY" not in flat, (
+            f"{name}: SMOKEBALL_VISION_ANTHROPIC_KEY is retired — the connector "
+            "uses the seat's own per-seat Anthropic workspace key"
+        )
     # The tuning knobs ride the same optional block — connector-side defaults
     # apply when unset, including the per-seat kill switch.
     optional_targets = {target for target, _ in spec.env_secrets_optional}
