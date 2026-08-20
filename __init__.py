@@ -36,6 +36,8 @@ from typing import Any
 
 import yaml
 
+from shared.mcp_tool_names import canonical_tool_name
+
 logger = logging.getLogger("hermes_smd.overlay")
 
 # Mirror Hermes' own directory-plugin namespace parent (hermes_cli/plugins.py:
@@ -87,6 +89,73 @@ def _load_subplugin_module(plugin_dir: Path) -> types.ModuleType:
     return module
 
 
+# Hook kwargs that carry a tool name and therefore ride the canonicalizing
+# wrapper below. These are the only hooks Hermes passes ``tool_name`` to
+# (upstream model_tools.py: pre_tool_call / post_tool_call /
+# transform_tool_result all fire with tool_name=<registry name>).
+_TOOL_NAME_HOOKS = frozenset({"pre_tool_call", "post_tool_call", "transform_tool_result"})
+
+
+def _canonicalizing_callback(callback: Any) -> Any:
+    """Wrap *callback* so it receives the overlay's canonical MCP tool name.
+
+    Hermes v0.19 renamed MCP tools ``mcp_<server>_<tool>`` ->
+    ``mcp__<server>__<tool>``; the overlay's policy tables (trust classes, the
+    destructive ban list, matter-binding content reads, outbound send/draft
+    sets, spec-read marks) are keyed on the former and fail CLOSED on an
+    unknown name, so without this translation every connector tool is refused
+    on a v0.19+ seat (observed live, ss-console#2444). See
+    ``shared/mcp_tool_names`` for the full account.
+
+    The wrapper is deliberately thin: it rewrites ``tool_name`` and adds
+    ``tool_name_wire`` (the untouched runtime spelling, for the one consumer
+    that must look a name up in Hermes' own registry dict). Return values pass
+    through unchanged — ``transform_tool_result`` depends on that. A wrapper
+    failure must never swallow the call, so the rewrite itself is guarded.
+    """
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            raw = kwargs.get("tool_name")
+            if isinstance(raw, str) and raw:
+                canonical = canonical_tool_name(raw)
+                if canonical != raw:
+                    kwargs["tool_name"] = canonical
+                    kwargs.setdefault("tool_name_wire", raw)
+        except Exception:  # noqa: BLE001 — never break a hook over naming
+            logger.exception("overlay fan-out: tool-name canonicalization failed")
+        return callback(*args, **kwargs)
+
+    # Keep the plugin's own identity visible in logs/tracebacks.
+    try:
+        wrapped.__name__ = getattr(callback, "__name__", "wrapped")
+        wrapped.__doc__ = getattr(callback, "__doc__", None)
+        wrapped.__wrapped__ = callback  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+    return wrapped
+
+
+class _CanonicalizingCtx:
+    """``PluginContext`` proxy that canonicalizes tool names for tool hooks.
+
+    Everything else on the context (``register_system_prompt_section``,
+    ``register_tool``, attributes the plugins read) is forwarded untouched via
+    ``__getattr__``, so this stays a translation layer and not a second API.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def register_hook(self, hook_name: str, callback: Any) -> Any:
+        if hook_name in _TOOL_NAME_HOOKS:
+            callback = _canonicalizing_callback(callback)
+        return self._inner.register_hook(hook_name, callback)
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self._inner, item)
+
+
 def load_and_register_subplugins(ctx: Any, base: Path | None = None) -> list[str]:
     """Fan out: load + ``register(ctx)`` every declared sub-plugin, with the
     SAME ctx. Best-effort — a sub-plugin that fails to load/register is logged
@@ -94,6 +163,7 @@ def load_and_register_subplugins(ctx: Any, base: Path | None = None) -> list[str
     boot invariant's job to enforce (it fails the boot gate if any of the five
     functional plugins didn't register). Returns the slugs that registered."""
     base = base or Path(__file__).resolve().parent
+    wrapped_ctx = _CanonicalizingCtx(ctx)
     registered: list[str] = []
     for rel in declared_subplugins(base):
         plugin_dir = base / rel
@@ -104,7 +174,7 @@ def load_and_register_subplugins(ctx: Any, base: Path | None = None) -> list[str
             if register_fn is None:
                 logger.warning("overlay fan-out: %s has no register(); skipping", name)
                 continue
-            register_fn(ctx)
+            register_fn(wrapped_ctx)
             registered.append(name)
             logger.info("overlay fan-out: registered %s", name)
         except Exception:  # noqa: BLE001 — one bad sub-plugin must not abort the rest
