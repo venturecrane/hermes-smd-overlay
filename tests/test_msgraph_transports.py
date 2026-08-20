@@ -73,10 +73,15 @@ class _FakeGraphBroker:
 
     def __init__(self) -> None:
         self.replies: list[tuple[str, str]] = []
+        #: (message_id, comment, html) — ss#2489 added the html half, and it is
+        #: recorded separately so a test can assert on the RENDERED body without
+        #: the plain-text assertions above losing their meaning.
+        self.reply_calls: list[tuple[str, str, str]] = []
         self.sends: list[dict] = []
 
-    def send_reply(self, message_id, comment):
+    def send_reply(self, message_id, comment, *, html=""):
         self.replies.append((message_id, comment))
+        self.reply_calls.append((message_id, comment, html))
         return ""
 
     def send_message(self, payload):
@@ -142,6 +147,101 @@ def test_msgraph_reply_dispatches_via_graph_reply(monkeypatch, tmp_path):
     _, meta = next((a, m) for a, m in events if a == "REPLY_SENT")
     assert meta["adapter"] == "msgraph"
     assert "Thanks, will do." not in json.dumps(meta)  # body never persisted
+
+
+# ---------------------------------------------------------------------------
+# ss#2489 — the reply carries a rendered body, because Graph's /reply composes
+# in HTML and collapses a plain-text comment's newlines. Four replies reached
+# hermes-ashton-price's principal as one unbroken block on 2026-08-20.
+# ---------------------------------------------------------------------------
+
+
+def test_msgraph_reply_renders_the_body_so_line_structure_survives(monkeypatch, tmp_path):
+    """The wall, pinned at the seam that produced it.
+
+    The assertion is on STRUCTURE rather than an exact string: what failed live
+    was that every block ran together, so what has to hold is that the two
+    blocks arrive as two blocks.
+    """
+    mod, _d1 = _reply_mod(monkeypatch, tmp_path)
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(mod.msgraph_broker, "send_reply", fake.send_reply)
+    _record_origin()
+    mod.on_post_tool_call(
+        tool_name="mcp_msgraph_mail_create_draft",
+        args={
+            "to": ["greg@whitfield.example"],
+            "subject": "Re: matter",
+            "body_text": "First paragraph.\n\nSecond paragraph.",
+        },
+        session_id="s1",
+    )
+    _mid, comment, html = fake.reply_calls[0]
+    assert html.count("<p") == 2, html
+    assert "First paragraph." in html and "Second paragraph." in html
+    # The plain half still rides along: the broker keeps it as the fallback and
+    # the audit digest is taken over the words, not the markup.
+    assert comment == "First paragraph.\n\nSecond paragraph."
+
+
+def test_msgraph_reply_renders_report_structure_as_structure(monkeypatch, tmp_path):
+    mod, _d1 = _reply_mod(monkeypatch, tmp_path)
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(mod.msgraph_broker, "send_reply", fake.send_reply)
+    _record_origin()
+    mod.on_post_tool_call(
+        tool_name="mcp_msgraph_mail_create_draft",
+        args={
+            "to": ["greg@whitfield.example"],
+            "subject": "Re: matter",
+            "body_text": "## What I did\n\n- Read the file\n- Logged the call",
+        },
+        session_id="s1",
+    )
+    _mid, _comment, html = fake.reply_calls[0]
+    assert "<h2" in html
+    assert html.count("<li") == 2
+
+
+def test_msgraph_reply_escapes_model_authored_markup(monkeypatch, tmp_path):
+    """Escape-by-default is the property that makes rendering safe on this path;
+    it is inherited from report_render, and inheriting it silently is how it gets
+    lost in a later refactor."""
+    mod, _d1 = _reply_mod(monkeypatch, tmp_path)
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(mod.msgraph_broker, "send_reply", fake.send_reply)
+    _record_origin()
+    mod.on_post_tool_call(
+        tool_name="mcp_msgraph_mail_create_draft",
+        args={
+            "to": ["greg@whitfield.example"],
+            "subject": "Re: matter",
+            "body_text": "<script>alert(1)</script>",
+        },
+        session_id="s1",
+    )
+    _mid, _comment, html = fake.reply_calls[0]
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_a_composer_authored_html_body_wins(monkeypatch, tmp_path):
+    mod, _d1 = _reply_mod(monkeypatch, tmp_path)
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(mod.msgraph_broker, "send_reply", fake.send_reply)
+    _record_origin()
+    mod.on_post_tool_call(
+        tool_name="mcp_msgraph_mail_create_draft",
+        args={
+            "to": ["greg@whitfield.example"],
+            "subject": "Re: matter",
+            "body_text": "plain",
+            "html": "<p>mine</p>",
+        },
+        session_id="s1",
+    )
+    _mid, _comment, html = fake.reply_calls[0]
+    assert html == "<p>mine</p>"
 
 
 def test_msgraph_reply_fails_closed_when_broker_unreachable(monkeypatch, tmp_path):
