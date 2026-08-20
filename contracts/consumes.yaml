@@ -97,6 +97,30 @@ vars:
     requirement: optional
     consumed_by: [mcp_registry]
     note: "AgentMail READ/DRAFT credential — the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py). Inbox-scoped with message_send/draft_send WITHHELD since ss#2258, so it cannot transmit: the vendor refuses. NO overlay plugin reads it anymore; transmit is a broker verb keyed on AGENTMAIL_SEND_API_KEY, which never enters this process's environment."
+  SMOKEBALL_VISION_ANTHROPIC_KEY:
+    # Same indirect shape as AGENTMAIL_API_KEY: no overlay plugin reads this
+    # name. It is the SOURCE secret of a remapped row on the smokeball MCP
+    # connector spec (bootstrap/mcp_registry.py), which the translator reads via
+    # get_secret and materializes into the subprocess env block as
+    # ANTHROPIC_API_KEY.
+    discovery: indirect
+    stage: agent
+    requirement: optional
+    consumed_by: [mcp_registry]
+    note: >-
+      ss-console#2464. NEW EGRESS, optional: with this staged, the smokeball
+      connector subprocess makes outbound HTTPS calls to the Anthropic Messages
+      API to transcribe scanned documents that carry no text layer. The call is
+      READ-classified — it sends document bytes already fetched from Smokeball
+      and returns a transcription; it writes nothing anywhere. Unstaged, the
+      connector keeps returning the scanned-and-unreadable marker and makes no
+      such call, so absence changes no seat behavior. This is a SEPARATE
+      spend-limited Anthropic key, never the org ANTHROPIC_API_KEY, because
+      translate.py materializes registry env values in plaintext onto the
+      per-seat volume (ADR 0010). Four non-secret tuning vars ride the same
+      optional block and have connector-side defaults — SMOKEBALL_VISION_MODEL,
+      SMOKEBALL_VISION_PAGE_CAP, SMOKEBALL_VISION_MAX_BYTES, and the per-seat
+      kill switch SMOKEBALL_VISION_DISABLED.
   SMD_MCP_STORE_DIR:
     discovery: static
     stage: agent

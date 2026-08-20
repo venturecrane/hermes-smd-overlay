@@ -251,6 +251,32 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             ("SMOKEBALL_AUTH_MODE", "SMOKEBALL_AUTH_MODE"),  # default client_credentials
             ("SMOKEBALL_REFRESH_TOKEN", "SMOKEBALL_REFRESH_TOKEN"),  # authorization_code seats
             ("SMOKEBALL_ACCOUNT_ID", "SMOKEBALL_ACCOUNT_ID"),  # multi-account seats
+            # --- vision-read fallback for scanned documents (ss-console#2464) ---
+            # A scanned PDF carries no text layer, so the connector's mechanical
+            # extraction returns nothing and every downstream read refuses. The
+            # fallback transcribes the scan through the Anthropic Messages API
+            # from inside the connector subprocess.
+            #
+            # KEY POSTURE, and the reason this is a REMAP rather than a straight
+            # ANTHROPIC_API_KEY row: translate.py writes every value in this
+            # block LITERALLY into the profile's mcp_config on the per-seat
+            # volume (ADR 0010). Whatever is staged here lives at rest on that
+            # volume in plaintext. So the connector gets its OWN spend-limited
+            # Anthropic key, staged per seat as SMOKEBALL_VISION_ANTHROPIC_KEY
+            # and presented to the subprocess under the name its SDK expects.
+            # NEVER stage the org ANTHROPIC_API_KEY here — same remap shape as
+            # clio's ENCRYPTION_KEY row above.
+            #
+            # Every row is OPTIONAL by design: with the key unstaged the
+            # connector simply keeps returning the scanned-and-unreadable
+            # marker, which is exactly today's behavior. Nothing about a seat
+            # changes until the key is staged and the seat reprovisions.
+            # remap: a scoped per-seat key, NOT the org ANTHROPIC_API_KEY.
+            ("ANTHROPIC_API_KEY", "SMOKEBALL_VISION_ANTHROPIC_KEY"),
+            ("SMOKEBALL_VISION_MODEL", "SMOKEBALL_VISION_MODEL"),  # connector default
+            ("SMOKEBALL_VISION_PAGE_CAP", "SMOKEBALL_VISION_PAGE_CAP"),  # connector default
+            ("SMOKEBALL_VISION_MAX_BYTES", "SMOKEBALL_VISION_MAX_BYTES"),  # connector default
+            ("SMOKEBALL_VISION_DISABLED", "SMOKEBALL_VISION_DISABLED"),  # per-seat kill switch
         ),
         blocked_tools=(),
     ),

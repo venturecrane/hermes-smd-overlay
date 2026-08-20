@@ -54,3 +54,36 @@ def test_reference_surprise_is_fail_closed_refused() -> None:
     verdict = classify_tool("mcp_reference_surprise")
     assert verdict.action_class is ActionClass.REFUSED
     assert verdict.unmapped is True
+
+
+def test_smokeball_vision_key_is_a_scoped_remap_never_the_org_key() -> None:
+    """ss-console#2464: the connector's scanned-document transcription credential.
+
+    Two facts worth pinning, both security posture rather than plumbing.
+
+    First, the row is a REMAP: the subprocess reads ``ANTHROPIC_API_KEY`` but the
+    value comes from the per-seat ``SMOKEBALL_VISION_ANTHROPIC_KEY``. translate.py
+    writes registry env values literally into the profile config on the per-seat
+    volume (ADR 0010), so a straight ``("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")``
+    row would put the org key at rest on every seat's disk. That is the mistake
+    this test exists to catch.
+
+    Second, it is OPTIONAL: an unstaged key skips the row and leaves the server
+    wired (translate.py's optional loop), so seats that never get the key keep
+    behaving exactly as they do today.
+    """
+    spec = MCP_CONNECTOR_REGISTRY["smokeball"]
+    assert ("ANTHROPIC_API_KEY", "SMOKEBALL_VISION_ANTHROPIC_KEY") in spec.env_secrets_optional
+    # Never required (a missing key must not unwire the connector), and never
+    # sourced from the org key under any policy.
+    assert not any(target == "ANTHROPIC_API_KEY" for target, _ in spec.env_secrets)
+    assert all(source != "ANTHROPIC_API_KEY" for _, source in spec.env_secrets_optional)
+    # The tuning knobs ride the same optional block — connector-side defaults
+    # apply when unset, including the per-seat kill switch.
+    optional_targets = {target for target, _ in spec.env_secrets_optional}
+    assert {
+        "SMOKEBALL_VISION_MODEL",
+        "SMOKEBALL_VISION_PAGE_CAP",
+        "SMOKEBALL_VISION_MAX_BYTES",
+        "SMOKEBALL_VISION_DISABLED",
+    } <= optional_targets
