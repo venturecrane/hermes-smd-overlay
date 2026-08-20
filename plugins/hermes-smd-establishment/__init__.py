@@ -159,7 +159,7 @@ from typing import Any
 from shared import admin_possession, provenance, read_capture
 from shared.action_classes import ActionClass, BannedToolError, classify_tool
 from shared.customer_config import CustomerConfig
-from shared.inbound import SESSION_INBOUND_ORIGIN
+from shared.inbound import SESSION_INBOUND_ORIGIN, unwrap_inbound
 from shared.outbound_recipient import DRAFT_RECORD_TOOLS, extract_to_recipients
 from shared.tool_registration import register_wrapped_tool
 
@@ -1228,12 +1228,21 @@ def _read_call_failed(status: Any, error_type: Any) -> bool:
 def on_post_tool_call(**kwargs: Any) -> None:
     """Hold the raw text of every connector document read (ss#2247).
 
-    WHY THIS HOOK AND NOT ``transform_tool_result``: ``post_tool_call`` fires
-    FIRST (docs/hook-surface.md §2, ordering invariant), so what lands in the
-    store is the connector's raw text while the model still sees only the
-    nonce-fenced wrap ``hermes-smd-inbound`` puts around it. That is a strict
-    improvement on the path this replaces, which asked the model to retype
-    content it had never seen unfenced. The fence is untouched.
+    WHY THIS HOOK AND NOT ``transform_tool_result``: what lands in the store is
+    the connector's raw text while the model still sees only the nonce-fenced
+    wrap ``hermes-smd-inbound`` puts around it. That is a strict improvement on
+    the path this replaces, which asked the model to retype content it had never
+    seen unfenced. The fence is untouched.
+
+    THE ORDERING IS NO LONGER AN INVARIANT (ss#2444, 2026-08-20). This docstring
+    used to justify the choice with "``post_tool_call`` fires FIRST
+    (docs/hook-surface.md §2, ordering invariant)". Hermes v0.20.4 inverted it:
+    ``transform_tool_result`` now fires BEFORE ``post_tool_call``, so the fence
+    is already applied when we get here and ``json.loads`` died at char 1 on
+    every document read. The capture no longer depends on the order at all —
+    :func:`shared.inbound.unwrap_inbound` peels a fence when there is one and
+    passes the text through untouched when there is not, which is correct under
+    both orders. Do not reintroduce an ordering assumption here.
 
     Observer only — ``post_tool_call`` returns are not interpreted, and this
     must never become a gate. Exception-safe: a capture miss costs one refused
@@ -1263,7 +1272,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
         raw = kwargs.get("result")
         if not isinstance(raw, str) or not raw:
             return
-        payload = _unwrap_read_result(json.loads(raw))
+        payload = _unwrap_read_result(json.loads(unwrap_inbound(raw)))
         if not isinstance(payload, dict):
             return
         # The unsupported-type branch returns no `text` key at all; a document
