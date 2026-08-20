@@ -257,22 +257,28 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             # fallback transcribes the scan through the Anthropic Messages API
             # from inside the connector subprocess.
             #
-            # KEY POSTURE, and the reason this is a REMAP rather than a straight
-            # ANTHROPIC_API_KEY row: translate.py writes every value in this
-            # block LITERALLY into the profile's mcp_config on the per-seat
-            # volume (ADR 0010). Whatever is staged here lives at rest on that
-            # volume in plaintext. So the connector gets its OWN spend-limited
-            # Anthropic key, staged per seat as SMOKEBALL_VISION_ANTHROPIC_KEY
-            # and presented to the subprocess under the name its SDK expects.
-            # NEVER stage the org ANTHROPIC_API_KEY here — same remap shape as
-            # clio's ENCRYPTION_KEY row above.
+            # KEY POSTURE. translate.py writes every value in this block
+            # LITERALLY into the profile's mcp_config on the per-seat volume
+            # (ADR 0010), so it is fair to ask what this row puts at rest. The
+            # answer is: nothing new. The staged ANTHROPIC_API_KEY is the seat's
+            # own Anthropic WORKSPACE key — ss-console provisioning prefers
+            # ANTHROPIC_API_KEY__<CUSTOMER_ID> from /ss (ADR 0062 section 2,
+            # per-customer workspaces are the cost-attribution boundary;
+            # operator/bin/provision-customer.sh) — and that same credential
+            # already sits at rest on the same volume in the profile's
+            # auth.json. This row hands the connector the credential the seat
+            # already holds; it adds no exposure class.
             #
-            # Every row is OPTIONAL by design: with the key unstaged the
-            # connector simply keeps returning the scanned-and-unreadable
-            # marker, which is exactly today's behavior. Nothing about a seat
-            # changes until the key is staged and the seat reprovisions.
-            # remap: a scoped per-seat key, NOT the org ANTHROPIC_API_KEY.
-            ("ANTHROPIC_API_KEY", "SMOKEBALL_VISION_ANTHROPIC_KEY"),
+            # What must NEVER be staged as a seat's ANTHROPIC_API_KEY is a
+            # SHARED org-wide credential, because then one seat's volume holds
+            # every seat's spend. That invariant is enforced at provisioning and
+            # in the vault, where the key is chosen — not here, where the
+            # registry can only pass along whatever the seat was given.
+            #
+            # Every row is OPTIONAL by design: with no key staged the connector
+            # simply keeps returning the scanned-and-unreadable marker, which is
+            # exactly today's behavior. A missing key never unwires the server.
+            ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
             ("SMOKEBALL_VISION_MODEL", "SMOKEBALL_VISION_MODEL"),  # connector default
             ("SMOKEBALL_VISION_PAGE_CAP", "SMOKEBALL_VISION_PAGE_CAP"),  # connector default
             ("SMOKEBALL_VISION_MAX_BYTES", "SMOKEBALL_VISION_MAX_BYTES"),  # connector default
