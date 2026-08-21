@@ -241,6 +241,12 @@ vars:
     requirement: optional
     consumed_by: [webhook-gate]
     note: "consecutive authored-spec control self-check crashes before the heartbeat reports spec_control_ok=0 (ss-console #2234; same shape as the connector check — the boolean is the reported failure state, and it means 'cannot read config or manifest', never 'no spec installed'). Default 3."
+  GATEWAY_LOOP_CHECK_DEBOUNCE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "consecutive gateway loop-liveness self-check crashes before the heartbeat reports gateway_loop_ok=0 (ss-console#2488 part 2; the boolean is the reported failure state and means 'this check could not look', never 'the loop is fine'). Default 3."
   SMD_CONNECTOR_LEDGER_PATH:
     discovery: static
     stage: agent

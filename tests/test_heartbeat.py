@@ -206,6 +206,11 @@ def _emitter(**overrides):
         # ``None`` is the HOLD state (no usable boot sentinel), so the default
         # keeps both fields off every unrelated payload assertion.
         webhook_surface_check_fn=overrides.get("webhook_surface_check_fn", lambda: None),
+        # Hermetic default for the gateway loop check (ss-console#2488 part 2).
+        # ``None`` is the HOLD state; without it the emitter would stat the real
+        # /opt/data and /run on the developer's machine.
+        gateway_loop_check_fn=overrides.get("gateway_loop_check_fn", lambda: None),
+        gateway_loop_check_debounce=overrides.get("gateway_loop_check_debounce", 3),
     )
     return hb.HeartbeatEmitter(**kwargs), calls
 
@@ -744,3 +749,100 @@ def test_read_cron_containment_omits_when_volume_absent(tmp_path, monkeypatch):
 
     assert hb._read_cron_containment() is None
     assert "cron_containment" not in _payload_with_containment()
+
+
+# ---------------------------------------------------------------------------
+# Gateway loop liveness (ss-console#2488 part 2)
+# ---------------------------------------------------------------------------
+
+
+def _loop(**kw):
+    from shared.gateway_loop_check import GatewayLoopCheck
+
+    base = dict(ok=True, age_seconds=None, supervisor_state=None, restarts_last_hour=None)
+    base.update(kw)
+    return GatewayLoopCheck(**base)
+
+
+def test_payload_sends_gateway_loop_fields_including_zero():
+    """age=0 and restarts=0 are REAL values and must reach the wire: a beat
+    that just landed and a supervisor that has never had to kill are both facts
+    the console resolves alerts on. Truthiness-omitting them would strand an
+    open wedge alert forever."""
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        gateway_loop_ok=True,
+        gateway_loop_age_seconds=0,
+        gateway_supervisor_state="armed",
+        gateway_restarts_last_hour=0,
+    )
+    assert p["gateway_loop_ok"] == 1
+    assert p["gateway_loop_age_seconds"] == 0
+    assert p["gateway_supervisor_state"] == "armed"
+    assert p["gateway_restarts_last_hour"] == 0
+
+
+def test_payload_omits_gateway_loop_fields_when_none():
+    p = hb.build_payload(
+        heartbeat_ts="t", last_audit_ts=None, last_skill_ts=None, uptime_seconds=None, version=None
+    )
+    for k in (
+        "gateway_loop_ok",
+        "gateway_loop_age_seconds",
+        "gateway_supervisor_state",
+        "gateway_restarts_last_hour",
+    ):
+        assert k not in p
+
+
+def test_payload_sends_gateway_loop_ok_false_as_zero():
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        gateway_loop_ok=False,
+    )
+    assert p["gateway_loop_ok"] == 0
+    assert "gateway_loop_age_seconds" not in p
+
+
+def test_tick_carries_gateway_loop_check_result():
+    import json
+
+    em, calls = _emitter(
+        gateway_loop_check_fn=lambda: _loop(
+            age_seconds=400, supervisor_state="armed", restarts_last_hour=1
+        )
+    )
+    em._tick()
+    body = json.loads(calls["posts"][0][2])
+    assert body["gateway_loop_ok"] == 1
+    assert body["gateway_loop_age_seconds"] == 400
+    assert body["gateway_supervisor_state"] == "armed"
+    assert body["gateway_restarts_last_hour"] == 1
+
+
+def test_gateway_loop_check_crash_debounces_then_reports_not_omits():
+    """Report-late beats report-never: after the debounce a crashed checker
+    ships ok=0, which pages gateway_loop_unprovable, instead of the field
+    vanishing -- which would hold an open wedge alert open and read as the
+    'monitoring green while broken' class this whole feature exists to close."""
+    import json
+
+    def boom():
+        raise RuntimeError("stat exploded")
+
+    em, calls = _emitter(gateway_loop_check_fn=boom, gateway_loop_check_debounce=2)
+    em._tick()
+    b1 = json.loads(calls["posts"][0][2])
+    assert "gateway_loop_ok" not in b1  # first crash: hold (no last-good yet)
+    em._tick()
+    b2 = json.loads(calls["posts"][1][2])
+    assert b2["gateway_loop_ok"] == 0
+    assert "gateway_loop_age_seconds" not in b2
