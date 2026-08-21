@@ -1088,18 +1088,21 @@ def _resolve_admin_origin(session_id: str) -> tuple[str, str] | None:
     return sender, str(origin.message_id or "")
 
 
-def _resolve_authored_act(tool_name: str) -> tuple[dict, str, str] | None:
-    """The authored payload for this act, plus the names the read-back says.
+def _resolve_authored_act(tool_name: str) -> dict | None:
+    """The authored payload for this act: the block whole, names included.
 
     Read from ``self_initiation.document_library.operator_matter`` in the TRUSTED
     customer.yaml, restricted to the tool's closed key vocabulary. The model's
     arguments are never consulted: what the administrator is asked to approve is
     what the firm authored, and a seat that authored nothing cannot propose.
 
-    ``client_contact_name`` / ``matter_type_name`` are optional authored labels.
-    They exist so the read-back can say "client: Ashton and Price" instead of a
-    UUID a person cannot judge; when absent the ids stand in, which is honest
-    rather than invented.
+    The authored ``client_contact_name`` / ``matter_type_name`` travel in the
+    payload rather than being resolved here. Nothing in this hook looks a name
+    up: the broker renders the read-back from the same authored keys, so the
+    sentence the administrator judges and the payload the seat sent are one file
+    read twice, with no third version composed in between. Those two keys are
+    stripped again before the tool is called (:func:`act_broker.tool_arguments`),
+    because the connector takes ids.
     """
     keys = act_broker.ACT_PAYLOAD_KEYS.get(tool_name)
     if not keys:
@@ -1124,9 +1127,7 @@ def _resolve_authored_act(tool_name: str) -> tuple[dict, str, str] | None:
     if not act_broker.ACT_REQUIRED_KEYS.get(tool_name, frozenset()) <= set(payload):
         logger.warning("trust: authored operator_matter is incomplete; no act may be proposed")
         return None
-    contact_name = str(authored.get("client_contact_name") or payload.get("client_contact_id", ""))
-    type_name = str(authored.get("matter_type_name") or payload.get("matter_type_id", ""))
-    return payload, contact_name, type_name
+    return payload
 
 
 def _propose_commitment_act(tool_name: str, session_id: str) -> dict:
@@ -1145,18 +1146,15 @@ def _propose_commitment_act(tool_name: str, session_id: str) -> dict:
     if PENDING_SEND.peek() is not None or PENDING_ACTS.has_open(session_id):
         logger.info("trust: %s not proposed; another approval is already outstanding", tool_name)
         return {"action": "block", "message": _ACT_ALREADY_OPEN_REFUSAL}
-    authored = _resolve_authored_act(tool_name)
-    if authored is None:
+    payload = _resolve_authored_act(tool_name)
+    if payload is None:
         return {"action": "block", "message": _ACT_NOT_AUTHORED_REFUSAL}
-    payload, contact_name, type_name = authored
     try:
         response = act_broker.propose(
             tool=tool_name,
             payload=payload,
             instructed_by=sender,
             source_ref=message_id,
-            contact_name=contact_name,
-            matter_type_name=type_name,
         )
     except Exception:  # noqa: BLE001 - an unreachable broker withholds, never allows
         logger.warning("trust: act_propose failed; the commitment stays withheld", exc_info=True)
@@ -1362,8 +1360,12 @@ def evaluate_tool_call(
             PENDING_ACTS.peek_confirmed(session_id, tool_name) if is_commitment else None
         )
         if confirmed_act is not None and isinstance(args, dict):
+            # The stored payload is the authored block whole; the tool gets the
+            # subset it accepts. The two authored names are what the read-back
+            # said, not fields the connector has, so they are stripped here and
+            # kept on the record, which is what the committed row carries.
             args.clear()
-            args.update(copy.deepcopy(confirmed_act.payload))
+            args.update(copy.deepcopy(act_broker.tool_arguments(tool_name, confirmed_act.payload)))
             approved_replay = True
 
         decision = enforce(

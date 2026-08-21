@@ -13,6 +13,13 @@ refuses anything that does not match. Two independent readings of one authored
 file, which is the property that makes "yes" mean the matter the firm authored
 rather than the matter the model asked for.
 
+TWO KEY SETS, AND THE DIFFERENCE MATTERS. The PAYLOAD is the whole authored
+block, names included, because that is the thing the two readings compare and the
+thing the committed row records. The ARGUMENTS are the subset the vendor's API
+actually accepts. The authored names exist so the broker can render a read-back a
+person can judge ("client: Ashton and Price") rather than a UUID; sending them on
+to the connector would be sending it fields it does not have.
+
 WHY NOT ``shared.workspace_broker.request``. That helper raises on ``ok != True``,
 and a broker refusal here has to reach the caller as the sentence it is, so the
 seat can tell the administrator what was refused instead of turning it into an
@@ -41,25 +48,51 @@ ACTION_COMMIT = "act_commit"
 #: tells a sentence to install from a call to make.
 KIND_TOOL_CALL = "tool_call"
 
-#: The only payload keys any act may carry, per tool. Mirrors the broker's own
-#: ``ACT_TOOLS``. A key absent from the authored block is simply omitted;
-#: anything not listed here is never sent, whoever authored it.
+#: The only payload keys any act may carry, per tool: the authored block, names
+#: included. Mirrors the broker's own ``ACT_TOOLS``. A key absent from the
+#: authored block is simply omitted; anything not listed here is never sent,
+#: whoever authored it.
 ACT_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
     "mcp_smokeball_create_matter": (
         "description",
         "matter_type_id",
         "client_contact_id",
         "number",
+        "client_contact_name",
+        "matter_type_name",
+    ),
+}
+
+#: The subset of the payload the TOOL is called with. The authored names are for
+#: the read-back the administrator judges; the connector takes ids.
+ACT_ARG_KEYS: dict[str, frozenset[str]] = {
+    "mcp_smokeball_create_matter": frozenset(
+        {"description", "matter_type_id", "client_contact_id", "number"}
     ),
 }
 
 #: Keys without which the act cannot be proposed at all. ``number`` is optional
-#: at the vendor, so an authored block that omits it is still complete.
+#: at the vendor, so an authored block that omits it is still complete. The names
+#: are optional too: without them the read-back falls back to ids, which is
+#: unreadable but honest.
 ACT_REQUIRED_KEYS: dict[str, frozenset[str]] = {
     "mcp_smokeball_create_matter": frozenset(
         {"description", "matter_type_id", "client_contact_id"}
     ),
 }
+
+
+def tool_arguments(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """The payload projected onto the keys the tool itself accepts.
+
+    An unknown tool projects to nothing rather than passing the payload through:
+    a commitment whose argument shape this module does not know is one it must
+    not be replaying.
+    """
+    keys = ACT_ARG_KEYS.get(tool_name)
+    if not keys:
+        return {}
+    return {key: value for key, value in payload.items() if key in keys}
 
 
 def is_act_tool(tool_name: Any) -> bool:
@@ -96,14 +129,13 @@ def propose(
     payload: dict[str, Any],
     instructed_by: str,
     source_ref: str,
-    contact_name: str,
-    matter_type_name: str,
 ) -> dict[str, Any]:
     """Ask the broker to mint a proposal for one authored act.
 
-    ``contact_name`` / ``matter_type_name`` are what the read-back SAYS, so the
-    administrator reads "client: Ashton and Price" rather than a UUID. They are
-    labels only: the payload the act commits carries the ids.
+    ``payload`` is the authored block whole, names included. The hook resolves
+    nothing and looks nothing up: the broker renders the read-back from the same
+    authored names, so what the administrator reads and what the seat sent came
+    from one file read twice, with no third version composed in between.
     """
     return verdict(
         {
@@ -112,8 +144,6 @@ def propose(
             "payload": payload,
             "instructed_by": instructed_by,
             "source_ref": source_ref,
-            "contact_name": contact_name,
-            "matter_type_name": matter_type_name,
         }
     )
 
@@ -145,6 +175,7 @@ def commit(
 __all__ = [
     "ACTION_COMMIT",
     "ACTION_PROPOSE",
+    "ACT_ARG_KEYS",
     "ACT_PAYLOAD_KEYS",
     "ACT_REQUIRED_KEYS",
     "KIND_TOOL_CALL",
@@ -152,5 +183,6 @@ __all__ = [
     "commit",
     "is_act_tool",
     "propose",
+    "tool_arguments",
     "verdict",
 ]

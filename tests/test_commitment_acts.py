@@ -48,8 +48,22 @@ SESSION = "sess-act"
 PROPOSAL = "5c1d9f02"
 MESSAGE_ID = "msg-inbound-1"
 
-#: The block the firm authored. The model never supplies any of it.
+#: The block the firm authored, whole. The model never supplies any of it. This
+#: is what is proposed and what is committed: six keys, names included, because
+#: the names are what the administrator reads and therefore part of what they
+#: agreed to.
 AUTHORED = {
+    "description": "Operator Library",
+    "matter_type_id": "42cc724c-f046-451c-8452-4284f7a82b66_CA",
+    "client_contact_id": "0ac0f746-bf92-462d-b4e5-d133070314fa",
+    "number": "OPS-OPERATOR-LIBRARY",
+    "client_contact_name": "Ashton and Price",
+    "matter_type_name": "Personal Injury - Plaintiff",
+}
+
+#: What the TOOL is called with: the same block minus the two authored names,
+#: which are read-back labels and not fields the connector has.
+ARGS = {
     "description": "Operator Library",
     "matter_type_id": "42cc724c-f046-451c-8452-4284f7a82b66_CA",
     "client_contact_id": "0ac0f746-bf92-462d-b4e5-d133070314fa",
@@ -104,11 +118,7 @@ class _FakeCustomerConfig:
 
 
 def _authored_block() -> dict:
-    return {
-        **AUTHORED,
-        "client_contact_name": "Ashton and Price",
-        "matter_type_name": "Personal Injury - Plaintiff",
-    }
+    return dict(AUTHORED)
 
 
 @pytest.fixture(autouse=True)
@@ -200,6 +210,19 @@ def test_creating_a_matter_is_still_a_commitment():
     assert classify_tool(TOOL).action_class is ActionClass.COMMITMENT
 
 
+def test_the_authored_names_are_agreed_to_but_never_passed_on():
+    """The two halves of the payload, and the seam between them.
+
+    The names are part of what the administrator agreed to, so they are in the
+    payload that is proposed and committed. They are not fields the connector
+    has, so they are not in what the tool is called with.
+    """
+    assert act_broker.tool_arguments(TOOL, AUTHORED) == ARGS
+    assert set(AUTHORED) - set(ARGS) == {"client_contact_name", "matter_type_name"}
+    # An act tool this module does not know projects to nothing, never through.
+    assert act_broker.tool_arguments(OTHER_COMMITMENT, AUTHORED) == {}
+
+
 # ---------------------------------------------------------------------------
 # The register
 # ---------------------------------------------------------------------------
@@ -276,11 +299,12 @@ def test_the_authored_act_is_proposed_even_when_the_model_asked_for_another(gate
     assert READBACK in result["message"]
     proposals = _propose_calls(calls)
     assert len(proposals) == 1
+    # The authored block WHOLE, names included: the broker renders the sentence
+    # the administrator judges from these same keys, so nothing composed in the
+    # hook sits between the file and what they read.
     assert proposals[0]["payload"] == AUTHORED
     assert proposals[0]["instructed_by"] == ADMIN
     assert proposals[0]["source_ref"] == MESSAGE_ID
-    assert proposals[0]["contact_name"] == "Ashton and Price"
-    assert proposals[0]["matter_type_name"] == "Personal Injury - Plaintiff"
     # Withheld, not done: the register holds a question, not an approval.
     assert PENDING_ACTS.peek(SESSION).confirmed is None
 
@@ -399,7 +423,9 @@ def test_the_confirmed_payload_replaces_whatever_the_model_composed(gate):
     _confirm_on_seat()
     live = {"description": "Something Else", "number": "2026-9999", "extra": "injected"}
     assert enforce.evaluate_tool_call(TOOL, live, "smd", session_id=SESSION) is None
-    assert live == AUTHORED  # the stored payload, verbatim, nothing added
+    # The stored payload, projected onto the keys the connector accepts: nothing
+    # the model added survives, and the two read-back names are not passed on.
+    assert live == ARGS
 
 
 def test_the_approval_is_spent_by_the_call_it_authorized(gate):
@@ -563,7 +589,9 @@ def test_an_administrators_yes_confirms_the_act_and_names_the_call(establishment
     context = _turn(mod, ADMIN, YES_EMAIL)["context"]
     assert f"[act {PROPOSAL}]" in context
     assert TOOL in context
-    assert json.dumps(AUTHORED, ensure_ascii=False, sort_keys=True) in context
+    # The model is told the tool's own arguments, not the whole authored block.
+    assert json.dumps(ARGS, ensure_ascii=False, sort_keys=True) in context
+    assert "client_contact_name" not in context
     act = PENDING_ACTS.peek_confirmed(SESSION, TOOL)
     assert act is not None
     assert act.payload == AUTHORED
