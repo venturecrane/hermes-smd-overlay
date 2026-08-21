@@ -46,9 +46,7 @@ def world(tmp_path, monkeypatch):
         return p
 
     w.beat = beat
-    w.checker = lambda: GatewayLoopChecker(
-        home=str(home), run_dir=str(run), ledger_dir=str(ledger)
-    )
+    w.checker = lambda: GatewayLoopChecker(home=str(home), run_dir=str(run), ledger_dir=str(ledger))
     return w
 
 
@@ -114,9 +112,9 @@ def test_missing_profile_directory_is_also_a_hold(world):
     """FileNotFoundError covers a missing parent too; a PermissionError does not
     hide behind it (the overlay's never-path.exists() rule)."""
     monkey_home = world.home / "nowhere"
-    r = GatewayLoopChecker(home=str(monkey_home), run_dir=str(world.run), ledger_dir=str(world.ledger)).check(
-        uptime_seconds=10_000
-    )
+    r = GatewayLoopChecker(
+        home=str(monkey_home), run_dir=str(world.run), ledger_dir=str(world.ledger)
+    ).check(uptime_seconds=10_000)
     assert r.ok is True
     assert r.age_seconds is None
 
