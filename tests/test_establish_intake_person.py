@@ -14,7 +14,16 @@ have waved through (Law 12):
   falsifiable form);
 * the run dir is purged on pass AND fail;
 * the firm path is untouched: an unknown scope refuses, and a person run
-  refuses any phase but install.
+  refuses any phase but install;
+* ``append`` adds a sentence instead of replacing the lot (ss-console#2529),
+  and the default is still replace, because "change my preference to X" and
+  "also do Y" are different instructions.
+
+THE FALSIFIER for the append block, run against 349d86b (the parent commit):
+``_install_person`` ignores an unknown submission field, so
+``test_append_joins_the_new_sentence_onto_the_existing_body`` fails with the
+stored body equal to the new sentence alone — the person's earlier preference
+silently gone, while the seat reports the new one installed.
 """
 
 from __future__ import annotations
@@ -272,6 +281,68 @@ def test_unknown_scope_is_refused(tmp_path):
     result = _read_result(spool)
     assert result["status"] == STATUS_REJECTED
     assert any("unknown scope" in r for r in result["reasons"])
+    assert s3.puts == []
+
+
+# ---------------------------------------------------------------------------
+# append: add a preference rather than replace the lot (ss-console#2529)
+# ---------------------------------------------------------------------------
+
+
+def test_append_joins_the_new_sentence_onto_the_existing_body(tmp_path):
+    """A person who said "bullets, under 150 words" and then says "and always
+    give me the deadline first" means both. A replace would drop the first while
+    telling them the second is in effect."""
+    intake, s3, spool = make_intake(tmp_path)
+    intake.process_run(build_person_run(spool, run_id="run-p1", body="Bullets. Under 150 words."))
+    intake.process_run(
+        build_person_run(spool, run_id="run-p2", body="Give me the deadline first.", append=True)
+    )
+    result = _read_result(spool, "run-p2")
+    assert result["status"] == STATUS_INSTALLED
+    doc = json.loads(s3.objects[PREF_KEY])
+    assert doc["body"] == "Bullets. Under 150 words.\n\nGive me the deadline first."
+    assert doc["sha256"] == _sha(doc["body"])
+
+
+def test_append_without_an_existing_preference_is_just_the_new_body(tmp_path):
+    intake, s3, spool = make_intake(tmp_path)
+    intake.process_run(build_person_run(spool, body="Give me the deadline first.", append=True))
+    assert _read_result(spool)["status"] == STATUS_INSTALLED
+    assert json.loads(s3.objects[PREF_KEY])["body"] == "Give me the deadline first."
+
+
+def test_without_append_a_second_preference_replaces(tmp_path):
+    """The default is unchanged. ``append`` is opt-in because "change my
+    preference to X" and "also do Y" are different instructions, and only the
+    person saying them knows which one they meant."""
+    intake, s3, spool = make_intake(tmp_path)
+    intake.process_run(build_person_run(spool, run_id="run-p1", body="Bullets."))
+    intake.process_run(build_person_run(spool, run_id="run-p2", body="Prose."))
+    assert json.loads(s3.objects[PREF_KEY])["body"] == "Prose."
+
+
+def test_append_past_the_ceiling_refuses_and_writes_nothing(tmp_path):
+    from shared.person_prefs import MAX_PREF_BODY_BYTES
+
+    intake, s3, spool = make_intake(tmp_path)
+    intake.process_run(
+        build_person_run(spool, run_id="run-p1", body="x" * (MAX_PREF_BODY_BYTES - 10))
+    )
+    puts_before = list(s3.puts)
+    intake.process_run(build_person_run(spool, run_id="run-p2", body="y" * 100, append=True))
+    result = _read_result(spool, "run-p2")
+    assert result["status"] == STATUS_REJECTED
+    assert any("over the" in r for r in result["reasons"])
+    assert s3.puts == puts_before
+
+
+def test_a_non_boolean_append_is_refused(tmp_path):
+    intake, s3, spool = make_intake(tmp_path)
+    intake.process_run(build_person_run(spool, append="yes"))
+    result = _read_result(spool)
+    assert result["status"] == STATUS_REJECTED
+    assert any("append must be a boolean" in r for r in result["reasons"])
     assert s3.puts == []
 
 

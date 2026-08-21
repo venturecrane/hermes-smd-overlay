@@ -24,6 +24,21 @@ from the wire): ``run_id``, ``staging_id``, ``phase`` (``analyze``/``install``),
 ``instructed_by``, ``source_ref``. Doc files carry ``doc_id``, ``name``,
 ``sha256`` (broker-computed), ``text``, ``source``.
 
+THREE SCOPES, ONE SPOOL. ``scope`` selects which install this run is:
+
+* ``firm`` (the default) — a property's body distilled from a staged corpus,
+  through the compilers;
+* ``person`` — one individual's preference about their own work
+  (ADR 0085 §6), no corpus, no gates, plus ``append`` to add rather than replace;
+* ``firm_adjust`` — one sentence an admin instructed and confirmed by reply
+  (ss-console#2529), carried as ``adjustment`` (``id``, ``text``, ``sha256``,
+  ``instructed_by``, ``applied_by``, ``at``), appended to the property's
+  standing adjustments. No corpus, so no gates; the controls are the admin
+  allow list, sender attribution, the untainted turn, and the readback.
+
+The last two survive a degraded daemon (``GATE_FREE_SCOPES``) because a gate
+that was never going to run cannot have been skipped.
+
 WHAT THIS DAEMON VERIFIES ITSELF (design §4 — defense in depth behind the
 broker, because root's input surface must not TRUST the spool merely because
 perms say only the broker can write it):
@@ -75,6 +90,11 @@ from shared.person_prefs import (
     normalize_person_address,
     person_slug,
 )
+from spec_applier.applier import (
+    MAX_ADJUSTMENT_TEXT_BYTES,
+    MAX_ADJUSTMENTS,
+    render_spec,
+)
 from spec_applier.preferences import person_pref_key, previous_person_pref_key
 
 logger = logging.getLogger(__name__)
@@ -91,6 +111,17 @@ MAX_SPEC_BYTES = 256 * 1024  # applier parity (spec_applier.applier.MAX_SPEC_BYT
 
 SPEC_PROPERTIES = ("voice", "format")
 _SAFE_SEGMENT = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,63}\Z")
+
+#: Scopes that run NO compiler gates, and therefore survive a degraded daemon.
+#: Neither has a corpus: ``person`` installs the subject's own instruction about
+#: their own work, ``firm_adjust`` installs one sentence an admin said and
+#: confirmed. An absent compiler cannot mean a skipped gate where no gate was
+#: ever going to run — and refusing them would mean a firm whose leak-check
+#: binary is missing can no longer tell its Operator how to write a letter.
+GATE_FREE_SCOPES = ("person", "firm_adjust")
+
+#: The confirmed-adjustment id: the eight-hex proposal id the firm quoted back.
+_ADJUSTMENT_ID = re.compile(r"\A[0-9a-f]{8}\Z")
 
 #: Result files the broker never collected are swept after this long.
 RESULT_TTL_SECONDS = 30 * 60
@@ -264,12 +295,13 @@ class EstablishIntake:
                 result = self._result(
                     run_id, "?", STATUS_REJECTED, reasons=[f"unsafe run id {run_id!r}"]
                 )
-            elif degraded and self._submission_scope(run_dir) != "person":
-                # Person-scoped runs deliberately survive a degraded daemon:
-                # they run NO compiler gates (see _install_person), so an
-                # absent compiler cannot mean a skipped gate for them — while
-                # for firm runs the refusal stands (Law 12: a run the gates
-                # could not examine must not read as one they passed).
+            elif degraded and self._submission_scope(run_dir) not in GATE_FREE_SCOPES:
+                # Gate-free runs deliberately survive a degraded daemon: they
+                # run NO compiler gates (see _install_person and
+                # _install_firm_adjust), so an absent compiler cannot mean a
+                # skipped gate for them — while for corpus-fed firm runs the
+                # refusal stands (Law 12: a run the gates could not examine
+                # must not read as one they passed).
                 logger.error(
                     "establish_intake: DEGRADED — compiler(s) missing, refusing run %s: %s",
                     run_id,
@@ -437,14 +469,14 @@ class EstablishIntake:
         """Best-effort read of the submission's scope, for the degraded gate.
 
         Any fault reads as ``"firm"`` — the fail-closed direction, because a
-        firm-scoped run on a degraded daemon is refused while a person-scoped
-        one proceeds. ``_process`` re-reads and fully validates the submission;
+        firm-scoped run on a degraded daemon is refused while a gate-free one
+        proceeds. ``_process`` re-reads and fully validates the submission;
         this peek decides only which degraded posture applies.
         """
         try:
             sub = json.loads((run_dir / "submission.json").read_text())
             scope = sub.get("scope") if isinstance(sub, dict) else None
-            return scope if scope == "person" else "firm"
+            return scope if scope in GATE_FREE_SCOPES else "firm"
         except (OSError, json.JSONDecodeError):
             return "firm"
 
@@ -483,6 +515,22 @@ class EstablishIntake:
             if problems:
                 return self._result(run_id, phase, STATUS_REJECTED, reasons=problems)
             return self._install_person(run_id, sub)
+        if scope == "firm_adjust":
+            # One confirmed sentence from an admin. Like the person scope: no
+            # staging set, no corpus, no compiler gates. Unlike it, the artifact
+            # is firm-wide — the authority for that is the seat-side admin gate
+            # plus the readback the person confirmed, neither of which this
+            # process can see (module header).
+            if phase != "install":
+                return self._result(
+                    run_id,
+                    phase,
+                    STATUS_REJECTED,
+                    reasons=["firm_adjust establishment supports only phase 'install'"],
+                )
+            if problems:
+                return self._result(run_id, phase, STATUS_REJECTED, reasons=problems)
+            return self._install_firm_adjust(run_id, sub)
         if scope != "firm":
             return self._result(
                 run_id, phase, STATUS_REJECTED, reasons=[f"unknown scope {scope!r}"]
@@ -669,15 +717,36 @@ class EstablishIntake:
                 "declare the class to bind the gate"
             )
 
+        provenance = _corpus_provenance(run_id, docs)
+
+        def _replace_body(current_entry: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+            """Replace the distilled body, KEEPING the standing adjustments.
+
+            THE FALSIFIER FOR THIS FUNCTION (ss-console#2529). Before it existed
+            this path wrote ``{"body": ..., "sha256": ...}`` over the whole
+            property, so the first re-establishment from documents silently
+            deleted every sentence the firm had said out loud and been told was
+            in effect — a firm that establishes its voice on Tuesday would find
+            Monday's instructions gone, with nothing anywhere reporting it. The
+            two authoring routes write different fields of one property and
+            neither is allowed to clear the other's.
+            """
+            entry: dict[str, Any] = {"body": spec_body, "sha256": digest}
+            if assertions:
+                entry["assertions"] = assertions
+            if provenance:
+                entry["provenance"] = provenance
+            carried = current_entry.get("adjustments")
+            if isinstance(carried, list) and carried:
+                entry["adjustments"] = carried
+            return entry, []
+
         return self._put_and_converge(
             run_id=run_id,
             staging_id=staging_id,
             output_class=output_class,
             prop=prop,
-            spec_body=spec_body,
-            digest=digest,
-            assertions=assertions,
-            provenance=_corpus_provenance(run_id, docs),
+            merge=_replace_body,
             demotions=demotions,
             gate_states=gate_states,
             warnings=warnings,
@@ -691,17 +760,31 @@ class EstablishIntake:
         self,
         *,
         run_id: str,
-        staging_id: str,
+        staging_id: str | None,
         output_class: str,
         prop: str,
-        spec_body: str,
-        digest: str,
-        assertions: dict[str, Any],
-        provenance: dict[str, Any],
-        demotions: list[dict[str, Any]],
-        gate_states: dict[str, str],
-        warnings: list[str],
+        merge: Callable[[dict[str, Any]], tuple[dict[str, Any] | None, list[str]]],
+        demotions: list[dict[str, Any]] | None = None,
+        gate_states: dict[str, str] | None = None,
+        warnings: list[str] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """GET, merge, copy the recovery generation, PUT, read back, converge.
+
+        ONE MOTION, TWO WRITERS. A corpus-fed establishment replaces a
+        property's distilled body; a confirmed adjustment appends a sentence to
+        the same property. Both have to copy the previous generation, both have
+        to read back what they wrote, and both have to wait for the applier — so
+        both come through here, and what differs is only ``merge``: a callable
+        handed the property's CURRENT entry (``{}`` when there is none) that
+        returns the entry to write, or ``None`` plus reasons to refuse.
+
+        The merge runs BEFORE the recovery copy. A refusal therefore writes
+        nothing at all, rather than leaving a pointless duplicate on the
+        previous key and telling the firm the write failed.
+        """
+        gate_states = gate_states or {}
+        warnings = list(warnings or [])
         key = spec_object_key(self.slug)
         try:
             current = self._get_object(key)
@@ -726,6 +809,22 @@ class EstablishIntake:
                 # (it is the recoverable state, whatever it is) but contributes
                 # no classes to the merge.
                 logger.warning("establish_intake: current vault object unparseable; merging none")
+
+        class_entry = merged_classes.get(output_class)
+        current_entry = class_entry.get(prop) if isinstance(class_entry, dict) else None
+        entry, merge_problems = merge(current_entry if isinstance(current_entry, dict) else {})
+        if entry is None:
+            return self._result(
+                run_id,
+                "install",
+                STATUS_REJECTED,
+                staging_id=staging_id,
+                reasons=merge_problems or ["the merge refused without a reason"],
+                gates=gate_states,
+            )
+        warnings.extend(merge_problems)
+
+        if current is not None:
             previous_key = previous_object_key(self.slug)
             try:
                 self.s3_client.put_object(
@@ -745,11 +844,6 @@ class EstablishIntake:
                     gates=gate_states,
                 )
 
-        entry: dict[str, Any] = {"body": spec_body, "sha256": digest}
-        if assertions:
-            entry["assertions"] = assertions
-        if provenance:
-            entry["provenance"] = provenance
         merged_classes.setdefault(output_class, {})
         if not isinstance(merged_classes[output_class], dict):
             merged_classes[output_class] = {}
@@ -790,6 +884,15 @@ class EstablishIntake:
                 "the spec applier has not yet installed this object; it applies on "
                 "the applier's next successful poll (fail-static — nothing is lost)"
             )
+        result_extra: dict[str, Any] = {
+            "output_class": output_class,
+            "property": prop,
+            "demotions": demotions if demotions is not None else [],
+            "previous_key": previous_key,
+            "source_digest": source_digest,
+        }
+        if extra:
+            result_extra.update(extra)
         return self._result(
             run_id,
             "install",
@@ -797,13 +900,7 @@ class EstablishIntake:
             staging_id=staging_id,
             gates=gate_states,
             warnings=warnings,
-            extra={
-                "output_class": output_class,
-                "property": prop,
-                "demotions": demotions,
-                "previous_key": previous_key,
-                "source_digest": source_digest,
-            },
+            extra=result_extra,
         )
 
     def _get_object(self, key: str) -> bytes | None:
@@ -840,6 +937,144 @@ class EstablishIntake:
             if self.now_fn() >= deadline:
                 return False
             self.sleep_fn(self.converge_interval)
+
+    # ------------------------------------------------------------------
+    # Firm adjustment (ADR 0085 §4 as amended 2026-08-21, ss-console#2529)
+    # ------------------------------------------------------------------
+
+    def _install_firm_adjust(self, run_id: str, sub: dict[str, Any]) -> dict[str, Any]:
+        """Append one confirmed sentence to a property's standing adjustments.
+
+        WHY NO COMPILER GATES RUN HERE. They cannot: every one of them takes a
+        CORPUS and refuses an empty one (leak check, digit invariant, selftest),
+        and there is no corpus — the artifact is a sentence an admin typed in an
+        email and confirmed by reply. Running them would not be strictness, it
+        would be a refusal of every adjustment the firm will ever make. What
+        holds instead, per the ADR amendment: the authored admin allow list
+        (authority), the per-channel sender attribution (who), the untainted
+        turn (the words are the sender's, not a document's), the broker's
+        proposal row (the committed text is the confirmed text, byte for byte),
+        and the readback the person answered "yes" to.
+
+        WHAT THIS FUNCTION WILL NOT TOUCH. The distilled ``body``, its
+        ``sha256``, its ``assertions``, its ``provenance``. An adjustment is
+        additive by construction: the firm said one more thing, and the record
+        of what was read to learn its voice is not a place to write that.
+        """
+        phase = "install"
+        problems: list[str] = []
+        output_class = str(sub.get("output_class") or "")
+        prop = str(sub.get("property") or "")
+        if not _SAFE_SEGMENT.match(output_class):
+            problems.append(f"output_class {output_class!r} outside the permitted charset")
+        if prop not in SPEC_PROPERTIES:
+            problems.append(f"property must be one of {SPEC_PROPERTIES}; got {prop!r}")
+        adjustment, adjustment_problems = self._verify_adjustment(sub.get("adjustment"))
+        problems.extend(adjustment_problems)
+        if problems:
+            return self._result(run_id, phase, STATUS_REJECTED, reasons=problems)
+        assert adjustment is not None  # noqa: S101 — narrowed by the problems check above
+
+        warnings: list[str] = []
+        if not self._class_declared(output_class):
+            warnings.append(
+                f"output class {output_class!r} is not declared in customer.yaml "
+                "output_classes — the adjustment installs (spec-before-declare, #2094), "
+                "but declare the class to bind the gate"
+            )
+
+        def _append(current_entry: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+            entry = dict(current_entry)
+            existing = entry.get("adjustments")
+            adjustments = list(existing) if isinstance(existing, list) else []
+            already = any(
+                isinstance(a, dict) and a.get("id") == adjustment["id"] for a in adjustments
+            )
+            if already:
+                # Idempotent retry. The broker consumes a proposal once, but a
+                # result the broker never collected can bring the same run back
+                # around; re-appending would render the firm's sentence twice.
+                return entry, ["this adjustment was already in effect; nothing changed"]
+            adjustments.append(adjustment)
+            if len(adjustments) > MAX_ADJUSTMENTS:
+                return None, [
+                    f"{output_class}.{prop} already carries {len(adjustments) - 1} standing "
+                    f"adjustments, the ceiling of {MAX_ADJUSTMENTS}; re-establish the "
+                    "property from documents rather than adding another sentence to it"
+                ]
+            body = entry.get("body")
+            rendered = render_spec(body if isinstance(body, str) else "", adjustments)
+            size = len(rendered.encode("utf-8"))
+            if size > MAX_SPEC_BYTES:
+                return None, [
+                    f"{output_class}.{prop} would render to {size} bytes with this "
+                    f"adjustment, over the {MAX_SPEC_BYTES}-byte ceiling"
+                ]
+            entry["adjustments"] = adjustments
+            return entry, []
+
+        return self._put_and_converge(
+            run_id=run_id,
+            staging_id=None,
+            output_class=output_class,
+            prop=prop,
+            merge=_append,
+            warnings=warnings,
+            extra={"scope": "firm_adjust", "adjustment_id": adjustment["id"]},
+        )
+
+    @staticmethod
+    def _verify_adjustment(raw: Any) -> tuple[dict[str, Any] | None, list[str]]:
+        """Re-verify the broker's adjustment record, field by field.
+
+        Defense in depth behind the broker (design §4): root's input surface
+        does not trust the spool merely because the permissions say only the
+        broker can write it. The hash is re-computed over the text rather than
+        read from the record, so a record whose text and digest disagree is
+        refused here even though the broker computed both.
+        """
+        problems: list[str] = []
+        if not isinstance(raw, dict):
+            return None, ["adjustment missing or not an object"]
+        adj_id = raw.get("id")
+        if not isinstance(adj_id, str) or not _ADJUSTMENT_ID.match(adj_id):
+            problems.append("adjustment.id must be eight lowercase hex characters")
+        text = raw.get("text")
+        if not isinstance(text, str) or not text.strip():
+            problems.append("adjustment.text missing or empty")
+            text = ""
+        elif "\n" in text or "\r" in text:
+            problems.append("adjustment.text must not contain a line break")
+        encoded = text.encode("utf-8")
+        if len(encoded) > MAX_ADJUSTMENT_TEXT_BYTES:
+            problems.append(
+                f"adjustment.text {len(encoded)} bytes exceeds the "
+                f"{MAX_ADJUSTMENT_TEXT_BYTES}-byte ceiling"
+            )
+        digest = sha256(encoded)
+        declared = raw.get("sha256")
+        if not isinstance(declared, str) or declared.strip().lower() != digest:
+            problems.append("adjustment.text does not rehash to the broker-computed sha256")
+        instructed_by = raw.get("instructed_by")
+        if not isinstance(instructed_by, str) or not instructed_by.strip():
+            problems.append("adjustment.instructed_by missing or empty")
+        applied_by = raw.get("applied_by")
+        if applied_by is not None and (not isinstance(applied_by, str) or not applied_by.strip()):
+            problems.append("adjustment.applied_by must be a non-empty string when present")
+        at = raw.get("at")
+        if not isinstance(at, str) or not at.strip():
+            problems.append("adjustment.at missing or empty")
+        if problems:
+            return None, problems
+        record: dict[str, Any] = {
+            "id": adj_id,
+            "text": text,
+            "instructed_by": str(instructed_by).strip(),
+            "at": str(at).strip(),
+        }
+        if applied_by:
+            record["applied_by"] = str(applied_by).strip()
+        return record, []
 
     # ------------------------------------------------------------------
     # Person-scoped install (ADR 0085 §6, ss#2067) — no gates, by design
@@ -886,6 +1121,10 @@ class EstablishIntake:
         assertions = sub.get("assertions")
         if assertions is not None and not isinstance(assertions, (dict, list)):
             problems.append("assertions must be an object or list when present")
+        append = sub.get("append")
+        if append is not None and not isinstance(append, bool):
+            problems.append("append must be a boolean when present")
+            append = False
         if person is not None:
             self._person_on_roster(person, problems)
         if problems:
@@ -902,6 +1141,34 @@ class EstablishIntake:
                 STATUS_ERROR,
                 reasons=[f"could not read the current preference object: {exc}"],
             )
+        if append and current is not None:
+            # ADD a preference rather than replace the lot. A person who has
+            # said "bullets, under 150 words" and then says "and always give me
+            # the deadline first" means both, and a replace would quietly drop
+            # the first one while telling them the second is in effect. The
+            # broker computed the declared hash over the NEW sentence, which is
+            # what was verified above; the stored digest is recomputed here over
+            # the joined body, because that is the artifact.
+            try:
+                existing_doc = json.loads(current.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                existing_doc = {}
+            existing_body = existing_doc.get("body") if isinstance(existing_doc, dict) else None
+            if isinstance(existing_body, str) and existing_body.strip():
+                body = existing_body.rstrip("\n") + "\n\n" + body
+                encoded = body.encode("utf-8")
+                if len(encoded) > MAX_PREF_BODY_BYTES:
+                    return self._result(
+                        run_id,
+                        phase,
+                        STATUS_REJECTED,
+                        reasons=[
+                            f"the preference would total {len(encoded)} bytes with this "
+                            f"addition, over the {MAX_PREF_BODY_BYTES}-byte ceiling"
+                        ],
+                    )
+                digest = sha256(encoded)
+
         previous_key: str | None = None
         if current is not None:
             previous_key = previous_person_pref_key(self.slug, pslug)
@@ -1176,6 +1443,7 @@ __all__ = [
     "MAX_SPEC_BYTES",
     "MAX_TOTAL_BYTES",
     "RESULT_TTL_SECONDS",
+    "GATE_FREE_SCOPES",
     "SPEC_PROPERTIES",
     "STAGING_TTL_SECONDS",
     "STATUS_ACCEPTED_PENDING",

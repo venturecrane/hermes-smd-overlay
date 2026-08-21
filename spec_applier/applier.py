@@ -38,6 +38,18 @@ by THIS process over the bytes it wrote — never copied from the source documen
 manifest that merely echoed the source's claims would verify the source against
 itself. A reader that catches the window between new bodies and the new manifest
 sees a hash mismatch and fails closed, which is the safe direction.
+
+TWO WAYS A PROPERTY GETS ITS TEXT (ss-console #2529). A ``body`` is distilled
+from documents the firm designated, through the compiler gates. An
+``adjustments`` list is the firm talking: one confirmed sentence at a time
+("in client letters, be more formal and shorter"), each carrying who instructed
+it, who applied it, and when. Both render into ONE installed file — body first,
+then a ``## Adjustments`` block, oldest first — because the model reads a file,
+not a vault entry, and a rule it cannot see is a rule that is not in effect. A
+property may carry either or both; adjustments alone is the ordinary state of a
+firm that has said how its letters should read without ever handing over a
+corpus. The manifest hash is computed over the RENDERED bytes, so the read mark,
+the spec gate, and the stamp need to know nothing about any of this.
 """
 
 from __future__ import annotations
@@ -46,6 +58,8 @@ import enum
 import json
 import logging
 import os
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -74,6 +88,32 @@ SPEC_PROPERTIES = ("voice", "format")
 #: past this is a mistake or an attempt to flood the drafting context, and
 #: either way the document is refused rather than truncated.
 MAX_SPEC_BYTES = 256 * 1024
+
+#: How many standing adjustments one property may carry. Past this the firm has
+#: a spec, not a list of afterthoughts, and the right move is to re-establish
+#: the property from documents rather than stack a fifty-first sentence on it.
+MAX_ADJUSTMENTS = 50
+
+#: Ceiling on one adjustment's text. It is a sentence the firm said out loud and
+#: confirmed by reply, not a document.
+MAX_ADJUSTMENT_TEXT_BYTES = 2000
+
+#: An adjustment id is the proposal id the firm confirmed: eight lowercase hex
+#: characters, short enough to quote in an email and long enough not to collide.
+_ADJUSTMENT_ID = re.compile(r"\A[0-9a-f]{8}\Z")
+
+#: Heading the rendered adjustments block opens with.
+ADJUSTMENTS_HEADING = "## Adjustments"
+
+#: The sentence that tells the reading model what the block below it is and how
+#: it ranks against the body above it. Rendered verbatim, every time, because
+#: the model reads only the file — it never sees the vault entry that produced
+#: it, so the precedence rule has to be IN the bytes.
+ADJUSTMENTS_PREAMBLE = (
+    "Standing instructions from the firm, in effect from the date shown. Each "
+    "applies on top of everything above; where an adjustment and the text above "
+    "disagree, the adjustment is the firm's later instruction and wins."
+)
 
 #: Ownership + permissions of everything this package installs. The dir is
 #: traversable and the files readable by the agent uid; NOTHING here is
@@ -220,10 +260,46 @@ class ParsedSpec:
     #: answer. Empty for a spec installed before provenance existed — and that
     #: absence must keep rendering as "I cannot name them", never as "none".
     provenance: dict = field(default_factory=dict)
+    #: Standing one-sentence instructions the firm gave conversationally and
+    #: confirmed by reply (ss-console#2529), oldest first. Already rendered into
+    #: ``body`` by the time this leaves the parser — carried here so a caller can
+    #: see what the file says without re-parsing markdown.
+    adjustments: tuple[dict, ...] = ()
 
     @property
     def rel_path(self) -> str:
         return f"{CLASSES_SUBDIR}/{self.output_class}/{self.prop}.md"
+
+
+def render_spec(body: str, adjustments: Sequence[dict]) -> str:
+    """The bytes installed for one property, assembled from its two sources.
+
+    Body, then one blank line, then the adjustments block. With no adjustments
+    the result is the body unchanged, byte for byte — which is why every spec
+    installed before this existed keeps its exact digest.
+
+    IMPORTED BY THE INTAKE, deliberately. The intake checks a proposed
+    adjustment against the byte ceiling before it writes the vault, and it has
+    to measure the same string this function produces. Two renderers would
+    drift, and the drift would show up as a seat that accepted a rule the
+    applier then refused — the firm's confirmed sentence sitting in the vault
+    and never reaching the file the model reads.
+    """
+    block = ""
+    if adjustments:
+        lines = [ADJUSTMENTS_HEADING, "", ADJUSTMENTS_PREAMBLE, ""]
+        for adj in adjustments:
+            who = f"instructed by {adj['instructed_by']}"
+            applied_by = adj.get("applied_by")
+            if applied_by:
+                who = f"{who}, applied by {applied_by}"
+            lines.append(f"- [rule {adj['id']}] ({who}, {adj['at']}): {adj['text']}")
+        block = "\n".join(lines) + "\n"
+    if not block:
+        return body
+    if not body:
+        return block
+    return body.rstrip("\n") + "\n\n" + block
 
 
 def parse_and_verify(data: bytes) -> tuple[list[ParsedSpec], list[str]]:
@@ -284,16 +360,101 @@ def parse_and_verify(data: bytes) -> tuple[list[ParsedSpec], list[str]]:
     return specs, errors
 
 
+def _parse_adjustments(path: str, raw: Any) -> tuple[tuple[dict, ...], list[str]]:
+    """Parse the optional standing-adjustments list for one property.
+
+    Refused the same way assertions and provenance are refused: a malformed
+    item takes the WHOLE document down rather than being dropped. Dropping is
+    the worse outcome by a distance — the firm confirmed a sentence by reply and
+    was told it was in effect, so a spec that quietly installs without it makes
+    the seat's own confirmation a lie, and nothing anywhere would say so.
+    """
+    if raw is None:
+        return (), []
+    if not isinstance(raw, list):
+        return (), [f"{path}.adjustments: must be a list when present"]
+    if len(raw) > MAX_ADJUSTMENTS:
+        return (), [
+            f"{path}.adjustments: {len(raw)} entries exceeds the {MAX_ADJUSTMENTS}-entry ceiling"
+        ]
+    errors: list[str] = []
+    parsed: list[dict] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        where = f"{path}.adjustments[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{where}: must be an object")
+            continue
+        adj_id = item.get("id")
+        if not isinstance(adj_id, str) or not _ADJUSTMENT_ID.match(adj_id):
+            errors.append(f"{where}.id: must be eight lowercase hex characters")
+            continue
+        if adj_id in seen:
+            errors.append(f"{where}.id: {adj_id!r} appears twice in this property")
+            continue
+        seen.add(adj_id)
+        item_errors: list[str] = []
+        for required in ("text", "instructed_by", "at"):
+            value = item.get(required)
+            if not isinstance(value, str) or not value.strip():
+                item_errors.append(f"{where}.{required}: must be a non-empty string")
+        applied_by = item.get("applied_by")
+        if applied_by is not None and (not isinstance(applied_by, str) or not applied_by.strip()):
+            item_errors.append(f"{where}.applied_by: must be a non-empty string when present")
+        text = item.get("text")
+        if isinstance(text, str):
+            if len(text.encode("utf-8")) > MAX_ADJUSTMENT_TEXT_BYTES:
+                item_errors.append(
+                    f"{where}.text: exceeds the {MAX_ADJUSTMENT_TEXT_BYTES}-byte ceiling"
+                )
+            if "\n" in text or "\r" in text:
+                # One adjustment renders as one bullet. A line break inside the
+                # text would produce a file whose shape does not match what this
+                # parser believes it wrote, so it is refused here as well as
+                # normalized at the broker — the two halves have to agree, and
+                # only one of them is on the seat.
+                item_errors.append(f"{where}.text: must not contain a line break")
+        if item_errors:
+            errors.extend(item_errors)
+            continue
+        entry = {
+            "id": adj_id,
+            "text": text,
+            "instructed_by": item["instructed_by"],
+            "at": item["at"],
+        }
+        if applied_by:
+            entry["applied_by"] = applied_by
+        parsed.append(entry)
+    if errors:
+        return (), errors
+    return tuple(parsed), []
+
+
 def _parse_one(slug: str, prop: str, raw: Any) -> tuple[ParsedSpec | None, list[str]]:
-    """Parse and hash-verify one ``classes.<slug>.<prop>`` entry."""
+    """Parse and hash-verify one ``classes.<slug>.<prop>`` entry.
+
+    A property is authored from a distilled ``body``, from a list of confirmed
+    ``adjustments``, or from both. The declared ``sha256`` covers the BODY, and
+    is checked only when there is one; the installed file is the rendered
+    combination of the two, and the manifest hashes what this process writes.
+    """
     path = f"classes.{slug}.{prop}"
     if not isinstance(raw, dict):
         return None, [f"{path}: must be an object with `body` and `sha256`"]
+    adjustments, adjustment_errors = _parse_adjustments(path, raw.get("adjustments"))
+    if adjustment_errors:
+        return None, adjustment_errors
     body = raw.get("body")
     declared = raw.get("sha256")
-    if not isinstance(body, str) or not body.strip():
-        return None, [f"{path}.body: must be a non-empty string"]
-    if not isinstance(declared, str) or not declared.strip():
+    has_body = isinstance(body, str) and bool(body.strip())
+    if not has_body:
+        if body is not None and not isinstance(body, str):
+            return None, [f"{path}.body: must be a string when present"]
+        if not adjustments:
+            return None, [f"{path}.body: must be a non-empty string"]
+        body = ""
+    if has_body and (not isinstance(declared, str) or not declared.strip()):
         return None, [f"{path}.sha256: must be the hex sha256 of `body`"]
     encoded = body.encode("utf-8")
     if len(encoded) > MAX_SPEC_BYTES:
@@ -301,11 +462,17 @@ def _parse_one(slug: str, prop: str, raw: Any) -> tuple[ParsedSpec | None, list[
             f"{path}.body: {len(encoded)} bytes exceeds the {MAX_SPEC_BYTES}-byte ceiling"
         ]
     actual = sha256(encoded)
-    if actual != declared.strip().lower():
+    if has_body and actual != str(declared).strip().lower():
         return None, [
-            f"{path}: declared sha256 {declared.strip().lower()!r} does not match the "
+            f"{path}: declared sha256 {str(declared).strip().lower()!r} does not match the "
             f"body's actual digest {actual!r} — the document and its own integrity "
             "claim disagree, so the whole document is refused"
+        ]
+    rendered = render_spec(body, adjustments).encode("utf-8")
+    if len(rendered) > MAX_SPEC_BYTES:
+        return None, [
+            f"{path}: the body and its {len(adjustments)} adjustments render to "
+            f"{len(rendered)} bytes, over the {MAX_SPEC_BYTES}-byte ceiling"
         ]
     # Assertions are OPTIONAL and, when present, must be an object. A malformed
     # value refuses the whole document rather than being dropped: silently
@@ -326,10 +493,11 @@ def _parse_one(slug: str, prop: str, raw: Any) -> tuple[ParsedSpec | None, list[
         ParsedSpec(
             output_class=slug,
             prop=prop,
-            body=encoded,
-            digest=actual or "",
+            body=rendered,
+            digest=sha256(rendered) or "",
             assertions=assertions,
             provenance=provenance,
+            adjustments=adjustments,
         ),
         [],
     )
@@ -585,8 +753,12 @@ def apply(
 
 
 __all__ = [
+    "ADJUSTMENTS_HEADING",
+    "ADJUSTMENTS_PREAMBLE",
     "CLASSES_SUBDIR",
     "MANIFEST_NAME",
+    "MAX_ADJUSTMENTS",
+    "MAX_ADJUSTMENT_TEXT_BYTES",
     "MAX_SPEC_BYTES",
     "SCHEMA_VERSION",
     "SPEC_PROPERTIES",
@@ -598,5 +770,6 @@ __all__ = [
     "apply",
     "parse_and_verify",
     "pull_specs",
+    "render_spec",
     "spec_object_key",
 ]
