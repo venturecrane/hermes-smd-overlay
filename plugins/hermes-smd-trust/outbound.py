@@ -123,8 +123,56 @@ _BODY_REQUIRED_DRAFT_TOOLS: frozenset[str] = frozenset(
         "email_update_draft",
         "sms_create_draft",
         "practice_management_create_note",
+        # The two live mail-draft names, for the same reason as the generic ones
+        # above: a create_draft with no recognizable body is a malformed call,
+        # not an empty one, and letting it through unscanned is how a draft
+        # reaches a mailbox without ever meeting the gate. Both connectors make
+        # the body schema-required, so a missing one is a shape surprise, which
+        # is exactly the case that must fail closed (ss-console#2511).
+        "mcp_msgraph_mail_create_draft",
+        "mcp_agentmail_create_draft",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# Gated tools that REPORT rather than refuse (ss-console#2511)
+#
+# ``mcp_smokeball_add_file`` (content_text) and
+# ``mcp_smokeball_render_docx_draft`` (draft_markdown) carry the firm's real
+# documents: a demand letter, discovery responses, a settlement statement.
+# Neither key was in the scan lists, so both tools reached
+# ``check_outbound_draft``, matched nothing, and exited unscanned. The
+# identifier surface with the largest blast radius on the seat was the one
+# surface the gate never saw. Those keys are in ``_DRAFT_SCAN_KEYS`` now.
+#
+# They REPORT instead of blocking, and the reason is the ss#2247 note up this
+# file rather than timidity. A demand letter is dense with figures and dates the
+# firm authored elsewhere; flipping a gate straight to BLOCK on that content,
+# with no measurement of how often it fires on correct work, is how the
+# establishment gate ended up teaching the model to delete wage rates from a
+# letter so it would stage. So every identifier in a filed document is measured
+# and written to the ledger, and nothing is refused until someone has read the
+# rate at which it fires. Flipping these to BLOCK is a Captain decision with
+# that number in hand.
+#
+# PER TOOL, never the env lever. ``SMD_IDENTIFIER_GATE_MODE=report`` downgrades
+# every gate on the seat and is the incident rollback; this downgrades exactly
+# two tools and is the authored posture. The audit row says which one applied
+# (``mode=report_tool`` vs ``mode=report``) so a ledger reader is never left
+# guessing whether a seat was in rollback.
+# ---------------------------------------------------------------------------
+
+_REPORT_ONLY_DRAFT_TOOLS: frozenset[str] = frozenset(
+    {
+        "mcp_smokeball_add_file",
+        "mcp_smokeball_render_docx_draft",
+    }
+)
+
+#: Audit/mode value for the per-tool carve above. Deliberately distinct from the
+#: operator-set ``report``, which means the whole seat is in rollback.
+MODE_REPORT_TOOL = "report_tool"
 
 
 def _is_gated_draft_tool(tool_name: str) -> bool:
@@ -230,6 +278,11 @@ _DRAFT_SCAN_KEYS: tuple[str, ...] = (
     "text",
     "note",
     "message",
+    # The document bodies (ss-console#2511). ``content_text`` is add_file's
+    # plain-text payload and ``draft_markdown`` is render_docx_draft's source;
+    # each is a whole document, and neither was scanned by anything.
+    "content_text",
+    "draft_markdown",
     # structured, identifier-bearing args (#2132)
     "subject",
     "title",
@@ -500,17 +553,33 @@ def _days_from_today_bucket(canonical: str) -> str:
     return ">365d"
 
 
-def _identifier_refusal_message(unverified: list) -> str:
+def _identifier_refusal_message(unverified: list, *, seat_sourced: bool = False) -> str:
     """What the model sees on a refusal. Names kinds only — never raw values,
-    never scan mechanics (which would teach evasion routes)."""
+    never scan mechanics (which would teach evasion routes).
+
+    ``seat_sourced`` adds one sentence when at least one of the hits was found in
+    the seat's OWN text this session rather than in a record. Without it the
+    refusal reads "not traceable to anything read this session" to a model that
+    can see it read the value ten minutes ago, in a skill file. A refusal whose
+    reason the reader can disprove is a refusal the reader works around; naming
+    the actual distinction is what makes it followable.
+    """
     kinds = sorted({h.kind.value for h in unverified})
-    return (
+    message = (
         "Refused: this content contains identifier(s) not traceable to anything "
         f"read this session ({', '.join(kinds)}). Re-read the source record that "
         "contains the correct value and include it exactly as it appears there — "
         "or remove the unverified value and state that it needs confirmation. "
         "Do not guess, derive, or reformat identifiers."
     )
+    if seat_sourced:
+        message += (
+            " At least one of these appears in your own instructions, skills, or "
+            "configuration rather than in a record from the firm's systems. Text "
+            "the seat carries is not a source; only a read of the firm's own "
+            "records is."
+        )
+    return message
 
 
 def _emit_identifier_audit(
@@ -520,6 +589,7 @@ def _emit_identifier_audit(
     blocked: bool,
     block_bypass: str | None,
     register_was_empty: bool,
+    seat_sourced: bool,
     session_id: str,
     tool_name: str,
     tool_call_id: str,
@@ -551,6 +621,12 @@ def _emit_identifier_audit(
         # redacted shapes only — never the raw identifier value
         "shapes": sorted({identifier_filter._redact(h) for h in unverified}),
     }
+    if seat_sourced:
+        # The kill test on ss-console#2511 reads this exact key and value. It is
+        # the difference between "the register was empty" and "the value came out
+        # of the seat's own text", which is the whole point of the negative
+        # register — so it is a field, not a phrase inside another field.
+        metadata["source"] = "seat_text"
     if block_bypass:
         metadata["block_bypass"] = block_bypass
     if date_distance:
@@ -599,6 +675,12 @@ def _check_identifiers(
             and not (h.kind is identifier_filter.IdKind.DATE and h.canonical in ambient)
         ]
         register_was_empty = result.register_was_empty
+        # ss-console#2511 — the negative register. A hit the SEAT's own text
+        # supplied is a different finding from a hit nothing supplied, and
+        # ``verifies`` is the same membership test the positive path uses, so
+        # both sides canonicalize identically by construction.
+        seat_register = provenance.seat_sourced_for(session_id)
+        seat_sourced_hits = [h for h in unverified if seat_register.verifies(h)]
     except Exception as exc:  # noqa: BLE001 — infra fault, not fabrication evidence
         logger.error(
             "outbound gate: identifier scan CRASHED (tool=%s err=%s); allowing",
@@ -610,8 +692,19 @@ def _check_identifiers(
         return None
 
     # -- zone 2: decide --
-    mode = _identifier_gate_mode()
-    empty_carve = register_was_empty and gate == "draft"
+    #
+    # Two carves and they do not compose. The empty-register carve exists so a
+    # conversational turn that read nothing is not bricked by a refusal with no
+    # source to go re-read. That reasoning does not reach a value the seat read
+    # out of its own skill body: there IS a thing to say about it, namely that
+    # it is not a record. So a seat-sourced hit refuses through the carve.
+    #
+    # The per-tool report carve is unconditional in the other direction: those
+    # two tools measure and never refuse, seat-sourced or not, until the
+    # false-positive rate has been read (see _REPORT_ONLY_DRAFT_TOOLS).
+    mode = MODE_REPORT_TOOL if tool_name in _REPORT_ONLY_DRAFT_TOOLS else _identifier_gate_mode()
+    seat_sourced = bool(seat_sourced_hits)
+    empty_carve = register_was_empty and gate == "draft" and not seat_sourced
     should_block = (
         mode == "block" and not empty_carve and any(h.kind in _BLOCKING_KINDS for h in unverified)
     )
@@ -627,6 +720,7 @@ def _check_identifiers(
             blocked=should_block,
             block_bypass=block_bypass,
             register_was_empty=register_was_empty,
+            seat_sourced=seat_sourced,
             session_id=session_id,
             tool_name=tool_name,
             tool_call_id=tool_call_id,
@@ -641,7 +735,10 @@ def _check_identifiers(
         )
 
     if should_block:
-        return {"action": "block", "message": _identifier_refusal_message(unverified)}
+        return {
+            "action": "block",
+            "message": _identifier_refusal_message(unverified, seat_sourced=seat_sourced),
+        }
     return None
 
 

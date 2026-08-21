@@ -371,11 +371,17 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # it keys on structured connector record shapes rather than on free
         # text, and narrowing it belongs with the matter gate's own review — not
         # carried along by a change to the identifier register.
+        text = result if isinstance(result, str) else str(result)
         if provenance.seeds_provenance(tool_name):
-            provenance.record_read(
-                resolved,
-                result if isinstance(result, str) else str(result),
-            )
+            provenance.record_read(resolved, text)
+        else:
+            # NOT discarded. A read the seat performed on its own text is
+            # evidence too — of the opposite thing. Recording it is what lets
+            # the outbound gate tell "nothing was read this session" apart from
+            # "this number came out of your own instructions", and refuse the
+            # second even on a turn where the first would be carved out. See the
+            # negative-register note in shared/provenance.py.
+            provenance.record_seat_text(resolved, text)
         # ss#2167 — matter membership rides the SAME read stream. The outbound
         # matter-identity gate cannot call the connector at send time (this
         # process cannot synchronously drive an MCP server from pre_tool_call),

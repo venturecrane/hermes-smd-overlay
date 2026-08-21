@@ -176,6 +176,154 @@ def test_scoring_a_draft_does_not_verify_the_draft(trust_plugin) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The negative register
+#
+# Excluding the seat's reads is subtraction, and subtraction on its own loosens
+# the gate: the draft path already carves out an EMPTY register, and after the
+# allowlist a turn whose only reads were local HAS an empty one. The sentinel
+# would have walked through the carve instead of through the register, and
+# whether the kill test passed would have depended on whether `list_matters`
+# happened to run first.
+#
+# So the seat's reads are recorded in a second register that means the opposite
+# thing, and "nothing was read" stops being the same state as "this came out of
+# your own instructions".
+# ---------------------------------------------------------------------------
+
+
+def test_the_incident_refuses_even_when_nothing_else_was_read(trust_plugin) -> None:
+    """The order-independence the negative register buys, and its whole reason.
+
+    Identical to the incident test above except that no tenant read runs first,
+    so the positive register is EMPTY and the draft-gate carve would otherwise
+    allow the draft outright. It must still refuse, because the sentinel is not
+    unsourced: it came from the skill.
+    """
+    session = "sess-2511-only-skill"
+    trust_plugin.on_post_tool_call(
+        tool_name="read_file",
+        result=SKILL_TEXT,
+        session_id=session,
+        tool_call_id="r1",
+    )
+
+    directive = trust_plugin.outbound.check_outbound_draft(
+        tool_name="mcp_msgraph_mail_create_draft",
+        args={"subject": "Self-test", "body": f"Internal note on matter {SENTINEL}."},
+        session_id=session,
+        tool_call_id="c1",
+    )
+
+    assert directive is not None, "the empty-register carve swallowed a seat-sourced value"
+    assert directive["action"] == "block"
+    assert "your own instructions" in directive["message"]
+
+
+def test_a_seat_read_populates_the_seat_register(trust_plugin) -> None:
+    """The positive register stays empty and the negative one fills."""
+    session = "sess-2511-neg"
+    trust_plugin.on_post_tool_call(
+        tool_name="read_file",
+        result=SKILL_TEXT,
+        session_id=session,
+        tool_call_id="r1",
+    )
+    assert not bool(provenance.register_for(session))
+    assert bool(provenance.seat_sourced_for(session))
+
+
+def test_a_tenant_read_does_not_populate_the_seat_register(trust_plugin) -> None:
+    """The converse, so the two registers cannot quietly become one.
+
+    Without this, an implementation that recorded EVERY read into both would
+    pass every other test in this file while making the negative register
+    meaningless.
+    """
+    session = "sess-2511-pos"
+    trust_plugin.on_post_tool_call(
+        tool_name="mcp_smokeball_get_matter",
+        result=MATTER_BLOB,
+        session_id=session,
+        tool_call_id="r1",
+    )
+    assert bool(provenance.register_for(session))
+    assert not bool(provenance.seat_sourced_for(session))
+
+
+def test_dropping_a_session_forgets_both_registers(trust_plugin) -> None:
+    session = "sess-2511-drop"
+    trust_plugin.on_post_tool_call(
+        tool_name="read_file", result=SKILL_TEXT, session_id=session, tool_call_id="r1"
+    )
+    trust_plugin.on_post_tool_call(
+        tool_name="mcp_smokeball_get_matter",
+        result=MATTER_BLOB,
+        session_id=session,
+        tool_call_id="r2",
+    )
+    provenance.drop(session)
+    assert not bool(provenance.register_for(session))
+    assert not bool(provenance.seat_sourced_for(session))
+
+
+def test_the_seat_register_is_bounded_like_the_read_register(trust_plugin) -> None:
+    for i in range(provenance._MAX_SESSIONS + 10):
+        provenance.record_seat_text(f"seat-{i}", f"matter ZZ-1234-{i:04d} in a skill body.")
+    assert len(provenance._seat_registers) <= provenance._MAX_SESSIONS
+
+
+# ---------------------------------------------------------------------------
+# The carve, pinned in all three of its states (ss-console#2511 plan 2c)
+#
+# One test rather than three scattered ones, because the states are only
+# meaningful against each other: the point is not that a seat-sourced value
+# blocks, it is that it blocks WHERE an unsourced value does not.
+# ---------------------------------------------------------------------------
+
+
+def _draft(plugin, session: str, body: str, tool: str = "mcp_msgraph_mail_create_draft"):
+    return plugin.outbound.check_outbound_draft(
+        tool_name=tool,
+        args={"subject": "Update", "body": body},
+        session_id=session,
+        tool_call_id="c",
+    )
+
+
+def test_the_empty_register_carve_has_three_states(trust_plugin) -> None:
+    unread = "Your matter is XX-1111-2222."
+
+    # 1. Empty register, value not seat-sourced: ALLOWED with a report row.
+    #    Unchanged behavior, and the reason the carve exists — a refusal with
+    #    nothing to go re-read is a brick on a conversational turn.
+    assert _draft(trust_plugin, "carve-empty", unread) is None
+
+    # 2. Empty register, value seat-sourced: BLOCKED. There IS something to say
+    #    about this one, so the carve's reasoning does not reach it.
+    trust_plugin.on_post_tool_call(
+        tool_name="read_file",
+        result=SKILL_TEXT,
+        session_id="carve-seat",
+        tool_call_id="r",
+    )
+    seat = _draft(trust_plugin, "carve-seat", f"Your matter is {SENTINEL}.")
+    assert seat is not None and seat["action"] == "block"
+    assert "your own instructions" in seat["message"]
+
+    # 3. Seeded register, value unverified: BLOCKED. Also unchanged.
+    trust_plugin.on_post_tool_call(
+        tool_name="mcp_smokeball_get_matter",
+        result=MATTER_BLOB,
+        session_id="carve-seeded",
+        tool_call_id="r",
+    )
+    seeded = _draft(trust_plugin, "carve-seeded", unread)
+    assert seeded is not None and seeded["action"] == "block"
+    # ...and that refusal does NOT claim a seat source it cannot show.
+    assert "your own instructions" not in seeded["message"]
+
+
+# ---------------------------------------------------------------------------
 # The partition, pinned
 #
 # Every READ tool in the registry is on exactly one side of this line, and the

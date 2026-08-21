@@ -223,6 +223,40 @@ _MAX_SESSIONS = 256
 _registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
 
 # ---------------------------------------------------------------------------
+# The NEGATIVE register (ss-console#2511)
+#
+# Excluding the seat's own reads from the positive register is subtraction, and
+# subtraction alone loosens the gate. ``_check_identifiers`` carves out an EMPTY
+# register on the draft path, on the reasoning that a refusal with no source to
+# re-read is a brick. Today ``read_file`` makes a register almost never empty;
+# with the allowlist above, a turn whose only reads were local has an empty one,
+# and every composed identifier on it would be ALLOWED with a report row. The
+# sentinel would go through again by a different door, and whether the kill test
+# passes would depend on whether ``list_matters`` happened to run first.
+#
+# So the seat's reads are not discarded. They are recorded HERE, and this
+# register means the opposite of the other one: an identifier in it was found in
+# text the seat produced or holds — a skill body, a spec, a config file, its own
+# scored draft. When a draft cites a value that appears ONLY here, that is not
+# "nothing was read", it is "you got this from your own instructions", and the
+# empty-register carve has nothing to say about it. Those are different states
+# and the gate now distinguishes them: the audit row carries ``source=seat_text``
+# and the refusal says where the value came from.
+#
+# Same shape and the same LRU bound as the positive register, keyed the same
+# way, so a session's two registers evict together in practice and a missing one
+# degrades to empty (no seat-sourced hits, i.e. today's behavior).
+#
+# It is a ``ProvenanceRegister`` rather than a bare set on purpose: membership is
+# decided by ``register.verifies(hit)``, so the seeder and the checker
+# canonicalize through exactly the same code as the positive path. A parallel
+# set with its own normalization would drift, and a key the checker never looks
+# up reads as "not seat-sourced" — the silent direction.
+# ---------------------------------------------------------------------------
+
+_seat_registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
+
+# ---------------------------------------------------------------------------
 # Session resolver (overlay #141, rescoped ss-console #2288)
 #
 # Hermes core passes session_id to post_tool_call and pre_llm_call but NOT to
@@ -508,17 +542,70 @@ def register_for(session_id: str) -> ProvenanceRegister:
     return reg
 
 
+def record_seat_text(session_id: str, text: str) -> None:
+    """Add the identifiers in a NON-seeding read result to the seat register.
+
+    The mirror of :func:`record_read`, and deliberately the same extractor: what
+    makes a value "seat-sourced" has to be decided by the same canonicalization
+    that decides whether a draft's value is verified, or the two sets are about
+    different strings.
+
+    Best-effort on the same terms as :func:`record_read` — a bad or oversized
+    blob is logged and skipped. A failure here loses a BLOCK the gate would
+    otherwise have made, so it degrades toward today's behavior rather than
+    toward a refusal nobody can explain.
+    """
+    if not session_id or not isinstance(text, str) or not text:
+        return
+    try:
+        reg = _seat_registers.get(session_id)
+        if reg is None:
+            reg = ProvenanceRegister()
+            _seat_registers[session_id] = reg
+            _evict_if_needed()
+        else:
+            _seat_registers.move_to_end(session_id)  # LRU touch
+        # Atoms only. Associations are seeded per connector RECORD and captions
+        # feed the citation allowlist; neither means anything for text the seat
+        # wrote about itself, and seeding them here would widen two gates this
+        # change is not about.
+        reg.add_read_text(text)
+    except Exception:  # noqa: BLE001 — recording is best-effort, never fatal
+        logger.debug(
+            "provenance: record_seat_text failed for session %s", session_id, exc_info=True
+        )
+
+
+def seat_sourced_for(session_id: str) -> ProvenanceRegister:
+    """The identifiers this session read from the SEAT's own text.
+
+    An unknown session yields an empty register, which verifies nothing, which
+    means no hit is seat-sourced — the pre-2511 behavior. Absence of the
+    negative register can only lose a block, never invent one.
+    """
+    reg = _seat_registers.get(session_id)
+    if reg is None:
+        return ProvenanceRegister()
+    _seat_registers.move_to_end(session_id)
+    return reg
+
+
 def drop(session_id: str) -> None:
-    """Forget a session's register (e.g. at session end). Idempotent."""
+    """Forget a session's registers (e.g. at session end). Idempotent."""
     _registers.pop(session_id, None)
+    _seat_registers.pop(session_id, None)
 
 
 def _evict_if_needed() -> None:
-    while len(_registers) > _MAX_SESSIONS:
-        evicted, _ = _registers.popitem(last=False)  # oldest
-        logger.debug(
-            "provenance: evicted oldest session register %s (cap %d)", evicted, _MAX_SESSIONS
-        )
+    for store, label in ((_registers, "read"), (_seat_registers, "seat")):
+        while len(store) > _MAX_SESSIONS:
+            evicted, _ = store.popitem(last=False)  # oldest
+            logger.debug(
+                "provenance: evicted oldest %s register %s (cap %d)",
+                label,
+                evicted,
+                _MAX_SESSIONS,
+            )
 
 
 def _reset_for_tests() -> None:
@@ -530,6 +617,7 @@ def _reset_for_tests() -> None:
     """
     global _process_session, _process_owner, _process_ambiguous
     _registers.clear()
+    _seat_registers.clear()
     _local.session = ""
     _local.last_resolution = ("", MODE_NONE)
     with _scope_lock:
@@ -549,8 +637,10 @@ __all__ = [
     "last_resolution",
     "note_session",
     "record_read",
+    "record_seat_text",
     "register_for",
     "resolve_session",
     "resolve_session_with_mode",
+    "seat_sourced_for",
     "seeds_provenance",
 ]
