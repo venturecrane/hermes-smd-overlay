@@ -18,7 +18,8 @@ Two tiers
   These are the CLAUDE.md Pattern-A / Pattern-B + tone-rule banned strings.
 * **Tier-2 (LAW-VERTICAL ONLY).** Run ``citation_filter.contains_citation`` on
   ``body``. A fabricated case cite / statute / rule blocks. This is the
-  Mata-v.-Avianca venture-killer guard.
+  Mata-v.-Avianca venture-killer guard. The refusal reason names the pattern
+  kind that hit and the remedy for it, and never echoes the matched text.
 
 Fail-closed, most-restrictive-on-indeterminate
 ----------------------------------------------
@@ -135,6 +136,55 @@ def _unverified_money(body: str, allowed_money: Iterable[str] | None) -> list[st
     if not allowed:
         return sorted({raw for raw, _canon in found})
     return sorted({raw for raw, canon in found if canon not in allowed})
+
+
+#: Per-pattern remedy text for a Tier-2 refusal, keyed by the
+#: ``citation_filter.PATTERNS`` labels. The old refusal named neither the kind
+#: nor a fix, so a model that hit it retried blindly: on the Ashton and Price
+#: seat one status reply was refused four to six times in a turn on ordinary
+#: comparison prose, then shipped trimmed with the gate mentioned to the client.
+#: A hint must say what shape was seen and what to do instead, and must never
+#: echo the matched text (that is what makes the dead ``refusal_message``
+#: unusable here: a refusal that quotes the cite hands it back to the drafter).
+_CITATION_HINTS: dict[str, str] = {
+    "case-name": (
+        "what reads as a court case caption (two names joined by v., vs, or "
+        "versus). If it names a court case, delete the reference entirely; do "
+        "not rephrase or abbreviate it. If the two names are things you are "
+        "comparing (two letter types, two options), write 'compared with' "
+        "instead, or restructure the sentence. If it is one of the firm's own "
+        "matters, read that matter from the case system this turn and name it "
+        "exactly as the record does. Never mention this refusal to the reader."
+    ),
+    "reporter-cite": (
+        "a reporter citation (volume, reporter, page). Remove it; never cite authority."
+    ),
+    "federal-statute": "a federal statute reference. Remove it; never cite authority.",
+    "state-statute": "a state statute reference. Remove it; never cite authority.",
+    "federal-rule": ("a federal court-rule reference. Remove it; never cite authority."),
+    "local-rule": "a local court-rule reference. Remove it; never cite authority.",
+    "bluebook-signal": (
+        "clustered Bluebook signals (id., supra, see also). Rewrite as plain prose."
+    ),
+}
+
+_CITATION_HINT_DEFAULT = "legal-citation-shaped content. Re-draft without it."
+
+
+def _citation_reason(labels: Iterable[str]) -> str:
+    """Refusal text naming each pattern kind that hit, and its remedy.
+
+    One hint per distinct label, in hit order. Never includes matched text.
+    """
+    seen = tuple(dict.fromkeys(labels))
+    hints = [_CITATION_HINTS.get(label, _CITATION_HINT_DEFAULT) for label in seen]
+    if not hints:
+        hints = [_CITATION_HINT_DEFAULT]
+    return (
+        "Refused: draft body contains "
+        + " Also: ".join(hints)
+        + " (ADR 0028 / safety invariant #6)."
+    )
 
 
 def evaluate(
@@ -268,11 +318,7 @@ def evaluate(
                 labels = tuple(dict.fromkeys(h.pattern for h in hits))
                 return GateDecision(
                     allowed=False,
-                    reason=(
-                        "Refused: draft body contains content matching legal-citation "
-                        "patterns (ADR 0028 / safety invariant #6); re-draft without "
-                        "citation content"
-                    ),
+                    reason=_citation_reason(labels),
                     audit_action=AUDIT_BLOCK,
                     tier="tier2_citation",
                     citation_hits=labels,

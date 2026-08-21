@@ -47,6 +47,15 @@ CASE_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Longhand separator. "Smith versus Jones" was caught by nothing: CASE_NAME_RE
+# folds only "v" and "vs". Unlike CASE_NAME_RE this pattern is case-SENSITIVE in
+# its parties (only the word "versus" is folded), because "versus" is ordinary
+# English and is a caption only between Capitalized parties: "apples versus
+# oranges" must pass, "Palsgraf versus Long Island Railroad" must block. The
+# all-caps and lowercase tolerance that #1128 bought for "v"/"vs" would, applied
+# here, refuse every comparison sentence the Operator writes.
+CASE_NAME_VERSUS_RE = re.compile(rf"\b{_PARTY}\s+(?i:versus)\s+{_PARTY}\b")
+
 # ---------- Reporter cite patterns (volume + reporter + page) ----------
 # Federal: U.S. Reports, Supreme Court Reporter, Federal Reporter (1d, 2d, 3d, 4th),
 # Federal Supplement (1st, 2d, 3d), Federal Appendix, Federal Rules Decisions.
@@ -121,6 +130,9 @@ class Hit:
 
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("case-name", CASE_NAME_RE),
+    # Same label on purpose: scan's allowlist branch, contains_citation's strong
+    # set, the gate's citation_hits, and every audit consumer stay unchanged.
+    ("case-name", CASE_NAME_VERSUS_RE),
     ("reporter-cite", REPORTER_CITE_RE),
     ("federal-statute", STATUTE_RE),
     ("state-statute", STATE_STATUTE_RE),
@@ -175,13 +187,23 @@ def canonical_caption(text: str) -> str:
 
     Applies the same anti-evasion normalization the scanner uses, then folds
     case, collapses whitespace, and normalizes the party separator so
-    "ALVAREZ V DRAPER", "Alvarez vs. Draper", and "Alvarez v. Draper" all
-    compare equal. Used by :func:`scan`'s ``allowed_case_names`` and by
-    callers building a provenance register of captions actually read.
+    "ALVAREZ V DRAPER", "Alvarez vs. Draper", "Alvarez versus Draper", and
+    "Alvarez v. Draper" all compare equal. Used by :func:`scan`'s
+    ``allowed_case_names`` and by callers building a provenance register of
+    captions actually read.
+
+    The ``versus`` fold lives HERE and deliberately NOT in
+    :func:`_normalize_encoding_bypass`. That function's output is fed straight
+    back through the pattern loop as a second scan pass, and CASE_NAME_RE is
+    IGNORECASE, so folding there would turn "apples versus oranges" into
+    "apples v. oranges" and refuse every plain-English comparison. Canonical
+    captions are only ever compared against the allowlist, so the fold is safe
+    on this path and is what lets a caption read as "Espinoza v. Kaviani" also
+    exempt "Espinoza versus Kaviani".
     """
     s = _normalize_encoding_bypass(text or "")
     s = re.sub(r"\s+", " ", s).strip().casefold()
-    return re.sub(r"\bv(?:s)?\.?\s", "v. ", s)
+    return re.sub(r"\b(?:v(?:s)?\.?|versus)\s", "v. ", s)
 
 
 def _canonical_allowlist(
