@@ -30,7 +30,7 @@ import json
 
 import pytest
 
-from shared import inbound
+from shared import inbound, msgraph_broker
 from shared.inbound import SESSION_TAINT
 from shared.outbound_recipient import DRAFT_RECIPIENTS
 from shared.pending_send import PENDING_SEND
@@ -82,17 +82,23 @@ class _FakeGraphBroker:
         #: test can assert the broker was TOLD the session and the matter — the
         #: broker writes the CONFIRM_SEND_* row and cannot learn either itself.
         self.joins: list[tuple[str, str | None]] = []
+        #: What the broker resolved for this message (ss-console#2499). Empty is
+        #: the DEFAULT, deliberately: it is what a pre-#2499 broker returns and
+        #: what a post-#2499 broker returns when its Sent Items lookup could not
+        #: find the message, so every existing assertion here keeps describing
+        #: the harder of the two cases.
+        self.vendor_id: str = ""
 
     def send_reply(self, message_id, comment, *, html="", session_id="", matter_ref=None):
         self.replies.append((message_id, comment))
         self.reply_calls.append((message_id, comment, html))
         self.joins.append((session_id, matter_ref))
-        return ""
+        return self.vendor_id
 
     def send_message(self, payload, *, session_id="", matter_ref=None):
         self.sends.append(dict(payload))
         self.joins.append((session_id, matter_ref))
-        return ""
+        return self.vendor_id
 
 
 # ---------------------------------------------------------------------------
@@ -566,3 +572,82 @@ def test_send_via_msgraph_surfaces_a_broker_refusal(monkeypatch):
         trust.outbound_send.send_via_msgraph({"to": ["a@x.example"], "body_text": "B"})
     # The broker's REASON reaches the operator, not a generic delivery failure.
     assert "not on the authored surface" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# ss-console#2499 — the audit row can name the message
+#
+# Graph answers both verbs 202 with no body, so every REPLY_SENT row on the live
+# A&P ledger read "(sent via msgraph, id unavailable)" (8 of 8) and could not be
+# joined to the mailbox at all. The broker now stamps an X-SMD-Audit-Row header
+# and resolves the message's RFC2822 id out of Sent Items; these pin that the id
+# reaches the rows this repo writes, and that the placeholder survives ONLY for
+# the case where it genuinely could not be resolved.
+# ---------------------------------------------------------------------------
+
+
+def test_a_send_row_names_the_message_the_broker_resolved(monkeypatch):
+    trust = load_plugin("hermes-smd-trust")
+    fake = _FakeGraphBroker()
+    fake.vendor_id = "<abc@firm.example>"
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", fake.send_message)
+    out = trust.outbound_send.send_via_msgraph({"to": ["a@x.example"], "body_text": "B"})
+    assert out == "<abc@firm.example>"
+
+
+def test_a_send_the_broker_could_not_locate_still_says_so(monkeypatch):
+    """The placeholder is honest HERE and only here. The broker's own row records
+    why the lookup failed; manufacturing an id would name a message the mailbox
+    does not contain, which reads as an answer and is not one."""
+    trust = load_plugin("hermes-smd-trust")
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", fake.send_message)
+    out = trust.outbound_send.send_via_msgraph({"to": ["a@x.example"], "body_text": "B"})
+    assert out == "(sent via msgraph, id unavailable)"
+
+
+def test_a_reply_row_names_the_message_the_broker_resolved(monkeypatch, tmp_path):
+    mod = load_plugin("hermes-smd-reply")
+    fake = _FakeGraphBroker()
+    fake.vendor_id = "<reply@firm.example>"
+    monkeypatch.setattr(mod.msgraph_broker, "send_reply", fake.send_reply)
+    assert mod._send_msgraph_reply("AAMk1", "sure") == "<reply@firm.example>"
+
+
+def test_a_reply_the_broker_could_not_locate_still_says_so(monkeypatch, tmp_path):
+    mod = load_plugin("hermes-smd-reply")
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(mod.msgraph_broker, "send_reply", fake.send_reply)
+    assert mod._send_msgraph_reply("AAMk1", "sure") == "(sent via msgraph, id unavailable)"
+
+
+def test_the_broker_client_prefers_the_resolved_id_over_the_empty_call_result():
+    """``message_id`` is what the vendor CALL returned, which on Graph is always
+    empty; ``vendor_message_id`` is what the broker went and looked up. Preferring
+    the second with the first behind it is what lets a seat run either side of
+    the ss-console change with no deployment ordering.
+
+    FALSIFIER: read ``message_id`` first and the resolved id is discarded on
+    every real send, which is the state before this change."""
+    assert (
+        msgraph_broker._vendor_id({"message_id": "", "vendor_message_id": "<x@firm.example>"})
+        == "<x@firm.example>"
+    )
+    assert msgraph_broker._vendor_id({"message_id": "<legacy@firm.example>"}) == (
+        "<legacy@firm.example>"
+    )
+    # Both present and different is the case that actually pins the ORDER: with
+    # only an empty message_id in play, either ordering returns the same answer
+    # and the assertion measures nothing.
+    assert (
+        msgraph_broker._vendor_id(
+            {
+                "message_id": "<from-the-call@firm.example>",
+                "vendor_message_id": "<looked-up@firm.example>",
+            }
+        )
+        == "<looked-up@firm.example>"
+    )
+    assert msgraph_broker._vendor_id({}) == ""
+    # A non-string is not an id. The broker is trusted, the wire is not.
+    assert msgraph_broker._vendor_id({"vendor_message_id": 7}) == ""

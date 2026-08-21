@@ -88,16 +88,17 @@ def send_message(
     ``subject``/``body_text``) — the shape the gateway's gate already saw. The
     broker applies the recipient fence and pins the From.
 
-    Graph answers ``sendMail`` with 202 and no body, so there is no vendor
-    message id to return; the caller surfaces a placeholder and the audit row's
-    ``input_digest`` is what identifies the transmit.
+    Graph answers ``sendMail`` with 202 and no body, so ``message_id`` is empty
+    and always will be -- it is the id the CALL returned, and the call returns
+    none. ss-console#2499 added the id the broker goes and LOOKS UP afterwards:
+    it stamps an ``X-SMD-Audit-Row`` header on the message, finds that message in
+    Sent Items on its read credential, and returns the RFC2822
+    ``vendor_message_id`` it found there.
+
+    Preferred, with ``message_id`` behind it, so this reads the same against a
+    broker on either side of that change and needs no deployment ordering.
     """
-    return str(
-        _call("msgraph_send", payload, session_id=session_id, matter_ref=matter_ref).get(
-            "message_id"
-        )
-        or ""
-    )
+    return _vendor_id(_call("msgraph_send", payload, session_id=session_id, matter_ref=matter_ref))
 
 
 def send_reply(
@@ -126,12 +127,28 @@ def send_reply(
     payload: dict[str, Any] = {"message_id": message_id, "comment": comment}
     if html.strip():
         payload["html"] = html
-    return str(
-        _call("msgraph_reply", payload, session_id=session_id, matter_ref=matter_ref).get(
-            "message_id"
-        )
-        or ""
-    )
+    return _vendor_id(_call("msgraph_reply", payload, session_id=session_id, matter_ref=matter_ref))
+
+
+def _vendor_id(response: dict[str, Any]) -> str:
+    """The id of the message the broker just sent, or ``""`` if it has none.
+
+    ss-console#2499. ``vendor_message_id`` is the RFC2822 id the broker resolved
+    out of Sent Items after the 202; ``message_id`` is what the vendor call
+    itself returned, which on Graph is always empty. Preferring the first and
+    falling back to the second means this works against a broker from either
+    side of that change, which is what lets the pin move without ordering.
+
+    An empty string is the truthful answer when the broker could not find the
+    message -- the caller decides what to record, and the broker has already
+    recorded WHY on its own row. Inventing an id here would put a value in the
+    ledger that matches nothing in the mailbox.
+    """
+    for key in ("vendor_message_id", "message_id"):
+        value = response.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 __all__ = [

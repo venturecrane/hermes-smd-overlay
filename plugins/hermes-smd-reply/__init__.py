@@ -221,7 +221,8 @@ def _send_msgraph_reply(
 
     Fail-closed as before: no broker path raises :class:`RelaySendError` (audited
     REPLY_FAILED) and NEVER falls back to another transport. Graph returns 202
-    with no id, so a placeholder is surfaced for the audit row.
+    with no id; ss-console#2499 has the broker resolve one afterwards, and the
+    placeholder is surfaced only when it could not.
 
     ss#2489 — WHY AN HTML BODY IS NOT COSMETIC HERE. Graph's ``/reply`` action
     composes the reply message IN HTML (the reference says so where it explains
@@ -252,7 +253,7 @@ def _send_msgraph_reply(
     one reply could only be matched by their timestamps."""
     body_html = _msgraph_reply_html(text, html)
     try:
-        msgraph_broker.send_reply(
+        sent_id = msgraph_broker.send_reply(
             graph_message_id,
             text,
             html=body_html,
@@ -263,7 +264,16 @@ def _send_msgraph_reply(
         raise relay.RelaySendError(f"broker refused the msgraph reply: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
         raise relay.RelaySendError(f"msgraph reply unavailable: {exc}") from exc
-    return "(sent via msgraph, id unavailable)"
+    # ss-console#2499. Every REPLY_SENT row on the live A&P ledger read
+    # "(sent via msgraph, id unavailable)" — 8 of 8 — because Graph's 202 carries
+    # no id. The broker now stamps an audit header on the reply and resolves the
+    # message's RFC2822 id out of Sent Items, so this row can name the message a
+    # firm would find in its own mailbox.
+    #
+    # The placeholder stays for the case where that lookup could not run. It is
+    # honest there: the broker's own row records why, and inventing an id would
+    # name a message the mailbox does not contain.
+    return sent_id or "(sent via msgraph, id unavailable)"
 
 
 # Holds the agent is told about (ss-console#2367). Populated by ``_held`` under
