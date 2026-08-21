@@ -604,6 +604,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "establish_stage_document": ActionClass.INTERNAL_WRITE,
     "establish_submit": ActionClass.INTERNAL_WRITE,
     "establish_status": ActionClass.READ,
+    # ss-console#2529. INTERNAL_WRITE rather than READ: a proposal writes a row
+    # the firm can be shown and later acts on, even though it installs nothing.
+    # establish_pending reads and is classed as a read.
+    "establish_propose": ActionClass.INTERNAL_WRITE,
+    "establish_pending": ActionClass.READ,
     # Seat self-description (hermes-smd-initiation, ss-console #2222 card rows
     # 1+7). READ, and nothing subtler: it opens the seat's own customer.yaml, its
     # own scheduler store, and the root-owned spec manifest, writes nothing, and

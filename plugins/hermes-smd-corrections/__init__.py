@@ -64,12 +64,21 @@ authority over how the firm's outputs are shaped). A turn with no verified origi
 is refused for the same reason an unresolvable taint state is: a capture we
 cannot attribute to a named administrator is one we decline.
 
-WHY THERE IS A NUDGE. ``record_peer_preference`` shipped as a registered tool and
-the learned lane had ZERO rows fleet-wide, because the write side was never
-prompted into behavior (overlay #170). A tool the model is never told to reach
-for is a tool that does not exist. The nudge is one line, on turns that have a
-human on the other end and are not tainted — the same condition capture itself
-requires, so it is never advertised on a turn where it would be refused.
+THE NUDGE IS GONE (ss-console#2529), AND THE TOOL IS NOT. There was a nudge
+here, for the overlay#170 reason: an unadvertised tool gets zero use. It rode
+every admin turn saying a standing style rule is "noted for a person to apply,
+not now in effect", and on 2026-08-21 two rehearsal turns spoken by an Operator
+ADMIN were answered in exactly those words. The line was doing its job; its job
+had become wrong. A standing style rule now has a route that ends in effect —
+``establish_propose``: the Operator reads the rule back, the person confirms,
+and it is committed under their name (ADR 0085 §4 as amended). A rule stated by
+someone who is not an admin is proposed ``for_admin`` and an admin releases it
+by replying "apply that", which is the same review this queue provided,
+conducted where the firm already is.
+
+So the tool stays registered, its refusals stay exactly as they were, and the
+portal queue stays a real place with real rows in it — but nothing steers a
+confirmable rule here any more.
 """
 
 from __future__ import annotations
@@ -144,20 +153,11 @@ _SCHEMA: dict[str, Any] = {
 }
 
 _DESCRIPTION = (
-    "Record that someone told you how a kind of output should be shaped or should "
-    "sound, so it can be applied to every future output of that kind instead of "
-    "only the next one. Recording is not applying: it goes to a person to review, "
-    "nothing changes until they act on it, and you must say so plainly rather than "
-    "promising the change is in effect. Use it the moment a correction is stated, "
-    "and still do what they asked for the message in front of you."
-)
-
-#: One line, appended to the turn's context. Short on purpose: it rides every
-#: sender-attributed turn, and a paragraph here is a paragraph on all of them.
-_NUDGE = (
-    "If this person tells you how a kind of output should be shaped or should sound "
-    f"— not just this one message — call {TOOL_NAME} to record it for review, and "
-    "tell them it has been noted for a person to apply, not that it is now in effect."
+    "Superseded for standing style rules: use establish_propose instead, which "
+    "reads the rule back for the person to confirm and then puts it in force "
+    "under their name. This records a statement for a person to review later "
+    "and changes nothing by itself. Reach for it only when there is no rule to "
+    "propose and no one who can confirm one."
 )
 
 
@@ -404,32 +404,33 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     }
 
 
-def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
-    """Tell the model the capture tool exists, on turns where it could be used.
+def on_pre_llm_call(**_kwargs: Any) -> dict[str, str] | None:
+    """Nothing. The nudge is gone (ss-console#2529).
 
-    Gated on the SAME conditions capture itself requires — a human on the other
-    end, an untainted turn, and a verified inbound sender on ``scope.admins`` —
-    through the one shared ``_refusal_reason`` so the nudge can never advertise
-    something ``on_pre_tool_call`` would refuse. A tool the model is never told
-    to reach for is a tool that does not exist (overlay #170); a tool it IS told
-    to reach for and is then refused is worse, because the refusal reads to the
-    person as the Operator changing its mind.
+    IT WAS NOT WRONG, IT WAS WINNING. This nudge rode every admin turn telling
+    the model that a standing style rule is "noted for a person to apply, not
+    now in effect" — which was accurate while capture was the only route a
+    sentence had. On 2026-08-21 two rehearsal turns spoken by an Operator ADMIN
+    were answered in exactly those words, because this line said so and the
+    establishment plugin's own admin path was about documents. Telling a
+    partner their own instruction is queued for somebody else's approval is
+    what ADR 0085 §3 exists to prevent.
 
-    No audit row here: the nudge is silence, not a decision. Rows are written
-    where a capture was actually attempted.
+    The route is now ``establish_propose``: read the rule back, let the person
+    confirm, put it in force under their name. The capture tool stays
+    registered and its refusals stay exactly as they were — a portal review
+    queue is still a real place and existing rows still land there — but
+    nothing advertises it, so nothing steers a confirmable rule into it.
+
+    The hook itself stays registered rather than being unhooked, so the seam is
+    here if a narrower nudge is ever wanted, and so the plugin's hook surface
+    does not change shape under the contract tests.
     """
-    if not kwargs.get("sender_id"):
-        return None
-    try:
-        if _refusal_reason(kwargs.get("session_id") or "") is not None:
-            return None
-    except Exception:  # noqa: BLE001 — no nudge when the turn cannot be certified
-        return None
-    return {"context": _NUDGE}
+    return None
 
 
 def register(ctx: Any) -> None:
-    """Register the capture tool plus its taint refusal and its nudge."""
+    """Register the capture tool plus its taint refusal."""
     register_wrapped_tool(
         ctx,
         name=TOOL_NAME,
@@ -442,7 +443,7 @@ def register(ctx: Any) -> None:
     )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
-    logger.info("hermes-smd-corrections registered %s + taint refusal + nudge", TOOL_NAME)
+    logger.info("hermes-smd-corrections registered %s + taint refusal", TOOL_NAME)
 
 
 __all__ = [

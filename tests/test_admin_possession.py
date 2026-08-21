@@ -96,6 +96,18 @@ def _gate(plugin, tool=None, session="sess-1", args=None):
     return plugin.on_pre_tool_call(tool_name=tool, session_id=session, args=args)
 
 
+def _DOCUMENT_TOOLS(plugin):  # noqa: N802 — reads as a constant at the call sites
+    """The three verbs the possession ceremony gates on the admin predicate.
+
+    ss-console#2529 added ``establish_propose`` and ``establish_pending``, which
+    carry their OWN predicates (the instructor must be the speaker, a personal
+    rule's subject must be them, a firm rule from a non-admin must wait for one)
+    and so cannot be swept up in a loop that only sets an admin stash. Their
+    possession behaviour is asserted where those predicates are.
+    """
+    return (plugin.TOOL_STAGE, plugin.TOOL_SUBMIT, plugin.TOOL_STATUS)
+
+
 def _nonce_from(message: str) -> str:
     match = _NONCE_RE.search(message)
     assert match, f"no challenge code in message: {message!r}"
@@ -122,7 +134,7 @@ def test_confirmed_admin_passes_all_three_tools(plugin):
     _turn(plugin, ADMIN)
     nonce = _nonce_from(_gate(plugin)["message"])
     assert admin_possession.try_confirm(ADMIN, f"Confirming: {nonce}", [ADMIN, OTHER_ADMIN])
-    for tool in plugin.ESTABLISH_TOOLS:
+    for tool in _DOCUMENT_TOOLS(plugin):
         assert _gate(plugin, tool) is None
 
 
@@ -230,7 +242,7 @@ def test_msgraph_custody_gets_no_ceremony(plugin):
     possession state is ever minted for it."""
     _FakeCustomerConfig.connectors = {"Email": {"adapter": "msgraph", "enabled": True}}
     _turn(plugin, ADMIN)
-    for tool in plugin.ESTABLISH_TOOLS:
+    for tool in _DOCUMENT_TOOLS(plugin):
         assert _gate(plugin, tool) is None
     assert admin_possession.outstanding_nonces() == {}
 
