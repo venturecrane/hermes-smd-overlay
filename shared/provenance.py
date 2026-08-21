@@ -7,11 +7,15 @@ the runtime analogue of ``shared.inbound.PENDING``.
 
 Two collaborating points in ``hermes-smd-trust``:
 
-* ``post_tool_call`` — for a READ-class tool, :func:`record_read` extracts the
-  structured identifiers from the tool RESULT and adds them to that session's
-  register.
+* ``post_tool_call`` — for a TENANT-SOURCE read tool (:func:`seeds_provenance`),
+  :func:`record_read` extracts the structured identifiers from the tool RESULT
+  and adds them to that session's register.
 * ``pre_tool_call`` — when the outbound gate evaluates a draft, it consults
   :func:`register_for` to ask "is each identifier in this body one we read?"
+
+Not every READ-class tool is a source (ss-console#2511). See
+:data:`TENANT_SOURCE_READ_TOOLS` below for the line and the incident that drew
+it.
 
 Process-local + bounded. One customer Machine = one agent process, so a
 module-level dict keyed by ``session_id`` is the right scope (same shape as
@@ -44,9 +48,171 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from typing import Any
 
+from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
 from shared.identifier_filter import ProvenanceRegister
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# What counts as a source (ss-console#2511)
+#
+# The register answers "did the Operator READ this identifier, or compose it?"
+# That answer is only as good as what was allowed to seed it. Until 2026-08-21
+# the seeding rule was the action class alone: any READ-class tool result went
+# into the register, and ``read_file`` is READ-class.
+#
+# The cost, measured. During the A&P stand-up rehearsal on
+# ``hermes-ashton-price``, the ``operator-self-test`` skill asked the Operator
+# to prove this gate by drafting a memo citing the sentinel case number
+# ZZ-9999-0001. The Operator read the skill text with ``read_file`` first, so
+# the sentinel was in the register before the draft gate looked; the gate found
+# nothing unverified and said nothing, because a verified identifier emits no
+# row. The sentinel matter 404d, the Operator retried against a real matter,
+# and the memo landed in the firm's production Smokeball. The gate was not
+# broken. It was fed a register poisoned with the seat's own prose.
+#
+# So the rule is about WHERE the text came from, not what class the tool is:
+#
+#   A read establishes provenance only when it reaches the tenant's own system
+#   of record — their mail, their calendar, their practice-management data,
+#   their documents.
+#
+# Everything the seat holds about itself is excluded, because none of it is a
+# record of anything the firm did: its files and skills (the incident), its
+# memory store, its self-description, its run and connector metadata, its own
+# unsent drafts, and any model-produced text about its own composition
+# (``voice_score_draft`` hands the draft straight back). The open web is
+# excluded for a different reason of the same shape: a page is a source, but not
+# the firm's, and it is writable by anyone who would like a number believed.
+#
+# THE SET IS AN ALLOWLIST, and that direction is the safety property. A read
+# tool nobody has classified here does not seed, so the gate over-reports — a
+# refusal a human can clear by re-reading — rather than under-reports, which is
+# a composed identifier delivered in silence. That is the same direction the
+# empty-register and eviction paths already take. ``tests/test_provenance_
+# sources.py`` pins every READ tool in the registry to one side or the other, so
+# a new tool cannot join either side without someone deciding.
+# ---------------------------------------------------------------------------
+
+#: Read tools whose results are the TENANT's records. Only these seed.
+TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        # AgentMail — the mailbox. Drafts are excluded on purpose: a draft is
+        # the Operator's own unsent sentence, and reading one back must not
+        # certify the numbers it contains. ``auth_me`` is seat identity.
+        "mcp_agentmail_list_inboxes",
+        "mcp_agentmail_get_inbox",
+        "mcp_agentmail_list_threads",
+        "mcp_agentmail_search_threads",
+        "mcp_agentmail_get_thread",
+        "mcp_agentmail_get_attachment",
+        "mcp_agentmail_list_messages",
+        "mcp_agentmail_search_messages",
+        # Microsoft Graph mail — the firm's own M365 mailbox.
+        "mcp_msgraph_mail_list_messages",
+        "mcp_msgraph_mail_read_message",
+        "mcp_msgraph_mail_poll_delta",
+        # Generic connector surface (mail, SMS, calendar, practice management).
+        "email_list_messages",
+        "email_get_message",
+        "email_search",
+        "email_get_thread",
+        "email_list_labels",
+        "sms_list_messages",
+        "sms_get_message",
+        "calendar_list_events",
+        "calendar_get_event",
+        "calendar_search_events",
+        "calendar_check_availability",
+        "practice_management_search_matters",
+        "practice_management_get_matter",
+        "practice_management_list_documents",
+        "practice_management_get_document",
+        "practice_management_list_tasks",
+        # Smokeball — the law wedge's system of record. ``auth_status`` is
+        # excluded (credential metadata, no tenant content). ``get_memos_on_
+        # matter`` IS included: a committed memo is part of the matter the firm
+        # can see, unlike a draft.
+        "mcp_smokeball_list_matters",
+        "mcp_smokeball_get_matter",
+        "mcp_smokeball_list_matter_types",
+        "mcp_smokeball_get_stage_sets",
+        "mcp_smokeball_get_stage_to_matter_mappings",
+        "mcp_smokeball_get_contacts",
+        "mcp_smokeball_get_contact",
+        "mcp_smokeball_get_contact_relations",
+        "mcp_smokeball_list_tasks",
+        "mcp_smokeball_get_task",
+        "mcp_smokeball_search_staff",
+        "mcp_smokeball_get_staff",
+        "mcp_smokeball_get_roles_on_matter",
+        "mcp_smokeball_get_relationships_on_matter",
+        "mcp_smokeball_get_files_on_matter",
+        "mcp_smokeball_get_file",
+        "mcp_smokeball_get_download_url",
+        "mcp_smokeball_read_document",
+        "mcp_smokeball_get_memos_on_matter",
+        "mcp_smokeball_get_bank_accounts",
+        "mcp_smokeball_get_matter_balances",
+        "mcp_smokeball_get_matter_billing_config",
+        "mcp_smokeball_get_fees",
+        "mcp_smokeball_get_expenses",
+        "mcp_smokeball_get_webhook_subscriptions",
+        "mcp_smokeball_get_event_types",
+        "mcp_smokeball_list_events",
+        "mcp_smokeball_list_folders",
+        # Clio.
+        "mcp_clio_oktopeak_list_matters",
+        "mcp_clio_oktopeak_get_matter",
+        "mcp_clio_oktopeak_search_contacts",
+        "mcp_clio_oktopeak_get_contact",
+        "mcp_clio_oktopeak_list_documents",
+        "mcp_clio_oktopeak_get_document",
+        "mcp_clio_oktopeak_list_tasks",
+        "mcp_clio_oktopeak_list_calendars",
+        "mcp_clio_oktopeak_list_calendar_entries",
+        "mcp_clio_oktopeak_list_time_entries",
+        "mcp_clio_oktopeak_get_billing_summary",
+        "mcp_clio_oktopeak_list_users",
+        "mcp_clio_oktopeak_get_user",
+        "mcp_clio_oktopeak_export_audit_log",
+        # Mediated Google Workspace — the principal's real mail, calendar and
+        # files, reached through the broker.
+        "workspace_gmail_search",
+        "workspace_gmail_get",
+        "workspace_calendar_list",
+        "workspace_calendar_get",
+        "workspace_drive_list",
+        "workspace_drive_get",
+        "workspace_drive_export",
+        "workspace_docs_get",
+        "workspace_sheets_get_values",
+    }
+)
+
+
+def seeds_provenance(tool_name: str) -> bool:
+    """True iff this tool's result may establish identifier provenance.
+
+    Total and fail-safe on every input a hook can hand it: an empty name, a
+    name nobody has registered, a write tool, or a read of the seat's own
+    artifacts all return False, which means the register stays unseeded and the
+    gate over-reports. Name matching uses the same trim + lowercase
+    normalization as ``action_classes.classify_tool`` so a runtime that
+    surfaces a differently-cased name cannot slip past this or land in it.
+
+    The action class is re-checked here rather than trusted from the caller, so
+    the predicate cannot certify a tool that was reclassified out of READ while
+    its name stayed in the set above.
+    """
+    if not tool_name:
+        return False
+    normalized = tool_name.strip().lower()
+    if normalized not in TENANT_SOURCE_READ_TOOLS:
+        return False
+    return TOOL_ACTION_CLASS_MAP.get(normalized) is ActionClass.READ
+
 
 # Bound the number of live session registers. A Machine handles one agent at a
 # time; a handful of concurrent sessions is the realistic ceiling. 256 is far
@@ -55,6 +221,40 @@ logger = logging.getLogger(__name__)
 _MAX_SESSIONS = 256
 
 _registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
+
+# ---------------------------------------------------------------------------
+# The NEGATIVE register (ss-console#2511)
+#
+# Excluding the seat's own reads from the positive register is subtraction, and
+# subtraction alone loosens the gate. ``_check_identifiers`` carves out an EMPTY
+# register on the draft path, on the reasoning that a refusal with no source to
+# re-read is a brick. Today ``read_file`` makes a register almost never empty;
+# with the allowlist above, a turn whose only reads were local has an empty one,
+# and every composed identifier on it would be ALLOWED with a report row. The
+# sentinel would go through again by a different door, and whether the kill test
+# passes would depend on whether ``list_matters`` happened to run first.
+#
+# So the seat's reads are not discarded. They are recorded HERE, and this
+# register means the opposite of the other one: an identifier in it was found in
+# text the seat produced or holds — a skill body, a spec, a config file, its own
+# scored draft. When a draft cites a value that appears ONLY here, that is not
+# "nothing was read", it is "you got this from your own instructions", and the
+# empty-register carve has nothing to say about it. Those are different states
+# and the gate now distinguishes them: the audit row carries ``source=seat_text``
+# and the refusal says where the value came from.
+#
+# Same shape and the same LRU bound as the positive register, keyed the same
+# way, so a session's two registers evict together in practice and a missing one
+# degrades to empty (no seat-sourced hits, i.e. today's behavior).
+#
+# It is a ``ProvenanceRegister`` rather than a bare set on purpose: membership is
+# decided by ``register.verifies(hit)``, so the seeder and the checker
+# canonicalize through exactly the same code as the positive path. A parallel
+# set with its own normalization would drift, and a key the checker never looks
+# up reads as "not seat-sourced" — the silent direction.
+# ---------------------------------------------------------------------------
+
+_seat_registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
 
 # ---------------------------------------------------------------------------
 # Session resolver (overlay #141, rescoped ss-console #2288)
@@ -342,17 +542,70 @@ def register_for(session_id: str) -> ProvenanceRegister:
     return reg
 
 
+def record_seat_text(session_id: str, text: str) -> None:
+    """Add the identifiers in a NON-seeding read result to the seat register.
+
+    The mirror of :func:`record_read`, and deliberately the same extractor: what
+    makes a value "seat-sourced" has to be decided by the same canonicalization
+    that decides whether a draft's value is verified, or the two sets are about
+    different strings.
+
+    Best-effort on the same terms as :func:`record_read` — a bad or oversized
+    blob is logged and skipped. A failure here loses a BLOCK the gate would
+    otherwise have made, so it degrades toward today's behavior rather than
+    toward a refusal nobody can explain.
+    """
+    if not session_id or not isinstance(text, str) or not text:
+        return
+    try:
+        reg = _seat_registers.get(session_id)
+        if reg is None:
+            reg = ProvenanceRegister()
+            _seat_registers[session_id] = reg
+            _evict_if_needed()
+        else:
+            _seat_registers.move_to_end(session_id)  # LRU touch
+        # Atoms only. Associations are seeded per connector RECORD and captions
+        # feed the citation allowlist; neither means anything for text the seat
+        # wrote about itself, and seeding them here would widen two gates this
+        # change is not about.
+        reg.add_read_text(text)
+    except Exception:  # noqa: BLE001 — recording is best-effort, never fatal
+        logger.debug(
+            "provenance: record_seat_text failed for session %s", session_id, exc_info=True
+        )
+
+
+def seat_sourced_for(session_id: str) -> ProvenanceRegister:
+    """The identifiers this session read from the SEAT's own text.
+
+    An unknown session yields an empty register, which verifies nothing, which
+    means no hit is seat-sourced — the pre-2511 behavior. Absence of the
+    negative register can only lose a block, never invent one.
+    """
+    reg = _seat_registers.get(session_id)
+    if reg is None:
+        return ProvenanceRegister()
+    _seat_registers.move_to_end(session_id)
+    return reg
+
+
 def drop(session_id: str) -> None:
-    """Forget a session's register (e.g. at session end). Idempotent."""
+    """Forget a session's registers (e.g. at session end). Idempotent."""
     _registers.pop(session_id, None)
+    _seat_registers.pop(session_id, None)
 
 
 def _evict_if_needed() -> None:
-    while len(_registers) > _MAX_SESSIONS:
-        evicted, _ = _registers.popitem(last=False)  # oldest
-        logger.debug(
-            "provenance: evicted oldest session register %s (cap %d)", evicted, _MAX_SESSIONS
-        )
+    for store, label in ((_registers, "read"), (_seat_registers, "seat")):
+        while len(store) > _MAX_SESSIONS:
+            evicted, _ = store.popitem(last=False)  # oldest
+            logger.debug(
+                "provenance: evicted oldest %s register %s (cap %d)",
+                label,
+                evicted,
+                _MAX_SESSIONS,
+            )
 
 
 def _reset_for_tests() -> None:
@@ -364,6 +617,7 @@ def _reset_for_tests() -> None:
     """
     global _process_session, _process_owner, _process_ambiguous
     _registers.clear()
+    _seat_registers.clear()
     _local.session = ""
     _local.last_resolution = ("", MODE_NONE)
     with _scope_lock:
@@ -378,11 +632,15 @@ __all__ = [
     "MODE_NONE",
     "MODE_PROCESS",
     "MODE_THREAD",
+    "TENANT_SOURCE_READ_TOOLS",
     "drop",
     "last_resolution",
     "note_session",
     "record_read",
+    "record_seat_text",
     "register_for",
     "resolve_session",
     "resolve_session_with_mode",
+    "seat_sourced_for",
+    "seeds_provenance",
 ]

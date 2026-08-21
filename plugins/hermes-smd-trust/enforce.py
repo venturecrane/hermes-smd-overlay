@@ -387,11 +387,26 @@ def _enforce_resolved(
         if effective == Ceiling.AUTONOMOUS:
             return _allow("autonomous internal write", action)
         if effective == Ceiling.DRAFT_FOR_REVIEW:
-            # The write proceeds, but routed to the draft/notes folder — unlike an
-            # external_send draft (withheld), an internal write at draft is allowed.
+            # An internal write at draft_for_review is ALLOWED and EXECUTES —
+            # unlike an external_send draft, which is withheld. The reason string
+            # said "routed to draft folder", and that was not a description of
+            # anything this branch does: nothing here inspects the tool, chooses
+            # a folder, or diverts a call. It reads as a routing decision because
+            # of where it sits next to the send path.
+            #
+            # It cost a reading. On 2026-08-21 the ledger row for the
+            # ``mcp_smokeball_create_memo`` that landed on a real matter in the
+            # firm's production Smokeball carried
+            # ``trust_decision=draft, trust_reason="internal write routed to
+            # draft folder"`` — a live write to the system of record, described
+            # in the audit journal as a draft (ss-console#2511). An auditor
+            # scanning for writes would have skipped it. ``audit_action`` stays
+            # ``draft`` because that is the ceiling's own vocabulary and other
+            # surfaces join on it; the human-readable reason now says what
+            # happened.
             return EnforcementDecision(
                 allowed=True,
-                reason="internal write routed to draft folder",
+                reason="internal write executed under draft_for_review ceiling",
                 audit_action="draft",
                 action_class=action,
             )

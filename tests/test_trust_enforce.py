@@ -217,7 +217,19 @@ def test_enforce_internal_write_autonomous_allowed() -> None:
     assert decision.authored_ceiling == enforce.Ceiling.AUTONOMOUS
 
 
-def test_enforce_internal_write_draft_for_review_routes_to_draft() -> None:
+def test_enforce_internal_write_draft_for_review_executes_and_says_so() -> None:
+    """An internal write at draft_for_review is ALLOWED, and the record says so.
+
+    The reason string used to read "internal write routed to draft folder",
+    which described a routing step this branch does not perform. On 2026-08-21
+    the ledger row for a ``mcp_smokeball_create_memo`` that executed against the
+    firm's production Smokeball, and landed on a real matter, carried exactly
+    that phrase (ss-console#2511). An auditor scanning the journal for writes
+    would have read it as a draft and moved on.
+
+    ``audit_action`` stays ``draft``: it is the ceiling's own vocabulary and
+    other surfaces join on it. The human-readable half is what changed.
+    """
     enforce = _load_trust_module("enforce")
     decision = enforce.enforce(
         action=enforce.ActionClass.INTERNAL_WRITE,
@@ -226,6 +238,35 @@ def test_enforce_internal_write_draft_for_review_routes_to_draft() -> None:
     )
     assert decision.allowed is True
     assert decision.audit_action == "draft"
+    assert "routed to draft folder" not in decision.reason
+    assert "executed" in decision.reason
+
+
+def test_no_allowed_decision_describes_itself_as_routed_to_a_draft_folder() -> None:
+    """The general form, so the phrase cannot come back on a neighbouring branch.
+
+    Every (action class x ceiling) pair the policy core will allow, checked for
+    the one phrase that made an executed write unreadable in the journal. A
+    WITHHELD decision may legitimately talk about drafting: nothing ran, and the
+    content really is being held for review. It is the ALLOWED ones that must
+    not.
+    """
+    enforce = _load_trust_module("enforce")
+    ceilings = list(enforce.Ceiling)
+    offenders = []
+    for action in enforce.ActionClass:
+        for ceiling in ceilings:
+            try:
+                decision = enforce.enforce(
+                    action=action,
+                    exposure={action: ceiling},
+                    tool_name="email_create_draft",
+                )
+            except Exception:  # noqa: BLE001 - a class the core declines to evaluate
+                continue
+            if decision.allowed and "routed to draft folder" in decision.reason:
+                offenders.append((action.value, ceiling.value, decision.reason))
+    assert offenders == [], offenders
 
 
 def test_enforce_external_send_exposure_governs() -> None:
