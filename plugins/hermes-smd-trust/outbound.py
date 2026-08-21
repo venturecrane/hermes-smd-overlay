@@ -146,19 +146,31 @@ _BODY_REQUIRED_DRAFT_TOOLS: frozenset[str] = frozenset(
 # identifier surface with the largest blast radius on the seat was the one
 # surface the gate never saw. Those keys are in ``_DRAFT_SCAN_KEYS`` now.
 #
-# They REPORT instead of blocking, and the reason is the ss#2247 note up this
+# Both tools REPORTED at first, and the reason was the ss#2247 note up this
 # file rather than timidity. A demand letter is dense with figures and dates the
 # firm authored elsewhere; flipping a gate straight to BLOCK on that content,
 # with no measurement of how often it fires on correct work, is how the
 # establishment gate ended up teaching the model to delete wage rates from a
-# letter so it would stage. So every identifier in a filed document is measured
-# and written to the ledger, and nothing is refused until someone has read the
-# rate at which it fires. Flipping these to BLOCK is a Captain decision with
-# that number in hand.
+# letter so it would stage. So the rate got measured before anything flipped.
+#
+# ``mcp_smokeball_render_docx_draft`` BLOCKS as of this change, because that
+# number is now in hand. Four pilot drafting lanes on 2026-08-21
+# (ss-console#2511, ``vfy_01M0JG54ATP5ZA1TDTQJ6CEVWA``) put ten render calls
+# through the gate and produced zero false positives and one genuine catch. The
+# catch argues the flip on its own: computed response deadlines reached a filed
+# Word draft, while the same values were refused on the memo and on the email in
+# the same turn. A document the firm files is the last surface that should be
+# the permissive one. So this tool falls through to ``_identifier_gate_mode()``
+# below, like every other draft tool.
+#
+# ``mcp_smokeball_add_file`` stays report-only. No lane has exercised it yet, so
+# its false-positive rate is unmeasured and the ss#2247 reasoning still applies
+# to it unchanged. Flipping it is the same decision again, with its own number,
+# not a follow-on to this one.
 #
 # PER TOOL, never the env lever. ``SMD_IDENTIFIER_GATE_MODE=report`` downgrades
 # every gate on the seat and is the incident rollback; this downgrades exactly
-# two tools and is the authored posture. The audit row says which one applied
+# one tool and is the authored posture. The audit row says which one applied
 # (``mode=report_tool`` vs ``mode=report``) so a ledger reader is never left
 # guessing whether a seat was in rollback.
 # ---------------------------------------------------------------------------
@@ -166,7 +178,6 @@ _BODY_REQUIRED_DRAFT_TOOLS: frozenset[str] = frozenset(
 _REPORT_ONLY_DRAFT_TOOLS: frozenset[str] = frozenset(
     {
         "mcp_smokeball_add_file",
-        "mcp_smokeball_render_docx_draft",
     }
 )
 
@@ -699,9 +710,10 @@ def _check_identifiers(
     # out of its own skill body: there IS a thing to say about it, namely that
     # it is not a record. So a seat-sourced hit refuses through the carve.
     #
-    # The per-tool report carve is unconditional in the other direction: those
-    # two tools measure and never refuse, seat-sourced or not, until the
-    # false-positive rate has been read (see _REPORT_ONLY_DRAFT_TOOLS).
+    # The per-tool report carve is unconditional in the other direction: a tool
+    # on that list measures and never refuses, seat-sourced or not, until its
+    # false-positive rate has been read (see _REPORT_ONLY_DRAFT_TOOLS, which is
+    # down to add_file alone now that render_docx_draft has its number).
     mode = MODE_REPORT_TOOL if tool_name in _REPORT_ONLY_DRAFT_TOOLS else _identifier_gate_mode()
     seat_sourced = bool(seat_sourced_hits)
     empty_carve = register_was_empty and gate == "draft" and not seat_sourced
