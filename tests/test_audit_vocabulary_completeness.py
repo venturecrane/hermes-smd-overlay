@@ -28,6 +28,7 @@ an undeclared type must be flagged by the same collector the real scan uses.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -152,3 +153,68 @@ def test_known_previously_undeclared_types_are_now_declared():
         "CORRECTION_PROPOSED",
     ):
         assert t in accepted, t
+
+
+# ---------------------------------------------------------------------------
+# The JOIN vocabulary (ss-console#2497)
+#
+# Same failure class as the action-type gap above, one layer down. An action
+# type absent from the vocabulary hides a whole row class from every consumer
+# that filters by it; a metadata KEY spelled two ways hides half the rows from
+# a join. #2312 is the precedent: the per-tool builder wrote ``trace_id`` where
+# six other emitters wrote ``tool_call_id``, and one query silently missed one
+# side or the other for weeks. These names are the joins the ledger is now sold
+# on, and they are written by six emitters across two repos.
+# ---------------------------------------------------------------------------
+
+
+def test_the_join_keys_are_declared_in_the_contract():
+    from shared.audit_contract import JOIN_KEYS
+
+    assert set(JOIN_KEYS) == {
+        "sender_key",
+        "vendor_message_id",
+        "session_id",
+        "matter_ref",
+        "document_id",
+        "memo_id",
+        "draft_id",
+        "written_body_sha256",
+    }
+
+
+def test_build_per_tool_metadata_documents_every_key_it_can_emit():
+    """The docstring is the contract a consumer reads (the AC names it), so a key
+    the builder can write and the docstring does not list is a field nobody
+    downstream knows exists.
+
+    FALSIFIER: delete one of the object-identity paragraphs from that docstring
+    and this fails; delete the key from the extractor instead and the
+    object-identity tests fail. Neither half can drift alone.
+    """
+    emit_path = ROOT / "plugins" / "hermes-smd-audit" / "emit.py"
+    tree = ast.parse(emit_path.read_text(encoding="utf-8"))
+    doc = next(
+        (
+            ast.get_docstring(node) or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "build_per_tool_metadata"
+        ),
+        None,
+    )
+    assert doc is not None, "build_per_tool_metadata not found in emit.py"
+    # The DOCUMENTED key list is the bullet names, not any substring of the
+    # prose: "seam" appears in that docstring as ordinary English ("the
+    # pre-to-post seam"), so a substring check would pass on a docstring that
+    # never names the field. Match the bullet form the docstring already uses.
+    documented = set(re.findall(r"^\s*- (\w+):", doc, re.MULTILINE))
+    required = {
+        "document_id",
+        "document_ids",
+        "memo_id",
+        "draft_id",
+        "written_body_sha256",
+        "written_body_field",
+        "seam",
+    }
+    assert required <= documented, f"emitted but undocumented: {sorted(required - documented)}"

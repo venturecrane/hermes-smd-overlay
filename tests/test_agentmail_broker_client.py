@@ -34,9 +34,18 @@ def test_reply_cannot_name_its_recipient():
     The reply's recipient is derived by the broker from the source message, so
     this module deliberately has no argument for it — a caller cannot aim a
     reply at an address of its choosing.
+
+    Pinned as an EXACT set, still: an allowlist that merely forbids today's
+    recipient spellings would pass the day someone adds ``deliver_to``. The two
+    audit joins added by ss-console#2497 (``session_id`` / ``matter_ref``) are
+    named here deliberately, so extending this signature stays a decision
+    somebody makes on purpose rather than one that slips through. Neither can
+    address a message: they are written to the audit row and never forwarded to
+    the vendor body, which ``test_audit_joins_ride_beside_the_payload`` proves.
     """
     params = set(inspect.signature(agentmail_broker.send_reply).parameters)
-    assert params == {"message_id", "text", "html"}
+    assert params == {"message_id", "text", "html", "session_id", "matter_ref"}
+    assert not params & {"to", "cc", "bcc", "recipient", "recipients", "deliver_to"}
 
 
 def test_transmit_is_unavailable_without_a_broker_socket(monkeypatch):

@@ -20,13 +20,14 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 
 import pytest
 import yaml
 
-from shared import inbound, matter_binding
+from shared import audit_contract, inbound, matter_binding
 from tests.conftest import load_plugin
 
 # ---------------------------------------------------------------------------
@@ -723,15 +724,31 @@ def test_send_reply_delegates_to_the_broker_and_carries_no_credential() -> None:
     mod = load_plugin("hermes-smd-reply")
     captured = {}
 
-    def _sender(*, message_id, text, html):
-        captured.update(message_id=message_id, text=text, html=html)
+    def _sender(*, message_id, text, html, session_id="", matter_ref=None):
+        captured.update(
+            message_id=message_id,
+            text=text,
+            html=html,
+            session_id=session_id,
+            matter_ref=matter_ref,
+        )
         return "msg_out"
 
     out = mod.relay.send_reply(
         message_id="msg_in", text="hello", html="<p>hello</p>", sender=_sender
     )
     assert out == "msg_out"
-    assert captured == {"message_id": "msg_in", "text": "hello", "html": "<p>hello</p>"}
+    # The audit joins (ss-console#2497) ride along and are EMPTY here, because
+    # this caller supplied none — the absence is recorded as absence, never as a
+    # placeholder. What stays pinned is that no recipient, key, or inbox id
+    # crosses this seam.
+    assert captured == {
+        "message_id": "msg_in",
+        "text": "hello",
+        "html": "<p>hello</p>",
+        "session_id": "",
+        "matter_ref": None,
+    }
 
 
 def test_send_reply_surfaces_a_broker_refusal_as_a_send_error() -> None:
@@ -1629,3 +1646,107 @@ def test_a_second_hold_for_one_message_stops_the_redraft_loop(relay_mod) -> None
     assert second is not None
     assert "Do NOT redraft" in second, second
     provenance._reset_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# Audit joins on the reply lane (ss-console#2497)
+#
+# Measured on the live ledgers 2026-08-21 (vfy_01M0H8DR6JAPYVHFMNJZXQZ517):
+# session_id was on 0 of 8 REPLY_SENT rows on ashton-price and 0 of 207 on the
+# pilot; matter_ref was NULL on every send row on both. A reply row that cannot
+# name the matter it was about is what a disputed-communication question falls
+# into, and it is what makes the #2167 silence read as innocence.
+# ---------------------------------------------------------------------------
+
+
+def test_a_sent_reply_names_its_session_the_matter_and_the_person(relay_mod) -> None:
+    """FALSIFIER: revert ``_emit_reply_event`` to the two-argument form and all
+    three assertions fail while every other reply test stays green, which is how
+    eight months of send rows shipped with none of them."""
+    mod, d1, sent = relay_mod
+    _seed_closed(_SENDER)  # the sender IS a party, so the reply relays
+    matter_binding.membership_for("s1").note_content_read(_M_A)
+    _type_sender_as_client(mod)
+    _record_origin(sender=_SENDER, message_id="msg_join_1", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft([_SENDER], text=f"Re: matter {_NUM_A}. Confirmed for Tuesday."),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+    row = next(c for c in d1.calls if c[1][2] == "REPLY_SENT")
+    meta = json.loads(row[1][-1])
+    assert meta["session_id"] == "s1"
+    assert meta["sender_key"] == hashlib.sha256(_SENDER.encode()).hexdigest()
+    # matter_ref is the COLUMN, not a metadata key: the portal audit record
+    # filters on the column, which is the whole reason the AC says so.
+    by_col = dict(zip(audit_contract.COLUMNS, row[1], strict=True))
+    assert by_col["matter_ref"] == _M_A
+    matter_binding._reset_for_tests()
+
+
+def test_a_held_reply_names_its_session_before_any_matter_work_happens(relay_mod) -> None:
+    """The early holds return long before the matter gate runs, and they are the
+    rows an auditor reads first when asking why someone got no answer.
+
+    FALSIFIER: bind ``_CURRENT_CALL.session_id`` at the send site instead of at
+    hook entry and this row loses its session while the sent-reply test above
+    still passes."""
+    mod, d1, sent = relay_mod
+    # Not on the roster: held at step (a), before recipient-lock or matter work.
+    _record_origin(sender="stranger@nowhere.example", message_id="msg_join_2", inbox_id="inbox_x")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["stranger@nowhere.example"]),
+        session_id="s_hold",
+    )
+    assert sent == []
+    held = [c for c in d1.calls if c[1][2] == "REPLY_HELD"]
+    assert len(held) == 1
+    assert json.loads(held[0][1][-1])["session_id"] == "s_hold"
+
+
+def test_the_broker_is_told_the_same_two_joins_the_reply_row_carries(relay_mod) -> None:
+    """One reply produces TWO rows, REPLY_SENT here and CONFIRM_SEND_DISPATCHED
+    in the broker, and before this change the only way to match them was their
+    timestamps. FALSIFIER: drop the forwarding at the ``relay.send_reply`` call
+    site and this fails while the audit row above still passes."""
+    mod, d1, _sent = relay_mod
+    forwarded: list[dict] = []
+
+    def _capture(*, message_id, text, html, session_id="", matter_ref=None):
+        forwarded.append({"session_id": session_id, "matter_ref": matter_ref})
+        return "msg_sent_2"
+
+    _seed_closed(_SENDER)
+    matter_binding.membership_for("s1").note_content_read(_M_A)
+    _type_sender_as_client(mod)
+    _record_origin(sender=_SENDER, message_id="msg_join_3", inbox_id="inbox_x")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mod.relay, "send_reply", _capture)
+        mod.on_post_tool_call(
+            tool_name="agentmail:create_draft",
+            args=_draft([_SENDER], text=f"Re: matter {_NUM_A}. Confirmed."),
+            session_id="s1",
+        )
+    assert forwarded == [{"session_id": "s1", "matter_ref": _M_A}]
+    matter_binding._reset_for_tests()
+
+
+def test_a_released_hold_claims_no_session_it_does_not_have(relay_mod) -> None:
+    """The sweeper runs minutes later on its own thread and the held-reply store
+    never persisted either join, so a released row must carry NEITHER rather than
+    the sweeper's own absent session written as an attribution.
+
+    FALSIFIER: default ``session_id`` to something truthy in
+    ``_emit_reply_event`` and this row starts claiming a session that never
+    composed it."""
+    mod, d1, _sent = relay_mod
+    mod._emit_reply_event(
+        action_type="REPLY_SENT",
+        metadata={"recipient": _SENDER, "released_from_hold": True},
+    )
+    row = next(c for c in d1.calls if c[1][2] == "REPLY_SENT")
+    by_col = dict(zip(audit_contract.COLUMNS, row[1], strict=True))
+    assert by_col["matter_ref"] is None
+    assert "session_id" not in json.loads(row[1][-1])

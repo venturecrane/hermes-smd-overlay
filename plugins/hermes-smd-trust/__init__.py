@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import matter_binding, provenance, report_render, spec_stamp
+from shared import matter_binding, matter_gate, provenance, report_render, spec_stamp
 from shared.broker_audit import write_decision
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
@@ -479,7 +479,26 @@ def _seat_email_adapter() -> str:
     return authored
 
 
-def _smd_send_message(args: dict[str, Any], **_: Any) -> str:
+def _resolved_session(kwargs: dict[str, Any]) -> str:
+    """The session id the per-session registers were written under.
+
+    Core drops ``session_id`` at some tool fire sites and passes only ``task_id``
+    (overlay #141); ``provenance.resolve_session`` is the single place that
+    reconciles them, and it is the key ``matter_binding`` was recorded under
+    (``on_post_tool_call`` passes the resolved id). Consulting the raw kwargs id
+    instead would look up an empty register and report a send with no matter on a
+    turn that read one. Never raises — an unresolvable session degrades to
+    whatever kwargs carried, which is what the row then says.
+    """
+    raw = str(kwargs.get("session_id") or "")
+    try:
+        return provenance.resolve_session(raw)
+    except Exception:  # noqa: BLE001 — an audit enrichment must not break a send
+        logger.debug("hermes-smd-trust: send session resolution failed", exc_info=True)
+        return raw
+
+
+def _smd_send_message(args: dict[str, Any], **kwargs: Any) -> str:
     """Execute a send the gate has already authorized.
 
     By the time a handler runs, ``pre_tool_call`` has classified the recipients,
@@ -521,11 +540,25 @@ def _smd_send_message(args: dict[str, Any], **_: Any) -> str:
         )
 
     payload = dict(args)
+    # ss-console#2497 — the two facts the broker's CONFIRM_SEND_* row cannot
+    # learn on its own. The session is resolved through ``provenance`` rather
+    # than read raw from kwargs because core drops ``session_id`` at some tool
+    # fire sites (overlay #141), and the matter registers this consults are keyed
+    # by the resolver's answer: looking them up under any other key finds an
+    # empty set and reports a send with no matter on a turn that had one.
+    send_session_id = _resolved_session(kwargs)
+    send_matter_ref = matter_gate.matter_ref_for(
+        send_session_id, matter_gate.cited_matters(matter_gate.body_from_args(payload))
+    )
     try:
         if _seat_email_adapter() == _ADAPTER_MSGRAPH:
-            message_id = outbound_send.send_via_msgraph(payload)
+            message_id = outbound_send.send_via_msgraph(
+                payload, session_id=send_session_id, matter_ref=send_matter_ref
+            )
         else:
-            message_id = outbound_send.send_message(payload=payload)
+            message_id = outbound_send.send_message(
+                payload=payload, session_id=send_session_id, matter_ref=send_matter_ref
+            )
     except outbound_send.OutboundSendError as exc:
         # Returned, not raised: a refused send is information the agent should
         # act on (pick a different recipient, ask the owner), not a tool crash.
@@ -590,9 +623,21 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     # correctly. Each transport fails closed on ITS missing credential; neither
     # cross-falls.
     is_msgraph = rec.tool_name == _MSGRAPH_SEND_TOOL or _seat_email_adapter() == _ADAPTER_MSGRAPH
+    # ss-console#2497. The broker writes CONFIRM_SEND_DISPATCHED / _FAILED and is
+    # the only writer of them, so these two facts have to travel with the request
+    # or the row cannot carry them at all. The matter is resolved from what this
+    # session READ and from the identifiers in the approved body, never declared
+    # by the model — the same rule the matter gate is built on. Both resolve to
+    # nothing on an ambiguous turn, and nothing is what the row then says.
+    send_matter_ref = matter_gate.matter_ref_for(
+        _resolved_session({"session_id": session_id}),
+        matter_gate.cited_matters(matter_gate.body_from_args(payload)),
+    )
     try:
         if is_msgraph:
-            message_id = outbound_send.send_via_msgraph(payload)
+            message_id = outbound_send.send_via_msgraph(
+                payload, session_id=session_id, matter_ref=send_matter_ref
+            )
         else:
             # ss#2258: AgentMail transmit is a broker verb now. No key is read
             # here and no inbox is resolved here — the broker pins the seat's own
@@ -601,7 +646,9 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
             # itself. The previous shape read an account-wide key and resolved the
             # inbox from an account listing in THIS process, which is how a seat
             # could send as (and to) someone it was never authored to touch.
-            message_id = outbound_send.send_message(payload=payload)
+            message_id = outbound_send.send_message(
+                payload=payload, session_id=session_id, matter_ref=send_matter_ref
+            )
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
         # NOTE: NEITHER path emits a row here any more. Both transports are broker

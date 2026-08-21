@@ -54,13 +54,32 @@ def transmit_available() -> bool:
     return bool(os.environ.get(SOCKET_ENV, "").strip())
 
 
-def _call(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _call(
+    action: str,
+    payload: dict[str, Any],
+    *,
+    session_id: str = "",
+    matter_ref: str | None = None,
+) -> dict[str, Any]:
     if not transmit_available():
         raise AgentMailBrokerUnavailable(
             f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
         )
+    # ss-console#2497. The broker writes the CONFIRM_SEND_* row and cannot know
+    # either fact — it does not run in the agent's process and has no session.
+    # They ride BESIDE ``payload``, never inside it: the payload is what reaches
+    # the vendor, and the broker builds the wire body from a closed allowlist, so
+    # an audit field placed there would be silently dropped. Both are OPTIONAL on
+    # the wire so the two sides deploy in either order (the same argument the
+    # ss#2489 ``html`` field makes): a broker that predates them ignores unknown
+    # request keys and writes exactly the row it writes today.
+    envelope: dict[str, Any] = {"action": action, "payload": payload}
+    if session_id:
+        envelope["session_id"] = session_id
+    if matter_ref:
+        envelope["matter_ref"] = matter_ref
     try:
-        return request({"action": action, "payload": payload}, timeout=SEND_TIMEOUT_SECONDS)
+        return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
     except OSError as exc:
         # Transport-level (OSError covers socket timeouts: TimeoutError has
         # subclassed it since 3.10). The broker may or may not have sent. Distinguished
@@ -70,7 +89,9 @@ def _call(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise AgentMailBrokerUnavailable(f"broker unreachable: {exc}") from exc
 
 
-def send_message(payload: dict[str, Any]) -> str:
+def send_message(
+    payload: dict[str, Any], *, session_id: str = "", matter_ref: str | None = None
+) -> str:
     """Transmit a fresh message; return the AgentMail message id.
 
     ``payload`` carries only content and recipients — the broker applies the
@@ -78,10 +99,22 @@ def send_message(payload: dict[str, Any]) -> str:
     broker refuses (an authored-policy decision, already audited there) and
     :class:`AgentMailBrokerUnavailable` when it could not be asked.
     """
-    return str(_call("agentmail_send", payload).get("message_id") or "")
+    return str(
+        _call("agentmail_send", payload, session_id=session_id, matter_ref=matter_ref).get(
+            "message_id"
+        )
+        or ""
+    )
 
 
-def send_reply(message_id: str, text: str = "", html: str = "") -> str:
+def send_reply(
+    message_id: str,
+    text: str = "",
+    html: str = "",
+    *,
+    session_id: str = "",
+    matter_ref: str | None = None,
+) -> str:
     """Reply to an inbound message; return the new message id.
 
     The recipient is structural — AgentMail threads the reply to the original
@@ -94,7 +127,12 @@ def send_reply(message_id: str, text: str = "", html: str = "") -> str:
         body["text"] = text
     if html:
         body["html"] = html
-    return str(_call("agentmail_reply", body).get("message_id") or "")
+    return str(
+        _call("agentmail_reply", body, session_id=session_id, matter_ref=matter_ref).get(
+            "message_id"
+        )
+        or ""
+    )
 
 
 __all__ = [

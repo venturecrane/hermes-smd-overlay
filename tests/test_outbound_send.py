@@ -28,11 +28,19 @@ def _load():
     return load_plugin("hermes-smd-trust").outbound_send
 
 
-def _sender(captured, message_id="msg_out"):
-    """A stand-in for the broker client that records the body it was handed."""
+def _sender(captured, message_id="msg_out", joins=None):
+    """A stand-in for the broker client that records the body it was handed.
 
-    def _send(body):
+    Accepts the ss-console#2497 audit kwargs the real client takes, and records
+    them separately when a test asks: they must reach the BROKER (which writes
+    the row) and must never join the vendor body, which is what the allowlist
+    assertions below prove.
+    """
+
+    def _send(body, *, session_id="", matter_ref=None):
         captured.append(body)
+        if joins is not None:
+            joins.append((session_id, matter_ref))
         return message_id
 
     return _send
@@ -62,7 +70,9 @@ def test_send_takes_no_credential_and_no_inbox():
     import inspect
 
     params = set(inspect.signature(_load().send_message).parameters)
-    assert params == {"payload", "sender"}
+    assert params == {"payload", "sender", "session_id", "matter_ref"}
+    # The control is what is ABSENT: no way to name the From or hand over a key.
+    assert not params & {"from", "sender_address", "inbox_id", "api_key", "token"}
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +123,7 @@ def test_send_message_refuses_without_recipient():
 def test_send_message_tolerates_missing_message_id():
     """A 2xx with no id is still a successful send; the turn must not fail."""
     mod = _load()
-    out = mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=lambda _b: "")
+    out = mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=lambda _b, **_k: "")
     assert out == "(sent, id unavailable)"
 
 
@@ -127,7 +137,7 @@ def test_a_broker_refusal_maps_to_send_error_and_keeps_its_reason():
     mod = _load()
     broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
 
-    def _refuse(_body):
+    def _refuse(_body, **_kwargs):
         raise broker.BrokerError("recipient is not on this seat's authored surface")
 
     with pytest.raises(mod.AgentMailSendError, match="authored surface"):
@@ -139,7 +149,7 @@ def test_an_unreachable_broker_is_not_reported_as_a_refusal():
     mod = _load()
     broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
 
-    def _down(_body):
+    def _down(_body, **_kwargs):
         raise broker.AgentMailBrokerUnavailable("socket missing")
 
     with pytest.raises(mod.AgentMailSendError, match="unavailable"):

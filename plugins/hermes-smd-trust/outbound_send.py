@@ -75,6 +75,8 @@ def send_message(
     *,
     payload: dict[str, Any],
     sender: Callable[..., Any] | None = None,
+    session_id: str = "",
+    matter_ref: str | None = None,
 ) -> str:
     """Ask the broker to send a fresh message; return the new message id.
 
@@ -92,13 +94,19 @@ def send_message(
 
     ``sender`` is injectable for tests. Raises :class:`AgentMailSendError` on
     refusal or transport failure alike — the caller's contract is unchanged.
+
+    ``session_id`` / ``matter_ref`` are ss-console#2497: the broker writes the
+    CONFIRM_SEND_* row and has no way to learn either, so the only place they can
+    come from is here. They are forwarded as kwargs so an injected ``sender``
+    written before this change keeps working — a test double that takes only the
+    body raises TypeError loudly rather than silently dropping the audit fields.
     """
     body = _send_body(payload)
     if not body.get("to"):
         raise AgentMailSendError("refusing to send: payload has no recipient")
     send = sender or agentmail_broker.send_message
     try:
-        message_id = send(body)
+        message_id = send(body, session_id=session_id, matter_ref=matter_ref)
     except agentmail_broker.BrokerError as exc:
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
@@ -136,6 +144,8 @@ def send_via_msgraph(
     payload: dict[str, Any],
     *,
     sender: Callable[..., Any] | None = None,
+    session_id: str = "",
+    matter_ref: str | None = None,
 ) -> str:
     """Ask the broker to send an approved message via Graph ``/sendMail``.
 
@@ -153,6 +163,9 @@ def send_via_msgraph(
 
     ``sender`` is injectable for tests. Raises :class:`MsGraphSendError` on
     refusal or transport failure alike — the caller's contract is unchanged.
+
+    ``session_id`` / ``matter_ref`` are ss-console#2497, forwarded to the broker
+    for the CONFIRM_SEND_* row it writes. See the twin note on ``send_message``.
     """
     body = {
         k: payload.get(k) for k in _MSGRAPH_SEND_FIELDS if payload.get(k) not in (None, "", [], {})
@@ -161,7 +174,7 @@ def send_via_msgraph(
         raise MsGraphSendError("refusing to send: payload has no recipient")
     send = sender or msgraph_broker.send_message
     try:
-        send(body)
+        send(body, session_id=session_id, matter_ref=matter_ref)
     except msgraph_broker.BrokerError as exc:
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful

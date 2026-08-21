@@ -136,3 +136,25 @@ def test_actor_agent_literal_matches_canonical_enum():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert ACTOR_AGENT == mod.ActorRole.AGENT.value
+
+
+def test_agent_event_params_carries_the_two_audit_joins():
+    """ss-console#2497. ``matter_ref`` is a COLUMN this builder never filled and
+    ``session_id`` has no column at all, so the two land in different places on
+    purpose. Pinned here beside the column contract because a future signature
+    change that drops either one would leave the send rows exactly as they were
+    on the live ledgers: unable to name the matter or the session.
+    """
+    params = agent_event_params(
+        action_type="REPLY_SENT",
+        metadata={"reply_channel": True},
+        session_id="sess-1",
+        matter_ref="matter-1",
+        now_ms=0,
+    )
+    by_col = dict(zip(_EXPECTED_COLUMNS, params, strict=True))
+    assert by_col["matter_ref"] == "matter-1"
+    assert '"session_id":"sess-1"' in by_col["metadata"]
+    # The other digest columns stay NULL — this builder still writes no payloads.
+    for col in ("input_digest", "output_digest", "diff_digest", "trust_ceiling"):
+        assert by_col[col] is None

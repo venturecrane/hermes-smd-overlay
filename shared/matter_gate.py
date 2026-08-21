@@ -77,6 +77,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -434,10 +435,67 @@ def content_read_refusal(session_id: str, tool_name: str, args: Any) -> str | No
         return None
 
 
+# ---------------------------------------------------------------------------
+# The matter_ref an audit row should carry (ss-console#2497)
+# ---------------------------------------------------------------------------
+
+
+def matter_ref_for(session_id: object, cited: Iterable[str] = ()) -> str | None:
+    """The ONE matter id an outbound row's ``matter_ref`` column should carry.
+
+    THE PROBLEM THIS ANSWERS. Session ``20260820_195837_68d654ce`` read four
+    distinct matters and then dispatched two sends. Every row is there; not one
+    of them says which matter the sends were about, and that silence reads as
+    evidence of innocence (ss#2167). A send row that names its matter is what
+    turns the ledger from a list of events into a record.
+
+    Neither source here is the model's word, matching the gate above:
+
+    1. the matter identifiers physically present in the body, resolved to
+       connector ids by what this session actually READ (``membership.resolve``
+       does the number -> id join, so ``2026-PI-101`` in a letter finds the
+       matter);
+    2. failing that, the single matter whose CONTENT this session read.
+
+    ``None`` on nothing and on ambiguity ALIKE, and that is the important half.
+    Naming one of two matters would be worse than NULL — it reads as an
+    exoneration for the matter it did not name, which is the exact reading
+    #2167 exists to prevent. A falsy session id is ``None`` for the same reason
+    ``multi_matter_session`` guards it: ``resolve_session`` returns ``""`` under
+    MODE_AMBIGUOUS / MODE_NONE and every unkeyed context shares that one bucket,
+    so a ref taken from it could belong to a different session's work.
+
+    Returns the CONNECTOR MATTER ID, never a cited token. The per-tool writer
+    already puts the connector id in this column
+    (``plugins/hermes-smd-audit/emit.py``), and a column carrying ids on some
+    rows and firm-facing numbers on others cannot be joined at all.
+    """
+    try:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+        membership = matter_binding.membership_for(sid)
+        resolved = {
+            matter_id
+            for matter_id in (
+                membership.resolve(token) for token in cited if isinstance(token, str) and token
+            )
+            if matter_id
+        }
+        if resolved:
+            return next(iter(resolved)) if len(resolved) == 1 else None
+        read = membership.content_read_matters()
+        return next(iter(read)) if len(read) == 1 else None
+    except Exception:  # noqa: BLE001 — an audit enrichment must never break a send
+        logger.debug("matter_gate: matter_ref resolution failed", exc_info=True)
+        return None
+
+
 __all__ = [
     "MatterVerdict",
     "evaluate",
     "cited_matters",
+    "matter_ref_for",
     "mode",
     "multi_matter_mode",
     "multi_matter_session",

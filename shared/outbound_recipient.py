@@ -95,11 +95,17 @@ def extract_to_recipients(args: Any) -> set[str]:
     return {addr for addr in (_normalize_addr(x) for x in items) if addr}
 
 
-def _extract_draft_id_from_result(result: Any) -> str:
+def extract_draft_id_from_result(result: Any) -> str:
     """Best-effort draft id from a ``create_draft`` / ``update_draft`` result.
 
     Handles a dict, a JSON string, or an MCP text-content wrapper. Returns "" if
     no id is found — the send then fails closed (unresolved → OUTSIDE/draft).
+
+    PUBLIC as of ss-console#2497. The audit writer needs the same id on the
+    TOOL_CALL_COMPLETED row for a draft creation, and the key spellings this
+    walks (``draft_id`` / ``id``, and AgentMail's nesting under ``draft``) are
+    the observed ones. A second extractor would be a second opinion about what a
+    draft id is, and the two would disagree the first time either changed.
     """
     obj: Any = result
     if isinstance(obj, str):
@@ -171,7 +177,7 @@ def record_draft_from_post_tool_call(
     if tool_name not in DRAFT_RECORD_TOOLS:
         return
     recipients = extract_to_recipients(args)
-    draft_id = _extract_draft_id_from_result(result)
+    draft_id = extract_draft_id_from_result(result)
     DRAFT_RECIPIENTS.record(session_id, draft_id, recipients)
 
 

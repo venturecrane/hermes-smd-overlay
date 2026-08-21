@@ -38,6 +38,7 @@ import logging
 import time
 from typing import Any
 
+from shared import object_identity
 from shared.action_classes import (
     BannedToolError,
     ToolClassification,
@@ -282,6 +283,7 @@ def build_per_tool_metadata(
     duration_ms: float | None = None,
     tool_call_id: str | None = None,
     arguments: dict | None = None,
+    result: Any = None,
     unmapped: bool = False,
     banned_reason: str | None = None,
     trust: TrustDecision | None = None,
@@ -318,6 +320,35 @@ def build_per_tool_metadata(
     - banned_reason:        str (set when banned_tool is True)
     - matter_id:            str (set when arguments has one)
     - customer_segment:     str (set when arguments has one)
+
+    The OBJECT the call touched (ss-console#2497 — ``shared.object_identity``).
+    Present only on the tools that have one to name, and only when the tool
+    actually produced it; a tool that mints no id contributes no key rather than
+    an empty one. Until this, a row could say a document was read on a matter and
+    not which document, and a memo was written and not which memo or what it
+    said, which is the difference between a record and a list of verbs:
+
+    - document_id:          str — ``mcp_smokeball_read_document``. From the
+                            result's ``fileId``/``file_id``/``document_id``,
+                            falling back to the args (the result is the source
+                            system's echo; the args are the model's composition).
+    - document_ids:         list[str] — ``mcp_smokeball_get_files_on_matter``:
+                            the ids the listing exposed, capped, with
+                            ``document_ids_truncated`` set when it stopped short.
+    - memo_id:              str — ``mcp_smokeball_create_memo``, when the write
+                            echoes one.
+    - draft_id:             str — the mail ``create_draft``/``update_draft``
+                            tools, via the same extractor the send gate uses.
+    - written_body_sha256:  str — sha256 of the body a WRITE actually wrote
+                            (``create_memo``'s ``text``, ``smd_deliver_draft``'s
+                            ``body``, a draft's body). Never the body itself: the
+                            digest proves the artifact in the firm's system is
+                            the one this row describes, and holds no content.
+    - written_body_field:   str — WHICH argument was digested, so the digest can
+                            be reproduced and checked rather than trusted.
+    - seam:                 str — ``smd_deliver_draft``'s declared destination.
+                            That tool returns a sentence and mints no id, so the
+                            digest plus the seam is the whole identity it has.
 
     The trust trail (present only when ``trust`` is supplied — i.e. when the
     gate's decision for this exact call was found):
@@ -387,6 +418,14 @@ def build_per_tool_metadata(
     scope = extract_scope_metadata(arguments)
     if scope:
         metadata.update(scope)
+
+    # WHAT the call touched (ss-console#2497). Applied after the scope keys and
+    # before nothing: object identity never overwrites a scope key (the two key
+    # sets are disjoint by construction — SCOPE_KEYS is matter_id /
+    # customer_segment), so ordering here is documentation, not a precedence.
+    identity = object_identity.extract(tool_name, arguments, result)
+    if identity:
+        metadata.update(identity)
 
     return metadata
 
@@ -560,6 +599,10 @@ def emit_tool_event(
         duration_ms=float(duration_ms) if duration_ms is not None else None,
         tool_call_id=tool_call_id or None,
         arguments=args,
+        # ss-console#2497: the result is what names the object the call touched
+        # (a created memo id, a read document's id). It was already in scope here
+        # for the outcome inference and simply never reached the metadata builder.
+        result=result,
         unmapped=unmapped,
         banned_reason=banned_reason,
         trust=trust,
