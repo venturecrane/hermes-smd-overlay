@@ -36,6 +36,34 @@ reasoning is authored at ``plugins/hermes-smd-reply/__init__.py:196-207``.
 Deleting either render site is a regression; collapsing them was investigated
 and falsified 2026-08-21.
 
+WHY THE TWO LANES DIFFER AT ALL, in one sentence, because it is the thing most
+likely to be mistaken for drift: on lane 1 the render is CONDITIONAL and the two
+transports are SYMMETRIC, since a body with no block structure needs no html on
+either wire; on lane 2 the render is UNCONDITIONAL on msgraph and ABSENT on
+AgentMail, since only one of those two transports delivers a real text/plain
+part and the other collapses whatever it is handed.
+
+WHICH TEST COVERS WHICH LANE, so the next reader does not have to re-derive it:
+
+  Lane 1, proactive send
+    ``test_a_report_body_arrives_rendered_on_both_send_transports``
+        AC1. One render, and BOTH transports carry it to the wire. The
+        assertion ss#2489 needed and did not have.
+    ``test_a_prose_send_stays_byte_identical_on_both_transports``
+        The symmetry: a prose body renders on NEITHER transport.
+    ``test_a_composer_authored_html_wins_on_both_send_transports``
+        AC3 on this lane.
+
+  Lane 2, reply relay
+    ``test_a_prose_reply_renders_on_msgraph_and_leaves_agentmail_byte_identical``
+        AC2. The asymmetry itself, pinned as intended, reason cited.
+    ``test_a_composer_authored_html_wins_on_both_reply_transports``
+        AC3 on this lane.
+    ``test_a_report_reply_renders_on_msgraph_and_reaches_agentmail_as_markdown``
+        The one pair no render site covers. OBSERVED, not endorsed.
+    ``test_the_msgraph_reply_escapes_model_authored_markup``
+        Escape-by-default, on the transport that renders unconditionally.
+
 WHAT THIS FILE DOES NOT CLAIM, stated so its green is not read as more than it
 is. ``_attach_html_body`` returns early unless the tool is EXTERNAL_SEND
 (``plugins/hermes-smd-trust/outbound.py:808-812``) and ``create_draft`` is
