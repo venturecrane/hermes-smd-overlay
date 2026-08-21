@@ -1721,9 +1721,9 @@ def _act_confirmation_note(
     tool = str(row.get("tool") or "")
     payload = row.get("payload")
     payload = payload if isinstance(payload, dict) else {}
-    if not tool or not payload:
+    if not tool or not payload or not act_broker.is_act_tool(tool):
         logger.warning(
-            "hermes-smd-establishment: act %s has no tool/payload; nothing confirmed",
+            "hermes-smd-establishment: act %s names no tool this seat can make; nothing confirmed",
             proposal_id,
         )
         return _ACT_NOT_OPEN_NOTE.format(proposal_id=proposal_id)
@@ -1751,7 +1751,13 @@ def _act_confirmation_note(
     return _ACT_CONFIRMED_NOTE.format(
         proposal_id=proposal_id,
         tool=tool,
-        payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        # The tool's own arguments, not the whole authored block: the two names
+        # in the payload are what the read-back said, and the connector has no
+        # such fields. The gate replays the same subset regardless, so this is
+        # about telling the model something true rather than about safety.
+        payload=json.dumps(
+            act_broker.tool_arguments(tool, payload), ensure_ascii=False, sort_keys=True
+        ),
     )
 
 
