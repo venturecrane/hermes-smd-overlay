@@ -174,7 +174,7 @@ def send_via_msgraph(
         raise MsGraphSendError("refusing to send: payload has no recipient")
     send = sender or msgraph_broker.send_message
     try:
-        send(body, session_id=session_id, matter_ref=matter_ref)
+        message_id = send(body, session_id=session_id, matter_ref=matter_ref)
     except msgraph_broker.BrokerError as exc:
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
@@ -182,6 +182,15 @@ def send_via_msgraph(
         raise MsGraphSendError(f"broker refused the send: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
         raise MsGraphSendError(f"broker transmit unavailable: {exc}") from exc
-    # Graph answers sendMail with 202 and no body, so no id exists to return —
-    # unchanged by the reseam, and the reason the audit row leans on its digest.
+    # ss-console#2499. Graph's 202 still carries no id, but the broker now stamps
+    # an X-SMD-Audit-Row header on the message and looks that message up in Sent
+    # Items to learn its RFC2822 id. That id is what a firm can find in its own
+    # mailbox, so it is what the audit row should name.
+    #
+    # The placeholder survives for the case where the lookup could not run or
+    # could not find it. It is honest there and only there: the broker's own row
+    # records WHY, and a manufactured id would name a message the mailbox does
+    # not contain — worse than no id, because it reads as an answer.
+    if isinstance(message_id, str) and message_id:
+        return message_id
     return "(sent via msgraph, id unavailable)"
