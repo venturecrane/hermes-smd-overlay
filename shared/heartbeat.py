@@ -41,6 +41,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 logger = logging.getLogger("hermes-smd-heartbeat")
@@ -71,22 +72,44 @@ def read_uptime_seconds() -> int | None:
         return None
 
 
-def read_audit_timestamps(db_path: str | None) -> tuple[str | None, str | None]:
-    """(last_audit_ts, last_skill_ts) from the read-only audit DB.
+class AuditLedgerFacts(NamedTuple):
+    """What one read-only pass over the ledger can say about it.
+
+    ``last_audit_ts`` / ``last_skill_ts`` are the pre-existing pair. ``head``
+    and ``rows`` are ss-console #2500's off-Machine chain pin: the ``row_hash``
+    of the newest CHAINED row and the total row count, read in the same pass so
+    the two can never describe different moments of the ledger.
+    """
+
+    last_audit_ts: str | None
+    last_skill_ts: str | None
+    head: str | None
+    rows: int | None
+
+
+def read_audit_facts(db_path: str | None) -> AuditLedgerFacts:
+    """Every ledger fact the beat carries, from ONE read-only connection.
 
     ``last_audit_ts`` is the newest ``audit_log.ts``; ``last_skill_ts`` is the
-    newest ``ts`` on a row that carries a ``skill_name``. Both are ``None`` when
-    the DB or the ``audit_log`` table does not exist yet (a freshly-booted
-    Machine that has done no work) — a legitimate empty state, not an error.
-    Opens the DB read-only so a heartbeat can never perturb the audit writer.
+    newest ``ts`` on a row that carries a ``skill_name``; ``head`` is the
+    ``row_hash`` of the newest row that has one (pre-#1686 rows carry NULL and
+    are not part of the chain — see ``shared.audit_chain``); ``rows`` is
+    ``COUNT(*)``. All are ``None`` when the DB or the ``audit_log`` table does
+    not exist yet (a freshly-booted Machine that has done no work) — a
+    legitimate empty state, not an error.
+
+    ONE connection by construction. The head and the count are the two halves
+    of an off-Machine integrity pin, and a pin whose halves were read seconds
+    apart can accuse an honest ledger of losing rows. Opens read-only so a
+    heartbeat can never perturb the audit writer.
     """
     if not db_path or not os.path.exists(db_path):
-        return (None, None)
+        return AuditLedgerFacts(None, None, None, None)
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
     except sqlite3.Error as exc:
         logger.warning("heartbeat: cannot open audit DB read-only: %s", exc)
-        return (None, None)
+        return AuditLedgerFacts(None, None, None, None)
     try:
         conn.execute("PRAGMA busy_timeout=2000")
         last_audit = _scalar(conn, "SELECT ts FROM audit_log ORDER BY id DESC LIMIT 1")
@@ -96,12 +119,41 @@ def read_audit_timestamps(db_path: str | None) -> tuple[str | None, str | None]:
             "WHERE skill_name IS NOT NULL AND skill_name != '' "
             "ORDER BY id DESC LIMIT 1",
         )
-        return (last_audit, last_skill)
+        # Chain columns in their OWN try. A pre-#1686 ledger has no ``row_hash``
+        # column at all, and on such a seat the SELECT raises — sharing the
+        # outer handler would have made a missing chain column take
+        # ``last_audit_ts`` down with it and report a working seat as silent.
+        # (Caught by the pre-existing tests/test_heartbeat.py fixture, which
+        # builds exactly that older table.)
+        head: str | None = None
+        try:
+            head = _scalar(
+                conn,
+                "SELECT row_hash FROM audit_log "
+                "WHERE row_hash IS NOT NULL AND row_hash != '' "
+                "ORDER BY id DESC LIMIT 1",
+            )
+        except sqlite3.Error as exc:
+            logger.debug("heartbeat: audit chain column unavailable: %s", exc)
+        rows = _scalar(conn, "SELECT COUNT(*) FROM audit_log")
+        return AuditLedgerFacts(
+            last_audit,
+            last_skill,
+            head,
+            rows if isinstance(rows, int) else None,
+        )
     except sqlite3.Error:
         # DB exists but audit_log table not created yet, or a transient lock.
-        return (None, None)
+        return AuditLedgerFacts(None, None, None, None)
     finally:
         conn.close()
+
+
+def read_audit_timestamps(db_path: str | None) -> tuple[str | None, str | None]:
+    """(last_audit_ts, last_skill_ts). Kept as the pre-#2498 name for callers
+    that want only the pair; :func:`read_audit_facts` is the full read."""
+    facts = read_audit_facts(db_path)
+    return (facts.last_audit_ts, facts.last_skill_ts)
 
 
 def _scalar(conn: sqlite3.Connection, sql: str) -> str | None:
@@ -132,6 +184,9 @@ def build_payload(
     gateway_loop_age_seconds: int | None = None,
     gateway_supervisor_state: str | None = None,
     gateway_restarts_last_hour: int | None = None,
+    audit_write_failures: int | None = None,
+    audit_head: str | None = None,
+    audit_rows: int | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -220,6 +275,23 @@ def build_payload(
         payload["gateway_supervisor_state"] = gateway_supervisor_state
     if gateway_restarts_last_hour is not None:
         payload["gateway_restarts_last_hour"] = gateway_restarts_last_hour
+    # ss-console #2498: how many audit rows this seat has failed to persist,
+    # ever (shared.audit_failure_counter). is-not-None discipline, and here it
+    # is the WHOLE POINT: 0 is the value that says "the writer is up and has
+    # lost nothing", which is the only thing that distinguishes a quiet ledger
+    # from a broken one. Truthiness-omitting it would send exactly the healthy
+    # case as silence — the shape this field exists to end. None means the seat
+    # cannot answer (no .smd dir), and the console holds what it last knew.
+    if audit_write_failures is not None:
+        payload["audit_write_failures"] = audit_write_failures
+    # ss-console #2500: the off-Machine chain pin. Read in the same pass as
+    # last_audit_ts (read_audit_facts), so the head and the count always
+    # describe one moment of the ledger. Both omitted on a ledger that has no
+    # chained rows yet — absence is "nothing to pin", never "the chain broke".
+    if audit_head:
+        payload["audit_head"] = audit_head
+    if audit_rows is not None:
+        payload["audit_rows"] = audit_rows
     return payload
 
 
@@ -536,7 +608,17 @@ class HeartbeatEmitter:
             return WebhookSurfaceCheck(ok=False, tools=None)
 
     def _post_control_plane(self) -> None:
-        last_audit_ts, last_skill_ts = read_audit_timestamps(self._audit_db_path_fn())
+        ledger = read_audit_facts(self._audit_db_path_fn())
+        # ss-console #2498. Read from the volume, not from this process: the
+        # failures happen in the AGENT process and in cron pre_run children,
+        # and this beat runs in the gate. Fail-soft like every other read here.
+        audit_write_failures: int | None = None
+        try:
+            from shared.audit_failure_counter import read_audit_write_failures
+
+            audit_write_failures = read_audit_write_failures()
+        except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
+            logger.debug("heartbeat: audit-write-failure tally read failed: %s", exc)
         # ADR 0062: surface the cost-breaker ladder level so the fleet view
         # can escalate a tripped seat. Read-only; any failure omits the field
         # (the receiver treats absence as unknown, never as OK).
@@ -561,8 +643,8 @@ class HeartbeatEmitter:
             logger.debug("heartbeat: token-age read failed: %s", exc)
         payload = build_payload(
             heartbeat_ts=_iso_utc_now(),
-            last_audit_ts=last_audit_ts,
-            last_skill_ts=last_skill_ts,
+            last_audit_ts=ledger.last_audit_ts,
+            last_skill_ts=ledger.last_skill_ts,
             uptime_seconds=read_uptime_seconds(),
             version=self._version,
             sticky_stop_level=level,
@@ -583,6 +665,9 @@ class HeartbeatEmitter:
             gateway_loop_age_seconds=loop.age_seconds if loop is not None else None,
             gateway_supervisor_state=loop.supervisor_state if loop is not None else None,
             gateway_restarts_last_hour=loop.restarts_last_hour if loop is not None else None,
+            audit_write_failures=audit_write_failures,
+            audit_head=ledger.head,
+            audit_rows=ledger.rows,
         )
         import json
 
@@ -705,9 +790,11 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
 
 
 __all__ = [
+    "AuditLedgerFacts",
     "HeartbeatEmitter",
     "build_payload",
     "emitter_from_env",
+    "read_audit_facts",
     "read_audit_timestamps",
     "read_uptime_seconds",
 ]

@@ -43,9 +43,12 @@ Scope:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 MANAGED_PREFIX = "op-managed"
 WAKE_ALWAYS = "always"
@@ -55,6 +58,33 @@ _SUPPORTED_WAKE_POLICIES = frozenset({WAKE_ALWAYS, WAKE_PRE_RUN_DECIDES})
 
 class CronMaterializeError(RuntimeError):
     """An authored cron entry could not be materialized (fail-closed)."""
+
+
+@dataclass(frozen=True)
+class RoutineChange:
+    """One routine crossing the scheduled / not-scheduled line (ss-console #2498).
+
+    THE GAP THIS CLOSES. Turning a routine on or off is the single most
+    consequential thing that happens to a seat between hand-off and steady
+    state, and until now it happened entirely OUTSIDE the ledger: it is a
+    customer.yaml edit, materialized here at boot, leaving no row. A Named
+    Administrator reading the record of a silent week could not tell a seat
+    whose routines were deliberately off (ashton-price since #2332) from one
+    whose routines were broken. #2498 S6.
+
+    ``enabled`` False = the routine was scheduled and is no longer.
+
+    Emitted on the DELTA only, never on the reconcile. This module removes and
+    recreates every managed job on EVERY boot, so a row per created job would
+    say "enabled" about eleven unchanged routines each time the Machine
+    restarts — noise that would bury the one line that mattered and would make
+    the ledger claim a change no one made.
+    """
+
+    persona_slug: str
+    skill: str
+    enabled: bool
+    schedule: str | None  # the authored cron expression when enabling; None when disabling
 
 
 @dataclass(frozen=True)
@@ -181,6 +211,7 @@ def materialize_cron(
     stage_script_for: Callable[[str, str, str], str] | None = None,
     reconcile_slugs: Iterable[str] | None = None,
     containment: bool = False,
+    on_routine_change: Callable[[RoutineChange], None] | None = None,
 ) -> list[str]:
     """Reconcile Hermes cron jobs from customer.yaml into each persona's profile
     home, converging every reconciled persona's store to EXACTLY its authored
@@ -254,6 +285,7 @@ def materialize_cron(
     # broadened set.
     stores: dict[str, CronStore] = {}
     managed_to_remove: dict[str, list[str]] = {}
+    managed_before: dict[str, set[str]] = {}
     for pslug in reconcile:
         try:
             store = store_for(pslug)
@@ -264,6 +296,7 @@ def materialize_cron(
             ) from exc
         stores[pslug] = store
         managed_to_remove[pslug] = [job["id"] for job in existing if _is_managed(job)]
+        managed_before[pslug] = {str(job.get("name", "")) for job in existing if _is_managed(job)}
 
     # ---- Pass B: mutate. Remove managed jobs, then create the authored set. ----
     registered: list[str] = []
@@ -287,4 +320,62 @@ def materialize_cron(
                 kwargs["script"] = ref
             store.create_job(**kwargs)
             registered.append(job.name)
+        _report_routine_changes(
+            pslug,
+            before=managed_before.get(pslug, set()),
+            desired=by_persona.get(pslug, []),
+            on_routine_change=on_routine_change,
+        )
     return registered
+
+
+def _report_routine_changes(
+    persona_slug: str,
+    *,
+    before: set[str],
+    desired: list[_DesiredJob],
+    on_routine_change: Callable[[RoutineChange], None] | None,
+) -> None:
+    """Report only routines that CROSSED the scheduled line for this persona.
+
+    Reported after the store mutation, so a change is only ever reported once
+    the runtime already reflects it — the ordering the pause and entitlement
+    controls use, and for their reason: a record of a change the seat did not
+    make is worse than no record.
+
+    A callback that raises is swallowed. Recording that a routine was turned on
+    must never be what stops it from being turned on; bootstrap is the wrong
+    place to fail on observability.
+    """
+    if on_routine_change is None:
+        return
+    schedules = {job.name: job.schedule for job in desired}
+    skills = {job.name: job.skill for job in desired}
+    after = set(schedules)
+    for name in sorted(after - before):
+        _emit_routine_change(
+            on_routine_change,
+            RoutineChange(persona_slug, skills[name], True, schedules[name]),
+        )
+    for name in sorted(before - after):
+        # A removed job's skill is recoverable from its managed name
+        # (op-managed:<persona>:<skill>) — the store row is already gone.
+        _emit_routine_change(
+            on_routine_change,
+            RoutineChange(persona_slug, name.split(":", 2)[-1], False, None),
+        )
+
+
+def _emit_routine_change(
+    on_routine_change: Callable[[RoutineChange], None], change: RoutineChange
+) -> None:
+    try:
+        on_routine_change(change)
+    except Exception:  # noqa: BLE001 — observability never gates materialization
+        logger.warning(
+            "cron_materialize: routine-change report failed for %s/%s (enabled=%s); "
+            "the job change itself stands",
+            change.persona_slug,
+            change.skill,
+            change.enabled,
+        )

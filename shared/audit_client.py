@@ -31,6 +31,7 @@ import socket
 from typing import Any
 
 from shared.audit_contract import COLUMNS
+from shared.audit_failure_counter import record_audit_write_failure
 
 SOCKET_ENV = "SMD_AUDIT_BROKER_SOCKET"
 _DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -42,7 +43,30 @@ class AuditWriteError(RuntimeError):
     Canonical definition lives here in ``shared/`` so the broker client can
     raise it without importing the plugin layer. ``hermes-smd-audit/emit.py``
     re-exports it for backward compatibility with existing importers.
+
+    Constructing one TALLIES a lost row (ss-console #2498). The counting lives
+    in the constructor, not at the raise sites, because this class is the one
+    definition of "a row could not be persisted" and every writer on the
+    Machine — the audit plugin's hooks, the trust and reply gates, the webhook
+    router, the config applier — funnels its failure through it before some
+    caller swallows it. Counting at the raise sites would have to be re-added
+    by every future writer, and the failure this closes is precisely that a
+    swallowed write left no trace anywhere.
+
+    The tally is best-effort and never raises, so a broken counter cannot turn
+    a degraded audit write into a crashed hook. Off-Machine it is a silent
+    no-op (see :mod:`shared.audit_failure_counter`), so raising this in a unit
+    test writes nothing.
+
+    One count = one raise, NOT one permanently-lost row. Nothing retries an
+    audit write today (deliberately: a retry queue changes the best-effort
+    posture and is out of scope per #2498's non-goals). If a retry path is ever
+    added, it must not re-count a row it goes on to persist.
     """
+
+    def __init__(self, *args: Any) -> None:
+        super().__init__(*args)
+        record_audit_write_failure(str(args[0]) if args else "audit write failed")
 
 
 class BrokerAuditClient:

@@ -75,6 +75,18 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         # Skill activation
         "SKILL_ENABLED",
         "SKILL_DISABLED",
+        # Routine scheduling (ss-console #2498). DELIBERATELY NOT the two above.
+        # SKILL_ENABLED is a skill-catalog mutation — whether the Operator is
+        # ALLOWED to do a thing. These are whether it is SCHEDULED to. The
+        # distinction is the whole point of the issue: ashton-price has every
+        # skill enabled and, since #2332, zero routines scheduled, so a ledger
+        # that conflated them would report that seat as fully armed while it
+        # deliberately initiates nothing. Written by the audit plugin at
+        # registration from the bootstrap spool (shared.routine_change_spool),
+        # on the DELTA only — the cron materializer recreates every managed job
+        # each boot, and a row per recreation would claim a change no one made.
+        "ROUTINE_ENABLED",
+        "ROUTINE_DISABLED",
         # Agent lifecycle
         "AGENT_STOPPED",
         "AGENT_RESUMED",
