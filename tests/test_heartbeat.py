@@ -846,3 +846,140 @@ def test_gateway_loop_check_crash_debounces_then_reports_not_omits():
     b2 = json.loads(calls["posts"][1][2])
     assert b2["gateway_loop_ok"] == 0
     assert "gateway_loop_age_seconds" not in b2
+
+
+# ---------------------------------------------------------------------------
+# Audit-ledger facts on the wire (ss-console #2498 + #2500)
+#
+# Three fields, one purpose: make a quiet ledger distinguishable from a broken
+# one, off the Machine, without asking SMD.
+# ---------------------------------------------------------------------------
+
+_CHAINED_AUDIT_DDL = (
+    "CREATE TABLE audit_log ("
+    "  id TEXT PRIMARY KEY, ts TEXT NOT NULL, action_type TEXT NOT NULL,"
+    "  skill_name TEXT, prev_hash TEXT, row_hash TEXT)"
+)
+
+
+def _make_chained_audit_db(path: str, rows: list[tuple[str, str, str | None]]) -> None:
+    """rows = [(id, ts, row_hash), ...]; row_hash None = a pre-#1686 legacy row."""
+    conn = sqlite3.connect(path)
+    conn.execute(_CHAINED_AUDIT_DDL)
+    conn.executemany(
+        "INSERT INTO audit_log (id, ts, action_type, row_hash) VALUES (?, ?, 'x', ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_audit_facts_returns_head_and_count(tmp_path):
+    db = tmp_path / "audit.db"
+    _make_chained_audit_db(
+        str(db),
+        [
+            ("01A", "2026-08-01T10:00:00+00:00", "a" * 64),
+            ("01B", "2026-08-01T11:00:00+00:00", "b" * 64),
+        ],
+    )
+    facts = hb.read_audit_facts(str(db))
+    assert facts.head == "b" * 64
+    assert facts.rows == 2
+    assert facts.last_audit_ts == "2026-08-01T11:00:00+00:00"
+
+
+def test_audit_facts_head_skips_unchained_legacy_rows(tmp_path):
+    """Rows written before #1686 carry NULL row_hash and are not part of the
+    chain. Pinning a NULL head would tell the console the chain vanished."""
+    db = tmp_path / "audit.db"
+    _make_chained_audit_db(
+        str(db),
+        [
+            ("01A", "2026-08-01T10:00:00+00:00", "a" * 64),
+            ("01B", "2026-08-01T11:00:00+00:00", None),
+        ],
+    )
+    facts = hb.read_audit_facts(str(db))
+    assert facts.head == "a" * 64
+    assert facts.rows == 2  # the count is of ALL rows, chained or not
+
+
+def test_audit_facts_on_a_pre_chain_ledger_still_reports_timestamps(tmp_path):
+    """A ledger with no row_hash COLUMN at all. The chain read must degrade on
+    its own — sharing a handler with the timestamp read would let a missing
+    column report a working seat as silent, which is the #2498 confusion in
+    reverse."""
+    db = tmp_path / "audit.db"
+    _make_audit_db(str(db), [("01A", "2026-08-01T10:00:00+00:00", "matter_memo")])
+    facts = hb.read_audit_facts(str(db))
+    assert facts.last_audit_ts == "2026-08-01T10:00:00+00:00"
+    assert facts.head is None
+    assert facts.rows == 1
+
+
+def test_audit_facts_empty_ledger_counts_zero(tmp_path):
+    db = tmp_path / "audit.db"
+    _make_chained_audit_db(str(db), [])
+    facts = hb.read_audit_facts(str(db))
+    assert facts.rows == 0
+    assert facts.head is None
+
+
+def test_audit_facts_missing_file_answers_nothing(tmp_path):
+    assert hb.read_audit_facts("/no/such/audit.db") == (None, None, None, None)
+
+
+def test_payload_carries_a_zero_write_failure_count():
+    """0 is the value that says 'the writer is up and has lost nothing'. It is
+    the ONLY thing that distinguishes a quiet ledger from a broken one, so
+    truthiness-omitting it would send exactly the healthy case as silence."""
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        audit_write_failures=0,
+    )
+    assert p["audit_write_failures"] == 0
+
+
+def test_payload_omits_write_failures_when_the_seat_cannot_answer():
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        audit_write_failures=None,
+    )
+    assert "audit_write_failures" not in p
+
+
+def test_payload_carries_head_and_rows():
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        audit_head="c" * 64,
+        audit_rows=0,
+    )
+    assert p["audit_head"] == "c" * 64
+    assert p["audit_rows"] == 0
+
+
+def test_payload_omits_head_on_an_unchained_ledger():
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        audit_head=None,
+        audit_rows=None,
+    )
+    assert "audit_head" not in p
+    assert "audit_rows" not in p

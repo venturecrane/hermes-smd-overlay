@@ -352,6 +352,60 @@ def on_post_llm_call(**kwargs: Any) -> None:
         )
 
 
+#: What a routine-change row names as its actor. NOT a person and not the
+#: agent: the seat sees only the materialized customer.yaml, so the truthful
+#: actor is the artifact that carried the change. Inventing a named person the
+#: Machine cannot verify would be exactly the fabrication class the venture
+#: bans. The role is `operator` because SMD owns that artifact — the firm asks,
+#: SMD authors, the seat records what it was handed.
+_ROUTINE_ACTOR = "customer.yaml"
+
+
+def _drain_routine_changes_to_ledger(writer) -> None:
+    """Write one row per routine that crossed the scheduled line at this boot.
+
+    ss-console #2498. ``bootstrap/cron_materialize.py`` spooled these to the
+    volume; this process is the one the broker lets write the ledger, so it
+    turns them into rows. Best-effort by construction — a failed write is
+    already counted by ``shared.audit_failure_counter`` and must never keep the
+    gateway from registering.
+    """
+    if writer is None:
+        return
+    try:
+        from shared.routine_change_spool import drain_routine_changes
+
+        changes = drain_routine_changes()
+    except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
+        logger.warning("hermes-smd-audit: routine-change spool unreadable: %s", exc)
+        return
+    for change in changes:
+        enabled = bool(change.get("enabled"))
+        try:
+            writer.write(
+                schemas.AuditEvent(
+                    action_type="ROUTINE_ENABLED" if enabled else "ROUTINE_DISABLED",
+                    actor=_ROUTINE_ACTOR,
+                    actor_role=schemas.ActorRole.OPERATOR,
+                    skill_name=str(change.get("skill") or "") or None,
+                    metadata={
+                        "persona": str(change.get("persona_slug") or ""),
+                        "schedule": change.get("schedule"),
+                        "source": "customer.yaml cron reconcile at boot",
+                    },
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
+            logger.warning(
+                "hermes-smd-audit: routine-change row failed (skill=%s enabled=%s): %s",
+                change.get("skill"),
+                enabled,
+                exc,
+            )
+    if changes:
+        logger.info("hermes-smd-audit: recorded %d routine change(s) from boot", len(changes))
+
+
 def register(ctx) -> None:
     """Plugin entry point. Wires the three hooks plus ADR 0022 Stream 2.
 
@@ -434,6 +488,7 @@ def register(ctx) -> None:
             transport="broker" if _broker_mode else "direct",
             reason=None,
         )
+        _drain_routine_changes_to_ledger(_WRITER)
     except KeyError as exc:
         # Per AGENTS.md hard rule #4, the plugin manifest declares its
         # ``requires_env`` so Hermes should not load us with missing env.

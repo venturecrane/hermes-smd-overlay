@@ -79,11 +79,13 @@ except ImportError as exc:  # pragma: no cover - import-time guard
 from bootstrap.cron_materialize import (
     CronMaterializeError,
     CronStore,
+    RoutineChange,
     materialize_cron,
 )
 from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
 from bootstrap.validate import validate_customer_yaml
 from shared.cron_containment import containment_active, containment_reason, sentinel_path
+from shared.routine_change_spool import append_routine_change
 from shared.secrets import get_secret
 from shared.webhook_read_surface import webhook_platform_toolsets
 
@@ -1685,6 +1687,7 @@ def translate_customer_yaml(
                 _real_script_stager(profiles_root),
                 reconcile_slugs=reconcile_slugs,
                 containment=_containment,
+                on_routine_change=_routine_change_spooler(hermes_home),
             )
         except CronMaterializeError as exc:
             raise TranslateError(str(exc)) from exc
@@ -1701,6 +1704,35 @@ def translate_customer_yaml(
         )
 
     return written_slugs
+
+
+def _routine_change_spooler(hermes_home: Path | str) -> Callable[[RoutineChange], None]:
+    """Spool routine enable/disable events for the gateway to turn into rows.
+
+    ss-console #2498. Bootstrap cannot write the ledger itself — the broker
+    holds the only RW handle and gates the generic append on the gateway PID —
+    so the event is spooled to the volume and the audit plugin drains it at
+    registration. See :mod:`shared.routine_change_spool`.
+
+    ``hermes_home`` is bound HERE, not read from the environment inside the
+    callback, and that is load-bearing: ``_real_cron_store_for`` sets the
+    process-global ``HERMES_HOME`` to each PERSONA PROFILE home while
+    reconciling that persona's store. A callback reading the env would drop the
+    spool at ``<volume>/profiles/<slug>/.smd/`` while the plugin drains
+    ``<volume>/.smd/`` — the row would be written nowhere and nothing would say
+    so. Same class as the original ADR 0047 bug this module exists to fix.
+    """
+
+    def spool(change: RoutineChange) -> None:
+        append_routine_change(
+            persona_slug=change.persona_slug,
+            skill=change.skill,
+            enabled=change.enabled,
+            schedule=change.schedule,
+            hermes_home=str(hermes_home),
+        )
+
+    return spool
 
 
 def _hermes_cron_importable() -> bool:
