@@ -215,7 +215,7 @@ def test_a_broken_manifest_costs_the_pointer_never_the_turn(establishment, tmp_p
     (tmp_path / PREFS_MANIFEST_NAME).write_text("{torn")
     monkeypatch.setenv("SMD_SPEC_DIR", str(tmp_path))
     result = _turn(plugin, PERSON)
-    assert result is not None and plugin._PERSON_NUDGE in result["context"]
+    assert result is not None and plugin._ESTABLISH_NUDGE in result["context"]
 
 
 # ---------------------------------------------------------------------------

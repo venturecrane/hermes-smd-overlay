@@ -105,6 +105,10 @@ def test_tools_are_mapped_with_the_declared_classes(establishment):
     assert classify_tool(plugin.TOOL_STAGE).action_class is ActionClass.INTERNAL_WRITE
     assert classify_tool(plugin.TOOL_SUBMIT).action_class is ActionClass.INTERNAL_WRITE
     assert classify_tool(plugin.TOOL_STATUS).action_class is ActionClass.READ
+    # ss-console#2529. Unmapped is terminal REFUSED (ss#1915), so a new verb
+    # that nobody classed would be a feature that silently never runs.
+    assert classify_tool(plugin.TOOL_PROPOSE).action_class is ActionClass.INTERNAL_WRITE
+    assert classify_tool(plugin.TOOL_PENDING).action_class is ActionClass.READ
 
 
 def test_registers_three_tools_and_three_hooks(establishment):
@@ -146,7 +150,11 @@ def test_non_admin_is_refused_and_told_who_can(establishment):
         verdict = _gate(plugin, tool)
         assert verdict is not None and verdict["action"] == "block"
         assert "Operator admins" in verdict["message"]
-        assert "correction_capture" in verdict["message"]
+        # ss-console#2529: the refusal used to send them to correction_capture,
+        # which recorded the rule for review and never put it in force. It now
+        # names the route that ends in effect, and who releases it.
+        assert plugin.TOOL_PROPOSE in verdict["message"]
+        assert "apply that" in verdict["message"]
     assert _gate(plugin, plugin.TOOL_STATUS) is None
 
 
@@ -157,11 +165,41 @@ def test_unclassified_session_is_refused_fail_closed(establishment):
     assert _gate(plugin, plugin.TOOL_SUBMIT, session="never-seen")["action"] == "block"
 
 
-def test_admin_passes_all_three_tools(establishment):
+def test_admin_passes_the_document_tools(establishment):
     plugin, _ = establishment
     _turn(plugin, "chris@firm.com")
-    for tool in plugin.ESTABLISH_TOOLS:
+    for tool in (plugin.TOOL_STAGE, plugin.TOOL_SUBMIT, plugin.TOOL_STATUS):
         assert _gate(plugin, tool) is None
+
+
+def test_an_admin_may_propose_and_read_their_own_pending_rules(establishment):
+    """The two ss-console#2529 verbs carry their own predicates rather than the
+    admin one — an admin still has to name themselves as the instructor, and a
+    personal rule still has to be their own."""
+    plugin, _ = establishment
+    _turn(plugin, "chris@firm.com")
+    assert (
+        plugin.on_pre_tool_call(
+            tool_name=plugin.TOOL_PROPOSE,
+            session_id="sess-1",
+            args={
+                "scope": "firm_adjust",
+                "subject": {"output_class": "outbound", "property": "voice"},
+                "text": "Be formal and short.",
+                "instructed_by": "chris@firm.com",
+                "source_ref": "msg-1",
+            },
+        )
+        is None
+    )
+    assert (
+        plugin.on_pre_tool_call(
+            tool_name=plugin.TOOL_PENDING,
+            session_id="sess-1",
+            args={"sender": "chris@firm.com", "include_for_admin": True},
+        )
+        is None
+    )
 
 
 def test_gate_ignores_other_tools(establishment):
@@ -202,11 +240,52 @@ def test_establishment_proceeds_on_a_turn_that_read_fenced_content(establishment
     session = "sess-tainted-establishment"
     SESSION_TAINT.mark(session, "unknown_external")
     _turn(plugin, "chris@firm.com", session=session)
-    for tool in plugin.ESTABLISH_TOOLS:
+    for tool in (plugin.TOOL_STAGE, plugin.TOOL_SUBMIT, plugin.TOOL_STATUS):
         assert _gate(plugin, tool, session=session) is None, (
-            f"{tool} was refused on a tainted turn — the establishment gate must "
-            "check the admin predicate ONLY (Captain decision 2026-08-02)"
+            f"{tool} was refused on a tainted turn — the DOCUMENT establishment "
+            "gate must check the admin predicate ONLY (Captain decision "
+            "2026-08-02)"
         )
+
+
+def test_propose_IS_refused_on_a_tainted_turn(establishment):
+    """The other half of the same decision, and not a reversal of it
+    (ss-console#2529, critique point 2).
+
+    The 2026-08-02 ruling turns on where the words come from. A document
+    establishment is tainted by doing its job and its sentence is distilled from
+    files the firm designated, through four compilers. A proposed rule reads
+    nothing: its content is a sentence the sender typed, no compiler can gate it
+    (they all refuse an empty corpus), and a tainted turn means exactly the thing
+    the corrections plugin's gate was built against. Two verbs, two provenances,
+    two answers, and this pair is what keeps a later reader from collapsing them.
+    """
+    plugin, _ = establishment
+    session = "sess-tainted-propose"
+    SESSION_TAINT.mark(session, "unknown_external")
+    _turn(plugin, "chris@firm.com", session=session)
+    verdict = plugin.on_pre_tool_call(
+        tool_name=plugin.TOOL_PROPOSE,
+        session_id=session,
+        args={
+            "scope": "firm_adjust",
+            "subject": {"output_class": "outbound", "property": "voice"},
+            "text": "Be formal.",
+            "instructed_by": "chris@firm.com",
+            "source_ref": "msg-1",
+        },
+    )
+    assert verdict is not None and verdict["action"] == "block"
+    assert "outside the firm" in verdict["message"]
+    # Reading what is outstanding is not authoring, so it is not gated.
+    assert (
+        plugin.on_pre_tool_call(
+            tool_name=plugin.TOOL_PENDING,
+            session_id=session,
+            args={"sender": "chris@firm.com"},
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -273,44 +352,58 @@ def test_unresolvable_webhook_route_stays_refused(establishment):
 # ---------------------------------------------------------------------------
 
 
-def test_nudge_rides_admin_turns_only(establishment):
-    """The ADMIN nudge stays admin-only (it advertises what the gate would
-    refuse anyone else). Since O5, every attributed turn also carries the
-    person-scope nudge — that gate any attributed sender can satisfy for
-    themselves, so advertising it to everyone is correct (overlay #170)."""
+def test_the_document_line_rides_admin_turns_only(establishment):
+    """The DOCUMENT line stays admin-only (it advertises what the gate would
+    refuse anyone else). The rule nudge rides every attributed turn, because
+    stating a rule is something any rostered person can do for their own work,
+    and for the firm's with an admin to release it (overlay#170)."""
     plugin, _ = establishment
     admin_context = _turn(plugin, "chris@firm.com")["context"]
-    assert plugin._NUDGE in admin_context
-    assert plugin._PERSON_NUDGE in admin_context
+    assert plugin._ADMIN_DOCUMENTS_LINE in admin_context
+    assert plugin._ESTABLISH_NUDGE in admin_context
     non_admin_context = _turn(plugin, "sarah@firm.com")["context"]
-    assert plugin._NUDGE not in non_admin_context
-    assert plugin._PERSON_NUDGE in non_admin_context
+    assert plugin._ADMIN_DOCUMENTS_LINE not in non_admin_context
+    assert plugin._ESTABLISH_NUDGE in non_admin_context
     assert _turn(plugin, "") is None
 
 
-def test_person_nudge_advertises_the_same_direction_the_pointer_reads(establishment):
+def test_a_non_admin_is_told_who_can_release_their_firm_rule(establishment):
+    """The non-admin leg, in the reply the person actually reads.
+
+    "An administrator can apply this" without a NAME is the friction that makes
+    a waiting lane not get used. The authored admin list is right there, so the
+    nudge names it and names the two words that release the rule.
+    """
+    plugin, _ = establishment
+    context = _turn(plugin, "sarah@firm.com")["context"]
+    assert "chris@firm.com" in context
+    assert "apply that" in context
+    assert plugin._ADMIN_DOCUMENTS_LINE not in context
+
+
+def test_the_nudge_advertises_the_same_direction_the_pointer_reads(establishment):
     """The write side must not be narrower than the read side (ss#2151).
 
     Rehearsal card 7 says "here's how I want things SENT TO ME". The nudge
-    used to advertise only the other direction — a person's own drafts and
-    documents — so that statement matched no predicate, nothing was recorded,
+    used to advertise only the other direction - a person's own drafts and
+    documents - so that statement matched no predicate, nothing was recorded,
     and the model still answered "Got it, I'll work that way going forward".
     Meanwhile ``_person_pref_pointer`` already told the model these are
     "preferences for work produced FOR THEM". One half of the same feature
     described a wider thing than the other, and the gap is where the unearned
     confirmation lived.
 
-    FALSIFIER: revert the nudge to "THEIR OWN work ... their drafts, their
-    documents" and this fails on both phrases.
+    FALSIFIER: narrow the nudge back to "their own drafts and documents" and
+    this fails on the delivery phrase.
     """
     plugin, _ = establishment
-    nudge = plugin._PERSON_NUDGE.lower()
+    nudge = plugin._ESTABLISH_NUDGE.lower()
     assert "for them" in nudge, "the nudge must cover work produced FOR the person"
     assert "send them" in nudge, "the nudge must name the delivery direction card 7 speaks"
 
 
-def test_person_nudge_names_the_limit_that_actually_exists(establishment):
-    """A recorded preference does NOT reach a scheduled delivery, so the nudge
+def test_the_nudge_names_the_limit_that_actually_exists(establishment):
+    """A recorded preference does NOT reach a scheduled delivery, so the seat
     says so rather than letting the model confirm a cadence it cannot change.
 
     The second half of this test is the proof that the limit is structural and
@@ -322,29 +415,47 @@ def test_person_nudge_names_the_limit_that_actually_exists(establishment):
     over-confirmation for a worse one.
 
     FALSIFIER: if the hook ever starts returning context on an unattributed
-    turn, the limit stops being true and this fails — at which point the
-    nudge's wording is what should change, not this assertion.
+    turn, the limit stops being true and this fails - at which point the
+    wording is what should change, not this assertion.
     """
     plugin, _ = establishment
-    nudge = plugin._PERSON_NUDGE.lower()
-    assert "scheduled routine" in nudge
-    assert "operator admin" in nudge, "a named limit must name who can act on it"
+    context = _turn(plugin, "sarah@firm.com")["context"].lower()
+    assert "scheduled turn has no sender" in context
+    assert "operator admin" in context, "a named limit must name who can act on it"
     for unattributed in (None, "", 0):
         assert (
             plugin.on_pre_llm_call(session_id="sess-cron", sender_id=unattributed, user_message="x")
             is None
-        ), "an unattributed turn must carry no person pointer — that is why the limit holds"
+        ), "an unattributed turn must carry no person pointer - that is why the limit holds"
 
 
-def test_person_nudge_forbids_confirming_what_was_not_recorded(establishment):
-    """The one-line rule this surface exists to install: state what happened,
-    what did not, and what would make it happen. The card-7 failure was a bare
-    "got it" on a turn carrying no establishment event, so the nudge binds the
-    confirmation to the tool actually returning."""
+def test_the_nudge_pins_the_readback_shape(establishment):
+    """The readback IS the control (ss-console#2529), so its shape is pinned.
+
+    The person is agreeing to a specific sentence. They have to be shown that
+    sentence, told what it attaches to, and given something unambiguous to
+    answer. A readback that paraphrases, or omits the tag, produces a "yes"
+    that means something the seat cannot act on.
+    """
     plugin, _ = establishment
-    nudge = plugin._PERSON_NUDGE.lower()
-    assert "until" in nudge and "returns" in nudge, "nothing is in effect until submit returns"
-    assert "confirm only what you actually recorded" in nudge
+    nudge = plugin._ESTABLISH_NUDGE.lower()
+    assert "word for word" in nudge, "the returned block goes out verbatim"
+    assert "reply yes to confirm" in nudge, "the person needs one unambiguous answer"
+    assert "attach to" in nudge, "they must be told what the rule binds"
+
+
+def test_the_nudge_forbids_the_sentence_that_broke_the_rehearsal(establishment):
+    """2026-08-21: two turns spoken by an Operator ADMIN were answered
+    "captured and queued for review, not in effect until a person acts". True
+    of the code, false of the promise (ADR 0085 section 3). Telling a partner
+    their own instruction needs somebody else's permission is the failure this
+    path exists to end, so the nudge forbids it by name - and still forbids
+    claiming effect that has not been observed."""
+    plugin, _ = establishment
+    nudge = plugin._ESTABLISH_NUDGE.lower()
+    assert "queued for review" in nudge
+    assert "not in effect until a person acts" in nudge
+    assert "do not say it is in effect until" in nudge
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +513,11 @@ def test_submit_marshals_exactly_the_design_fields(establishment):
         "corpus_manifest",
         "instructed_by",
         "source_ref",
+        # ss-console#2529. Present on every submit so one wire shape serves all
+        # three scopes; the broker ignores a null and refuses a firm_adjust
+        # carrying none.
+        "proposal_id",
+        "append",
     }
 
 

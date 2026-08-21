@@ -456,21 +456,42 @@ class TestAdminGateKillPair:
 # ---------------------------------------------------------------------------
 
 
-def test_nudge_on_a_sender_attributed_untainted_admin_turn(corrections, monkeypatch, tmp_path):
+def test_nothing_advertises_capture_any_more(corrections, monkeypatch, tmp_path):
+    """The nudge is gone (ss-console#2529), asserted on the turn that used to
+    carry it.
+
+    It was not wrong; it was winning. It rode every admin turn saying a standing
+    style rule is "noted for a person to apply, not now in effect" — true while
+    capture was the only route a sentence had. On 2026-08-21 two rehearsal turns
+    spoken by an Operator ADMIN were answered in exactly those words, because
+    this line said so. A standing rule now has a route that ends in effect
+    (``establish_propose``), so nothing steers a confirmable rule here.
+
+    FALSIFIER: restore the nudge and this fails on the admin turn — which is
+    the turn where its presence did the damage.
+    """
     plugin, _ = corrections
     _admin_turn(plugin, monkeypatch, tmp_path)
-    out = plugin.on_pre_llm_call(session_id="s1", sender_id=ADMIN_ADDRESS)
-    assert out is not None and plugin.TOOL_NAME in out["context"]
+    assert plugin.on_pre_llm_call(session_id="s1", sender_id=ADMIN_ADDRESS) is None
 
 
-def test_no_nudge_for_a_rostered_non_admin(corrections, monkeypatch, tmp_path):
-    """The nudge follows the refusal through one shared decision, so a non-admin
-    is never invited to state a standing rule the tool would then refuse."""
+def test_the_tool_and_its_refusals_are_untouched(corrections, monkeypatch, tmp_path):
+    """Un-advertising is not removal. The portal review queue is a real place
+    with real rows in it, and a caller that reaches for the tool still meets
+    every gate it always had."""
     plugin, _ = corrections
     _untainted(plugin, monkeypatch)
     _authored_admins(tmp_path, monkeypatch)
-    _sender_is("s-nudge-runner", NON_ADMIN_ADDRESS)
-    assert plugin.on_pre_llm_call(session_id="s-nudge-runner", sender_id=NON_ADMIN_ADDRESS) is None
+    _sender_is("s-still-gated", NON_ADMIN_ADDRESS)
+    verdict = plugin.on_pre_tool_call(
+        tool_name=plugin.TOOL_NAME, session_id="s-still-gated", args={}
+    )
+    assert verdict is not None and verdict["action"] == "block"
+
+
+def test_the_description_sends_the_model_to_the_route_that_ends_in_effect(corrections):
+    plugin, _ = corrections
+    assert "establish_propose" in plugin._DESCRIPTION
 
 
 def test_no_nudge_without_a_human(corrections, monkeypatch):

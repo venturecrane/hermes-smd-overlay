@@ -358,6 +358,12 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # The seat's own description of itself and of its runs.
         "operator_seat_facts",
         "establish_status",
+        # ss-console#2529. A pending rule is a sentence the Operator composed
+        # and the firm has not yet agreed to, so reading it back must not
+        # certify anything in it — the same reasoning that keeps the agent's own
+        # unsent drafts off the seeding side, and the reason a number inside a
+        # proposed rule is still a number nobody read from the firm's records.
+        "establish_pending",
         "escalation_state",
         "job_status",
         "connector_get_status",

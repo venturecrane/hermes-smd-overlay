@@ -201,6 +201,17 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         # names every type a ledger can contain, not only the ones this repo
         # writes (ss-console #2091 correction capture).
         "CORRECTION_PROPOSED",
+        # Conversational establishment, also broker-side (ss-console
+        # operator/workspace_broker/establishment.py). The two ESTABLISHMENT
+        # types have been reaching client ledgers since establishment shipped
+        # (ss-console#2161) and were declared in NEITHER vocabulary, so nothing
+        # anywhere named a type a ledger already contained. RULE_PROPOSED is the
+        # propose/read-back/confirm path (ss-console#2529). Declared here for
+        # the same reason CORRECTION_PROPOSED is: the vocabulary names every
+        # type a ledger can contain, not only the ones this repo writes.
+        "RULE_PROPOSED",
+        "ESTABLISHMENT_SUBMITTED",
+        "ESTABLISHMENT_RESULT",
     }
 )
 
