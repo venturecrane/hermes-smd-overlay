@@ -51,6 +51,30 @@ DIGEST = """# Needs a person today - 2026-07-15 - 3 items across 2 open matters
 """
 
 
+# ss#2489 — the shape that broke live. An introduction the A&P Operator sent on
+# 2026-08-20: a bullet list, then PARAGRAPHS, then a second bullet list. Neither
+# REPORT nor DIGEST above has a paragraph after a list item, which is exactly
+# why the bug reached a paying client's inbox with nine green tests behind it.
+MIXED = """I'm Operator, the AI Case Coordinator. Here's what I can see right now.
+
+CONNECTIONS (observed this turn)
+
+- Smokeball: authenticated, production, US region.
+- Email: connected.
+
+MATTERS 577 open matters as of this read.
+
+VOICE The firm has not established a staff voice yet.
+
+HOW I WORK
+
+- Messages to colleagues: I send on my own.
+- Messages outside the firm: a person reviews the draft.
+
+What can I help with?
+"""
+
+
 def _normalize(text: str) -> list[str]:
     """Reader-visible tokens, with markdown MARKERS dropped.
 
@@ -64,7 +88,7 @@ def _normalize(text: str) -> list[str]:
     return stripped.split()
 
 
-@pytest.mark.parametrize("source", [REPORT, DIGEST], ids=["report", "digest"])
+@pytest.mark.parametrize("source", [REPORT, DIGEST, MIXED], ids=["report", "digest", "mixed"])
 def test_purity_html_carries_exactly_the_source_text(source: str) -> None:
     """PURITY INVARIANT. The rendered html's reader-visible text equals the
     source text, token for token.
@@ -140,3 +164,74 @@ def test_empty_and_whitespace_input_do_not_crash() -> None:
         out = render_markdown(source)
         assert out.startswith("<div ") and out.endswith("</div>")
         assert html_text_content(out).strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# ss#2489 — list nesting. A paragraph ENDS a list.
+#
+# The live failure: an Operator introduction opened a bullet list at its first
+# section, and every following paragraph plus a second bullet group rendered
+# INSIDE that one <ul>. Nine tests passed over it because no corpus here mixed
+# a list with a following paragraph.
+# ---------------------------------------------------------------------------
+
+
+def _inside_first_list(html: str) -> str:
+    """The span between the first list open and its matching close."""
+    start = min(
+        (i for i in (html.find("<ul"), html.find("<ol")) if i != -1),
+        default=-1,
+    )
+    if start == -1:
+        return ""
+    end = min(
+        (i for i in (html.find("</ul>"), html.find("</ol>")) if i != -1),
+        default=len(html),
+    )
+    return html[start:end]
+
+
+def test_a_paragraph_after_a_list_item_closes_the_list() -> None:
+    html = render_markdown(MIXED)
+    assert "<p " not in _inside_first_list(html)
+
+
+def test_list_tags_are_balanced() -> None:
+    """<li> without a matching </li> is what the previous sniff-based close
+    produced: it read the last emitted string, which is </p> after a paragraph,
+    and closed an item that was never open."""
+    html = render_markdown(MIXED)
+    assert html.count("<li") == html.count("</li>")
+    assert html.count("<ul") == html.count("</ul>")
+    assert html.count("<ol") == html.count("</ol>")
+
+
+def test_a_second_bullet_group_opens_its_own_list() -> None:
+    """Two bullet groups separated by paragraphs are two lists, not one list
+    with prose wedged into it."""
+    html = render_markdown(MIXED)
+    assert html.count("<ul") == 2
+
+
+def test_a_blank_line_between_items_keeps_one_list() -> None:
+    """The falsifier for the three tests above: a fix that closed the list too
+    eagerly would split this into two lists, and every report skill's output
+    would grow spurious list breaks."""
+    html = render_markdown("- one\n\n- two\n\n- three\n")
+    assert html.count("<ul") == 1
+    assert html.count("<li") == 3
+
+
+def test_an_ordered_list_followed_by_prose_closes_too() -> None:
+    """The report skills emit ordered lists; the bug is not bullet-specific."""
+    html = render_markdown("1. first\n2. second\n\nClosing thought.\n")
+    assert "<p " not in _inside_first_list(html)
+    assert html.count("<ol") == html.count("</ol>") == 1
+
+
+def test_a_detail_line_still_attaches_to_its_item() -> None:
+    """The indented detail line under a list item is the shape every report
+    skill uses, and tightening the continuation rule must not break it."""
+    html = render_markdown("1. matter ALPHA-1, records outstanding\n   Requested 2026-06-20.\n")
+    assert "Requested 2026-06-20." in html_text_content(html)
+    assert html.count("<li") == html.count("</li>") == 1

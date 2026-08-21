@@ -87,13 +87,37 @@ def _inline(raw: str) -> str:
 
 
 class _Doc:
-    """Accumulates rendered blocks and owns list open/close bookkeeping."""
+    """Accumulates rendered blocks and owns list/item open-close bookkeeping.
+
+    The open state of the current list ITEM is a FLAG, not something inferred
+    from the last emitted string (ss#2489). The previous version asked
+    ``parts[-1].endswith("</li>")``, which is false both for an item that is
+    genuinely open and for a paragraph emitted while a list happened to be
+    open — so a document mixing the two closed items that were never opened and
+    emitted more ``</li>`` than ``<li>``. A flag cannot disagree with itself.
+
+    ``close_list`` closes the open item first, so no caller has to remember the
+    order. Every exit from a list goes through one door.
+    """
 
     def __init__(self) -> None:
         self.parts: list[str] = []
         self._list: str | None = None  # "ol" | "ul" | None
+        self._item_open = False
+
+    def close_item(self) -> None:
+        if self._item_open:
+            self.parts.append("</li>")
+            self._item_open = False
+
+    def add_item(self, chunk: str) -> None:
+        """Emit one list item, closing the previous one first."""
+        self.close_item()
+        self.parts.append(chunk)
+        self._item_open = True
 
     def close_list(self) -> None:
+        self.close_item()
         if self._list:
             self.parts.append(f"</{self._list}>")
             self._list = None
@@ -111,10 +135,26 @@ class _Doc:
     def in_list(self) -> bool:
         return self._list is not None
 
+    def item_open(self) -> bool:
+        return self._item_open
+
 
 def _flush_paragraph(doc: _Doc, buf: list[str]) -> None:
+    """Emit the buffered paragraph, ending any open list first.
+
+    ss#2489 — a paragraph ENDS a list. ``<p>`` is not valid inside ``<ul>``/
+    ``<ol>``, and a renderer that leaves it there produces a list that swallows
+    every following block. Observed live on hermes-ashton-price 2026-08-20: an
+    introduction opened a bullet list at its first section, and the remaining
+    three sections plus a second bullet group all rendered INSIDE that one list.
+
+    Closing here rather than at each call site is deliberate. The three block
+    handlers that already call ``close_list`` had to remember to; a caller that
+    forgot produced exactly this bug. Now the invariant lives with the emitter.
+    """
     if not buf:
         return
+    doc.close_list()
     doc.add(f'<p style="{_S_P}">{_inline(" ".join(buf))}</p>')
     buf.clear()
 
@@ -140,14 +180,14 @@ def _render_line(doc: _Doc, line: str, para: list[str]) -> None:
     if ordered:
         _flush_paragraph(doc, para)
         doc.open_list("ol")
-        doc.add(f'<li style="{_S_LI}"><div>{_inline(ordered.group(2))}</div>')
+        doc.add_item(f'<li style="{_S_LI}"><div>{_inline(ordered.group(2))}</div>')
         return
 
     bullet = _RE_UL_ITEM.match(line)
     if bullet:
         _flush_paragraph(doc, para)
         doc.open_list("ul")
-        doc.add(f'<li style="{_S_LI}"><div>{_inline(bullet.group(1))}</div>')
+        doc.add_item(f'<li style="{_S_LI}"><div>{_inline(bullet.group(1))}</div>')
         return
 
     quote = _RE_QUOTE.match(line)
@@ -159,18 +199,16 @@ def _render_line(doc: _Doc, line: str, para: list[str]) -> None:
 
     # An indented line directly under a list item is that item's detail line —
     # the shape every report skill uses for its "why this is consequential" line.
+    # An indented line is a continuation only while an ITEM is open. A blank
+    # line closes the item, so an indented line after one is a new block, not a
+    # detail line — emitting it as a detail div would put a bare <div> directly
+    # inside the <ul>, which is the same invalid-nesting class as the <p> above.
     cont = _RE_CONT.match(line)
-    if cont and doc.in_list() and not para:
+    if cont and doc.item_open() and not para:
         doc.add(f'<div style="{_S_CONT}">{_inline(cont.group(1))}</div>')
         return
 
     para.append(line.strip())
-
-
-def _close_open_item(doc: _Doc) -> None:
-    """Close a list item if the last emitted chunk left one open."""
-    if doc.in_list() and doc.parts and not doc.parts[-1].endswith("</li>"):
-        doc.add("</li>")
 
 
 def render_markdown(text: str) -> str:
@@ -183,16 +221,14 @@ def render_markdown(text: str) -> str:
     para: list[str] = []
     for raw_line in text.replace("\r\n", "\n").split("\n"):
         if not raw_line.strip():
+            # A blank line ends the current item but NOT the list: blank lines
+            # between items are ordinary markdown and must not split one list
+            # into several.
             _flush_paragraph(doc, para)
-            _close_open_item(doc)
+            doc.close_item()
             continue
-        before_list = doc.in_list()
-        starts_item = bool(_RE_OL_ITEM.match(raw_line) or _RE_UL_ITEM.match(raw_line))
-        if before_list and starts_item:
-            _close_open_item(doc)
         _render_line(doc, raw_line, para)
     _flush_paragraph(doc, para)
-    _close_open_item(doc)
     doc.close_list()
     return f'<div style="{_S_WRAP}">' + "".join(doc.parts) + "</div>"
 
