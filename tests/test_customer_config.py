@@ -622,6 +622,29 @@ def test_validate_rejects_confirm_on_non_send_class(tmp_path):
     assert any("confirm" in e and "send classes" in e for e in errors)
 
 
+def test_validate_accepts_confirm_on_commitment_in_exposure(tmp_path):
+    """The shape that crash-looped pilot-smokeball at boot on 2026-08-21:
+    `commitment: confirm` is what #303 gave a confirm branch for, and the
+    validator refused it. A seat authoring the admin-confirmed act must boot."""
+    good = VALID_YAML.replace(
+        "internal_write: autonomous", "internal_write: autonomous\n        commitment: confirm"
+    )
+    assert "commitment: confirm" in good  # guard: replace landed
+    assert validate_customer_yaml(_write(tmp_path, good)) == []
+
+
+def test_validate_still_rejects_confirm_on_commitment_in_exposure_ceiling(tmp_path):
+    """`confirm` on commitment is exposure-only: the entitlement dial's ceiling
+    map is derived from send tiers and never carries a commitment entry."""
+    bad = VALID_YAML.replace(
+        "      exposure:\n",
+        "      exposure_ceiling:\n        commitment: confirm\n      exposure:\n",
+    )
+    assert "exposure_ceiling:" in bad  # guard: replace landed
+    errors = validate_customer_yaml(_write(tmp_path, bad))
+    assert any("exposure_ceiling.commitment" in e and "confirm" in e for e in errors)
+
+
 # ---- validate_customer_yaml: exposure_ceiling (ss#2003 Q7) ----------------
 
 
