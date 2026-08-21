@@ -562,7 +562,9 @@ def _validate_exposure_map(
             # `confirm` (ADR 0071) has defined behavior in enforce()'s send
             # branch and, in `exposure` only, for `commitment` (#303). Reject it
             # anywhere else so it can't be authored where it does nothing.
-            allowed = sorted(SEND_ACTION_CLASSES | CONFIRM_NON_SEND_CLASSES_BY_FIELD.get(field, set()))
+            allowed = sorted(
+                SEND_ACTION_CLASSES | CONFIRM_NON_SEND_CLASSES_BY_FIELD.get(field, set())
+            )
             _err(
                 f"{ep}: 'confirm' is only valid for the send classes "
                 f"{sorted(SEND_ACTION_CLASSES)} (ADR 0071)"

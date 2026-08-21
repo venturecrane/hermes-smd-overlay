@@ -637,7 +637,8 @@ def test_validate_still_rejects_confirm_on_commitment_in_exposure_ceiling(tmp_pa
     """`confirm` on commitment is exposure-only: the entitlement dial's ceiling
     map is derived from send tiers and never carries a commitment entry."""
     bad = VALID_YAML.replace(
-        "      exposure:\n", "      exposure_ceiling:\n        commitment: confirm\n      exposure:\n"
+        "      exposure:\n",
+        "      exposure_ceiling:\n        commitment: confirm\n      exposure:\n",
     )
     assert "exposure_ceiling:" in bad  # guard: replace landed
     errors = validate_customer_yaml(_write(tmp_path, bad))
