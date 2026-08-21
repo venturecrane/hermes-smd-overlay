@@ -164,6 +164,38 @@ _HELD_STORE: held_store.HeldReplyStore | None = None
 _SWEEPER: Any | None = None
 
 
+def _msgraph_reply_html(text: str, html: str) -> str:
+    """The HTML body Graph is handed for a reply: composer-authored wins, else rendered.
+
+    Lifted out of :func:`_send_msgraph_reply` so ONE function decides what
+    reaches the wire and the audit digest is computed over that same value
+    (ss-console#2501). The reasoning for rendering unconditionally here is in
+    that function's docstring; this is only where it happens.
+
+    IDEMPOTENT, which is what lets the caller compose the body once and pass the
+    result through the existing ``html`` parameter: a non-blank ``html`` is
+    returned unchanged, so ``f(text, f(text, html)) == f(text, html)``.
+    """
+    if html.strip():
+        return html
+    return report_render.render_markdown(text) if text.strip() else ""
+
+
+def _transmitted_body(adapter: str, send_text: str, send_html: str) -> tuple[str, str]:
+    """Exactly the ``(text, html)`` bytes ``adapter`` is handed for a reply.
+
+    The two transports are asymmetric (see ``tests/test_transport_render_parity.py``
+    for why that asymmetry is intended rather than drift), so "the authored body"
+    is a different pair of strings on each. Computing it HERE, once, is what
+    makes ``body_digest_authored`` checkable: the digest covers the same values
+    the send call is given, not a reconstruction of them.
+    """
+    if adapter == _ADAPTER_MSGRAPH:
+        text = send_text or send_html
+        return text, _msgraph_reply_html(text, send_html)
+    return send_text, send_html
+
+
 def _send_msgraph_reply(
     graph_message_id: str,
     text: str,
@@ -218,9 +250,7 @@ def _send_msgraph_reply(
     CONFIRM_SEND_DISPATCHED row the BROKER writes carries the same two joins as
     the REPLY_SENT row this plugin writes. Without them the two rows describing
     one reply could only be matched by their timestamps."""
-    body_html = (
-        html if html.strip() else (report_render.render_markdown(text) if text.strip() else "")
-    )
+    body_html = _msgraph_reply_html(text, html)
     try:
         msgraph_broker.send_reply(
             graph_message_id,
@@ -808,20 +838,24 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # redirected); agentmail via its REST reply endpoint. Fail-closed: a
         # msgraph seat with no MSGRAPH_* creds REFUSES (audited REPLY_FAILED),
         # never falls back to AgentMail.
+        # The bytes this transport is handed, resolved once so the audit row's
+        # authored digests cover the very strings the send call receives
+        # (ss-console#2501) rather than a second reconstruction of them.
+        wire_text, wire_html = _transmitted_body(adapter, send_text, send_html)
         try:
             if adapter == _ADAPTER_MSGRAPH:
                 sent_id = _send_msgraph_reply(
                     origin.message_id,
-                    send_text or send_html,
-                    send_html,
+                    wire_text,
+                    wire_html,
                     session_id=session_id,
                     matter_ref=cited_matter_ref,
                 )
             else:
                 sent_id = relay.send_reply(
                     message_id=origin.message_id,
-                    text=send_text,
-                    html=send_html,
+                    text=wire_text,
+                    html=wire_html,
                     session_id=session_id,
                     matter_ref=cited_matter_ref,
                 )
@@ -857,6 +891,15 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 "inbox_id": origin.inbox_id,
                 "sent_message_id": sent_id,
                 "body_digest": inbound.content_digest(scan_text),
+                # The digests an OUTSIDER can recompute (ss-console#2501). The
+                # line above stays what it has always been: sha256 of the string
+                # the floors scanned, which folds in a subject the wire never
+                # carries and is therefore only checkable inside this system.
+                # These two cover exactly the bytes handed to the transport, so
+                # counsel holding the firm's own Sent Items copy can verify the
+                # body without taking SMD's word for it. Recipe, per transport,
+                # is in ``relay.authored_digests``.
+                **relay.authored_digests(text=wire_text, html=wire_html),
                 # Which PERSON this answered, as a key rather than an address
                 # (ss-console#2497). ``recipient`` above is the raw address and
                 # predates this issue; ``sender_key`` is what joins this row to
@@ -923,13 +966,28 @@ def _release_send(row: held_store.HeldReply) -> str:
     are found instead by ``in_reply_to`` plus ``released_from_hold``. Persisting
     the two on the held row at enqueue time is the fix and is not this change.
     """
+    wire_text, wire_html = _transmitted_body(row.adapter, row.send_text, row.send_html)
     if row.adapter == _ADAPTER_MSGRAPH:
-        return _send_msgraph_reply(row.message_id, row.send_text or row.send_html, row.send_html)
+        return _send_msgraph_reply(row.message_id, wire_text, wire_html)
     return relay.send_reply(
         message_id=row.message_id,
-        text=row.send_text,
-        html=row.send_html,
+        text=wire_text,
+        html=wire_html,
     )
+
+
+def _release_authored_digests(row: held_store.HeldReply) -> dict[str, str]:
+    """The checkable digests for a RELEASED reply (ss-console#2501).
+
+    Computed at release time from the same stored body :func:`_release_send`
+    transmits, through the same ``_transmitted_body``, so a released row carries
+    the identical guarantee a live one does. Deliberately NOT read back from the
+    held row: the held store keeps ``body_digest`` (the scan digest) and nothing
+    else, and persisting two more columns would mean a schema migration on every
+    seat to record something the release pass can derive exactly.
+    """
+    wire_text, wire_html = _transmitted_body(row.adapter, row.send_text, row.send_html)
+    return relay.authored_digests(text=wire_text, html=wire_html)
 
 
 def _sender_is_internal(sender: str) -> bool:
@@ -958,6 +1016,7 @@ def _sweep_once() -> sweeper.SweepResult:
         limiter=_LIMITER,
         policy=send_policy.live_send_policy(str(_YAML_PATH)),
         send_fn=_release_send,
+        authored_digest_fn=_release_authored_digests,
         emit_fn=_emit_reply_event,
         notify_fn=_notify_hold,
         internal_senders=_sender_is_internal,
