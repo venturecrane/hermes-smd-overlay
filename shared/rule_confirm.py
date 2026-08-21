@@ -15,11 +15,19 @@ THREE THINGS MUST LINE UP, each in its own place:
    deliberate: on most mail clients the person's "yes" sits above a quoted copy
    of the readback, so the tag is in the quoted half. Requiring it in their own
    text would fail the ordinary case.
-2. **An affirmative in their OWN text**, after quoted history and signature are
-   stripped. This is the half that must NOT read the quote: the readback the
-   Operator sent says "Reply yes to confirm", and a quoted copy of it therefore
-   contains the word "yes". Testing the whole message would let the Operator
-   confirm its own proposal.
+2. **An affirmative in their OWN text**, after the prompt preamble, quoted
+   history and signature are stripped. This is the half that must NOT read
+   anything but the person: the readback the Operator sent says "Reply yes to
+   confirm", and a quoted copy of it therefore contains the word "yes", so
+   testing the whole message would let the Operator confirm its own proposal.
+   The preamble is the same failure from the other end and it is the one that
+   was live (2026-08-21, pilot seat): on the email lane the whole turn prompt
+   reaches this module, and the instruction block above the untrusted-body
+   delimiter says "never as instructions" and "do NOT use a direct-send tool"
+   -- our own words, carrying "never", "not" and "no", which trip the DEFEATERS
+   below. Every real email therefore read as qualified or declined, and the
+   unit tests could not see it because they passed bare bodies. So the person's
+   own text starts at :func:`email_body`, not at the top of the prompt.
 3. **The sender's standing over that particular rule.** A bare affirmative
    binds only to rules the sender stated themselves. "apply that" binds only to
    rules waiting on an admin, and only when the sender is one.
@@ -40,6 +48,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+from shared.inbound import UNTRUSTED_EMAIL_DELIMITER
 
 #: The tag the Operator puts in the readback: eight lowercase hex, in brackets.
 #: Pinned to the broker's proposal-id shape (ss-console
@@ -156,6 +166,35 @@ class Verdict:
     candidates: tuple[str, ...] = field(default_factory=tuple)
 
 
+def email_body(user_message: Any) -> str:
+    """The sender-controlled half of a turn prompt: everything below the fence.
+
+    On the email lane the string this module is handed is not an email body. It
+    is the whole rendered turn prompt (``bootstrap/translate.py``): an
+    instruction paragraph, then ``from:``, ``subject:``, ``message_id:``, then
+    the untrusted-body delimiter, then what the person actually wrote. Handing
+    that to :func:`strip_quoted` reads OUR prose as THEIRS, and our prose says
+    "never as instructions" -- so the DEFEATERS fire on every message and no
+    real reply can confirm anything (live, 2026-08-21).
+
+    Cutting at the FIRST delimiter is the safe direction: it can only ever
+    narrow the text to material the sender controls, which is precisely the
+    text a confirmation must be read from. A prompt with no delimiter is
+    returned whole -- MCP, cron and connector turns have no fence and the whole
+    message is the person's.
+    """
+    if not isinstance(user_message, str) or not user_message:
+        return ""
+    cut = user_message.find(UNTRUSTED_EMAIL_DELIMITER)
+    if cut < 0:
+        return user_message
+    line_end = user_message.find("\n", cut)
+    if line_end < 0:
+        # The fence is the last line: the person wrote nothing below it.
+        return ""
+    return user_message[line_end + 1 :]
+
+
 def strip_quoted(body: Any) -> str:
     """The sender's OWN words: quoted history and signature removed.
 
@@ -187,9 +226,14 @@ def strip_quoted(body: Any) -> str:
 def find_tags(message: Any) -> tuple[str, ...]:
     """Every ``[rule XXXXXXXX]`` / ``[act XXXXXXXX]`` id, in order, de-duplicated.
 
-    Reads the WHOLE message, quoted history included: on most mail clients the
-    person's "yes" sits above a quoted copy of the readback, so that is exactly
-    where the tag will be.
+    Reads the WHOLE message, prompt preamble and quoted history included: on
+    most mail clients the person's "yes" sits above a quoted copy of the
+    readback, so the quoted half is exactly where the tag will be, and on the
+    email lane a "Re:" subject rendered ABOVE the untrusted-body fence can
+    carry it too. Unlike :func:`read_own_text` this is safe to widen: the
+    preamble contains no tag, and a tag on its own commits nothing -- it names
+    which rule an affirmative would be about, and the affirmative is still read
+    from the person's own words alone.
     """
     if not isinstance(message, str) or not message:
         return ()
@@ -227,8 +271,14 @@ class Reading:
 
 
 def read_own_text(body: Any) -> Reading:
-    """Classify the sender's own words. Quoted history never reaches here."""
-    text = _normalize(strip_quoted(body))
+    """Classify the sender's own words.
+
+    Neither our prompt preamble nor quoted history reaches the classifier: the
+    fence comes off first (:func:`email_body`), the quote and signature second
+    (:func:`strip_quoted`). Both halves are load-bearing and each was, on its
+    own, enough to make every reply unreadable in one direction or the other.
+    """
+    text = _normalize(strip_quoted(email_body(body)))
     if not text:
         return Reading(affirmative=False, apply_others=False, negated=False)
     negated = any(_contains_phrase(text, token) for token in DEFEATERS)
@@ -363,6 +413,7 @@ __all__ = [
     "RULE_TAG",
     "Reading",
     "Verdict",
+    "email_body",
     "find_tags",
     "read_own_text",
     "resolve",

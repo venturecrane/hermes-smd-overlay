@@ -261,3 +261,48 @@ def test_person_scope_on_agentmail_custody_requires_possession_first(
     verdict = _submit_gate(plugin, person=PERSON)
     assert verdict is not None and verdict.get("action") == "block"
     assert "confirm" in verdict.get("message", "").lower()
+
+
+# ---------------------------------------------------------------------------
+# 6 - the person ceremony's confirmation note is the PERSON's (live 2026-08-21)
+#
+# ss-probe-runner, 21:35Z: a rostered non-admin answered their
+# personal-preference possession challenge and the Operator told them
+# firm-level establishment was now unlocked for them. The two notes are
+# adjacent constants and the person lane appended the admin one. The person
+# ceremony confirms one mailbox so that ONE PERSON'S OWN preferences can be
+# recorded; it confers nothing over the firm, and a person told otherwise
+# spends their next reply asking for a firm change that is refused.
+# ---------------------------------------------------------------------------
+
+
+def test_the_person_note_never_promises_firm_level_authority():
+    """Falsifier: put "firm-level" back in the person note and this fails."""
+    plugin = load_plugin("hermes-smd-establishment")
+    note = plugin._PERSON_POSSESSION_CONFIRMED_NOTE.lower()
+    assert "firm-level" not in note
+    assert "firm level" not in note
+    assert "personal preferences" in note
+
+
+def test_the_person_lane_injects_the_person_note_not_the_admins(establishment, monkeypatch):
+    """The lane, not just the constant: a non-admin whose person ceremony
+    confirms this turn must be told about their own preferences. Falsifier:
+    point line back at _POSSESSION_CONFIRMED_NOTE and this fails."""
+    plugin, _ = establishment
+    monkeypatch.setattr(plugin, "_maybe_confirm_possession", lambda *a, **k: False)
+    monkeypatch.setattr(plugin, "_maybe_confirm_person_possession", lambda *a, **k: True)
+    result = _turn(plugin, PERSON)
+    context = result["context"]
+    assert plugin._PERSON_POSSESSION_CONFIRMED_NOTE.format(sender=PERSON) in context
+    assert "firm-level establishment is" not in context
+
+
+def test_the_admin_lane_still_gets_the_admin_note(establishment, monkeypatch):
+    """The twin stays intact: an admin's ceremony DOES unlock firm-level
+    establishment, and saying so is the whole point of that note."""
+    plugin, _ = establishment
+    monkeypatch.setattr(plugin, "_maybe_confirm_possession", lambda *a, **k: True)
+    monkeypatch.setattr(plugin, "_maybe_confirm_person_possession", lambda *a, **k: False)
+    context = _turn(plugin, ADMIN)["context"]
+    assert plugin._POSSESSION_CONFIRMED_NOTE.format(sender=ADMIN) in context
