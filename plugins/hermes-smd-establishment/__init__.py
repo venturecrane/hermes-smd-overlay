@@ -196,10 +196,11 @@ import json
 import logging
 import os
 import socket
+import time
 from collections import OrderedDict
 from typing import Any
 
-from shared import admin_possession, provenance, read_capture, rule_confirm
+from shared import act_broker, admin_possession, provenance, read_capture, rule_confirm
 from shared.action_classes import ActionClass, BannedToolError, classify_tool
 from shared.customer_config import CustomerConfig
 from shared.inbound import (
@@ -209,6 +210,8 @@ from shared.inbound import (
     unwrap_inbound,
 )
 from shared.outbound_recipient import DRAFT_RECORD_TOOLS, extract_to_recipients
+from shared.pending_acts import PENDING_ACTS, ConfirmedAct
+from shared.pending_send import PENDING_SEND
 from shared.tool_registration import register_wrapped_tool
 
 logger = logging.getLogger(__name__)
@@ -767,7 +770,34 @@ _DECLINED_NOTE = (
     "described something different, propose that instead."
 )
 
+_ACT_CONFIRMED_NOTE = (
+    "The administrator confirmed [act {proposal_id}]. Call {tool} now with "
+    "exactly: {payload}. Do not change any value, do not add one, and do not "
+    "call anything else first. Then report the read-back fields the tool "
+    "returns, naming what the firm's system of record now holds. If it refuses, "
+    "say what it refused and stop."
+)
+
+_ACT_NOT_ADMIN_NOTE = (
+    "The person agreed to [act {proposal_id}], but only an Operator "
+    "administrator can tell this seat to act on the firm's system of record, and "
+    "they are not one. Nothing was recorded and nothing will be created. Say so "
+    "plainly, name who can ({admins}), and do not call the tool."
+)
+
+_ACT_NOT_OPEN_NOTE = (
+    "The person agreed to [act {proposal_id}], but this seat is no longer "
+    "holding that as something to do, so nothing will be created. Say so, and "
+    "offer to put the same thing to them again."
+)
+
 _ASK_NOTES: dict[str, str] = {
+    "unnameable": (
+        "The person answered in the affirmative, but the only thing this seat "
+        "is holding is a message withheld for approval, and that is approved on "
+        "the owner's own channel rather than by email. Nothing was released. "
+        "Say what is waiting and leave it waiting."
+    ),
     "needs_tag": (
         "The person answered in the affirmative but named no rule, and they "
         "have more than one thing outstanding ({candidates}). Ask which, and "
@@ -1422,18 +1452,27 @@ def _readback_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, Any]
     """
     if not isinstance(session_id, str) or not session_id:
         return None
-    owed = _READBACK_OWED.get(session_id)
+    rule_owed = _READBACK_OWED.get(session_id) or []
+    # A proposed COMMITMENT owes the same debt for the same reason: the sentence
+    # the administrator is asked to answer has to be the sentence the broker
+    # rendered, or their "yes, create it" agrees to something they never read
+    # (ss-console operator-own-matter).
+    act_owed = PENDING_ACTS.proposed(session_id)
+    owed = [*rule_owed, *act_owed]
     if not owed:
         return None
     try:
         blob = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
     except (TypeError, ValueError):
         blob = str(args)
-    for readback in list(owed):
+    for readback in owed:
         if _readback_present(readback, blob):
-            owed.remove(readback)
-            if not owed:
-                _READBACK_OWED.pop(session_id, None)
+            if readback in rule_owed:
+                rule_owed.remove(readback)
+                if not rule_owed:
+                    _READBACK_OWED.pop(session_id, None)
+            else:
+                PENDING_ACTS.mark_delivered(session_id, readback)
             return None
     logger.info(
         "hermes-smd-establishment: %s blocked; the proposed rule's readback "
@@ -1627,6 +1666,95 @@ def _fetch_pending(sender: str, is_admin: bool) -> list[dict[str, Any]]:
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
 
 
+def _act_row(sender: str, is_admin: bool, proposal_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    """The act row WITH its payload, re-fetched by id when the listing omits it.
+
+    The listing exists to tell a person what is outstanding, so it need not carry
+    the call's arguments; the by-id read does. Asking again costs one round trip
+    on the one turn that matters and removes an assumption about a shape this
+    module does not own.
+    """
+    if isinstance(row.get("payload"), dict) and row.get("payload"):
+        return row
+    try:
+        response = _broker_request(
+            {
+                "action": TOOL_PENDING,
+                "sender": sender,
+                "include_for_admin": bool(is_admin),
+                "proposal_id": proposal_id,
+            }
+        )
+    except Exception:  # noqa: BLE001 — an unreachable broker confirms nothing
+        logger.debug("hermes-smd-establishment: act row lookup failed", exc_info=True)
+        return row
+    if not isinstance(response, dict) or not response.get("ok"):
+        return row
+    rows = response.get("pending")
+    rows = rows if isinstance(rows, list) else []
+    for candidate in rows:
+        if isinstance(candidate, dict) and str(candidate.get("proposal_id")) == proposal_id:
+            return candidate
+    return row
+
+
+def _act_confirmation_note(
+    session_id: str, sender: str, is_admin: bool, proposal_id: str, row: dict[str, Any]
+) -> str | None:
+    """An administrator answered an act. Record the approval and say what to call.
+
+    The one place a written "yes, create it" becomes an approval a COMMITMENT can
+    use. What it records is the broker's stored payload, which is the block the
+    firm authored, so the call that runs is the call the administrator read.
+    Their address and the message their answer arrived on go onto the record,
+    because a commitment whose ledger row cannot name the person and the sentence
+    behind it is not an approval, it is a note.
+
+    Nothing here trusts the model, and nothing here trusts the message beyond the
+    two things a verified inbound gives it: who sent it and which message it was.
+    """
+    if not is_admin:
+        return _ACT_NOT_ADMIN_NOTE.format(
+            proposal_id=proposal_id, admins=_admin_names(_load_config())
+        )
+    row = _act_row(sender, is_admin, proposal_id, row)
+    tool = str(row.get("tool") or "")
+    payload = row.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if not tool or not payload:
+        logger.warning(
+            "hermes-smd-establishment: act %s has no tool/payload; nothing confirmed",
+            proposal_id,
+        )
+        return _ACT_NOT_OPEN_NOTE.format(proposal_id=proposal_id)
+    message_id = ""
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id)
+        message_id = str(origin.message_id) if origin is not None else ""
+    except Exception:  # noqa: BLE001 — a missing message id is a thinner row, not a failure
+        logger.debug("hermes-smd-establishment: inbound origin unresolved for the act")
+    marked = PENDING_ACTS.mark_confirmed(
+        session_id,
+        ConfirmedAct(
+            proposal_id=proposal_id,
+            tool=tool,
+            payload=payload,
+            instructed_by=str(row.get("instructed_by") or ""),
+            confirmed_by=sender,
+            confirmed_message_id=message_id,
+            confirmed_at=time.time(),
+        ),
+    )
+    if not marked:
+        return _ACT_NOT_OPEN_NOTE.format(proposal_id=proposal_id)
+    logger.info("hermes-smd-establishment: act %s confirmed by %s", proposal_id, sender)
+    return _ACT_CONFIRMED_NOTE.format(
+        proposal_id=proposal_id,
+        tool=tool,
+        payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+    )
+
+
 def _confirmation_note(
     session_id: str, sender: str, is_admin: bool, user_message: Any
 ) -> str | None:
@@ -1652,11 +1780,17 @@ def _confirmation_note(
         # this runs on every attributed turn.
         return None
     pending = _fetch_pending(sender, is_admin)
-    if not pending:
+    # A withheld send carries no tag and cannot be named, but it is still
+    # something outstanding, so it counts when deciding whether a bare
+    # affirmative is ambiguous (ss-console operator-own-matter).
+    extra_open = 1 if PENDING_SEND.peek() is not None else 0
+    if not pending and not extra_open:
         return None
-    verdict = rule_confirm.resolve(user_message, pending, sender, is_admin)
+    verdict = rule_confirm.resolve(user_message, pending, sender, is_admin, extra_open=extra_open)
     if verdict.kind == rule_confirm.CONFIRMED and verdict.proposal_id:
         row = next((p for p in pending if str(p.get("proposal_id")) == verdict.proposal_id), {})
+        if str(row.get("kind") or "rule") == act_broker.KIND_TOOL_CALL:
+            return _act_confirmation_note(session_id, sender, is_admin, verdict.proposal_id, row)
         _CONFIRMED_STASH[session_id] = verdict.proposal_id
         logger.info(
             "hermes-smd-establishment: rule %s confirmed by %s", verdict.proposal_id, sender
@@ -1669,6 +1803,29 @@ def _confirmation_note(
     if verdict.kind == rule_confirm.DECLINED:
         return _DECLINED_NOTE.format(candidates=", ".join(verdict.candidates))
     if verdict.kind == rule_confirm.ASK:
+        if verdict.reason == rule_confirm.ASK_NOT_THEIRS:
+            # A "yes" to an act from somebody who is not an administrator. The
+            # matcher already refused to bind it; this only makes the sentence
+            # the person gets the right one, and still writes nothing.
+            act_row = next(
+                (
+                    p
+                    for p in pending
+                    if str(p.get("proposal_id")) in verdict.candidates
+                    and str(p.get("kind") or "rule") == act_broker.KIND_TOOL_CALL
+                ),
+                None,
+            )
+            if act_row is not None:
+                logger.info(
+                    "hermes-smd-establishment: act %s NOT confirmed (%s is not an admin)",
+                    act_row.get("proposal_id"),
+                    sender,
+                )
+                return _ACT_NOT_ADMIN_NOTE.format(
+                    proposal_id=str(act_row.get("proposal_id") or ""),
+                    admins=_admin_names(_load_config()),
+                )
         template = _ASK_NOTES.get(verdict.reason or "")
         if template is None:
             return None
