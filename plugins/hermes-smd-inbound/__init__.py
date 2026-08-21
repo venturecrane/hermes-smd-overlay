@@ -54,8 +54,10 @@ logger = logging.getLogger(__name__)
 # The delimiter every inbound-email prompt places between the fields WE
 # rendered and the sender-controlled body (bootstrap/translate.py, both the
 # agentmail and msgraph templates). Everything above it is trusted; everything
-# below is attacker-controlled data.
-_UNTRUSTED_DELIMITER = "--- untrusted email body below"
+# below is attacker-controlled data. Aliased, not re-spelled: three modules now
+# cut on this line (here, shared.rule_confirm, and the templates that render
+# it), and a second literal is a second thing to forget.
+_UNTRUSTED_DELIMITER = inbound.UNTRUSTED_EMAIL_DELIMITER
 # ``message_id: <id>`` on its own line. The templates render it as the LAST
 # field before the delimiter.
 _MESSAGE_ID_RE = re.compile(r"^message_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)

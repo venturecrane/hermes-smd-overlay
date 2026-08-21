@@ -997,12 +997,20 @@ _PERSON_CHALLENGE_PENDING_MESSAGE = (
     "Tell the requester the change is waiting on that reply."
 )
 
+# The PERSON twin of _POSSESSION_CONFIRMED_NOTE, and it must not read like it.
+# The person ceremony confirms one mailbox so that ONE PERSON'S OWN preferences
+# can be recorded; it confers nothing over the firm. Telling a rostered
+# non-admin that firm-level establishment is now open to them (live, 2026-08-21)
+# promises an authority the ceremony does not grant and the roster does not
+# hold, and the person then asks for firm changes that are refused.
 _PERSON_POSSESSION_CONFIRMED_NOTE = (
     "This message contained the mailbox-possession confirmation code for "
-    "{sender}: their mailbox is now confirmed and personal-preference "
-    "establishment is unlocked for them (a one-time ceremony; it re-arms only "
-    "if they leave the roster). Acknowledge the confirmation in your reply, "
-    "and if they stated preferences earlier, record them now."
+    "{sender}: their mailbox is now confirmed, so their personal preferences "
+    "can be recorded for them from here on (a one-time ceremony; it re-arms "
+    "only if they leave the roster). This is about their own preferences and "
+    "nothing else: it grants them no authority over the firm's rules. "
+    "Acknowledge the confirmation in your reply, and if they stated "
+    "preferences earlier, record them now."
 )
 
 
@@ -1922,7 +1930,11 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         # unadvertised tool gets zero use) — any rostered person may author
         # their own preferences, and their possession reply confirms here too.
         if _maybe_confirm_person_possession(cfg, sender_id, kwargs.get("user_message")):
-            lines.append(_POSSESSION_CONFIRMED_NOTE.format(sender=str(sender_id)))
+            # The PERSON note, not the admin one. Live on 2026-08-21 a rostered
+            # non-admin answered their personal-preference challenge and was
+            # told firm-level establishment was unlocked for them -- a promise
+            # of authority they do not hold, from a ceremony that grants none.
+            lines.append(_PERSON_POSSESSION_CONFIRMED_NOTE.format(sender=str(sender_id)))
         lines.append(_ESTABLISH_NUDGE)
         if not is_admin:
             lines.append(_FOR_ADMIN_LINE.format(admins=_admin_names(cfg)))
