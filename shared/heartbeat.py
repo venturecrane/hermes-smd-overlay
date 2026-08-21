@@ -128,6 +128,10 @@ def build_payload(
     webhook_surface_ok: bool | None = None,
     webhook_surface: dict[str, dict] | None = None,
     cron_containment: bool | None = None,
+    gateway_loop_ok: bool | None = None,
+    gateway_loop_age_seconds: int | None = None,
+    gateway_supervisor_state: str | None = None,
+    gateway_restarts_last_hour: int | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -199,6 +203,23 @@ def build_payload(
         payload["webhook_surface_ok"] = 1 if webhook_surface_ok else 0
     if webhook_surface is not None:
         payload["webhook_surface"] = webhook_surface
+    # Gateway loop liveness + the part-1 supervisor's own state (ss-console#2488
+    # part 2, shared/gateway_loop_check.py). Same is-not-None discipline, and
+    # here it is the WHOLE design: `gateway_loop_age_seconds=0` and
+    # `gateway_restarts_last_hour=0` are real values that must reach the wire,
+    # while an absent age (the arming latch, a pin with no heartbeat, boot
+    # suppression) must stay absent so the console HOLDS rather than resolving
+    # an open wedge alert on a number nobody measured. `gateway_loop_ok=False`
+    # means this check could not look -- our blindness, paged on its own,
+    # never a verdict on the loop.
+    if gateway_loop_ok is not None:
+        payload["gateway_loop_ok"] = 1 if gateway_loop_ok else 0
+    if gateway_loop_age_seconds is not None:
+        payload["gateway_loop_age_seconds"] = gateway_loop_age_seconds
+    if gateway_supervisor_state is not None:
+        payload["gateway_supervisor_state"] = gateway_supervisor_state
+    if gateway_restarts_last_hour is not None:
+        payload["gateway_restarts_last_hour"] = gateway_restarts_last_hour
     return payload
 
 
@@ -273,6 +294,8 @@ class HeartbeatEmitter:
         spec_control_check_fn=None,
         spec_control_check_debounce: int = 3,
         webhook_surface_check_fn=None,
+        gateway_loop_check_fn=None,
+        gateway_loop_check_debounce: int = 3,
     ) -> None:
         self._slug = slug
         self._key = key
@@ -309,6 +332,20 @@ class HeartbeatEmitter:
         # has no transient-failure mode a debounce would smooth — see
         # shared/webhook_surface_check.py.
         self._webhook_surface_check_fn = webhook_surface_check_fn or _default_webhook_surface_check
+        # Gateway loop liveness (shared.gateway_loop_check, ss-console#2488 pt 2).
+        # The checker object holds the arming latch across ticks, so it is
+        # constructed ONCE here and its bound method is the check_fn. Injectable
+        # + debounced like the scheduler check: a crash reports ok=False after
+        # the debounce, never silence -- silence is the defect class being closed.
+        if gateway_loop_check_fn is None:
+            from shared.gateway_loop_check import GatewayLoopChecker
+
+            self._gateway_loop_checker = GatewayLoopChecker()
+            gateway_loop_check_fn = self._default_gateway_loop_check
+        self._gateway_loop_check_fn = gateway_loop_check_fn
+        self._loop_debounce = max(1, gateway_loop_check_debounce)
+        self._loop_fail_count = 0
+        self._loop_last_good = None
 
     def start(self) -> bool:
         """Launch the daemon thread. Returns False (and logs) when the
@@ -420,6 +457,40 @@ class HeartbeatEmitter:
         self._conn_last_good = result
         return result
 
+    def _default_gateway_loop_check(self):
+        return self._gateway_loop_checker.check(uptime_seconds=read_uptime_seconds())
+
+    def _read_gateway_loop_check(self):
+        """Run the gateway loop-liveness check with the standard debounce.
+
+        A persistent crash reports ``GatewayLoopCheck(ok=False, ...)`` -- the
+        boolean IS the failure state and the console pages
+        ``gateway_loop_unprovable`` for it. Returns None only before the
+        first-ever success (console holds on absence)."""
+        from shared.gateway_loop_check import GatewayLoopCheck
+
+        try:
+            result = self._gateway_loop_check_fn()
+        except Exception as exc:  # noqa: BLE001 -- the check must never kill the beat
+            self._loop_fail_count += 1
+            logger.warning(
+                "heartbeat: gateway loop check failed (%d consecutive): %s",
+                self._loop_fail_count,
+                exc,
+            )
+            if self._loop_fail_count >= self._loop_debounce:
+                return GatewayLoopCheck(
+                    ok=False,
+                    age_seconds=None,
+                    supervisor_state=None,
+                    restarts_last_hour=None,
+                    reason=f"checker crashed: {exc.__class__.__name__}",
+                )
+            return self._loop_last_good
+        self._loop_fail_count = 0
+        self._loop_last_good = result
+        return result
+
     def _read_spec_control_check(self):
         """Run the authored-spec control self-check, debounced like the others.
 
@@ -480,6 +551,7 @@ class HeartbeatEmitter:
         conn = self._read_connector_check()
         spec = self._read_spec_control_check()
         surface = self._read_webhook_surface_check()
+        loop = self._read_gateway_loop_check()
         token_age: dict[str, int] | None = None
         try:
             from shared.connector_check import token_ages
@@ -507,6 +579,10 @@ class HeartbeatEmitter:
             webhook_surface_ok=surface.ok if surface is not None else None,
             webhook_surface=surface.tools if surface is not None else None,
             cron_containment=_read_cron_containment(),
+            gateway_loop_ok=loop.ok if loop is not None else None,
+            gateway_loop_age_seconds=loop.age_seconds if loop is not None else None,
+            gateway_supervisor_state=loop.supervisor_state if loop is not None else None,
+            gateway_restarts_last_hour=loop.restarts_last_hour if loop is not None else None,
         )
         import json
 
@@ -609,6 +685,10 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         spec_debounce = int(os.environ.get("SPEC_CONTROL_CHECK_DEBOUNCE", "3"))
     except ValueError:
         spec_debounce = 3
+    try:
+        loop_debounce = int(os.environ.get("GATEWAY_LOOP_CHECK_DEBOUNCE", "3"))
+    except ValueError:
+        loop_debounce = 3
     return HeartbeatEmitter(
         slug=os.environ.get("SMD_CUSTOMER_SLUG") or os.environ.get("CUSTOMER_SLUG"),
         key=os.environ.get("MACHINE_HEARTBEAT_KEY"),
@@ -620,6 +700,7 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
         scheduler_check_debounce=debounce,
         connector_check_debounce=conn_debounce,
         spec_control_check_debounce=spec_debounce,
+        gateway_loop_check_debounce=loop_debounce,
     )
 
 
