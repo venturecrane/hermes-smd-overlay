@@ -13,13 +13,15 @@ the audit plugin's ``post_tool_call`` hook on the resulting error result;
 this plugin does not cross-import the audit plugin.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
-from shared import matter_binding, matter_gate, provenance, report_render, spec_stamp
+from shared import act_broker, matter_binding, matter_gate, provenance, report_render, spec_stamp
 from shared.broker_audit import write_decision
+from shared.pending_acts import PENDING_ACTS, tool_call_failed
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
 from shared.spec_status import SPEC_STATUS
@@ -315,6 +317,80 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         }
 
 
+def _act_reference(result: Any) -> str:
+    """The vendor's id for what a committed act created, or ``""``.
+
+    Best-effort by design. The reference is what makes the ledger row point at a
+    real record, and not finding one is worth a row that says so; it is not worth
+    failing a commitment that already happened.
+    """
+    if isinstance(result, dict):
+        payload: Any = result
+    elif isinstance(result, str) and result.strip():
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            return ""
+    else:
+        return ""
+    while isinstance(payload, dict) and "result" in payload and "id" not in payload:
+        payload = payload["result"]
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("id", "matter_id", "matterId", "ref"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _commit_confirmed_act(tool_name: str, session_id: str, kwargs: dict[str, Any]) -> None:
+    """Commit the broker row for an act that just executed, if one did.
+
+    Two decisions live here, and both are one-directional:
+
+    * a call that POSITIVELY reported failure commits NOTHING. A committed row
+      says the firm's system of record holds a thing; committing one for a call
+      that errored would put that claim in the ledger with an administrator's
+      name attached to it;
+    * the in-process record is dropped either way, so a retry has to be proposed
+      and confirmed again. The broker row simply stays open until its own TTL.
+
+    Exception-safe and observational: a commit that cannot be written costs the
+    ledger a row, never the turn.
+    """
+    try:
+        if not tool_name or not act_broker.is_act_tool(tool_name):
+            return
+        record = PENDING_ACTS.finish(session_id, tool_name)
+        if record is None:
+            return
+        if tool_call_failed(kwargs.get("status"), kwargs.get("error_type")):
+            logger.warning(
+                "hermes-smd-trust: %s failed; act %s NOT committed (the broker row "
+                "stays open until its TTL)",
+                tool_name,
+                record.proposal_id,
+            )
+            return
+        act_broker.commit(
+            proposal_id=record.proposal_id,
+            tool=record.tool,
+            payload=record.payload,
+            confirmed_by=record.confirmed_by,
+            confirmed_message_id=record.confirmed_message_id,
+            ok=True,
+            ref=_act_reference(kwargs.get("result")),
+        )
+        logger.info(
+            "hermes-smd-trust: act %s committed (confirmed by %s)",
+            record.proposal_id,
+            record.confirmed_by,
+        )
+    except Exception:  # noqa: BLE001 - a missed commit costs a ledger row, not the turn
+        logger.warning("hermes-smd-trust: act commit failed", exc_info=True)
+
+
 def on_post_tool_call(**kwargs: Any) -> None:
     """Populate the per-session identifier provenance register from READ-tool
     results (A1).
@@ -349,6 +425,11 @@ def on_post_tool_call(**kwargs: Any) -> None:
             )
         except Exception:  # noqa: BLE001
             logger.debug("hermes-smd-trust: draft-recipient record failed", exc_info=True)
+
+        # Close a confirmed commitment's broker row against what actually
+        # happened (ss-console operator-own-matter). Runs BEFORE the READ-class
+        # early return below, because a commitment is by definition not a read.
+        _commit_confirmed_act(tool_name, resolved, kwargs)
 
         try:
             classification = enforce.classify_tool(tool_name)

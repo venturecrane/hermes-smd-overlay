@@ -45,7 +45,15 @@ from typing import Any
 #: Pinned to the broker's proposal-id shape (ss-console
 #: operator/workspace_broker/establishment.py) and the applier's
 #: ``_ADJUSTMENT_ID``; all three must agree or a confirmed rule cannot be found.
-RULE_TAG = re.compile(r"\[rule ([0-9a-f]{8})\]")
+#:
+#: TWO KINDS, ONE CHANNEL (ss-console operator-own-matter). ``[rule XXXXXXXX]``
+#: is a sentence to install; ``[act XXXXXXXX]`` is a call to make. They share
+#: this matcher because they share the thing that matters: a person read one
+#: sentence and answered it, and the seat has to decide what they answered
+#: without guessing. The id is broker-minted and unique across both, so binding
+#: is by id and the word only tells the reader which sort of thing they are
+#: looking at.
+RULE_TAG = re.compile(r"\[(rule|act) ([0-9a-f]{8})\]")
 
 #: A line that begins the quoted history. Everything from here down is somebody
 #: else's words (usually ours, quoted back), and none of it is the reply.
@@ -128,6 +136,9 @@ ASK_AMBIGUOUS = "ambiguous"
 ASK_UNKNOWN_TAG = "unknown_tag"
 ASK_NOT_THEIRS = "not_theirs"
 ASK_QUALIFIED = "qualified"
+#: An affirmative when the only thing outstanding carries no tag and is not
+#: answerable on this channel (a send withheld for a Telegram approval).
+ASK_UNNAMEABLE = "unnameable"
 
 
 @dataclass(frozen=True)
@@ -174,7 +185,7 @@ def strip_quoted(body: Any) -> str:
 
 
 def find_tags(message: Any) -> tuple[str, ...]:
-    """Every ``[rule XXXXXXXX]`` id in the message, in order, de-duplicated.
+    """Every ``[rule XXXXXXXX]`` / ``[act XXXXXXXX]`` id, in order, de-duplicated.
 
     Reads the WHOLE message, quoted history included: on most mail clients the
     person's "yes" sits above a quoted copy of the readback, so that is exactly
@@ -184,7 +195,7 @@ def find_tags(message: Any) -> tuple[str, ...]:
         return ()
     seen: list[str] = []
     for match in RULE_TAG.finditer(message):
-        tag = match.group(1)
+        tag = match.group(2)
         if tag not in seen:
             seen.append(tag)
     return tuple(seen)
@@ -239,7 +250,18 @@ def _sender_may_confirm(
     * every other rule is confirmed by the person who stated it, saying yes.
       An admin's own firm rule is this lane, because they already had the
       authority when they stated it.
+
+    AN ACT IS A THIRD LANE (``kind == "tool_call"``, ss-console
+    operator-own-matter), and it is admin-only in both directions. A commitment
+    is the firm's employee doing something to the firm's system of record, so the
+    only person whose yes counts is one the firm authored as an Operator
+    administrator; and because an act is only ever PROPOSED on an administrator's
+    own turn, the ordinary "did you state this yourself" test would be the wrong
+    question. Any administrator may answer it, with a plain yes or with "apply
+    that", and nobody else may answer it at all.
     """
+    if str(row.get("kind") or "rule") == "tool_call":
+        return is_admin
     for_admin = bool(row.get("for_admin"))
     stated_by = str(row.get("instructed_by") or "").strip().lower()
     if apply_others:
@@ -252,16 +274,28 @@ def resolve(
     pending: list[dict[str, Any]],
     sender: Any,
     is_admin: bool,
+    extra_open: int = 0,
 ) -> Verdict:
-    """Decide what this reply did, over the rules this sender has outstanding.
+    """Decide what this reply did, over the items this sender has outstanding.
 
     ``pending`` is the broker's ``establish_pending`` list for this sender (its
-    ``for_admin`` rows included when the sender is an admin). Every branch that
-    is not a clean single match returns ASK, because the cost of asking is one
-    reply and the cost of guessing is a rule the firm never agreed to.
+    ``for_admin`` rows included when the sender is an admin), rules and acts
+    alike. Every branch that is not a clean single match returns ASK, because the
+    cost of asking is one reply and the cost of guessing is a rule the firm never
+    agreed to, or a call it never asked for.
+
+    ``extra_open`` counts outstanding things that carry NO tag and so can never
+    be named: today that is a withheld send waiting on a Telegram yes. They
+    cannot be confirmed here, but they can make a bare affirmative ambiguous, so
+    they are counted when deciding whether to ask.
     """
     rows = [r for r in pending if isinstance(r, dict) and r.get("proposal_id")]
     if not rows:
+        if extra_open > 0 and read_own_text(message).affirmative:
+            # Something IS waiting, it just is not something a tag can name, and
+            # it is not approved on this channel. Do not silently do nothing: the
+            # person believes they just answered a question.
+            return Verdict(kind=ASK, reason=ASK_UNNAMEABLE)
         return Verdict(kind=NONE)
     address = str(sender or "").strip().lower()
     tags = find_tags(message)
@@ -320,6 +354,7 @@ __all__ = [
     "ASK_NOT_THEIRS",
     "ASK_QUALIFIED",
     "ASK_UNKNOWN_TAG",
+    "ASK_UNNAMEABLE",
     "BARE_AFFIRMATIVES",
     "CONFIRMED",
     "DECLINED",

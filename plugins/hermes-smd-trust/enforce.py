@@ -56,7 +56,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from shared import content_floor, matter_gate, spec_gate
+from shared import act_broker, content_floor, matter_gate, spec_gate
 from shared.action_classes import (
     BANNED_TOOLS,
     TOOL_ACTION_CLASS_MAP,
@@ -69,7 +69,8 @@ from shared.action_classes import (
     VERTICAL_FLOORS as _SHARED_VERTICAL_FLOORS,
 )
 from shared.customer_config import CustomerConfigMissingError
-from shared.inbound import SESSION_TAINT, TRUST_CLASS_INTERNAL
+from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT, TRUST_CLASS_INTERNAL
+from shared.pending_acts import PENDING_ACTS
 from shared.pending_send import PENDING_SEND
 from shared.trust_decision import (
     ACTION_CLASS_BANNED,
@@ -438,6 +439,28 @@ def _decide_approval_class(
     if effective == Ceiling.DRAFT_FOR_REVIEW:
         return EnforcementDecision(
             allowed=False, reason=draft_reason, audit_action=draft_audit, action_class=action
+        )
+    if effective == Ceiling.CONFIRM and action == ActionClass.COMMITMENT:
+        # The confirm ceiling for a COMMITMENT (ss-console operator-own-matter).
+        # A send at this ceiling waits on a Telegram "yes"; a commitment waits on
+        # an Operator administrator's written instruction, which is authority they
+        # already hold over their employee. Everything that makes that safe sits
+        # one layer up in ``evaluate_tool_call``: only an authenticated email turn
+        # an administrator opened may PROPOSE, only the authored block is
+        # proposed, and only the stored payload is replayed. Here the ceiling does
+        # what the send confirm ceiling does, withhold rather than refuse, so the
+        # caller can start the round trip instead of ending the turn.
+        #
+        # DESTRUCTIVE is deliberately excluded: it falls through to the refusal
+        # below, so an authored `destructive: confirm` (which the ss-console
+        # validator does not accept in the first place) can never become an
+        # approvable act by this route.
+        if approved:
+            return _allow(f"{label} confirmed by an administrator's current-turn approval", action)
+        return _await_approval(
+            f"{label} at authored confirm ceiling; withheld pending the "
+            "administrator's confirmation",
+            action,
         )
     if not approved:
         return _refuse(f"{label} action requires explicit current-turn approval", action)
@@ -992,6 +1015,184 @@ def _resolve_send_recipients(tool_name: str, args: dict, session_id: str) -> set
     return set(recips) if recips else set()
 
 
+# ---------------------------------------------------------------------------
+# The commitment confirm round-trip (ss-console operator-own-matter)
+#
+# Four refusals and one instruction. Each refusal writes NOTHING: no broker row,
+# no register entry, nothing for a later "yes" to land on. That is the property
+# that matters, because the failure this guards against is not a commitment that
+# fires without approval, it is a commitment that acquires one later from a
+# person who never saw it.
+# ---------------------------------------------------------------------------
+
+_ACT_ORIGIN_REFUSAL = (
+    "Refused: a commitment can only be proposed on a turn an Operator "
+    "administrator opened by email. Tell the person what you would do and ask an "
+    "administrator to email you, and do not try again on this turn."
+)
+
+_ACT_NOT_AUTHORED_REFUSAL = (
+    "Refused: no Operator matter is authored for this seat, so there is nothing "
+    "you may propose to create. Say so plainly and name what the firm would have "
+    "to author; do not offer to create one from values you chose."
+)
+
+_ACT_ALREADY_OPEN_REFUSAL = (
+    "Refused: something is already waiting on this person's answer, and one "
+    "outstanding question at a time is what makes their yes unambiguous. Finish "
+    "that first."
+)
+
+_ACT_WITHHELD_INSTRUCTION = (
+    "Withheld pending the administrator's confirmation. Nothing was created. Put "
+    "this line in your reply exactly as written, then end the turn: {readback}"
+)
+
+
+def _resolve_admin_origin(session_id: str) -> tuple[str, str] | None:
+    """``(sender_address, message_id)`` when an ADMIN opened this turn by email.
+
+    Three conditions, and the turn has to satisfy all of them before a
+    commitment may even be proposed:
+
+    1. the session carries a recorded inbound origin. Only the mail webhook
+       router records one, and only after signature verification, so a Telegram
+       message, a cron wake, a self-wake and a tool-driven turn all resolve to
+       None here without any name being consulted;
+    2. that origin has a verified sender address;
+    3. the address is on the seat's authored ``scope.admins``, matched exactly.
+
+    Fail-closed on every fault: an unreadable config admits nobody.
+    """
+    if not session_id:
+        return None
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id)
+    except Exception:  # noqa: BLE001 - an unresolvable origin proposes nothing
+        logger.warning("trust: inbound origin unresolvable; no act may be proposed", exc_info=True)
+        return None
+    if origin is None:
+        return None
+    sender = (origin.sender_address or "").strip().lower()
+    if not sender:
+        return None
+    try:
+        from shared.customer_config import CustomerConfig  # local import
+
+        cfg = CustomerConfig.from_volume()
+    except Exception:  # noqa: BLE001 - an unreadable config admits no admins
+        logger.warning("trust: customer config unreadable; no act may be proposed", exc_info=True)
+        return None
+    if not cfg.sender_is_admin(sender):
+        return None
+    return sender, str(origin.message_id or "")
+
+
+def _resolve_authored_act(tool_name: str) -> tuple[dict, str, str] | None:
+    """The authored payload for this act, plus the names the read-back says.
+
+    Read from ``self_initiation.document_library.operator_matter`` in the TRUSTED
+    customer.yaml, restricted to the tool's closed key vocabulary. The model's
+    arguments are never consulted: what the administrator is asked to approve is
+    what the firm authored, and a seat that authored nothing cannot propose.
+
+    ``client_contact_name`` / ``matter_type_name`` are optional authored labels.
+    They exist so the read-back can say "client: Ashton and Price" instead of a
+    UUID a person cannot judge; when absent the ids stand in, which is honest
+    rather than invented.
+    """
+    keys = act_broker.ACT_PAYLOAD_KEYS.get(tool_name)
+    if not keys:
+        return None
+    try:
+        from shared.customer_config import CustomerConfig  # local import
+
+        raw = CustomerConfig.from_volume().raw
+    except Exception:  # noqa: BLE001 - an unreadable config authors nothing
+        logger.warning("trust: customer config unreadable; no authored act", exc_info=True)
+        return None
+    block = raw.get("self_initiation") if isinstance(raw, dict) else None
+    library = block.get("document_library") if isinstance(block, dict) else None
+    authored = library.get("operator_matter") if isinstance(library, dict) else None
+    if not isinstance(authored, dict):
+        return None
+    payload = {
+        key: authored[key]
+        for key in keys
+        if isinstance(authored.get(key), str) and authored[key].strip()
+    }
+    if not act_broker.ACT_REQUIRED_KEYS.get(tool_name, frozenset()) <= set(payload):
+        logger.warning("trust: authored operator_matter is incomplete; no act may be proposed")
+        return None
+    contact_name = str(authored.get("client_contact_name") or payload.get("client_contact_id", ""))
+    type_name = str(authored.get("matter_type_name") or payload.get("matter_type_id", ""))
+    return payload, contact_name, type_name
+
+
+def _propose_commitment_act(tool_name: str, session_id: str) -> dict:
+    """Start the round trip for a withheld commitment. Always returns a block.
+
+    Order is load-bearing. The origin gate runs FIRST, so a turn that may not
+    propose never reaches the config read or the broker, and a non-admin sender
+    leaves no trace anywhere. The single-outstanding check runs before the broker
+    for the same reason.
+    """
+    origin = _resolve_admin_origin(session_id)
+    if origin is None:
+        logger.info("trust: %s not proposed; the turn has no admin email origin", tool_name)
+        return {"action": "block", "message": _ACT_ORIGIN_REFUSAL}
+    sender, message_id = origin
+    if PENDING_SEND.peek() is not None or PENDING_ACTS.has_open(session_id):
+        logger.info("trust: %s not proposed; another approval is already outstanding", tool_name)
+        return {"action": "block", "message": _ACT_ALREADY_OPEN_REFUSAL}
+    authored = _resolve_authored_act(tool_name)
+    if authored is None:
+        return {"action": "block", "message": _ACT_NOT_AUTHORED_REFUSAL}
+    payload, contact_name, type_name = authored
+    try:
+        response = act_broker.propose(
+            tool=tool_name,
+            payload=payload,
+            instructed_by=sender,
+            source_ref=message_id,
+            contact_name=contact_name,
+            matter_type_name=type_name,
+        )
+    except Exception:  # noqa: BLE001 - an unreachable broker withholds, never allows
+        logger.warning("trust: act_propose failed; the commitment stays withheld", exc_info=True)
+        return {
+            "action": "block",
+            "message": (
+                "Refused: this seat could not record the question to put to the "
+                "administrator, so nothing was proposed and nothing was created. "
+                "Say so and stop."
+            ),
+        }
+    if not (isinstance(response, dict) and response.get("ok")):
+        refused = str((response or {}).get("refused") or "the broker refused the proposal")
+        logger.info("trust: act_propose refused: %s", refused)
+        return {"action": "block", "message": f"Refused: {refused}"}
+    readback = str(response.get("readback") or "")
+    proposal_id = str(response.get("proposal_id") or "")
+    if not readback or not proposal_id:
+        return {
+            "action": "block",
+            "message": (
+                "Refused: the proposal came back without a sentence to read to "
+                "the administrator, so there is nothing they could agree to. Say "
+                "so and stop."
+            ),
+        }
+    PENDING_ACTS.note_proposed(session_id, proposal_id, tool_name, readback)
+    logger.info(
+        "trust: %s withheld; act %s proposed to %s",
+        tool_name,
+        proposal_id,
+        sender,
+    )
+    return {"action": "block", "message": _ACT_WITHHELD_INSTRUCTION.format(readback=readback)}
+
+
 def evaluate_tool_call(
     tool_name: str,
     args: dict,
@@ -1149,6 +1350,22 @@ def evaluate_tool_call(
                 args.update(copy.deepcopy(stored.args))
             approved_replay = True
 
+        # The commitment half of the same round trip (ss-console
+        # operator-own-matter). Identical shape to the send replay above and for
+        # identical reasons: the payload the administrator READ is the payload
+        # that executes, so it is replayed over the live arguments BEFORE the
+        # ceiling decides and before anything downstream inspects them. A model
+        # that re-composes the call with a different matter number on the
+        # confirming turn changes nothing.
+        is_commitment = effective_action is ActionClass.COMMITMENT
+        confirmed_act = (
+            PENDING_ACTS.peek_confirmed(session_id, tool_name) if is_commitment else None
+        )
+        if confirmed_act is not None and isinstance(args, dict):
+            args.clear()
+            args.update(copy.deepcopy(confirmed_act.payload))
+            approved_replay = True
+
         decision = enforce(
             action=effective_action,
             exposure=exposure,
@@ -1231,6 +1448,15 @@ def evaluate_tool_call(
     # supersedes any prior pending; only a resolved-recipient send is captured.
     if is_send and send_recips and decision.audit_action == "await_approval":
         PENDING_SEND.capture(tool_name, args, send_recips)
+
+    # A commitment withheld at the confirm ceiling starts its round trip here:
+    # the authored act is put to an administrator, and the model is told to carry
+    # the broker's sentence into its reply. Deliberately AFTER the decision row
+    # is written, so the ledger records the withhold whatever the proposal does,
+    # and deliberately not on the confirmed pass (``confirmed_act`` is None only
+    # when nothing has been approved yet).
+    if is_commitment and confirmed_act is None and decision.audit_action == "await_approval":
+        return _propose_commitment_act(tool_name, session_id)
 
     # ---- Outbound matter identity (ss#2167) --------------------------------
     # Deliberately OUTSIDE the ``decision.allowed`` guard below. On a seat where
@@ -1422,6 +1648,13 @@ def evaluate_tool_call(
         # already overwritten with the stored payload above.
         if is_send and approved_replay:
             PENDING_SEND.take_for_send(tool_name, send_recips)
+        # The commitment's approval is spent the same way and at the same moment,
+        # once the call has cleared every gate and is about to execute. The
+        # record survives the spend so ``post_tool_call`` can close the broker row
+        # against what the vendor actually recorded; what it no longer is, is an
+        # approval, so a second call this turn is withheld again.
+        if is_commitment and confirmed_act is not None:
+            PENDING_ACTS.take_in_flight(session_id, tool_name)
         return None
 
     return {"action": "block", "message": f"Refused: {decision.reason}"}
