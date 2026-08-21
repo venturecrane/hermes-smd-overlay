@@ -79,6 +79,27 @@ converge-wait returns ``installed`` or ``accepted_pending_install``, and the
 nudge requires ``establish_status`` before the reply claims effect. A rule that
 is still converging is "recorded, in effect within a minute, I will confirm".
 
+THE PILOT RUN THAT MADE BOTH OF THOSE MECHANICAL (2026-08-21T23:30Z, overlay
+07ed486). A person confirmed ``[rule 811e5a68]``; the confirmation matcher
+worked; and then two things failed in a row, each of which had an instruction
+covering it.
+
+* The model called ``establish_submit`` five times and the broker refused every
+  one, because the plugin forwarded the model's own paraphrase in ``spec_body``
+  and the broker refuses a submit that restates the confirmed sentence. The
+  model could not fix it by trying harder: the text was never its to change.
+  The fix is that the field is no longer sent. :func:`_submit_payload` puts the
+  id, the scope and the provenance on the wire and nothing that describes the
+  rule (broker-side: ``_refuse_restated``, and the row IS the source).
+* With nothing committed and no status read, the reply told the firm the rule
+  was in effect. It was not; the seat's preference manifest was empty. That
+  sentence is now a gate (:func:`_in_effect_gate`), not a paragraph.
+
+The general shape, and the reason both fixes look like the readback lock: when
+a claim is checkable and the cost of it being wrong is a firm that stops asking
+for what it is not getting, the check goes in the seam, and the instruction
+stays only as the explanation.
+
 WHY THE ADMIN CHECK IS A HOOK rather than a check inside the handlers: Hermes
 hands a tool handler only ``task_id``/``user_task`` (``model_tools.py``
 dispatch) — never ``sender_id`` or ``session_id``. ``pre_llm_call`` is the one
@@ -195,6 +216,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import socket
 import time
 from collections import OrderedDict
@@ -250,7 +272,16 @@ TOOL_PROPOSE = "establish_propose"
 TOOL_PENDING = "establish_pending"
 TOOL_SUBMIT = "establish_submit"
 TOOL_STATUS = "establish_status"
+
 ESTABLISH_TOOLS = (TOOL_STAGE, TOOL_PROPOSE, TOOL_PENDING, TOOL_SUBMIT, TOOL_STATUS)
+
+#: The intake's terminal status for a run whose object the applier has picked
+#: up (``establish_intake.intake.STATUS_INSTALLED``). Duplicated rather than
+#: imported: the plugin loads inside the seat's agent process, the intake runs
+#: as root on the other side of the spool, and they share no import path. If
+#: the intake ever renames it, this gate goes quiet in the SAFE direction (it
+#: keeps blocking) rather than the loud one.
+_STATUS_INSTALLED = "installed"
 
 #: Mirrors the vault schema + broker vocabulary. Declared here only so the model
 #: sees a closed enum; the broker and the intake both re-validate it.
@@ -277,6 +308,95 @@ _MAX_READBACKS = 8
 #: that can block, exactly like ``_ADMIN_STASH``. A submit naming any other id
 #: is refused: the model does not get to decide what was confirmed.
 _CONFIRMED_STASH: dict[str, str] = {}
+
+#: The confirmed rule's own sentence, kept beside the id for exactly one
+#: purpose: :func:`_in_effect_gate` must not read the RULE as a claim about
+#: itself. A rule that says "from now on, letters are formal" carries a claim
+#: phrase in its own body, and a reply that quotes the rule back is quoting,
+#: not asserting.
+_CONFIRMED_TEXT: dict[str, str] = {}
+
+#: Run id -> proposal id, recorded when a submit that carried a proposal is
+#: accepted. The broker echoes both, and the pair is the only way to read a
+#: later ``establish_status`` as "THAT rule installed": the person-scope result
+#: names the person and the digest, never the proposal it came from.
+_SUBMIT_RUNS: OrderedDict[str, str] = OrderedDict()
+_MAX_SUBMIT_RUNS = 16
+
+#: Proposal ids this session has OBSERVED installed, keyed by session. Written
+#: only from a broker answer -- an ``establish_status`` result whose status is
+#: ``installed``, or a submit refusal in which the broker itself says the rule
+#: is already committed and in effect. Never written from anything the model
+#: said. Read by :func:`_in_effect_gate`, which is the whole point: "in effect"
+#: is a fact about the seat, and the seat is the only thing entitled to assert
+#: it (ss-console#2529, pilot 2026-08-21).
+_INSTALLED_RULES: OrderedDict[str, set[str]] = OrderedDict()
+_MAX_INSTALLED = 8
+
+#: The last thing the broker said when it refused a commit this session. The
+#: gate quotes it back, because a reply that says "I could not commit it" and
+#: does not say WHY is the same dead end for the firm as the false claim.
+_LAST_SUBMIT_REFUSAL: OrderedDict[str, str] = OrderedDict()
+_MAX_REFUSALS = 8
+
+#: Phrases that assert a rule is ALREADY in force. Deliberately not a list of
+#: "words about rules": each of these is a completed-state claim, and the
+#: hedged forms ("will be in effect", "could not be committed") are excluded by
+#: :data:`_EFFECT_HEDGES` rather than by leaving the phrase out, so the honest
+#: sentences the seat asks the model to send keep passing.
+_EFFECT_CLAIMS = (
+    "in effect",
+    "in force",
+    "takes effect",
+    "take effect",
+    "taken effect",
+    "committed",
+    "applied",
+    "installed",
+    "from now on",
+    "going forward",
+)
+
+#: Read immediately before a claim phrase: it is then a promise, a condition or
+#: a denial, not an assertion of present effect. "recorded and will be in
+#: effect within a minute" is exactly what :data:`_CONFIRMED_NOTE` asks for on a
+#: converging run, and "confirmed but could not be committed" is what the gate
+#: itself asks for -- neither may be blocked.
+_EFFECT_HEDGES = (
+    "will",
+    "going to",
+    "once",
+    "when",
+    "as soon as",
+    "should",
+    "expect",
+    "shortly",
+    "not yet",
+    "yet to be",
+    "could not",
+    "couldn't",
+    "cannot",
+    "can't",
+    "was not",
+    "wasn't",
+    "were not",
+    "is not",
+    "isn't",
+    "has not",
+    "hasn't",
+    "have not",
+    "haven't",
+    "before it",
+    "until",
+    "unable to",
+    "failed to",
+)
+
+#: How far back to look for a hedge. One short clause -- long enough for
+#: "will be in effect" and "could not be committed", short enough that a
+#: "will" belonging to another verb in the same sentence does not launder
+#: the claim.
+_HEDGE_WINDOW = 24
 
 _STAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -424,7 +544,8 @@ _SUBMIT_SCHEMA: dict[str, Any] = {
                 "staging, no corpus; only the person themselves may do it. "
                 "'firm_adjust' commits ONE rule the person already confirmed; it "
                 "needs proposal_id and nothing else about the rule, because the "
-                "sentence comes from what they were shown."
+                "sentence comes from what they were shown. Same on 'person' "
+                "when you have a confirmed proposal_id."
             ),
         },
         "proposal_id": {
@@ -432,7 +553,12 @@ _SUBMIT_SCHEMA: dict[str, Any] = {
             "description": (
                 "The tag of the rule the person confirmed, without the brackets "
                 "(e.g. '7f3a2c1d'). Required for scope 'firm_adjust'. You may "
-                "only pass an id the seat told you was confirmed on this turn."
+                "only pass an id the seat told you was confirmed on this turn. "
+                "WITH one, pass NOTHING ELSE about the rule: no spec_body, no "
+                "text, no person, no output_class, no property. The seat holds "
+                "the sentence the person was shown and commits that; a submit "
+                "that restates it, even accurately, is refused, and rewriting "
+                "your version cannot make it pass."
             ),
         },
         "append": {
@@ -446,9 +572,11 @@ _SUBMIT_SCHEMA: dict[str, Any] = {
         "person": {
             "type": ["string", "null"],
             "description": (
-                "Required for scope 'person': the email address of the person "
-                "whose preferences these are. It MUST be exactly the address of "
-                "the person speaking to you — the gate refuses any other value."
+                "Required for scope 'person' WITHOUT a proposal_id: the email "
+                "address of the person whose preferences these are. It MUST be "
+                "exactly the address of the person speaking to you, and the gate "
+                "refuses any other value. With a proposal_id, omit it: the seat "
+                "takes the person from the confirmed proposal."
             ),
         },
         "staging_id": {
@@ -490,7 +618,9 @@ _SUBMIT_SCHEMA: dict[str, Any] = {
                 "The spec you drafted, as prose for the drafting model. Carries "
                 "NO client text beyond the approved fixed strings and NO digits "
                 "outside {{profile.*}} tokens — the gates refuse both. Required "
-                "for 'install'."
+                "for 'install' from a staged corpus, and forbidden when you are "
+                "committing a confirmed proposal_id, because that sentence is the "
+                "person's, not yours to write."
             ),
         },
         "assertions": {
@@ -564,7 +694,9 @@ _SUBMIT_DESCRIPTION = (
     "profile you draft the spec against, 'install' to submit your drafted spec "
     "through the compiler gates and install it on pass. Returns a run_id to poll "
     "with establish_status. The result names any auto-demoted rules and the "
-    "documents that violated them — relay those plainly in your reply."
+    "documents that violated them; relay those plainly in your reply. To commit "
+    "a rule someone just confirmed, pass its proposal_id and nothing describing "
+    "the rule; the seat commits the sentence they were shown."
 )
 
 _STATUS_DESCRIPTION = (
@@ -726,6 +858,36 @@ _SUBMIT_UNCONFIRMED_MESSAGE = (
     "effect."
 )
 
+_SUBMIT_REFUSED_NOTE = (
+    "The seat refused this commit. Report that refusal to the person in your "
+    "reply, in the seat's own words, and say plainly that the rule is NOT in "
+    "effect. Do NOT submit again with different wording: the sentence being "
+    "committed comes from what the person was shown and confirmed, not from "
+    "this call, so re-writing it cannot make the commit succeed and a fresh "
+    "sentence is one nobody agreed to. If the refusal names something you can "
+    f"genuinely fix (a missing {TOOL_STATUS} run, an expired proposal), do that "
+    "one thing; otherwise say what happened and stop."
+)
+
+_IN_EFFECT_UNPROVEN_MESSAGE = (
+    "Refused: this message tells the person a rule is in force, and nothing on "
+    "this seat has observed rule {proposal_id} installed: no {status_tool} has "
+    "reported it, and the commit did not succeed. Of everything in a reply "
+    "this is the one sentence that cannot be walked back, because once the "
+    "firm believes a rule is in effect they stop asking for it and start "
+    "reading every later output as proof it works.\n\n"
+    "{refusal}"
+    "Send instead what actually happened: the rule was confirmed, it could not "
+    "be committed, and here is what the seat said when it refused. If you "
+    f"believe it did commit, call {TOOL_STATUS} on the run first and say it is "
+    "in effect only once the status says installed."
+)
+
+#: Filled into the message above when the broker actually said something. An
+#: empty refusal (the model never called submit at all) leaves it out rather
+#: than printing a heading over nothing.
+_IN_EFFECT_REFUSAL_BLOCK = 'The seat\'s last word on committing it was: "{message}"\n\n'
+
 _SUBMIT_NEEDS_PROPOSAL_MESSAGE = (
     f"Refused: scope 'firm_adjust' commits a rule the person already confirmed, "
     "so it needs the proposal_id of that rule and takes the sentence from "
@@ -755,13 +917,20 @@ _OLD_BROKER_MESSAGE = (
 
 _CONFIRMED_NOTE = (
     'The person just confirmed rule [rule {proposal_id}]: "{text}". Commit it '
-    f"now with {TOOL_SUBMIT} (scope '{{scope}}', proposal_id '{{proposal_id}}'), "
-    f"then call {TOOL_STATUS} on the run it returns. Reply with what is in "
+    f"now with {TOOL_SUBMIT}, and pass EXACTLY these arguments: scope "
+    "'{scope}', proposal_id '{proposal_id}', instructed_by, source_ref (and "
+    "append, on a personal rule). Do not pass the rule's text, spec_body, "
+    "person, output_class or property. The seat commits the sentence the "
+    "person was shown, from its own record, and a submit that restates it in "
+    "your words is refused outright. "
+    f"Then call {TOOL_STATUS} on the run it returns. Reply with what is in "
     "effect, for whom, and from when — but only say it is IN EFFECT once the "
     "status says installed. If the status says it was accepted and is still "
     "converging, say it is recorded and will be in effect within a minute and "
     "that you will confirm; if it says the proposal expired, ask them to state "
-    "the rule again. Never claim effect you have not observed."
+    "the rule again. If the commit was REFUSED, say that it was confirmed and "
+    "could not be committed, and quote what the seat said. Never claim effect "
+    "you have not observed."
 )
 
 _DECLINED_NOTE = (
@@ -1195,33 +1364,136 @@ def _is_old_broker(response: Any) -> bool:
     return any(marker in message for marker in _OLD_BROKER_MARKERS)
 
 
-def _submit(args: dict[str, Any], **_: Any) -> str:
-    """Submit an analyze/install run. The broker rebuilds the submission from
-    this bounded field set — nothing else on the wire reaches the spool."""
-    response = _broker_request(
-        {
+#: The scopes on which a ``proposal_id`` means "take the rule from the row".
+#: Firm-corpus establishment is deliberately NOT here: it has no pending row to
+#: source from, and a submit that happened to carry a stray id must keep its
+#: staged payload rather than be silently emptied.
+_PROPOSAL_SCOPES = ("firm_adjust", "person")
+
+
+def _submit_payload(args: dict[str, Any]) -> dict[str, Any]:
+    """The wire shape for one submit, and on a confirmed rule a SHORT one.
+
+    LIVE DEFECT (pilot seat, 2026-08-21T23:30Z, overlay 07ed486). A person
+    confirmed ``[rule 811e5a68]``. The model called ``establish_submit`` five
+    times and the broker refused all five with ``EstablishmentValidationError``,
+    because this function forwarded whatever the model had put in ``spec_body``
+    and the model had written its own paraphrase of the rule. The broker's
+    ``_refuse_restated`` is right to refuse that, because the committed bytes must
+    be the bytes the person saw, but the refusal was unfixable from the model's
+    side, since the text is not the model's to change. Nothing committed, and
+    the reply then told the firm the rule was in effect.
+
+    So the plugin stops sending it. With a ``proposal_id`` on a proposal-backed
+    scope, the wire carries the id, the scope, and the provenance, and NOTHING
+    that describes the rule: the broker sources ``text``, ``spec_body``,
+    ``person``, ``output_class`` and ``property`` from its own row. A field the
+    model cannot send is a field it cannot get wrong, which is the same
+    argument as the readback lock one step further along.
+    """
+    proposal_id = args.get("proposal_id")
+    if proposal_id is not None and args.get("scope") in _PROPOSAL_SCOPES:
+        return {
             "action": TOOL_SUBMIT,
             "scope": args.get("scope"),
-            "person": args.get("person"),
-            "staging_id": args.get("staging_id"),
-            "phase": args.get("phase"),
-            "output_class": args.get("output_class"),
-            "property": args.get("property"),
-            "spec_body": args.get("spec_body"),
-            "assertions": args.get("assertions"),
-            "corpus_manifest": args.get("corpus_manifest"),
+            "proposal_id": proposal_id,
             "instructed_by": args.get("instructed_by"),
             "source_ref": args.get("source_ref"),
-            # ss-console#2529. Present on every submit so one wire shape serves
-            # all three scopes; the broker ignores a null and refuses a
-            # firm_adjust that carries none.
-            "proposal_id": args.get("proposal_id"),
             "append": args.get("append"),
         }
-    )
+    return {
+        "action": TOOL_SUBMIT,
+        "scope": args.get("scope"),
+        "person": args.get("person"),
+        "staging_id": args.get("staging_id"),
+        "phase": args.get("phase"),
+        "output_class": args.get("output_class"),
+        "property": args.get("property"),
+        "spec_body": args.get("spec_body"),
+        "assertions": args.get("assertions"),
+        "corpus_manifest": args.get("corpus_manifest"),
+        "instructed_by": args.get("instructed_by"),
+        "source_ref": args.get("source_ref"),
+        # ss-console#2529. Present on every submit so one wire shape serves
+        # all three scopes; the broker ignores a null and refuses a
+        # firm_adjust that carries none.
+        "proposal_id": proposal_id,
+        "append": args.get("append"),
+    }
+
+
+def _submit(args: dict[str, Any], **kwargs: Any) -> str:
+    """Submit an analyze/install run. The broker rebuilds the submission from
+    this bounded field set; nothing else on the wire reaches the spool."""
+    payload = _submit_payload(args)
+    response = _broker_request(payload)
     if _is_old_broker(response):
         return _OLD_BROKER_MESSAGE
+    session_id = provenance.resolve_session(kwargs.get("session_id"))
+    if isinstance(response, dict):
+        _note_submit_outcome(session_id, payload, response)
+        if not response.get("ok") and payload.get("proposal_id"):
+            # The model's next move after a refusal is the one that goes wrong:
+            # it re-reads the rule, rewrites it, and submits again, which is the
+            # loop the pilot ran five times. Say so in the tool result, under a
+            # key of the seat's own so the broker's verdict stays verbatim.
+            response = dict(response)
+            response["seat_note"] = _SUBMIT_REFUSED_NOTE
     return json.dumps(response, ensure_ascii=False)
+
+
+def _note_submit_outcome(
+    session_id: str, payload: dict[str, Any], response: dict[str, Any]
+) -> None:
+    """Record what the broker said about a commit, for the gate to read.
+
+    Three facts come out of one answer: which run carries which proposal (so a
+    later status can be read as "THAT rule installed"), the text of a refusal
+    (so the reply can quote it), and the one refusal that is really a report of
+    success. "already committed; it is in effect" is the broker asserting the
+    rule is in force, and treating it as anything else would leave the gate
+    blocking a true sentence forever.
+    """
+    proposal_id = str(payload.get("proposal_id") or "").strip().lower()
+    if not session_id or not proposal_id:
+        return
+    if response.get("ok"):
+        run_id = str(response.get("run_id") or "").strip()
+        if run_id:
+            _SUBMIT_RUNS[run_id] = proposal_id
+            _SUBMIT_RUNS.move_to_end(run_id)
+            while len(_SUBMIT_RUNS) > _MAX_SUBMIT_RUNS:
+                _SUBMIT_RUNS.popitem(last=False)
+        _LAST_SUBMIT_REFUSAL.pop(session_id, None)
+        return
+    message = str(response.get("message") or "").strip()
+    _LAST_SUBMIT_REFUSAL[session_id] = message
+    _LAST_SUBMIT_REFUSAL.move_to_end(session_id)
+    while len(_LAST_SUBMIT_REFUSAL) > _MAX_REFUSALS:
+        _LAST_SUBMIT_REFUSAL.popitem(last=False)
+    if "already committed" in message.lower():
+        _mark_installed(session_id, proposal_id)
+
+
+def _note_confirmed_text(session_id: str, text: str) -> None:
+    """Keep the confirmed sentence beside its id, for the gate to discount."""
+    if not session_id:
+        return
+    if text:
+        _CONFIRMED_TEXT[session_id] = text
+    else:
+        _CONFIRMED_TEXT.pop(session_id, None)
+
+
+def _mark_installed(session_id: str, proposal_id: str) -> None:
+    """This session has seen the seat say the rule is in force."""
+    if not session_id or not proposal_id:
+        return
+    seen = _INSTALLED_RULES.setdefault(session_id, set())
+    seen.add(proposal_id)
+    _INSTALLED_RULES.move_to_end(session_id)
+    while len(_INSTALLED_RULES) > _MAX_INSTALLED:
+        _INSTALLED_RULES.popitem(last=False)
 
 
 def _remember_readback(session_id: str, readback: str) -> None:
@@ -1488,6 +1760,116 @@ def _readback_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, Any]
         tool_name,
     )
     return {"action": "block", "message": _READBACK_MISSING_MESSAGE.format(readback=owed[0])}
+
+
+def _in_effect_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, Any] | None:
+    """A reply may not say a rule is in force until the seat has seen it install.
+
+    THE LIVE FAILURE (pilot seat, 2026-08-21T23:30Z). The person confirmed
+    ``[rule 811e5a68]``; five commits were refused; no status was ever read;
+    and the Operator replied "Rule 811e5a68 is in effect", which was false --
+    the seat's preference manifest was empty. The instruction forbidding that
+    sentence was already there, in :data:`_CONFIRMED_NOTE`, and had been since
+    the feature shipped. It did not hold, and an instruction that has failed
+    once on the surface it exists to protect is not made stronger by being
+    repeated more firmly.
+
+    So it is a gate, on the same seam as the readback lock and for the same
+    reason: the claim is checkable, the check is cheap, and the cost of being
+    wrong is not a bad sentence but a firm that believes its instructions are
+    being followed when they are not.
+
+    NARROW BY CONSTRUCTION, three conditions, all required:
+
+    1. **This session confirmed a rule on this turn.** No confirmation, no
+       gate -- an ordinary reply that happens to say "from now on" about the
+       work in front of it is none of this function's business.
+    2. **That rule is not in the observed-installed set.** Written only from a
+       broker answer (:func:`_note_submit_outcome`, :func:`on_post_tool_call`),
+       never from anything the model said.
+    3. **The body asserts present effect, next to something naming a rule.** A
+       completed-state claim (:data:`_EFFECT_CLAIMS`) that is not hedged
+       (:data:`_EFFECT_HEDGES`), in a message that also carries a ``[rule
+       XXXXXXXX]`` tag or the word "rule".
+
+    Condition 3 is what keeps the two honest replies passing: "recorded, and it
+    will be in effect within a minute" is hedged, and "confirmed, but it could
+    not be committed" is hedged. Both are sentences the seat itself asks for
+    elsewhere, and a gate that blocked them would teach the model to say
+    nothing at all, which is the failure one door down.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    proposal_id = _CONFIRMED_STASH.get(session_id)
+    if not proposal_id:
+        return None
+    if proposal_id in _INSTALLED_RULES.get(session_id, set()):
+        return None
+    try:
+        blob = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+    except (TypeError, ValueError):
+        blob = str(args)
+    # Two runs of text in this body are QUOTED, not asserted, and both can carry
+    # a claim phrase: the rule's own sentence (which may well say "from now on")
+    # and the seat's refusal (which says "the committed rule comes from the
+    # proposal"). The gate asks for both to be quoted, so it must not then read
+    # them as the model's claim. Discounting them is not a hole: removing a
+    # sentence cannot manufacture a claim the model did not write.
+    quoted = [_CONFIRMED_TEXT.get(session_id) or "", _LAST_SUBMIT_REFUSAL.get(session_id) or ""]
+    if not _claims_effect(_discount(blob, quoted)):
+        return None
+    logger.info(
+        "hermes-smd-establishment: %s blocked; the body claims rule %s is in "
+        "effect and no install has been observed",
+        tool_name,
+        proposal_id,
+    )
+    message = _LAST_SUBMIT_REFUSAL.get(session_id) or ""
+    return {
+        "action": "block",
+        "message": _IN_EFFECT_UNPROVEN_MESSAGE.format(
+            proposal_id=proposal_id,
+            status_tool=TOOL_STATUS,
+            refusal=(_IN_EFFECT_REFUSAL_BLOCK.format(message=message) if message else ""),
+        ),
+    }
+
+
+def _discount(blob: str, quoted: list[str]) -> str:
+    """Drop each quoted run from the body, raw and JSON-escaped."""
+    for text in quoted:
+        text = text.strip()
+        if not text:
+            continue
+        for form in (text, json.dumps(text, ensure_ascii=False)[1:-1]):
+            blob = blob.replace(form, " ")
+    return blob
+
+
+def _claims_effect(blob: str) -> bool:
+    """Does this body assert, unhedged, that a rule is already in force?
+
+    Two halves, both required. The ANCHOR keeps the scan on messages that are
+    about a rule at all: a tag, or the bare word. The CLAIM is a completed-state
+    phrase with no hedge in the short run of text before it -- the window is
+    one clause, so "will be in effect" and "could not be committed" read as what
+    they are, while a denial three sentences earlier cannot launder a later
+    assertion.
+    """
+    lowered = blob.lower()
+    if not rule_confirm.RULE_TAG.search(lowered) and not re.search(r"\brules?\b", lowered):
+        return False
+    for phrase in _EFFECT_CLAIMS:
+        start = 0
+        while True:
+            found = lowered.find(phrase, start)
+            if found < 0:
+                break
+            window = lowered[max(0, found - _HEDGE_WINDOW) : found]
+            if not any(hedge in window for hedge in _EFFECT_HEDGES):
+                return True
+            start = found + 1
+    return False
 
 
 def _readback_present(readback: str, blob: str) -> bool:
@@ -1784,6 +2166,7 @@ def _confirmation_note(
     not leave the previous turn's permission standing.
     """
     _CONFIRMED_STASH.pop(session_id, None)
+    _CONFIRMED_TEXT.pop(session_id, None)
     if not isinstance(user_message, str) or not user_message.strip():
         return None
     if (
@@ -1806,6 +2189,7 @@ def _confirmation_note(
         if str(row.get("kind") or "rule") == act_broker.KIND_TOOL_CALL:
             return _act_confirmation_note(session_id, sender, is_admin, verdict.proposal_id, row)
         _CONFIRMED_STASH[session_id] = verdict.proposal_id
+        _note_confirmed_text(session_id, str(row.get("text") or ""))
         logger.info(
             "hermes-smd-establishment: rule %s confirmed by %s", verdict.proposal_id, sender
         )
@@ -1999,6 +2383,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
     """
     try:
         tool_name = kwargs.get("tool_name")
+        if tool_name == TOOL_STATUS:
+            _note_status_result(kwargs)
+            return
         connector = _CAPTURED_READ_TOOLS.get(tool_name) if isinstance(tool_name, str) else None
         if connector is None:
             return
@@ -2057,6 +2444,42 @@ def on_post_tool_call(**kwargs: Any) -> None:
             "and name the remedy",
             exc_info=True,
         )
+
+
+def _note_status_result(kwargs: dict[str, Any]) -> None:
+    """Observe an ``establish_status`` answer: did THAT rule install?
+
+    This is the only writer of the observed-installed set that runs on a
+    successful path, and it reads the BROKER's answer rather than the model's
+    account of it. Two ways to learn the id, because the two install paths
+    report differently: a firm adjustment's result names its ``adjustment_id``,
+    while a personal preference's result names the person and the digest and
+    nothing about the proposal it came from, so for that one the run id is the
+    link, recorded when the submit was accepted.
+
+    Observer only, and exception-safe: a missed observation costs one blocked
+    reply that the model can fix by calling status again, never the turn.
+    """
+    raw = kwargs.get("result")
+    if not isinstance(raw, str) or not raw:
+        return
+    try:
+        response = json.loads(unwrap_inbound(raw))
+    except (TypeError, ValueError):
+        return
+    response = _unwrap_read_result(response)
+    if not isinstance(response, dict):
+        return
+    result = response.get("result")
+    if not isinstance(result, dict) or result.get("status") != _STATUS_INSTALLED:
+        return
+    session_id = provenance.resolve_session(kwargs.get("session_id"))
+    args = kwargs.get("args")
+    args = args if isinstance(args, dict) else {}
+    run_id = str(response.get("run_id") or args.get("run_id") or "").strip()
+    for proposal_id in (_SUBMIT_RUNS.get(run_id), result.get("adjustment_id")):
+        if isinstance(proposal_id, str) and proposal_id:
+            _mark_installed(session_id, proposal_id.strip().lower())
 
 
 def _unwrap_read_result(payload: Any) -> Any:
@@ -2302,6 +2725,13 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         if withheld is not None:
             return withheld
         if isinstance(tool_name, str) and tool_name and _is_send_shaped(tool_name):
+            # The in-effect gate runs FIRST because the readback gate has a side
+            # effect, it clears the debt on delivery, and a debt spent by a
+            # send that another gate then blocks is a debt the retry no longer
+            # owes.
+            withheld = _in_effect_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))
+            if withheld is not None:
+                return withheld
             return _readback_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))
         return None
     try:
