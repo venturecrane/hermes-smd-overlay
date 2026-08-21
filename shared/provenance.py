@@ -513,11 +513,19 @@ def _record_captions(reg: ProvenanceRegister, text: str) -> None:
     match we register every left-suffix × right-prefix token combination
     (bounded at 5×5 by the regex itself): the true caption is always among
     them, and the gate's boundary-bounded containment does the rest. "In re"
-    forms register whole. Best-effort by construction of the caller.
+    forms register whole. A caption the record spells in longhand ("Espinoza
+    versus Kaviani") is harvested through CASE_NAME_VERSUS_RE and canonicalizes
+    to the "v." form, so the read registers the same caption either way.
+    Best-effort by construction of the caller.
     """
-    from shared.citation_filter import CASE_NAME_RE, canonical_caption
+    from shared.citation_filter import (
+        CASE_NAME_RE,
+        CASE_NAME_VERSUS_RE,
+        canonical_caption,
+    )
 
-    for m in CASE_NAME_RE.finditer(text):
+    matches = list(CASE_NAME_RE.finditer(text)) + list(CASE_NAME_VERSUS_RE.finditer(text))
+    for m in matches:
         canon = canonical_caption(m.group(0))
         if " v. " not in canon:
             reg.add_caption(canon)  # "in re ..." — register the whole form
