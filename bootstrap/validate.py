@@ -95,6 +95,18 @@ SEND_ACTION_CLASSES = {
     "external_send_vendor",
 }
 
+# The one non-send class `confirm` has defined behavior for, and only in the
+# persona's authored `exposure` (never `exposure_ceiling`, which the runtime
+# entitlement dial derives from send tiers): a COMMITMENT at the confirm
+# ceiling is withheld as an act proposal and released only by an
+# administrator's confirmed `[act ...]` reply (plugins/hermes-smd-trust/
+# enforce.py `_decide_approval_class`, #303). Authoring it anywhere else still
+# refuses, because there it would do nothing. Added after the first seat that
+# authored `commitment: confirm` crash-looped at boot on this validator
+# (pilot-smokeball, 2026-08-21 22:57Z): the enforce branch landed in #303 and the
+# validator had not moved with it.
+CONFIRM_NON_SEND_CLASSES_BY_FIELD = {"exposure": {"commitment"}}
+
 # Closed vocabulary for a scope.outbound_roster entry's `class` (ADR 0075).
 OUTBOUND_ROSTER_CLASSES = {"client", "records_vendor", "firm_staff"}
 
@@ -542,13 +554,20 @@ def _validate_exposure_map(
             )
         elif value not in ACCEPTED_CEILINGS:
             _err(f"{ep}: must be one of {sorted(ACCEPTED_CEILINGS)}", errors)
-        elif value == "confirm" and key not in SEND_ACTION_CLASSES:
-            # `confirm` (ADR 0071) only has defined behavior in enforce()'s send
-            # branch; reject it on any non-send class so it can't be authored where
-            # it does nothing.
+        elif (
+            value == "confirm"
+            and key not in SEND_ACTION_CLASSES
+            and key not in CONFIRM_NON_SEND_CLASSES_BY_FIELD.get(field, set())
+        ):
+            # `confirm` (ADR 0071) has defined behavior in enforce()'s send
+            # branch and, in `exposure` only, for `commitment` (#303). Reject it
+            # anywhere else so it can't be authored where it does nothing.
+            allowed = sorted(SEND_ACTION_CLASSES | CONFIRM_NON_SEND_CLASSES_BY_FIELD.get(field, set()))
             _err(
                 f"{ep}: 'confirm' is only valid for the send classes "
-                f"{sorted(SEND_ACTION_CLASSES)} (ADR 0071)",
+                f"{sorted(SEND_ACTION_CLASSES)} (ADR 0071)"
+                + (", plus commitment in exposure (#303)" if field == "exposure" else "")
+                + f"; valid here: {allowed}",
                 errors,
             )
         else:
