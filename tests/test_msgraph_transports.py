@@ -78,14 +78,20 @@ class _FakeGraphBroker:
         #: the plain-text assertions above losing their meaning.
         self.reply_calls: list[tuple[str, str, str]] = []
         self.sends: list[dict] = []
+        #: The audit joins each call carried (ss-console#2497). Recorded so a
+        #: test can assert the broker was TOLD the session and the matter — the
+        #: broker writes the CONFIRM_SEND_* row and cannot learn either itself.
+        self.joins: list[tuple[str, str | None]] = []
 
-    def send_reply(self, message_id, comment, *, html=""):
+    def send_reply(self, message_id, comment, *, html="", session_id="", matter_ref=None):
         self.replies.append((message_id, comment))
         self.reply_calls.append((message_id, comment, html))
+        self.joins.append((session_id, matter_ref))
         return ""
 
-    def send_message(self, payload):
+    def send_message(self, payload, *, session_id="", matter_ref=None):
         self.sends.append(dict(payload))
+        self.joins.append((session_id, matter_ref))
         return ""
 
 
@@ -334,7 +340,7 @@ def test_confirm_dispatch_msgraph_never_falls_back_to_agentmail(monkeypatch):
     _arm_msgraph(monkeypatch, trust)
     agentmail_calls: list[dict] = []
 
-    def _refuse(_payload):
+    def _refuse(_payload, **_kwargs):
         raise trust.outbound_send.msgraph_broker.BrokerError("recipient not authored")
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)
@@ -353,7 +359,7 @@ def test_confirm_dispatch_msgraph_fails_closed_without_broker(monkeypatch):
     trust = load_plugin("hermes-smd-trust")
     _arm_msgraph(monkeypatch, trust)
 
-    def _unavailable(_payload):
+    def _unavailable(_payload, **_kwargs):
         raise trust.outbound_send.msgraph_broker.MsGraphBrokerUnavailable("no socket")
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _unavailable)
@@ -427,7 +433,7 @@ def _both_transports(monkeypatch, trust):
     monkeypatch.setattr(
         trust.outbound_send.msgraph_broker,
         "send_message",
-        lambda payload: graph.append(dict(payload)) or "",
+        lambda payload, **_kw: graph.append(dict(payload)) or "",
     )
     monkeypatch.setattr(
         trust.outbound_send,
@@ -552,7 +558,7 @@ def test_confirm_dispatch_routes_by_adapter_when_the_tool_is_the_shared_one(monk
 def test_send_via_msgraph_surfaces_a_broker_refusal(monkeypatch):
     trust = load_plugin("hermes-smd-trust")
 
-    def _refuse(_payload):
+    def _refuse(_payload, **_kwargs):
         raise trust.outbound_send.msgraph_broker.BrokerError("not on the authored surface")
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)

@@ -433,6 +433,8 @@ def send_reply(
     text: str,
     html: str,
     sender: Callable[..., Any] | None = None,
+    session_id: str = "",
+    matter_ref: str | None = None,
 ) -> str:
     """Ask the broker to send a threaded reply; return the new msg id.
 
@@ -453,10 +455,24 @@ def send_reply(
     ``sender`` is injectable for tests. Raises :class:`RelaySendError` on any
     failure — refusal or transport alike — because the caller's contract is
     unchanged: it is exception-safe and audits a failed reply.
+
+    ``session_id`` / ``matter_ref`` (ss-console#2497) are forwarded so the row the
+    BROKER writes for this transmit carries the same joins as the REPLY_SENT row
+    the plugin writes. They are passed as keywords, so an injected ``sender``
+    that predates them raises TypeError rather than dropping them silently.
     """
     send = sender or agentmail_broker.send_reply
     try:
-        return str(send(message_id=message_id, text=text, html=html) or "")
+        return str(
+            send(
+                message_id=message_id,
+                text=text,
+                html=html,
+                session_id=session_id,
+                matter_ref=matter_ref,
+            )
+            or ""
+        )
     except agentmail_broker.BrokerError as exc:
         # The broker refused and has already recorded why. Surfacing its reason
         # keeps the operator-visible message specific ("that sender is not on

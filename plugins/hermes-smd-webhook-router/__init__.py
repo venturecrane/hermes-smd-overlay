@@ -42,7 +42,7 @@ from typing import Any
 from shared import inbound, inbound_message
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
-from shared.audit_contract import agent_event_params
+from shared.audit_contract import agent_event_params, sender_key
 from shared.customer_config import CustomerConfig
 from shared.secrets import get_secret, require
 from shared.webhook_read_surface import (
@@ -121,6 +121,8 @@ def _emit_inbound_received(
     client: Any,
     customer: str,
     envelope: inbound.InboundEnvelope,
+    dto: Any = None,
+    session_id: str = "",
 ) -> None:
     """Write one INBOUND_RECEIVED row directly via D1Client (ADR 0027).
 
@@ -131,17 +133,52 @@ def _emit_inbound_received(
     side by PR-B; the direct-INSERT path does not validate action_type, so the
     row writes through regardless. If the audit writer ever rejects the type,
     coordinate with team-lead (the schema is the canonical source).
+
+    WHO SENT IT, AND WHICH MESSAGE (ss-console#2497). Until this, the row's only
+    identifier was ``item_id`` — ``secrets.token_hex(16)``, minted here
+    (``shared/inbound.py``), belonging to nothing outside this process. So the
+    row said a message arrived and could name neither the person who sent it nor
+    the message in the mailbox it came from: naming the sender meant opening the
+    mailbox and matching by timestamp and digest, which is what an auditor does
+    when there is no record. Two facts fix it, both taken from the normalized
+    seam DTO rather than re-parsed from the provider payload:
+
+    * ``sender_key`` — ``sha256`` of the canonical address
+      (``shared.audit_contract.sender_key``). A HASH, not the address: an audit
+      export is a file that leaves the Machine, and the issue's non-goal is
+      explicit that no raw address may be in a row. The firm holds its own
+      people's addresses and can reproduce the key.
+    * ``vendor_message_id`` — ``dto.message_id``: the AgentMail message id, or
+      the Graph message id the msgraph connector normalized onto the DTO. Both
+      are OBSERVED fields of the seam contract (``shared/inbound_message.py``:
+      ``message_id`` is required for msgraph and parsed from ``message_id`` for
+      AgentMail), which is why this reads the DTO and does not reach for
+      ``internetMessageId`` — nothing in this repo has seen that field on the
+      wire, and a guessed key is a key no query will ever match.
+
+    ``session_id`` rides along under the same argument the send rows use: it is
+    the only thing that ties this row to the reply it produced. It is routinely
+    EMPTY on the live email path (core carries none at dispatch, observed
+    2026-07-15) and is then omitted rather than written as "".
     """
     metadata = {
         "per_inbound_received": True,
         "customer": customer,
         **envelope.audit_metadata(),
     }
+    if dto is not None:
+        key = sender_key(getattr(dto, "from_addr", None))
+        if key:
+            metadata["sender_key"] = key
+        vendor_message_id = getattr(dto, "message_id", "")
+        if isinstance(vendor_message_id, str) and vendor_message_id:
+            metadata["vendor_message_id"] = vendor_message_id
     # input_digest stays NULL — inbound content is never persisted, only its
     # digest (carried inside metadata via envelope.audit_metadata()).
     params = agent_event_params(
         action_type="INBOUND_RECEIVED",
         metadata=metadata,
+        session_id=session_id or None,
     )
     client.execute(_INSERT_SQL, *params)
 
@@ -528,6 +565,10 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     # Set only when the in-place sender-status write could not be applied; the
     # directive below then carries the rewrite for Hermes to apply instead.
     rewrite_text: str | None = None
+    # Bound BEFORE the try so the audit emission below can read it even when the
+    # envelope block raised partway (ss-console#2497). It is also routinely "" on
+    # the live email path, which the writer omits rather than records.
+    session_id: str = ""
     try:
         content = _inbound_content_for(payload)
         # Normalize at the seam (spec D2): one InboundMessage shape regardless of
@@ -668,6 +709,8 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
                     client=_D1_CLIENT,
                     customer=_CUSTOMER_SLUG,
                     envelope=envelope,
+                    dto=dto,
+                    session_id=session_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

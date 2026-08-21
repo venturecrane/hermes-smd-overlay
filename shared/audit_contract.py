@@ -14,7 +14,9 @@ pinned by the schema-snapshot CI guard.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import unicodedata
 from typing import Any
 
 from shared.ids import iso_utc, sha256, ulid
@@ -97,11 +99,91 @@ CHAIN_COLUMN_ALTERS: tuple[str, ...] = (
 CANONICAL_TOOL_CALL_KEY = "tool_call_id"
 DEPRECATED_TOOL_CALL_KEY = "trace_id"
 
+# The JOIN keys, as spelled inside the ``metadata`` blob (ss-console#2497).
+#
+# audit_log has twelve columns and none of them names a person, a message, or a
+# tool's output object — so on the live ashton-price ledger (1,473 rows, 2026-08-21,
+# vfy_01M0H8DR6JAPYVHFMNJZXQZ517) an INBOUND_RECEIVED row carried a random
+# ``item_id`` and no sender at all, and a REPLY_SENT row carried neither the
+# session nor the matter. Reconstructing "who caused this, answering what, about
+# which matter" was a join by TIMESTAMP ADJACENCY, which is not a join.
+#
+# These names are the join, so they are pinned here beside COLUMNS for exactly
+# the reason CANONICAL_TOOL_CALL_KEY is: six writers spread across two repos have
+# to spell them identically or a query silently reaches half the rows.
+#
+#   sender_key          sha256 of the CANONICAL address that sent an inbound
+#                       message (:func:`sender_key`). Never the address itself —
+#                       an export leaves the Machine.
+#   vendor_message_id   the provider's own id for that message (AgentMail message
+#                       id; the Graph message id the connector normalized).
+#   session_id          the agent session the row belongs to. Already the spelling
+#                       used by the per-tool and fabrication-gate writers.
+#   matter_ref          the matter the action concerned. This one ALSO has a
+#                       column, and the column is where it belongs — the metadata
+#                       spelling exists only so a consumer reading the blob finds
+#                       the same name.
+#   document_id / memo_id / draft_id
+#                       the object a read/write tool touched or created.
+#   written_body_sha256 sha256 of the body a write tool actually wrote.
+JOIN_KEYS: tuple[str, ...] = (
+    "sender_key",
+    "vendor_message_id",
+    "session_id",
+    "matter_ref",
+    "document_id",
+    "memo_id",
+    "draft_id",
+    "written_body_sha256",
+)
+
 CREATE_INDEX_SQL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
     "CREATE INDEX IF NOT EXISTS idx_audit_action_type ON audit_log(action_type, ts)",
     "CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor, ts)",
 )
+
+
+def canonical_address(address: str) -> str:
+    """The ONE canonical form an address is reduced to before it is hashed.
+
+    ``unicodedata.normalize("NFC", …).strip().lower()`` — a deliberate twin of
+    ss-console ``operator/workspace_broker/recipient_policy.py:48``
+    (``canonicalize``) and of ``shared/recipient_classifier.py``'s
+    ``_canonicalize_roster_entry``. All three must agree, because a hash is only
+    a join key if both ends reduce the same human to the same bytes.
+
+    NFC is the load-bearing part, for the same reason it is at the fence: ``é``
+    has two valid encodings, they are one character to every mail system, and
+    ``.lower()`` alone leaves them unequal — so the same person would produce two
+    different ``sender_key`` values and the ledger would report two people.
+
+    NOT ``casefold()``: it maps ``ß`` to ``ss``, which would collide two
+    different mailboxes into one key. Under a fence a collision widens the
+    allow set; under an audit key it merges two people's actions into one
+    identity, which is the worse failure of the two.
+    """
+    return unicodedata.normalize("NFC", address).strip().lower()
+
+
+def sender_key(address: object) -> str | None:
+    """Hex sha256 of :func:`canonical_address`, or ``None`` when there is none.
+
+    The audit row's answer to "which person", and the reason it is a HASH: an
+    audit export is a file that leaves the Machine, and a ledger of raw client
+    addresses is a disclosure surface the record does not need. A firm holding
+    the address can reproduce the key and find every row that person caused; a
+    reader who does not already know the address learns nothing from it.
+
+    A rostered display name may ride alongside as a LABEL. It is never the
+    identity — a display name is attacker-controlled text in every mail system.
+    """
+    if not isinstance(address, str):
+        return None
+    canonical = canonical_address(address)
+    if not canonical:
+        return None
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _dumps(metadata: dict | None) -> str | None:
@@ -163,6 +245,8 @@ def agent_event_params(
     action_type: str,
     metadata: dict | None = None,
     skill_name: str | None = None,
+    session_id: str | None = None,
+    matter_ref: str | None = None,
     now_ms: int | None = None,
     now=None,
 ) -> list[Any]:
@@ -170,7 +254,36 @@ def agent_event_params(
     outbound-gate shape): fresh ULID + ISO-Z timestamp, ``actor="agent"`` /
     ``actor_role="agent"``, all digest columns NULL. ``now_ms``/``now`` are
     injectable for deterministic tests.
+
+    ``session_id`` and ``matter_ref`` are ss-console#2497. Every row this builder
+    wrote carried neither: measured on the live A&P ledger, ``session_id`` was
+    absent from 0 of 8 REPLY_SENT rows and ``matter_ref`` from every send row on
+    both seats, because this function had no argument for either. A reply that
+    cannot name the matter it was about is not an audit record of a reply.
+
+    They land in different places, on purpose:
+
+    * ``matter_ref`` goes to the **COLUMN**. It has had one since the first
+      migration; leaving the value in metadata would keep it out of the only
+      field the portal record filters and indexes on
+      (``src/lib/portal/operator/object-audit-record.ts``).
+    * ``session_id`` goes to **metadata**, because there is no column for it and
+      adding one would be a schema change. ``session_id`` is already its
+      spelling on the per-tool and fabrication-gate rows, so one query reaches
+      all of them.
+
+    An explicit ``session_id`` wins over one a caller also put in ``metadata`` —
+    the argument is the newer, deliberate channel. Both are omitted when falsy:
+    an absent join key must read as absent, never as an empty string, which the
+    chain canonicalizes distinctly from NULL.
+
+    Canonicalization is UNTOUCHED. ``metadata`` is already one of the twelve
+    hashed columns (``shared/audit_chain.py``), so new keys change the canonical
+    body of NEW rows only — every existing row keeps verifying against its own
+    stored values.
     """
+    if session_id:
+        metadata = {**(metadata or {}), "session_id": session_id}
     return build_audit_params(
         row_id=ulid(now_ms=now_ms),
         ts=iso_utc(now),
@@ -178,6 +291,7 @@ def agent_event_params(
         actor=ACTOR_AGENT,
         actor_role=ACTOR_AGENT,
         skill_name=skill_name,
+        matter_ref=matter_ref or None,
         metadata=metadata,
     )
 
@@ -190,8 +304,11 @@ __all__ = [
     "CREATE_INDEX_SQL",
     "CANONICAL_TOOL_CALL_KEY",
     "DEPRECATED_TOOL_CALL_KEY",
+    "JOIN_KEYS",
     "ACTOR_AGENT",
     "build_audit_params",
     "agent_event_params",
+    "canonical_address",
+    "sender_key",
     "sha256",
 ]

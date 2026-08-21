@@ -567,6 +567,57 @@ def test_router_emits_inbound_received_without_content(tmp_path, monkeypatch) ->
     assert hashlib.sha256(body.encode()).hexdigest() in metadata_json
 
 
+def test_inbound_row_names_the_sender_and_the_vendor_message(tmp_path, monkeypatch) -> None:
+    """ss-console#2497 — the row can say WHO sent this and WHICH message it was.
+
+    Before this, the only identifier on an INBOUND_RECEIVED row was ``item_id``,
+    minted here by ``secrets.token_hex`` and belonging to nothing outside this
+    process: naming the sender meant opening the mailbox and matching by
+    timestamp and digest. Measured on the live A&P ledger 2026-08-21
+    (``vfy_01M0H8DR6JAPYVHFMNJZXQZ517``).
+
+    FALSIFIER: drop the ``dto=`` argument at the emit call site and both
+    assertions below fail while every other inbound test stays green — which is
+    exactly how the gap survived this long.
+    """
+    mod, fake = _load_router_with_table(tmp_path, monkeypatch)
+    sender = "paralegal@example.test"
+    payload = {
+        "source": "agentmail",
+        "event_type": "message.received",
+        "message": {
+            "from": f"Paralegal <{sender}>",
+            "message_id": "am-msg-77",
+            "inbox_id": "inbox-1",
+            "text": "please pull the file",
+        },
+    }
+    mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-9"))
+    inbound_row = next(c for c in fake.calls if c[1][2] == "INBOUND_RECEIVED")
+    metadata = json.loads(inbound_row[1][-1])
+
+    assert metadata["sender_key"] == hashlib.sha256(sender.encode()).hexdigest()
+    assert metadata["vendor_message_id"] == "am-msg-77"
+    assert metadata["session_id"] == "sess-9"
+    # NON-GOAL, enforced: no raw address in any row. An export leaves the
+    # Machine, and the firm can reproduce the key from an address it already has.
+    assert sender not in inbound_row[1][-1]
+    assert "@" not in metadata["sender_key"]
+
+
+def test_inbound_row_omits_the_joins_it_cannot_resolve(tmp_path, monkeypatch) -> None:
+    """A payload with no seam DTO records no sender and no vendor id, rather than
+    empty strings that would read as "we looked and there was nobody"."""
+    mod, fake = _load_router_with_table(tmp_path, monkeypatch)
+    payload = {"source": "agentmail", "event_type": "message.received", "body": "bare"}
+    mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id=""))
+    inbound_row = next(c for c in fake.calls if c[1][2] == "INBOUND_RECEIVED")
+    metadata = json.loads(inbound_row[1][-1])
+    assert "sender_key" not in metadata
+    assert "vendor_message_id" not in metadata
+    assert "session_id" not in metadata
+
+
 def test_router_rostered_sender_is_internal_and_not_quarantined(tmp_path, monkeypatch) -> None:
     """ss #1943: a sender on scope.inbound_allow_from — the same authored list
     that already authorizes autonomous replies to them — classifies internal:

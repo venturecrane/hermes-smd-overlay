@@ -87,7 +87,7 @@ from shared import (
 )
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
-from shared.audit_contract import agent_event_params
+from shared.audit_contract import agent_event_params, sender_key
 from shared.customer_config import CustomerConfig, CustomerConfigError
 from shared.recipient_classifier import RecipientClass, classify_recipients_typed
 from shared.secrets import get_secret
@@ -164,7 +164,14 @@ _HELD_STORE: held_store.HeldReplyStore | None = None
 _SWEEPER: Any | None = None
 
 
-def _send_msgraph_reply(graph_message_id: str, text: str, html: str = "") -> str:
+def _send_msgraph_reply(
+    graph_message_id: str,
+    text: str,
+    html: str = "",
+    *,
+    session_id: str = "",
+    matter_ref: str | None = None,
+) -> str:
     """Reply in-thread via Microsoft Graph, keyed on the recorded message id.
 
     Graph derives the recipients from the original message (POST
@@ -205,12 +212,23 @@ def _send_msgraph_reply(graph_message_id: str, text: str, html: str = "") -> str
     for the same reason it is sound in ``hermes-smd-trust``: the transform is
     pure and presentational, adding no token of content the fabrication scan,
     the content floor, and the matter gate have not already evaluated. A
-    composer-authored ``html`` wins, exactly as it does there."""
+    composer-authored ``html`` wins, exactly as it does there.
+
+    ``session_id`` / ``matter_ref`` (ss-console#2497) are forwarded so the
+    CONFIRM_SEND_DISPATCHED row the BROKER writes carries the same two joins as
+    the REPLY_SENT row this plugin writes. Without them the two rows describing
+    one reply could only be matched by their timestamps."""
     body_html = (
         html if html.strip() else (report_render.render_markdown(text) if text.strip() else "")
     )
     try:
-        msgraph_broker.send_reply(graph_message_id, text, html=body_html)
+        msgraph_broker.send_reply(
+            graph_message_id,
+            text,
+            html=body_html,
+            session_id=session_id,
+            matter_ref=matter_ref,
+        )
     except msgraph_broker.BrokerError as exc:
         raise relay.RelaySendError(f"broker refused the msgraph reply: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
@@ -229,22 +247,64 @@ _HOLD_NOTICES = notice.HoldNoticeStore()
 # a thread-local rather than eight touched call sites. Set at hook entry and
 # cleared on the way out; an absent id degrades to the empty key, which the
 # transform hook still matches for the very next drained call in the same turn.
+#
+# ss-console#2497 puts the SESSION on the same thread-local, for the identical
+# reason: ``_held`` is reached from a dozen sites and every one of the rows it
+# writes needs the session, so the value travels with the turn rather than
+# through a dozen touched signatures.
 _CURRENT_CALL = threading.local()
 
 
-def _emit_reply_event(*, action_type: str, metadata: dict) -> None:
+def _current_session_id() -> str:
+    """The session this thread's dispatch belongs to, or "" when unresolved."""
+    value = getattr(_CURRENT_CALL, "session_id", "")
+    return value if isinstance(value, str) else ""
+
+
+def _emit_reply_event(
+    *,
+    action_type: str,
+    metadata: dict,
+    session_id: str | None = None,
+    matter_ref: str | None = None,
+) -> None:
     """Write one reply-channel audit row directly via D1Client (mirror-don't-gate).
 
     Shares the ``shared.audit_contract`` row shape with the audit plugin so the
     two can never desync. Metadata carries digest + recipient + message id +
     reason ONLY — never the draft body. Best-effort: a failed emission is logged
-    and swallowed (the reply decision already happened)."""
+    and swallowed (the reply decision already happened).
+
+    THE TWO JOINS (ss-console#2497). Every row this function wrote carried
+    neither the session nor the matter: 0 of 8 REPLY_SENT rows on the A&P ledger
+    had a ``session_id`` and none of 207 on the pilot did, and ``matter_ref`` was
+    NULL on every send row on both seats. A reply row that cannot say what it was
+    about is the gap a disputed-communication question falls into.
+
+    Both are resolved HERE rather than at each call site, because the sites that
+    most need them are the early holds — roster, recipient-lock, empty body —
+    which return before any matter work happens:
+
+    * ``session_id`` defaults to the turn's session off ``_CURRENT_CALL``;
+    * ``matter_ref`` defaults to ``matter_gate.matter_ref_for``, which names the
+      single matter this session read and returns ``None`` on ambiguity rather
+      than picking one.
+
+    A caller with better evidence (the send path, which has the verdict's own
+    resolved matters) passes it explicitly and wins.
+    """
     if _D1_CLIENT is None or _CUSTOMER_SLUG is None:
         return
     try:
+        resolved_session = session_id if session_id is not None else _current_session_id()
+        resolved_matter = (
+            matter_ref if matter_ref is not None else matter_gate.matter_ref_for(resolved_session)
+        )
         params = agent_event_params(
             action_type=action_type,
             metadata={"customer": _CUSTOMER_SLUG, "reply_channel": True, **metadata},
+            session_id=resolved_session or None,
+            matter_ref=resolved_matter,
         )
         _D1_CLIENT.execute(_INSERT_SQL, *params)
     except Exception as exc:  # noqa: BLE001 — audit must never break the hook
@@ -267,6 +327,12 @@ def _note_fallback_resolution() -> None:
 
 
 def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
+    # ``_matter_ref`` is a CONTROL argument, not metadata: an underscore-prefixed
+    # key so it cannot collide with a real metadata field, popped before the rest
+    # of ``extra`` becomes the row's metadata. Callers that know the matter the
+    # body cites pass it; everyone else lets ``_emit_reply_event`` resolve the
+    # session's own (ss-console#2497).
+    matter_ref = extra.pop("_matter_ref", None)
     _emit_reply_event(
         action_type="REPLY_HELD",
         metadata={
@@ -275,6 +341,7 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
             "message_id": origin.message_id,
             **extra,
         },
+        matter_ref=matter_ref,
     )
     # ss-console#2367: the audit row is the record, not the telling. Record the
     # hold so ``on_transform_tool_result`` can put it in front of the model in
@@ -405,6 +472,12 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # whose result the agent is about to read (ss-console#2367).
         tool_call_id = kwargs.get("tool_call_id")
         _CURRENT_CALL.tool_call_id = tool_call_id if isinstance(tool_call_id, str) else ""
+        # ss-console#2497: bind the session at the SAME point, before any hold can
+        # fire. The early holds — roster, recipient-lock, empty body — return long
+        # before the send path resolves anything, and they are the rows an auditor
+        # asking "why did this person get no answer" reads first.
+        raw_session_id = kwargs.get("session_id")
+        _CURRENT_CALL.session_id = raw_session_id if isinstance(raw_session_id, str) else ""
 
         # (0) The draft must actually exist. ``post_tool_call`` fires after every
         # dispatch, including one that returned an error, and the relay used to
@@ -637,12 +710,18 @@ def on_post_tool_call(**kwargs: Any) -> None:
             # (ADR 0072, the same carve-out enforce.py applies).
             recipient_is_exempt=recipient_class in (RecipientClass.INTERNAL, RecipientClass.VENDOR),
         )
+        # The verdict's own cited-and-resolved tokens are better evidence of what
+        # this reply is ABOUT than the session's read set, so from here down the
+        # rows carry the matter the body actually names (ss-console#2497). Still
+        # ``None`` when the body cites two matters — see ``matter_ref_for``.
+        cited_matter_ref = matter_gate.matter_ref_for(session_id, matter_verdict.matters)
         if matter_verdict.should_withhold and matter_gate.mode() == "block":
             _held(
                 "matter_mismatch",
                 origin,
                 matters=list(matter_verdict.matters),
                 detail=matter_verdict.reason,
+                _matter_ref=cited_matter_ref,
             )
             return
         if matter_verdict.status == "unresolved" and matter_verdict.matters:
@@ -660,6 +739,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
                     "matters": list(matter_verdict.matters),
                     "detail": matter_verdict.reason,
                 },
+                session_id=session_id,
+                matter_ref=cited_matter_ref,
             )
 
         # (d) Rate-limit under the authored send policy (#2070). Resolved LIVE
@@ -729,12 +810,20 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # never falls back to AgentMail.
         try:
             if adapter == _ADAPTER_MSGRAPH:
-                sent_id = _send_msgraph_reply(origin.message_id, send_text or send_html, send_html)
+                sent_id = _send_msgraph_reply(
+                    origin.message_id,
+                    send_text or send_html,
+                    send_html,
+                    session_id=session_id,
+                    matter_ref=cited_matter_ref,
+                )
             else:
                 sent_id = relay.send_reply(
                     message_id=origin.message_id,
                     text=send_text,
                     html=send_html,
+                    session_id=session_id,
+                    matter_ref=cited_matter_ref,
                 )
         except relay.RelaySendError as exc:
             _emit_reply_event(
@@ -745,6 +834,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
                     "recipient": origin.sender_address,
                     "message_id": origin.message_id,
                 },
+                session_id=session_id,
+                matter_ref=cited_matter_ref,
             )
             return
 
@@ -753,6 +844,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
         _REPLIED.commit(origin.message_id)
 
         # (g) Audit the send — digest + recipient + message ids, never the body.
+        inbound_sender_key = sender_key(origin.sender_address)
+        sender_key_metadata = {"sender_key": inbound_sender_key} if inbound_sender_key else {}
         _emit_reply_event(
             action_type="REPLY_SENT",
             metadata={
@@ -764,12 +857,21 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 "inbox_id": origin.inbox_id,
                 "sent_message_id": sent_id,
                 "body_digest": inbound.content_digest(scan_text),
+                # Which PERSON this answered, as a key rather than an address
+                # (ss-console#2497). ``recipient`` above is the raw address and
+                # predates this issue; ``sender_key`` is what joins this row to
+                # the INBOUND_RECEIVED row that opened the turn, without a second
+                # address leaving the Machine in an export.
+                **sender_key_metadata,
             },
+            session_id=session_id,
+            matter_ref=cited_matter_ref,
         )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-reply: post_tool_call handler error: %s", exc)
     finally:
         _CURRENT_CALL.tool_call_id = ""
+        _CURRENT_CALL.session_id = ""
 
 
 def on_transform_tool_result(**kwargs: Any) -> str | None:
@@ -811,7 +913,16 @@ def on_transform_tool_result(**kwargs: Any) -> str | None:
 
 
 def _release_send(row: held_store.HeldReply) -> str:
-    """Transmit one released reply through the same transports the live path uses."""
+    """Transmit one released reply through the same transports the live path uses.
+
+    NO SESSION AND NO MATTER, deliberately (ss-console#2497). This runs on the
+    sweeper thread minutes or hours after the turn that composed the reply; the
+    held-reply store persists the body, the sender and the adapter, and never
+    persisted either join. Writing the sweeper's own (absent) session onto the
+    row would be a fabricated attribution, so the released rows carry neither and
+    are found instead by ``in_reply_to`` plus ``released_from_hold``. Persisting
+    the two on the held row at enqueue time is the fix and is not this change.
+    """
     if row.adapter == _ADAPTER_MSGRAPH:
         return _send_msgraph_reply(row.message_id, row.send_text or row.send_html, row.send_html)
     return relay.send_reply(

@@ -48,13 +48,27 @@ def transmit_available() -> bool:
     return bool(os.environ.get(SOCKET_ENV, "").strip())
 
 
-def _call(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _call(
+    action: str,
+    payload: dict[str, Any],
+    *,
+    session_id: str = "",
+    matter_ref: str | None = None,
+) -> dict[str, Any]:
     if not transmit_available():
         raise MsGraphBrokerUnavailable(
             f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
         )
+    # ss-console#2497 — see the twin note in ``agentmail_broker``. Beside the
+    # payload, not inside it, and optional on the wire so the broker and the
+    # overlay can be deployed in either order.
+    envelope: dict[str, Any] = {"action": action, "payload": payload}
+    if session_id:
+        envelope["session_id"] = session_id
+    if matter_ref:
+        envelope["matter_ref"] = matter_ref
     try:
-        return request({"action": action, "payload": payload}, timeout=SEND_TIMEOUT_SECONDS)
+        return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
     except OSError as exc:
         # Transport-level (OSError covers socket timeouts: TimeoutError has
         # subclassed it since 3.10). The broker may or may not have sent.
@@ -65,7 +79,9 @@ def _call(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise MsGraphBrokerUnavailable(f"broker unreachable: {exc}") from exc
 
 
-def send_message(payload: dict[str, Any]) -> str:
+def send_message(
+    payload: dict[str, Any], *, session_id: str = "", matter_ref: str | None = None
+) -> str:
     """Transmit a fresh message via Graph ``/sendMail``.
 
     ``payload`` carries only content and recipients, flat (``to``/``cc``/
@@ -76,10 +92,22 @@ def send_message(payload: dict[str, Any]) -> str:
     message id to return; the caller surfaces a placeholder and the audit row's
     ``input_digest`` is what identifies the transmit.
     """
-    return str(_call("msgraph_send", payload).get("message_id") or "")
+    return str(
+        _call("msgraph_send", payload, session_id=session_id, matter_ref=matter_ref).get(
+            "message_id"
+        )
+        or ""
+    )
 
 
-def send_reply(message_id: str, comment: str, *, html: str = "") -> str:
+def send_reply(
+    message_id: str,
+    comment: str,
+    *,
+    html: str = "",
+    session_id: str = "",
+    matter_ref: str | None = None,
+) -> str:
     """Reply in-thread to an inbound Graph message.
 
     The recipient is structural — Graph derives it from the source message — and
@@ -98,7 +126,12 @@ def send_reply(message_id: str, comment: str, *, html: str = "") -> str:
     payload: dict[str, Any] = {"message_id": message_id, "comment": comment}
     if html.strip():
         payload["html"] = html
-    return str(_call("msgraph_reply", payload).get("message_id") or "")
+    return str(
+        _call("msgraph_reply", payload, session_id=session_id, matter_ref=matter_ref).get(
+            "message_id"
+        )
+        or ""
+    )
 
 
 __all__ = [

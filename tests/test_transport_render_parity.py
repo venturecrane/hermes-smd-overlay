@@ -123,12 +123,12 @@ def _send_body_on(monkeypatch, trust, tmp_path, adapter: str, args: dict) -> dic
     monkeypatch.setattr(
         trust.outbound_send.msgraph_broker,
         "send_message",
-        lambda payload: graph.append(dict(payload)) or "",
+        lambda payload, **_joins: graph.append(dict(payload)) or "",
     )
     monkeypatch.setattr(
         trust.outbound_send.agentmail_broker,
         "send_message",
-        lambda payload: agentmail.append(dict(payload)) or "am-1",
+        lambda payload, **_joins: agentmail.append(dict(payload)) or "am-1",
     )
 
     result = trust._smd_send_message(dict(args))
@@ -267,12 +267,12 @@ def _reply_html_on(monkeypatch, tmp_path, adapter: str, args: dict) -> tuple[str
     monkeypatch.setattr(
         mod.msgraph_broker,
         "send_reply",
-        lambda _mid, comment, *, html="": wire.append((comment, html)) or "",
+        lambda _mid, comment, *, html="", **_joins: wire.append((comment, html)) or "",
     )
     monkeypatch.setattr(
         mod.relay.agentmail_broker,
         "send_reply",
-        lambda *, message_id, text, html: wire.append((text, html)) or "am-1",
+        lambda *, message_id, text, html, **_joins: wire.append((text, html)) or "am-1",
     )
 
     inbound.SESSION_INBOUND_ORIGIN._origins.clear()
