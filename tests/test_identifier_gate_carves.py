@@ -13,14 +13,22 @@ about this call?" is the one that got answered wrong.
    into the firm's file with no identifier check, and `read_document` then seeded
    every number in them straight back into the register as though read.
 
-2. **They report rather than refuse, per tool.** A demand letter is dense with
-   figures and dates the firm authored elsewhere. The ss#2247 note in
-   `outbound.py` records what happened the last time a gate started refusing that
-   kind of content without its false-positive rate being read first: the agent
-   deleted the wage rates from a letter so it would stage. So these two measure
-   and log. `mode=report_tool` is deliberately not the same string as the
-   operator-set `SMD_IDENTIFIER_GATE_MODE=report`, so a ledger reader can tell a
-   two-tool posture from a whole-seat rollback.
+2. **They reported rather than refused, per tool, until the rate was read.** A
+   demand letter is dense with figures and dates the firm authored elsewhere. The
+   ss#2247 note in `outbound.py` records what happened the last time a gate
+   started refusing that kind of content without its false-positive rate being
+   read first: the agent deleted the wage rates from a letter so it would stage.
+   So both tools measured and logged. `mode=report_tool` is deliberately not the
+   same string as the operator-set `SMD_IDENTIFIER_GATE_MODE=report`, so a ledger
+   reader can tell a per-tool posture from a whole-seat rollback.
+
+   `mcp_smokeball_render_docx_draft` now BLOCKS, and the tests below pin that.
+   Four pilot drafting lanes on 2026-08-21 (ss-console#2511,
+   `vfy_01M0JG54ATP5ZA1TDTQJ6CEVWA`) put ten render calls through the gate for
+   zero false positives and one genuine catch: computed response deadlines
+   reached a filed Word draft while the same values were refused on the memo and
+   on the email in the same turn. `mcp_smokeball_add_file` stays report-only, on
+   the same reasoning as before, because no lane has exercised it yet.
 
 3. **An executed internal write stopped being described as a draft.** Covered in
    `test_trust_enforce.py` alongside the rest of the decision vocabulary.
@@ -87,18 +95,13 @@ def _rows(fake: _FakeD1Client) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("tool", "key"),
-    [
-        ("mcp_smokeball_add_file", "content_text"),
-        ("mcp_smokeball_render_docx_draft", "draft_markdown"),
-    ],
-)
-def test_the_document_writes_are_measured_and_allowed(gate, tool: str, key: str) -> None:
+def test_add_file_is_measured_and_allowed(gate) -> None:
+    """The half of the carve that survives: no lane has exercised add_file, so
+    its false-positive rate is unread and it still measures rather than refuses."""
     plugin, fake = gate
     directive = plugin.outbound.check_outbound_draft(
-        tool_name=tool,
-        args={key: UNREAD_BODY},
+        tool_name="mcp_smokeball_add_file",
+        args={"content_text": UNREAD_BODY},
         session_id="s",
         tool_call_id="c",
     )
@@ -109,6 +112,64 @@ def test_the_document_writes_are_measured_and_allowed(gate, tool: str, key: str)
     assert '"blocked":false' in rows[0]
     assert '"case_number"' in rows[0]
     # The row names shapes, never the value, on this path as on every other.
+    assert SENTINEL not in rows[0]
+
+
+def test_a_word_draft_refuses_an_unread_identifier(gate) -> None:
+    """The half of the carve that ended: render_docx_draft blocks.
+
+    Same body, same session, same unread case number as the add_file test above.
+    Ten render calls across four pilot lanes on 2026-08-21 produced no false
+    positive and one genuine catch, so the tool falls through to the ordinary
+    mode resolution and refuses like a memo does. The ledger row has to say
+    `mode=block` and not `mode=report_tool`, because a reader who sees the carve
+    string on this tool is looking at a seat that never took the flip.
+    """
+    plugin, fake = gate
+    directive = plugin.outbound.check_outbound_draft(
+        tool_name="mcp_smokeball_render_docx_draft",
+        args={"draft_markdown": UNREAD_BODY},
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert directive is not None and directive["action"] == "block"
+    rows = _rows(fake)
+    assert len(rows) == 1, rows
+    assert '"mode":"block"' in rows[0]
+    assert '"blocked":true' in rows[0]
+    assert '"case_number"' in rows[0]
+    assert "report_tool" not in rows[0]
+    assert SENTINEL not in rows[0]
+
+
+def test_a_word_draft_refuses_a_seat_sourced_identifier(gate) -> None:
+    """The seat-text path blocks on render_docx_draft too.
+
+    A value the seat read out of its own instructions is the case the report
+    carve used to swallow whole: `source=seat_text` was recorded and the draft
+    still went into the firm's file. Pinned separately from the ordinary refusal
+    because the two reach `should_block` by different routes, and the flip has to
+    close both.
+    """
+    plugin, fake = gate
+    plugin.on_post_tool_call(
+        tool_name="read_file",
+        result=f"The sentinel case number is {SENTINEL}.",
+        session_id="s",
+        tool_call_id="r2",
+    )
+    directive = plugin.outbound.check_outbound_draft(
+        tool_name="mcp_smokeball_render_docx_draft",
+        args={"draft_markdown": UNREAD_BODY},
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert directive is not None and directive["action"] == "block"
+    rows = _rows(fake)
+    assert len(rows) == 1, rows
+    assert '"mode":"block"' in rows[0]
+    assert '"blocked":true' in rows[0]
+    assert '"source":"seat_text"' in rows[0]
     assert SENTINEL not in rows[0]
 
 
@@ -135,10 +196,10 @@ def test_the_same_body_still_blocks_on_a_memo(gate) -> None:
 def test_report_tool_is_distinguishable_from_an_operator_rollback(gate, monkeypatch) -> None:
     """`mode` has to answer "why did this not block?" on its own.
 
-    With the seat in rollback every row says `report`; with only the two document
-    tools carved, exactly those rows say `report_tool`. If the two shared a
-    string, a ledger reader could not tell a two-tool posture from a seat whose
-    gate someone had switched off during an incident.
+    With the seat in rollback every row says `report`; with only the carved tool,
+    exactly that row says `report_tool`. If the two shared a string, a ledger
+    reader could not tell a per-tool posture from a seat whose gate someone had
+    switched off during an incident.
     """
     plugin, fake = gate
     monkeypatch.setenv("SMD_IDENTIFIER_GATE_MODE", "report")
@@ -149,8 +210,8 @@ def test_report_tool_is_distinguishable_from_an_operator_rollback(gate, monkeypa
         tool_call_id="c1",
     )
     plugin.outbound.check_outbound_draft(
-        tool_name="mcp_smokeball_render_docx_draft",
-        args={"draft_markdown": UNREAD_BODY},
+        tool_name="mcp_smokeball_add_file",
+        args={"content_text": UNREAD_BODY},
         session_id="s",
         tool_call_id="c2",
     )
@@ -158,14 +219,18 @@ def test_report_tool_is_distinguishable_from_an_operator_rollback(gate, monkeypa
     assert modes == ["report", "report_tool"]
 
 
-def test_the_report_carve_covers_exactly_two_tools() -> None:
-    """Pinned as a set, so a third tool cannot be added without a decision."""
+def test_the_report_carve_covers_exactly_one_tool() -> None:
+    """Pinned as a set, so a second tool cannot be added without a decision.
+
+    `mcp_smokeball_render_docx_draft` left this set on 2026-08-21 with its
+    false-positive rate read. It is named here rather than merely absent, so a
+    revert has to argue with a test instead of quietly re-widening the carve.
+    """
     ob = load_plugin("hermes-smd-trust").outbound
-    assert ob._REPORT_ONLY_DRAFT_TOOLS == frozenset(
-        {"mcp_smokeball_add_file", "mcp_smokeball_render_docx_draft"}
-    )
-    # And the render TEMPLATE path is deliberately not among them: it composes
-    # from authored fields rather than from a model-written markdown body.
+    assert ob._REPORT_ONLY_DRAFT_TOOLS == frozenset({"mcp_smokeball_add_file"})
+    assert "mcp_smokeball_render_docx_draft" not in ob._REPORT_ONLY_DRAFT_TOOLS
+    # And the render TEMPLATE path was never among them: it composes from
+    # authored fields rather than from a model-written markdown body.
     assert "mcp_smokeball_render_docx_template" not in ob._REPORT_ONLY_DRAFT_TOOLS
 
 
