@@ -203,7 +203,12 @@ def canonical_caption(text: str) -> str:
     """
     s = _normalize_encoding_bypass(text or "")
     s = re.sub(r"\s+", " ", s).strip().casefold()
-    return re.sub(r"\b(?:v(?:s)?\.?|versus)\s", "v. ", s)
+    # Alternation ordered so "ersus" is tried before "s", and the optional dot
+    # sits outside the group so "versus." folds too. Kept character-identical to
+    # the ss-console twin (operator/safety-substrate/citation_filter.py): the two
+    # copies must agree on canonical form or an allowlist entry registered by one
+    # will not match a hit canonicalized by the other.
+    return re.sub(r"\bv(?:ersus|s)?\.?\s", "v. ", s)
 
 
 def _canonical_allowlist(

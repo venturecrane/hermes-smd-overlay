@@ -18,7 +18,7 @@ The ``versus`` pattern is case-SENSITIVE in its parties, unlike ``CASE_NAME_RE``
 """
 
 from shared import provenance
-from shared.citation_filter import contains_citation, scan
+from shared.citation_filter import canonical_caption, contains_citation, scan
 from shared.identifier_filter import ProvenanceRegister
 from shared.outbound_gate import evaluate
 
@@ -71,6 +71,26 @@ def test_versus_caption_blocks_without_allowlist() -> None:
 def test_versus_caption_passes_when_the_v_form_is_allowlisted() -> None:
     """A caption read as "Espinoza v. Kaviani" also exempts the longhand form."""
     assert not contains_citation(_VERSUS_BODY, allowed_case_names=["ESPINOZA v. Kaviani"])
+
+
+def test_every_separator_spelling_canonicalizes_the_same() -> None:
+    """Parity pin for the ss-console twin.
+
+    Both copies must agree on canonical form or an allowlist entry registered by
+    one will not match a hit canonicalized by the other. "versus." with a
+    trailing dot is the spelling the two implementations most easily disagree on,
+    because the optional dot has to sit outside the separator alternation.
+    """
+    for raw in (
+        "Smith v. Jones",
+        "Smith v Jones",
+        "Smith vs. Jones",
+        "Smith vs Jones",
+        "Smith versus Jones",
+        "Smith versus. Jones",
+        "SMITH VERSUS JONES",
+    ):
+        assert canonical_caption(raw) == "smith v. jones", raw
 
 
 # ---- gate reason ------------------------------------------------------------
