@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from email.utils import parseaddr
 from typing import Any
 
-from shared import agentmail_broker, content_floor, outbound_gate
+from shared import agentmail_broker, content_floor, inbound, outbound_gate
 from shared import send_policy as send_policy_mod
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,16 @@ def draft_body(args: Any) -> tuple[str, str, str]:
     on purpose: the floors fail CLOSED on an uninspectable body, and the caller
     additionally refuses to send when both ``send_text`` and ``send_html`` are
     empty (a subject-only draft has nothing to relay).
+
+    The two halves are digested DIFFERENTLY and on purpose (ss-console#2501).
+    ``scan_text`` feeds ``body_digest``, which proves that what the floors
+    inspected is what the audit row describes -- a statement about the inside of
+    this system, and unverifiable from outside it, since the subject it folds in
+    is never transmitted. ``send_text`` / ``send_html`` feed
+    ``body_digest_authored`` / ``body_digest_authored_html``, which are computed
+    over exactly the bytes handed to the transport, so counsel holding the
+    firm's own copy of the message can recompute them. See
+    :func:`authored_digests`.
     """
     if not isinstance(args, dict):
         return "", "", ""
@@ -482,11 +492,63 @@ def send_reply(
         raise RelaySendError(f"broker transmit unavailable: {exc}") from exc
 
 
+# ---------------------------------------------------------------------------
+# Independently checkable digests over the transmitted body (ss-console#2501)
+# ---------------------------------------------------------------------------
+
+
+def authored_digest(body: str) -> str:
+    """SHA-256 hex over exactly the UTF-8 bytes of ``body``. "" for no body.
+
+    Deliberately the same primitive the rest of the ledger uses
+    (:func:`shared.inbound.content_digest`), because a second hash
+    implementation is a second thing that can disagree.
+
+    An ABSENT body digests to "" rather than to the SHA-256 of the empty string.
+    A reader of the audit row must be able to tell "no HTML was authored" from
+    "HTML whose content was empty", and ``e3b0c442...`` looks like a real body
+    to anyone who does not recognize it on sight.
+    """
+    return inbound.content_digest(body) if body else ""
+
+
+def authored_digests(*, text: str, html: str) -> dict[str, str]:
+    """Audit fields for one transmitted reply body, keyed as the row carries them.
+
+    WHAT MAKES THESE CHECKABLE AND ``body_digest`` NOT. ``body_digest`` covers
+    ``draft_body``'s ``scan_text``: subject + text + html joined, an internal
+    string that includes a subject the wire never carries. Nobody outside this
+    system can reconstruct it. These two cover exactly the bytes the caller
+    hands the transport, so the recipe needs no trust in SMD:
+
+      * a transport that transmits the body verbatim (AgentMail's ``send_reply``
+        carries a real text/plain part) -- the digest of the stored part EQUALS
+        ``body_digest_authored``;
+      * Graph's ``POST /messages/{id}/reply`` -- Graph COMPOSES the stored
+        message (its own wrapper plus the quoted original), so byte equality
+        cannot hold, by construction, and the recipe is CONTAINMENT: the
+        authored bytes appear verbatim inside the stored body.
+
+    Absent halves are omitted rather than written empty, so a row never claims a
+    digest for a body that was never sent.
+    """
+    out: dict[str, str] = {}
+    text_digest = authored_digest(text)
+    if text_digest:
+        out["body_digest_authored"] = text_digest
+    html_digest = authored_digest(html)
+    if html_digest:
+        out["body_digest_authored_html"] = html_digest
+    return out
+
+
 __all__ = [
     "AGENTMAIL_API_BASE",
     "GateResult",
     "RateLimiter",
     "RelaySendError",
+    "authored_digest",
+    "authored_digests",
     "draft_body",
     "draft_recipients",
     "gate_body",

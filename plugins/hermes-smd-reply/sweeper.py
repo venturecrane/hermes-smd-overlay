@@ -65,6 +65,7 @@ def run_sweep_once(
     policy: send_policy_mod.SendPolicy,
     send_fn: Callable[[held_store_mod.HeldReply], str],
     emit_fn: Callable[..., None],
+    authored_digest_fn: Callable[[held_store_mod.HeldReply], dict[str, str]] | None = None,
     notify_fn: Callable[..., None] | None = None,
     internal_senders: Callable[[str], bool] | None = None,
     now: float | None = None,
@@ -75,6 +76,12 @@ def run_sweep_once(
     failure); ``emit_fn`` writes the audit row; ``notify_fn`` reports expiry.
     ``internal_senders`` answers whether a sender is rostered-INTERNAL, so the
     release re-applies the SAME exemption the live path applied.
+
+    ``authored_digest_fn`` returns the transport-exact body digests for one row
+    (ss-console#2501), injected for the same reason every other seam here is:
+    what the transports are handed is the plugin's knowledge, not the sweeper's.
+    Absent, a released row simply carries no authored digest -- it is never
+    written empty or guessed at.
     """
     if not policy.held_release_enabled:
         return SweepResult()
@@ -158,6 +165,10 @@ def run_sweep_once(
                 "inbox_id": row.inbox_id,
                 "sent_message_id": sent_id,
                 "body_digest": row.body_digest,
+                # The outsider-checkable halves (ss-console#2501): a reply the
+                # sweeper released is as verifiable from the firm's own copy as
+                # one the live path sent.
+                **(authored_digest_fn(row) if authored_digest_fn is not None else {}),
                 "released_from_hold": True,
                 "held_reason": row.hold_reason,
             },
