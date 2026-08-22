@@ -48,7 +48,7 @@ BUCKET = "smd-customer-config"
 SLUG = "pilot-smokeball"
 KEY = spec_object_key(SLUG)
 PREV_KEY = f"vaults/{SLUG}/output-classes.previous.json"
-CLASS = "outbound"
+CLASS = "outbound_client"
 PROP = "voice"
 
 TEXT = "In client letters, be more formal and shorter; no pleasantries."

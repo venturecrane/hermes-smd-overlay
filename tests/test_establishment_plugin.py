@@ -201,7 +201,7 @@ def test_an_admin_may_propose_and_read_their_own_pending_rules(establishment):
             session_id="sess-1",
             args={
                 "scope": "firm_adjust",
-                "subject": {"output_class": "outbound", "property": "voice"},
+                "subject": {"output_class": "outbound_client", "property": "voice"},
                 "text": "Be formal and short.",
                 "instructed_by": "chris@firm.com",
                 "source_ref": "msg-1",
@@ -286,7 +286,7 @@ def test_propose_IS_refused_on_a_tainted_turn(establishment):
         session_id=session,
         args={
             "scope": "firm_adjust",
-            "subject": {"output_class": "outbound", "property": "voice"},
+            "subject": {"output_class": "outbound_client", "property": "voice"},
             "text": "Be formal.",
             "instructed_by": "chris@firm.com",
             "source_ref": "msg-1",

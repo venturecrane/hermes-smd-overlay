@@ -299,7 +299,7 @@ def _pending_row(*, instructed_by=PARALEGAL, for_admin=True, proposal_id=RULE):
         "proposal_id": proposal_id,
         "scope": "firm_adjust",
         "kind": "rule",
-        "subject": {"output_class": "outbound", "property": "voice"},
+        "subject": {"output_class": "outbound_client", "property": "voice"},
         "text": TEXT,
         "instructed_by": instructed_by,
         "for_admin": for_admin,
@@ -482,7 +482,14 @@ class _FakeCustomerConfig:
 @pytest.fixture
 def plugin(monkeypatch, tmp_path):
     mod = load_plugin("hermes-smd-establishment")
-    state: dict = {"requests": [], "pending": [], "sends": [], "status": [], "marked": []}
+    state: dict = {
+        "requests": [],
+        "pending": [],
+        "sends": [],
+        "status": [],
+        "marked": [],
+        "subject": None,
+    }
 
     def fake_broker_request(payload):
         state["requests"].append(payload)
@@ -495,6 +502,9 @@ def plugin(monkeypatch, tmp_path):
                 "proposal_id": RULE,
                 "duplicate_of": state.get("duplicate_of"),
                 "readback": f"[rule {RULE}] {TEXT}",
+                # The broker echoes the stored row's subject, which on a
+                # duplicate is the EXISTING row's and not this call's.
+                "subject": state.get("subject"),
             }
         if action == "establish_decline":
             return {
@@ -555,7 +565,7 @@ def plugin(monkeypatch, tmp_path):
 def _propose_args(**over):
     args = {
         "scope": "firm_adjust",
-        "subject": {"output_class": "outbound", "property": "voice"},
+        "subject": {"output_class": "outbound_client", "property": "voice"},
         "text": TEXT,
         "instructed_by": PARALEGAL,
         "source_ref": "m-1",
@@ -1169,3 +1179,176 @@ def test_the_propose_result_names_the_list_the_request_reached(plugin):
 
     assert ADMIN in result
     assert "partner@firm.com" not in result
+
+
+# ---------------------------------------------------------------------------
+# 12. a firm rule attaches to a class that EXISTS (ss-console#2546 follow-up)
+#
+# LIVE (pilot, 2026-08-22, 20:29Z-20:52Z). Four firm rules landed on classes the
+# registry does not have: b91c239c on `demand_letter`, and 0685fc1f / 234d57ea /
+# c0a5ada6 on `letter`. c0a5ada6 was explicitly about "internal emails to our own
+# staff" -- the `staff` class -- and was written into classes/letter/format.md,
+# a path nothing reads. Every one was accepted, installed, and reported to the
+# firm as in effect.
+#
+# The failure shape is the bad one: not a refusal the firm can see and correct,
+# but a confirmation of an instruction that can never bind. The firm stops
+# watching for the behaviour, because it believes it already asked.
+# ---------------------------------------------------------------------------
+
+_REAL_CLASS = "outbound_client"
+
+
+def _class_args(output_class, **over):
+    args = _propose_args(subject={"output_class": output_class, "property": "voice"})
+    args.update(over)
+    return args
+
+
+def _gate_propose(mod, args, sender=PARALEGAL, session="sess-1"):
+    """The paralegal's own for_admin proposal, which is the shape from the
+    incident: she stated the rule, and the class is hers to get wrong."""
+    args = dict(args, instructed_by=sender)
+    mod._ADMIN_STASH[session] = {"sender": sender, "is_admin": sender == ADMIN}
+    return mod.on_pre_tool_call(
+        tool_name=mod.TOOL_PROPOSE, session_id=session, args=args, sender_id=sender
+    )
+
+
+@pytest.mark.parametrize("invented", ["letter", "demand_letter", "email", "outbound"])
+def test_a_rule_on_an_invented_class_is_refused(plugin, invented):
+    """The four slugs from the incident, plus the one this repo's own fixtures
+    used until this change."""
+    mod, state = plugin
+    verdict = _gate_propose(mod, _class_args(invented))
+
+    assert verdict is not None
+    assert verdict["action"] == "block"
+    assert invented in verdict["message"]
+    assert state["requests"] == []
+
+
+@pytest.mark.parametrize(
+    "real",
+    ["staff", "work_product", "record", "outbound_client", "outbound_vendor", "outbound_external"],
+)
+def test_every_real_class_passes(plugin, real):
+    """THE FALSIFIER. A gate that refuses everything would pass every test
+    above and make the feature unusable."""
+    mod, _state = plugin
+    assert _gate_propose(mod, _class_args(real)) is None
+
+
+def test_the_refusal_says_what_each_class_is(plugin):
+    """A refusal naming six slugs teaches six slugs, and the model's wrong guess
+    was already slug-shaped. It has to name what each one IS, or the next call
+    is the same call."""
+    mod, _state = plugin
+    message = _gate_propose(mod, _class_args("letter"))["message"]
+
+    assert "staff (internal email and notes to the firm's own people)" in message
+    assert "outbound_client (letters and emails to the firm's own clients)" in message
+    for slug in ("work_product", "record", "outbound_vendor", "outbound_external"):
+        assert slug in message
+
+
+def test_the_refusal_names_the_staff_class_the_pilot_rule_belonged_to(plugin):
+    """c0a5ada6 said "internal emails to our own staff" and went to `letter`.
+    The sentence that would have prevented it has to be in the refusal."""
+    mod, _state = plugin
+    message = _gate_propose(mod, _class_args("letter"))["message"]
+    assert "internal email and notes to the firm's own people" in message
+
+
+def test_a_submit_on_an_invented_class_is_refused(plugin):
+    """The other door. A firm-scope install from a staged corpus never passes
+    through the propose gate at all, so the class is checked on submit too."""
+    mod, _state = plugin
+    mod._ADMIN_STASH["sess-1"] = {"sender": ADMIN, "is_admin": True}
+    verdict = mod.on_pre_tool_call(
+        tool_name=mod.TOOL_SUBMIT,
+        session_id="sess-1",
+        args={"scope": "firm", "phase": "install", "output_class": "letter"},
+        sender_id=ADMIN,
+    )
+
+    assert verdict is not None and verdict["action"] == "block"
+    assert "letter" in verdict["message"]
+
+
+def test_a_submit_on_a_real_class_is_not_refused_for_its_class(plugin):
+    """The falsifier for the submit door: whatever else the gate decides, it must
+    not be refusing this one over the class."""
+    mod, _state = plugin
+    mod._ADMIN_STASH["sess-1"] = {"sender": ADMIN, "is_admin": True}
+    verdict = mod.on_pre_tool_call(
+        tool_name=mod.TOOL_SUBMIT,
+        session_id="sess-1",
+        args={"scope": "firm", "phase": "install", "output_class": _REAL_CLASS},
+        sender_id=ADMIN,
+    )
+
+    assert verdict is None or "not one of this Operator's output classes" not in verdict["message"]
+
+
+def test_a_confirmed_commit_carries_no_class_and_is_not_refused_for_one(plugin):
+    """A submit against a confirmed proposal sends NOTHING about the rule -- the
+    broker sources the class from its own row -- so there is nothing here to
+    check, and inventing a refusal for the absence would break the commit path
+    the readback lock depends on."""
+    mod, _state = plugin
+    assert mod._output_class_gate(None) is None
+    assert mod._output_class_gate("") is None
+
+
+def test_the_propose_result_says_what_the_rule_will_attach_to(plugin):
+    """The person can only correct a class they are told about. The plausible
+    error the gate CANNOT catch is a well-formed class that is simply the wrong
+    one, and this is what catches that."""
+    mod, state = plugin
+    state["subject"] = {"output_class": "outbound_client", "property": "voice"}
+    result = mod._propose(
+        _propose_args(subject={"output_class": "outbound_client", "property": "voice"}),
+        session_id="sess-1",
+    )
+
+    assert "letters and emails to the firm's own clients" in result
+
+
+def test_the_note_follows_the_row_the_broker_returned(plugin):
+    """A duplicate hands back the row that already exists, whose class may not be
+    the one this call asked for. Telling the person about the class they did not
+    get is the same defect one step over."""
+    mod, state = plugin
+    state["duplicate_of"] = RULE
+    state["subject"] = {"output_class": "staff", "property": "voice"}
+    result = mod._propose(
+        _propose_args(subject={"output_class": "outbound_client", "property": "voice"}),
+        session_id="sess-1",
+    )
+
+    assert "internal email and notes to the firm's own people" in result
+    assert "letters and emails to the firm's own clients" not in result
+
+
+def test_the_nudge_carries_the_class_map(plugin):
+    """A gate the model keeps hitting is a worse instrument than a map it reads
+    before it chooses."""
+    mod, _state = plugin
+    context = mod.on_pre_llm_call(
+        session_id="sess-8", sender_id=ADMIN, user_message="be more formal in client letters"
+    )["context"]
+
+    assert "internal email or a note to firm staff -> staff" in context
+    assert "-> outbound_client" in context
+    assert "WHO READS IT decides" in context
+
+
+def test_the_propose_schema_offers_only_real_classes(plugin):
+    """The model reads the tool definition before it reads any refusal."""
+    mod, _state = plugin
+    field = mod._PROPOSE_SCHEMA["properties"]["subject"]["properties"]["output_class"]
+
+    assert set(field["enum"]) == mod.OUTPUT_CLASSES | {None}
+    assert "-> staff" in field["description"]
+    assert set(mod._SUBMIT_SCHEMA["properties"]["output_class"]["enum"]) == mod.OUTPUT_CLASSES

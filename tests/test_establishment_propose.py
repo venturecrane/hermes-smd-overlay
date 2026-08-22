@@ -93,7 +93,7 @@ def _turn(mod, sender, session="sess-1", message="Be more formal in client lette
 def _propose_args(**over):
     args = {
         "scope": "firm_adjust",
-        "subject": {"output_class": "outbound", "property": "voice"},
+        "subject": {"output_class": "outbound_client", "property": "voice"},
         "text": "In client letters, be more formal and shorter.",
         "instructed_by": ADMIN,
         "source_ref": "msg-41",

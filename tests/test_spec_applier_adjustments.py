@@ -21,7 +21,7 @@ one-sentence ``adjustments``, or from both. What this file pins:
 THE FALSIFIER for this file, run against 349d86b (the parent commit):
 ``_parse_one`` requires ``body`` to be a non-empty string, so
 ``test_a_property_with_only_adjustments_installs`` fails with
-``classes.outbound.voice.body: must be a non-empty string`` and nothing installs.
+``classes.outbound_client.voice.body: must be a non-empty string`` and nothing installs.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ def _entry(*, body: str | None = None, adjustments: list[dict] | None = None) ->
     return entry
 
 
-def _doc(entry: dict, *, klass: str = "outbound", prop: str = "voice") -> bytes:
+def _doc(entry: dict, *, klass: str = "outbound_client", prop: str = "voice") -> bytes:
     return json.dumps(
         {"schema_version": SCHEMA_VERSION, "classes": {klass: {prop: entry}}}
     ).encode()
@@ -157,7 +157,7 @@ def test_a_property_with_only_adjustments_installs(tmp_path):
     s3 = FakeS3({KEY: _doc(_entry(adjustments=[ADJ_A]))})
     result = apply(s3_client=s3, bucket=BUCKET, slug=SLUG, spec_dir=tmp_path)
     assert result.outcome is SpecApplyOutcome.APPLIED
-    installed = (tmp_path / "classes/outbound/voice.md").read_text()
+    installed = (tmp_path / "classes/outbound_client/voice.md").read_text()
     assert installed == EXPECTED_BLOCK
 
 
@@ -167,8 +167,8 @@ def test_the_manifest_hashes_the_rendered_bytes_not_the_body(tmp_path):
     s3 = FakeS3({KEY: _doc(_entry(body=body, adjustments=[ADJ_A]))})
     apply(s3_client=s3, bucket=BUCKET, slug=SLUG, spec_dir=tmp_path)
     manifest = json.loads((tmp_path / MANIFEST_NAME).read_text())
-    entry = manifest["specs"]["classes/outbound/voice.md"]
-    on_disk = (tmp_path / "classes/outbound/voice.md").read_bytes()
+    entry = manifest["specs"]["classes/outbound_client/voice.md"]
+    on_disk = (tmp_path / "classes/outbound_client/voice.md").read_bytes()
     assert entry["sha256"] == hashlib.sha256(on_disk).hexdigest()
     assert entry["sha256"] != hashlib.sha256(body.encode()).hexdigest()
     assert entry["bytes"] == len(on_disk)
@@ -267,7 +267,7 @@ def test_one_bad_item_discards_the_specs_that_did_verify():
         {
             "schema_version": SCHEMA_VERSION,
             "classes": {
-                "outbound": {"voice": _entry(body="Fine.")},
+                "outbound_client": {"voice": _entry(body="Fine.")},
                 "staff": {"voice": _entry(body="Also fine.", adjustments=[{"id": "nope"}])},
             },
         }

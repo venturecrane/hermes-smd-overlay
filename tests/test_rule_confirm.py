@@ -33,7 +33,7 @@ def _row(proposal_id=RULE_A, *, instructed_by=ADMIN, for_admin=False, scope="fir
     return {
         "proposal_id": proposal_id,
         "scope": scope,
-        "subject": {"output_class": "outbound", "property": "voice"},
+        "subject": {"output_class": "outbound_client", "property": "voice"},
         "text": "In client letters, be more formal and shorter.",
         "readback": f"[rule {proposal_id}] In client letters, be more formal and shorter.",
         "instructed_by": instructed_by,
