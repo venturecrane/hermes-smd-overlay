@@ -224,9 +224,7 @@ def record_peer_preference_tool(args: dict[str, Any], **_: Any) -> str:
     clean, error = store.parse_capture_args(args if isinstance(args, dict) else {})
     if error:
         return json.dumps({"ok": False, "error": error})
-    return json.dumps(
-        {"ok": True, "preference": clean["preference"], "source": clean["source"]}
-    )
+    return json.dumps({"ok": True, "preference": clean["preference"], "source": clean["source"]})
 
 
 def on_post_tool_call(**kwargs: Any) -> None:

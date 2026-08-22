@@ -142,9 +142,7 @@ def test_marker_does_not_block_pull_side_disclosure() -> None:
         is False
     )
     assert (
-        reg.contains_marker(
-            "Open tasks first, completed tasks last under a Completed heading."
-        )
+        reg.contains_marker("Open tasks first, completed tasks last under a Completed heading.")
         is False
     )
 
