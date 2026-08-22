@@ -213,12 +213,19 @@ def record_peer_preference_tool(args: dict[str, Any], **_: Any) -> str:
     context, so it does NOT write — it validates the agent's input and returns
     an ack. The actual attributed write happens in :func:`on_post_tool_call`,
     which has both the args and the session_id needed to resolve the peer.
+
+    The ack key is ``ok``, not ``recorded`` (ss-console#2552). This string is the
+    last thing the model reads before composing its reply, and handing it the
+    word "recorded" is part of how a confirm email came to read "That preference
+    is recorded to your profile". No caller reads this key — the write is driven
+    from the tool ARGS in :func:`on_post_tool_call` — so the vocabulary is free
+    to be service-shaped.
     """
     clean, error = store.parse_capture_args(args if isinstance(args, dict) else {})
     if error:
-        return json.dumps({"recorded": False, "error": error})
+        return json.dumps({"ok": False, "error": error})
     return json.dumps(
-        {"recorded": "pending", "preference": clean["preference"], "source": clean["source"]}
+        {"ok": True, "preference": clean["preference"], "source": clean["source"]}
     )
 
 

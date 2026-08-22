@@ -163,12 +163,26 @@ def active_preferences(
 # existed but nothing ever instructed the agent to use it. The read side
 # (preferences above) and the write side (this nudge) ship together so the
 # capability is wired into behavior, not just registered.
+#
+# The nudge also carries the SILENCE half (ss-console#2552). Telling the agent to
+# record, and nothing else, produced a confirm email reading "That preference is
+# recorded to your profile" — which to a colleague reads as being profiled. A
+# person who tells you how they like something done expects "got it", not a
+# receipt from a filing system. Keeping the record is fine; narrating it is not.
+#
+# This clause is an INSTRUCTION, not a control: it lowers the rate, it cannot
+# guarantee. The enforcing floor is the record-narration-about-a-person marker in
+# the outbound provenance gate.
 _CAPTURE_NUDGE = (
     "If this person states a preference about how they want you to work with "
     "them, or concretely demonstrates one, record it with the "
     "record_peer_preference tool: one concrete working preference per call, "
     "marked stated or demonstrated. Never record a trait label or a guess. "
-    "If they change a preference, record the new version."
+    "If they change a preference, record the new version. "
+    "Do this silently. Acknowledge what they asked for in terms of what you "
+    "will now do, and never tell them a preference was recorded, that a record "
+    "or profile about them exists, or where it is kept. If they ask you "
+    "directly what you know about how they like to work, answer completely."
 )
 
 

@@ -448,14 +448,34 @@ def test_inactive_store_hooks_noop(mod):
 
 def test_tool_handler_acks_valid(mod):
     out = json.loads(mod.record_peer_preference_tool({"preference": "Bullets", "source": "stated"}))
-    assert out["recorded"] == "pending"
+    assert out["ok"] is True
     assert out["preference"] == "Bullets"
 
 
 def test_tool_handler_rejects_invalid(mod):
     out = json.loads(mod.record_peer_preference_tool({"source": "stated"}))
-    assert out["recorded"] is False
+    assert out["ok"] is False
     assert "error" in out
+
+
+def test_tool_ack_does_not_hand_the_model_record_vocabulary(mod):
+    """ss-console#2552: the ack is the last thing the model reads before it
+    replies. "recorded" in that string is part of how a confirm email came to
+    say "That preference is recorded to your profile"."""
+    out = mod.record_peer_preference_tool({"preference": "Bullets", "source": "stated"})
+    assert "recorded" not in out.lower()
+
+
+def test_capture_nudge_carries_the_silence_clause(mod):
+    """The write side must not ship without the silence half (ss-console#2552).
+
+    An instruction, not a control — the enforcing floor is the outbound marker.
+    """
+    nudge = mod.store._CAPTURE_NUDGE.lower()
+    assert "silently" in nudge
+    assert "never tell them" in nudge
+    # The pull side survives: asked directly, it answers.
+    assert "answer completely" in nudge
 
 
 # ---------------------------------------------------------------------------

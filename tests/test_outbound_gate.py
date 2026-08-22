@@ -35,12 +35,16 @@ from tests.conftest import load_plugin
 # (operator/safety-substrate/fabrication_markers.json). This sha256 pins the
 # vendored bytes so the two repos cannot silently drift.
 #
-# Pinned to the PR-B artifact at branch feat/aie-inbound-spine-0027
-# (version 2026-05-29.2). TODO(PR-B-merge): when PR-B lands on main, re-pin this
-# to the merged artifact's sha256 (it should not change if the file is
-# unmodified at merge) and switch the loader's vendoring note to the pinned
-# raw-URL on main.
-_CANONICAL_MARKERS_SHA256 = "e666b2a24d2b4198db30ae8225ad252dbf6ace0acda8ce66f3a36ce8bad69142"
+# Pinned to version 2026-08-22.1 (ss-console#2552 added the
+# record-narration-about-a-person marker). TODO(PR-B-merge): switch the loader's
+# vendoring note to the pinned raw-URL on main.
+#
+# NOTE on what this guard does NOT cover. It hashes the VENDORED file against a
+# constant in this repo; it never reads ss-console. So it catches a vendored edit
+# that forgot to update the pin, and it does NOT catch the canonical artifact and
+# the vendored copy drifting apart. Updating both repos in the same change is a
+# discipline requirement, not something CI enforces.
+_CANONICAL_MARKERS_SHA256 = "0a432b844a38e37521126309ca9143358a010f1bb886d907859580de6c902b4e"
 
 _VENDORED_MARKERS_PATH = (
     Path(__file__).resolve().parent.parent / "shared" / "fabrication_markers.json"
@@ -84,6 +88,79 @@ def test_markers_match_em_dash_and_dollar() -> None:
     reg = load_markers()
     assert reg.contains_marker("This is great — really.")
     assert reg.contains_marker("The price is $2,500 for the engagement.")
+
+
+# ---------------------------------------------------------------------------
+# record-narration-about-a-person (ss-console#2552)
+#
+# The Operator speaks about what it will do, never about what it holds on you.
+# A colleague who states a preference gets "here is what I will do", not "that is
+# recorded to your profile" — the notebook is fine, announcing it is not.
+# ---------------------------------------------------------------------------
+
+
+def test_marker_catches_the_live_trigger_sentence() -> None:
+    """The exact sentence that shipped to Scott, and its active-voice variants."""
+    reg = load_markers()
+    assert reg.contains_marker(
+        "That preference is recorded to your profile and applies from this turn forward."
+    )
+    assert reg.contains_marker("I've added that to your profile.")
+    assert reg.contains_marker("Saved to your profile.")
+    assert reg.contains_marker("I have updated your preferences.")
+    assert reg.contains_marker("Your profile has been updated with this.")
+    assert reg.contains_marker("I keep a profile on you for this.")
+
+
+def test_marker_does_not_hit_attributed_firm_prose() -> None:
+    """A firm's own letter says "your file" and "profile" legitimately.
+
+    This is why the marker's nouns are scoped to profile/preferences and exclude
+    file/record: an earlier draft matched "added ... your file" and would have
+    refused a real PI letter. A gate that cannot be satisfied honestly teaches
+    the model to satisfy it dishonestly (the 2026-08-11 staging incident).
+    """
+    reg = load_markers()
+    assert reg.contains_marker("We have added your medical records to your file.") is False
+    assert reg.contains_marker("Please review your file before the hearing.") is False
+    assert reg.contains_marker("The claimant profile shows three prior injuries.") is False
+    assert reg.contains_marker("Your driving record was requested from MVD.") is False
+
+
+def test_marker_does_not_block_pull_side_disclosure() -> None:
+    """Asked what it knows, the Operator answers in full.
+
+    The rule bans volunteering, not disclosure. Refusing to say what is held
+    would be the genuinely sinister posture, so an over-broad marker is a defect
+    in the other direction — this is that falsifier.
+    """
+    reg = load_markers()
+    assert reg.contains_marker("You told me you prefer open tasks first.") is False
+    assert reg.contains_marker("I'll remember that.") is False
+    assert (
+        reg.contains_marker("Here's what I have for you: open tasks first, completed last.")
+        is False
+    )
+    assert (
+        reg.contains_marker(
+            "Open tasks first, completed tasks last under a Completed heading."
+        )
+        is False
+    )
+
+
+def test_marker_known_paraphrase_limits_are_pinned() -> None:
+    """The marker catches this VOCABULARY, not the behavior.
+
+    Paraphrase evades it. These are asserted as misses on purpose so the limit is
+    a recorded fact rather than a later surprise: the capture nudge is what
+    generalizes, and the nudge is an instruction, not a control. If one of these
+    starts matching, that is an improvement — update this test deliberately.
+    """
+    reg = load_markers()
+    assert reg.contains_marker("I'll note that in your file.") is False
+    assert reg.contains_marker("It's in your preferences now.") is False
+    assert reg.contains_marker("I've made a note of how you like this.") is False
 
 
 def test_markers_clean_body_has_no_hit() -> None:
