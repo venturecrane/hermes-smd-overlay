@@ -36,3 +36,11 @@ CUSTOMER_DB
 # `git submodule update` fails on the gitlinks with no .gitmodules). ADR 0075 incident 2026-07-13.
 .worktrees/
 .wtfix/
+
+# Worktrees created under .claude/ share the .worktrees/ hazard above: an
+# unignored gitlink with no .gitmodules breaks `git submodule update`, which
+# `uv pip install "git+...@sha"` runs. It also leaves this checkout permanently
+# "dirty", which suppresses the ss-console sync guard that keeps it current
+# (ss-console#2556). A stale overlay checkout serves stale source to any agent
+# that reads a file from it instead of a ref.
+.claude/worktrees/
