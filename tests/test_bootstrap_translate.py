@@ -1896,3 +1896,42 @@ def test_translate_containment_sentinel_converges_cron_to_zero(tmp_path, caplog)
     )
     assert any("CRON CONTAINMENT ACTIVE" in r.getMessage() for r in caplog.records)
     assert any("ss#2258 containment" in r.getMessage() for r in caplog.records)
+
+
+def test_commitment_confirm_renders_the_call_first_line_not_the_send_line(tmp_path):
+    """Read live on pilot-smokeball 2026-08-22: with the generic confirm sentence
+    ("request explicit approval in the same turn") the model asked in prose and
+    never called create_matter, so the gate never minted an [act ...] line and
+    an administrator's "yes" had nothing to bind to. A COMMITMENT at confirm
+    renders its own line: call the tool, relay the gate's [act line verbatim."""
+    with_commitment = VALID_YAML.replace(
+        "internal_write: autonomous", "internal_write: autonomous\n        commitment: confirm"
+    )
+    assert "commitment: confirm" in with_commitment  # guard: replace landed
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, with_commitment)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    line = next(ln for ln in soul.splitlines() if ln.startswith("- **commitment**: confirm"))
+    assert "CALL the tool" in line
+    assert '"[act ' in line
+    assert "request explicit approval in the same turn" not in line
+    # the send classes keep the generic confirm wording
+    with_send_confirm = VALID_YAML.replace(
+        "external_send: draft_for_review", "external_send: confirm"
+    )
+    (tmp_path / "b").mkdir()
+    customer_yaml2, skills_dir2, hermes_home2 = _seed_repo(tmp_path / "b", with_send_confirm)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml2),
+        hermes_home=str(hermes_home2),
+        skills_dir=str(skills_dir2),
+    )
+    soul2 = (hermes_home2 / "profiles" / "marcus" / "SOUL.md").read_text()
+    send_line = next(
+        ln for ln in soul2.splitlines() if ln.startswith("- **external_send**: confirm")
+    )
+    assert "request explicit approval in the same turn" in send_line
