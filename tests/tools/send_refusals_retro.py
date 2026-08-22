@@ -12,6 +12,31 @@ BEFORE it ships, not after a month of quiet dashboards.
 It shares the query rather than restating it, deliberately. A retro-falsifier
 with its own copy of the SQL measures the copy.
 
+EXPECTED ON THE PILOT LEDGER
+----------------------------
+Read by hand from the pilot's ``audit.db`` on 2026-08-22, applying this same
+logic read-only. These are the numbers this script must reproduce; a zero on a
+day named here means the query is too narrow and must be widened BEFORE it
+ships, and a nonzero on 08-14 or 08-18 means it is too wide.
+
+    day       refused   unsent
+    2026-08-04      3        -
+    2026-08-05      2        -
+    2026-08-06      2        -
+    2026-08-08      2        -
+    2026-08-09      1        -
+    2026-08-13      5        -
+    2026-08-14      0        0
+    2026-08-18      0        0
+    2026-08-19      5        1
+    2026-08-20      -        1
+
+The three clusters are three separate gates that each muted the one routine
+whose job is to reach a human: the voice-spec gate (08-04..08-09, ss#2234), the
+``smd_send_message`` TypeError (08-13, ss#2348), and the identifier + em-dash
+refusals (08-19). 08-20 is the silent one — needs-you items and no attempt.
+Note the script prints ONE total per day; on 08-19 that total is 6.
+
 Usage:
 
     python tests/tools/send_refusals_retro.py /path/to/audit.db \\
@@ -21,8 +46,10 @@ Usage:
 
 Each row is that day's count as the ticker would have reported it at 23:59:59
 UTC on that date — i.e. a trailing-24h window ending at the day's end, which is
-the same window shape the live field carries. ``--events`` prints the newest few
-events for each day, exactly as they would ride the heartbeat.
+the same window shape the live field carries. The two kinds are broken out
+alongside the total so a run can be checked against the table above per kind,
+not only in aggregate. ``--events`` prints the newest few events for each day,
+exactly as they would ride the heartbeat.
 
 Read-only: the ledger is opened ``mode=ro`` so running this against a live copy
 cannot perturb the audit writer.
@@ -75,13 +102,16 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"# {path}  (trailing {SEND_REFUSAL_WINDOW_HOURS}h window, ending each day 23:59:59Z)"
         )
-        print(f"{'day':<12}{'count':>6}  last_ts")
+        print(f"{'day':<12}{'total':>6}{'refused':>9}{'unsent':>8}  last_ts")
         for day in days:
             at = datetime.combine(day, datetime.max.time()).replace(
                 microsecond=0, tzinfo=timezone.utc
             )
             facts = count_send_refusals(conn, at)
-            print(f"{day.isoformat():<12}{facts.count:>6}  {facts.last_ts or '-'}")
+            print(
+                f"{day.isoformat():<12}{facts.count:>6}{facts.refused:>9}{facts.unsent:>8}"
+                f"  {facts.last_ts or '-'}"
+            )
             if args.events:
                 for event in facts.events:
                     print(f"              {json.dumps(event, sort_keys=True)}")
