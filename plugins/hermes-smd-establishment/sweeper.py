@@ -28,6 +28,15 @@ WHAT ONE PASS DOES, and the ordering is the whole design:
 WHAT IT NEVER DOES. It does not confirm, commit, decline, or release anything.
 The broker's senderless listing returns TERMINAL rows only, so there is nothing
 here that could be acted on even by a caller trying to.
+
+THE FOURTH OUTCOME (ss-console#2546 follow-up). A rule an administrator APPLIED
+is news the person who asked is owed just as much as a decline, and it was the
+one outcome that reached nobody: the seat's live path observed the install and
+then failed to send, and there was no pass afterwards that could notice. So an
+installed row now travels this loop too. It does NOT go through ``notify``: the
+install note answers a different question (was anybody waiting on this rule) and
+carries its own once-only claim, so it is handed to ``notify_install``, which
+does both and returns whether the person was told.
 """
 
 from __future__ import annotations
@@ -52,6 +61,26 @@ DEFAULT_SWEEP_INTERVAL_S = 30.0
 MAX_PER_PASS = 20
 
 
+def outcome_kind(row: dict[str, Any]) -> str:
+    """Which outcome this row is, in the vocabulary the notes are written in.
+
+    ``""`` for a row that has not ended, which is every row that must be left
+    alone. The broker speaks of a committed rule as ``state="committed"`` plus an
+    ``installed`` flag, and the two are deliberately separate over there: a rule
+    can be committed and still converging, and only the flag says a run's result
+    was read and the word seen. This collapses the pair into the one word the
+    note is keyed on, and a committed row WITHOUT the flag collapses to nothing.
+    """
+    if not isinstance(row, dict):
+        return ""
+    state = str(row.get("state") or "")
+    if state in ("lapsed", "declined"):
+        return state
+    if state == "committed" and row.get("installed"):
+        return "installed"
+    return ""
+
+
 @dataclass(frozen=True)
 class SweepResult:
     """What one pass did. Returned for the log line and for the tests."""
@@ -71,13 +100,16 @@ def run_sweep_once(
     notify: Callable[..., bool],
     mark: Callable[[str], None],
     max_per_pass: int = MAX_PER_PASS,
+    notify_install: Callable[[str, str], bool] | None = None,
 ) -> SweepResult:
     """One reporting pass. Pure with respect to I/O injection.
 
     ``fetch`` returns the seat's unreported outcomes (and, as a side effect of
     being a broker verb, marks whatever has just expired). ``notify`` sends one
     row's note and returns whether it went. ``mark`` tells the broker the person
-    has been told.
+    has been told. ``notify_install`` sends AND marks an install note, because
+    that one is once-only against the broker rather than against this pass; a
+    sweeper built without it simply leaves installed rows for the next caller.
 
     A row this cannot send is left UNMARKED and comes back next pass. There is
     no failure counter and no give-up, on purpose: the failure modes are a
@@ -93,11 +125,19 @@ def run_sweep_once(
             skipped += 1
             continue
         proposal_id = str(row.get("proposal_id") or "")
-        state = str(row.get("state") or "")
-        if not proposal_id or state not in ("lapsed", "declined"):
+        kind = outcome_kind(row)
+        if not proposal_id or not kind:
             skipped += 1
             continue
-        if notify(kind=state, row=row, by=str(row.get("declined_by") or "")):
+        if kind == "installed":
+            if notify_install is None:
+                skipped += 1
+            elif notify_install("", proposal_id):
+                reported += 1
+            else:
+                failed += 1
+            continue
+        if notify(kind=kind, row=row, by=str(row.get("declined_by") or "")):
             mark(proposal_id)
             reported += 1
         else:
@@ -143,6 +183,7 @@ __all__ = [
     "DEFAULT_SWEEP_INTERVAL_S",
     "MAX_PER_PASS",
     "SweepResult",
+    "outcome_kind",
     "run_sweep_once",
     "start_sweeper_thread",
 ]

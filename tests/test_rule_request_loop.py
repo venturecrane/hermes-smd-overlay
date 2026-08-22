@@ -28,6 +28,8 @@ both sides, which is what they are for.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from shared import operations_request as ops_request
@@ -480,7 +482,7 @@ class _FakeCustomerConfig:
 @pytest.fixture
 def plugin(monkeypatch, tmp_path):
     mod = load_plugin("hermes-smd-establishment")
-    state: dict = {"requests": [], "pending": [], "sends": []}
+    state: dict = {"requests": [], "pending": [], "sends": [], "status": [], "marked": []}
 
     def fake_broker_request(payload):
         state["requests"].append(payload)
@@ -502,6 +504,15 @@ def plugin(monkeypatch, tmp_path):
                 "text": TEXT,
                 "declined_by": ADMIN,
             }
+        if action == "establish_status":
+            queue = state.get("status") or []
+            return queue.pop(0) if queue else {"ok": False, "error": "unknown run_id"}
+        if action == "establish_lapse_notified":
+            state["marked"].append(payload.get("proposal_id"))
+            for row in state["pending"]:
+                if row.get("proposal_id") == payload.get("proposal_id"):
+                    row["lapse_notified"] = True
+            return {"ok": True}
         return {"ok": True, "run_id": "run-1"}
 
     def fake_send(**kwargs):
@@ -515,10 +526,26 @@ def plugin(monkeypatch, tmp_path):
     _FakeCustomerConfig.admins = [ADMIN]
     _FakeCustomerConfig.routing = [ADMIN]
     monkeypatch.setattr(mod, "CustomerConfig", _FakeCustomerConfig)
+    # The converge wait is real time in production and nothing in a test; the
+    # SHAPE under test is "more than one read", so the schedule keeps its length
+    # and loses its sleeps.
+    #
+    # TOLERANT ON PURPOSE (raising=False, and getattr below). Every register the
+    # install notice added is reset here, and a fixture that DEMANDED them would
+    # make the whole file error out at origin/main -- which would say only that
+    # a name is missing, and would say it just as loudly for the nineteen tests
+    # in this file that have nothing to do with the install notice. The falsifier
+    # is supposed to show each new test failing on its own assertion, so the
+    # fixture is built to survive the ref it is falsified against.
+    monkeypatch.setattr(mod, "_INSTALL_POLL_DELAYS", (0.0, 0.0, 0.0, 0.0), raising=False)
     mod._ADMIN_STASH.clear()
     mod._CONFIRMED_STASH.clear()
     mod._OPERATIONS_SENT.clear()
     mod._OUTCOMES_REPORTED.clear()
+    mod._SUBMIT_RUNS.clear()
+    mod._INSTALLED_RULES.clear()
+    for register in ("_INSTALL_NOTIFIED", "_STATUS_CACHE"):
+        getattr(mod, register, {}).clear()
     SESSION_INBOUND_ORIGIN._origins.clear()
     SESSION_TAINT._tainted.clear()
     yield mod, state
@@ -862,3 +889,283 @@ def test_the_dispatcher_marks_its_payload_templated(monkeypatch):
     assert result.sent is False
     assert seen[TEMPLATED_BODY_ARG] is True
     assert result.reason == "stop here"
+
+
+# ---------------------------------------------------------------------------
+# 11. the rule goes into force and the person who asked HEARS SO
+#     (ss-console#2546 follow-up)
+#
+# LIVE DEFECT (pilot, 2026-08-22T20:31Z, overlay 119f6bf). ss-probe-runner, a
+# non-admin, stated a firm rule. ss-probe-admin replied "apply that". The submit
+# was accepted at 20:31:32Z and the intake installed the rule twenty seconds
+# later; the seat's own gate correctly blocked one premature draft and released
+# the reply once the install was real. Every part of that worked. The runner was
+# never told, and her inbox is the only place the whole feature is visible.
+#
+# The seat asked the broker ONCE, immediately after the submit returned, whether
+# the run had installed. It had not yet -- a converge window read at its start
+# measures nothing -- so the notification path returned, and the answer it was
+# waiting for arrived into a one-shot result that some other caller consumed.
+#
+# Three observers now, because the fact can surface on three different paths and
+# the person is owed it whichever one sees it first: the handler waits out the
+# window, the model's own status call is watched, and the sweeper picks up
+# anything that got as far as being observed but not sent. Exactly one letter
+# across the three, and the lock is the broker's conditional mark.
+# ---------------------------------------------------------------------------
+
+
+def _installed_row(**over):
+    row = {
+        "proposal_id": RULE,
+        "text": TEXT,
+        "instructed_by": PARALEGAL,
+        "for_admin": True,
+        "state": "committed",
+        "installed": True,
+        "lapse_notified": False,
+    }
+    row.update(over)
+    return row
+
+
+def _pending_answer():
+    return {"ok": True, "run_id": "run-1", "status": "pending"}
+
+
+def _installed_answer():
+    return {
+        "ok": True,
+        "run_id": "run-1",
+        "status": "complete",
+        "result": {"status": "installed", "adjustment_id": RULE},
+    }
+
+
+def _apply(mod, state, *, sender=ADMIN, row=None, status=None, session="sess-1"):
+    """An administrator's confirmed submit, with the broker's answers staged."""
+    state["pending"] = [row if row is not None else _installed_row()]
+    state["status"] = list(status if status is not None else [_installed_answer()])
+    mod._ADMIN_STASH[session] = {"sender": sender, "is_admin": True}
+    return mod._submit({"scope": "firm_adjust", "proposal_id": RULE}, session_id=session)
+
+
+def _install_notes(state):
+    return [s for s in state["sends"] if "in effect" in s["subject"]]
+
+
+def test_a_rule_that_installs_on_the_third_poll_is_still_reported(plugin):
+    """THE LIVE DEFECT. One poll fired at the start of a 90 s converge window
+    reads 'pending' and learns nothing, which is exactly what happened to the
+    run that installed twenty seconds later."""
+    mod, state = plugin
+    _apply(mod, state, status=[_pending_answer(), _pending_answer(), _installed_answer()])
+
+    notes = _install_notes(state)
+    assert len(notes) == 1
+    assert notes[0]["to"] == [PARALEGAL]
+    assert TEXT in notes[0]["text"]
+    assert ADMIN in notes[0]["text"]
+    assert state["marked"] == [RULE]
+
+
+def test_a_run_that_never_converges_sends_nothing(plugin):
+    """The falsifier. The seat may not say a rule is in force because it waited
+    a while and stopped asking."""
+    mod, state = plugin
+    _apply(mod, state, status=[_pending_answer()] * 8)
+
+    assert _install_notes(state) == []
+    assert state["marked"] == []
+
+
+def test_the_seats_wait_leaves_the_reply_gate_satisfied(plugin):
+    """The seat saw the word itself, so the reply may say the rule is in force
+    even if the model's own status call never lands."""
+    mod, state = plugin
+    _apply(mod, state)
+    assert RULE in mod._INSTALLED_RULES.get("sess-1", set())
+
+
+def test_the_models_status_call_reports_an_install_the_poll_missed(plugin):
+    """The second observer. The poll gave up; the model asked; the person is
+    told anyway."""
+    mod, state = plugin
+    _apply(mod, state, status=[_pending_answer()] * 8)
+    assert _install_notes(state) == []
+
+    mod._SUBMIT_RUNS["run-1"] = RULE
+    mod.on_post_tool_call(
+        tool_name="establish_status",
+        session_id="sess-1",
+        args={"run_id": "run-1"},
+        result=json.dumps(_installed_answer()),
+    )
+
+    notes = _install_notes(state)
+    assert len(notes) == 1
+    assert notes[0]["to"] == [PARALEGAL]
+    assert state["marked"] == [RULE]
+
+
+def test_two_observers_of_one_install_send_one_letter(plugin):
+    """The handler waited it out AND the model asked. One rule, one letter."""
+    mod, state = plugin
+    _apply(mod, state)
+    assert len(_install_notes(state)) == 1
+
+    mod.on_post_tool_call(
+        tool_name="establish_status",
+        session_id="sess-1",
+        args={"run_id": "run-1"},
+        result=json.dumps(_installed_answer()),
+    )
+
+    assert len(_install_notes(state)) == 1
+    assert state["marked"] == [RULE]
+
+
+def test_the_broker_mark_is_what_stops_the_second_letter(plugin):
+    """Not process memory. A seat that restarted between the send and the next
+    observation still sends nothing, because the row says it was reported."""
+    mod, state = plugin
+    _apply(mod, state)
+    mod._INSTALL_NOTIFIED.clear()  # the restart
+    before = len(_install_notes(state))
+
+    mod.on_post_tool_call(
+        tool_name="establish_status",
+        session_id="sess-1",
+        args={"run_id": "run-1"},
+        result=json.dumps(_installed_answer()),
+    )
+
+    assert len(_install_notes(state)) == before
+
+
+def test_an_administrator_confirming_their_own_rule_is_sent_nothing(plugin):
+    """No letter, and no wait either: the row is read BEFORE the converge
+    window, so an administrator's own confirmation does not hold the turn open
+    for a hundred seconds to learn something nobody is waiting for."""
+    mod, state = plugin
+    _apply(mod, state, sender=ADMIN, row=_installed_row(instructed_by=ADMIN))
+
+    assert _install_notes(state) == []
+    assert state["status"] == [_installed_answer()]  # untouched: never polled
+
+
+def test_a_rule_nobody_was_waiting_on_is_not_polled_for(plugin):
+    """Same ordering, the other reason: a rule that was never for_admin has no
+    requester to tell."""
+    mod, state = plugin
+    _apply(mod, state, row=_installed_row(for_admin=False))
+
+    assert _install_notes(state) == []
+    assert state["status"] == [_installed_answer()]
+
+
+def test_a_note_that_did_not_go_leaves_the_row_for_the_sweeper(plugin):
+    """Mark AFTER the send, never before. A refused gate is a condition that
+    clears, and the row has to come back."""
+    mod, state = plugin
+    state["send_ok"] = False
+    _apply(mod, state)
+
+    assert state["marked"] == []
+    assert RULE not in mod._INSTALL_NOTIFIED
+
+    state["send_ok"] = True
+    assert mod._notify_install_observed("sess-1", RULE) is True
+    assert state["marked"] == [RULE]
+
+
+def test_the_seats_own_read_does_not_blind_the_model(plugin):
+    """A result is a ONE-SHOT read. The seat now polls runs itself, so when its
+    poll wins the race the model asking a moment later would be told 'unknown
+    run_id' about a run that had just succeeded -- the seat destroying the
+    model's evidence in the act of gathering its own."""
+    mod, state = plugin
+    _apply(mod, state)
+    assert state["status"] == []  # consumed by the seat's poll
+
+    answered = json.loads(mod._status({"run_id": "run-1"}))
+    assert answered["result"]["status"] == "installed"
+
+
+def test_a_live_answer_always_wins_over_the_cache(plugin):
+    """The cache is the broker's own answer handed back, never a second source
+    of truth: it is consulted only when the broker no longer has the run."""
+    mod, state = plugin
+    _apply(mod, state)
+    state["status"] = [{"ok": True, "run_id": "run-1", "status": "pending"}]
+
+    assert json.loads(mod._status({"run_id": "run-1"}))["status"] == "pending"
+
+
+def test_the_sweeper_reports_an_installed_rule(plugin):
+    """The third observer, for the run whose send failed while somebody was in
+    front of it and whose person is now owed a letter with nobody there."""
+    mod, state = plugin
+    state["pending"] = [_installed_row()]
+    result = mod._sweep_lapses_once()
+
+    assert result.reported == 1
+    assert [s["to"] for s in _install_notes(state)] == [[PARALEGAL]]
+    assert state["marked"] == [RULE]
+
+
+def test_the_sweeper_leaves_a_committed_rule_nobody_has_seen_install(plugin):
+    """THE HONESTY OF IT. Committed is not in force: the run can still be
+    converging and can still fail. A sweeper that read consumed_at as an outcome
+    would mail 'your rule is in effect' about a rule that never landed."""
+    mod, state = plugin
+    state["pending"] = [_installed_row(installed=False)]
+    result = mod._sweep_lapses_once()
+
+    assert result.reported == 0
+    assert _install_notes(state) == []
+
+
+@pytest.mark.parametrize(
+    "row,expected",
+    [
+        ({"state": "lapsed"}, "lapsed"),
+        ({"state": "declined"}, "declined"),
+        ({"state": "committed", "installed": True}, "installed"),
+        ({"state": "committed", "installed": False}, ""),
+        ({"state": "committed"}, ""),
+        ({"state": "open"}, ""),
+        ({}, ""),
+    ],
+)
+def test_which_outcome_a_row_is(row, expected):
+    sweeper = load_plugin("hermes-smd-establishment").__dict__["lapse_sweeper"]
+    assert sweeper.outcome_kind(row) == expected
+
+
+def test_the_nudge_names_the_list_the_request_reaches(plugin):
+    """THE COSMETIC DEFECT, live on the pilot: the Operator named the ADMINS
+    while the request had gone to scope.rule_requests_to. The two lists are
+    separate by design, so naming the wrong one sends the person to chase an
+    answer from somebody who was never asked."""
+    mod, state = plugin
+    _FakeCustomerConfig.admins = [ADMIN, "partner@firm.com"]
+    _FakeCustomerConfig.routing = [ADMIN]
+    context = mod.on_pre_llm_call(
+        session_id="sess-9", sender_id=PARALEGAL, user_message="be more formal"
+    )["context"]
+
+    assert ADMIN in context
+    assert "partner@firm.com" not in context
+
+
+def test_the_propose_result_names_the_list_the_request_reached(plugin):
+    """And so does the sentence handed back from the tool, for the same reason
+    and against the same falsifier."""
+    mod, state = plugin
+    _FakeCustomerConfig.admins = [ADMIN, "partner@firm.com"]
+    _FakeCustomerConfig.routing = [ADMIN]
+    result = mod._propose(_propose_args(), session_id="sess-1")
+
+    assert ADMIN in result
+    assert "partner@firm.com" not in result
