@@ -104,11 +104,20 @@ class SendRefusalFacts(NamedTuple):
     ``count`` is refusals PLUS silent wakes; ``last_ts`` is the newest event of
     either kind (the console's paging marker); ``events`` is the newest few,
     each naming the routine, the tool, and the reason — never a value.
+
+    ``refused`` and ``unsent`` break the total apart. Only ``count`` rides the
+    heartbeat — the console pages on the timestamp, not on a level, and two more
+    integers would be two more fields to ingest for no decision they change. The
+    split exists for the retro-falsifier, whose known-good table is per kind, so
+    a run that matched the total by getting both halves wrong would still be
+    caught.
     """
 
     count: int
     last_ts: str | None
     events: list[dict]
+    refused: int = 0
+    unsent: int = 0
 
 
 #: Trailing window. A day, because the routines this watches fire daily: a
@@ -128,11 +137,16 @@ _SEND_REFUSAL_EVENT_CAP = 5
 #: half.
 _MAX_REASON_CHARS = 200
 
-#: A wake with no ``LLM_TURN_COMPLETED`` to close its session gets this much
-#: room to have sent something. Only reached when the turn wrote no LLM row at
-#: all — a crash, or a ledger gap — where the honest bound is a short fixed one
-#: rather than "until the next thing happened".
+#: A wake whose routine wrote no ``LLM_TURN_COMPLETED`` at all gets this much
+#: room to have sent something. Reached when the turn crashed or the ledger has
+#: a gap, where the honest bound is a short fixed one rather than "until the
+#: next thing happened".
 _UNCLOSED_SESSION_SPAN = 30 * 60
+
+#: And when the routine DID write a turn row, the span still stops here. A turn
+#: row found four hours after the wake belongs to the next run, and borrowing
+#: its dispatch would clear a silence it had nothing to do with.
+_SESSION_SPAN_CAP = 60 * 60
 
 #: Recipients the falsifier and the smoke tests send to. A dispatch that reached
 #: ONLY these is not a routine reaching a human, so it does not clear a wake.
@@ -175,12 +189,14 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
       the 2026-08-20 instance: five items waiting and not one send attempted,
       which no refusal-shaped query can see because there is no refusal.
 
-    THE SESSION SPAN, and why it is joined on time. ``EMITTED_WAKE`` is written
-    by ``pre_run.py``, a process that has no session id yet (the turn it decides
-    for has not started), and the broker writes ``CONFIRM_SEND_DISPATCHED``
-    without one on the seats measured. So the span runs from the wake row to the
-    last ``LLM_TURN_COMPLETED`` of the session the wake names when it names one,
-    and ``_UNCLOSED_SESSION_SPAN`` past the wake when it does not. Overlapping a
+    THE SESSION SPAN, and why it is joined on skill and time. Neither end of it
+    can be joined on a session id, because neither row has one: ``EMITTED_WAKE``
+    is written by the ``pre_run.py`` child before the turn exists (0 of 17 pilot
+    rows carry a session id, read live 2026-08-22) and the broker writes
+    ``CONFIRM_SEND_DISPATCHED`` without one on both live seats. So the span runs
+    from the wake to the first ``LLM_TURN_COMPLETED`` of the same ROUTINE at or
+    after it — ``skill_name`` is a column on both — bounded at either end by
+    ``_SESSION_SPAN_CAP`` / ``_UNCLOSED_SESSION_SPAN``. Overlapping a
     neighbouring routine's dispatch can only SUPPRESS a page, never invent one,
     which is the direction an alert should err in when its own join is
     approximate.
@@ -191,9 +207,9 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
     """
     cutoff = _iso_floor(_as_utc(now).isoformat())
     horizon = _iso_floor((_as_utc(now) - timedelta(hours=SEND_REFUSAL_WINDOW_HOURS)).isoformat())
-    events: list[dict] = []
-    events.extend(_refused_events(conn, horizon, cutoff))
-    events.extend(_unsent_events(conn, horizon, cutoff))
+    refused = _refused_events(conn, horizon, cutoff)
+    unsent = _unsent_events(conn, horizon, cutoff)
+    events = refused + unsent
     # Newest first, so the cap keeps the newest rather than whichever kind the
     # queries happened to run in.
     events.sort(key=lambda e: e["ts"], reverse=True)
@@ -202,6 +218,8 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
         count=len(events),
         last_ts=last_ts,
         events=events[:_SEND_REFUSAL_EVENT_CAP],
+        refused=len(refused),
+        unsent=len(unsent),
     )
 
 
@@ -283,7 +301,6 @@ def _unsent_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[
     wakes = conn.execute(
         "SELECT ts, skill_name,"
         " json_extract(metadata,'$.routine') AS routine,"
-        " json_extract(metadata,'$.session_id') AS session_id,"
         " json_extract(metadata,'$.digest_needs_you') AS needs_you"
         " FROM audit_log"
         " WHERE action_type = 'EMITTED_WAKE'"
@@ -292,9 +309,9 @@ def _unsent_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[
         (horizon, cutoff),
     ).fetchall()
     out: list[dict] = []
-    for ts, skill_name, routine, session_id, needs_you in wakes:
+    for ts, skill_name, routine, needs_you in wakes:
         start = _iso_floor(ts)
-        end = _session_span_end(conn, session_id, start)
+        end = _session_span_end(conn, skill_name, start)
         if end > cutoff:
             # The session may still be running. Nothing to conclude yet, and a
             # page for a routine that is mid-turn would be a page for nothing.
@@ -316,27 +333,45 @@ def _unsent_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[
     return out
 
 
-def _session_span_end(conn: sqlite3.Connection, session_id: str | None, start: str) -> str:
-    """When the wake's session stopped being able to send.
+def _session_span_end(conn: sqlite3.Connection, skill_name: str | None, start: str) -> str:
+    """When the wake's turn stopped being able to send.
 
-    The last ``LLM_TURN_COMPLETED`` of the named session, or a fixed span past
-    the wake when the wake names no session (``pre_run.py`` has none to name) or
-    when that session wrote no turn row at all.
+    THE JOIN IS SKILL + TIME, NOT SESSION, and that is a measured fact rather
+    than a preference. ``EMITTED_WAKE`` is written by the ``pre_run.py`` CHILD
+    before the turn it decides for exists, so it has no session to name: 0 of 17
+    rows on the pilot ledger carry one (read live 2026-08-22). A session join
+    here would have matched nothing and reported every needs-you wake as silent,
+    or — worse, depending on which way the fallback fell — none of them.
+
+    So the span runs from the wake to the FIRST ``LLM_TURN_COMPLETED`` of the
+    same routine at or after it, capped at ``_SESSION_SPAN_CAP``; and when that
+    routine wrote no turn row at all, to ``_UNCLOSED_SESSION_SPAN`` past the
+    wake. Both bounds are deliberately short. A long span borrows the NEXT run's
+    dispatch to clear this run's silence, and a fact that can be cleared by work
+    done an hour later is not a fact about this wake.
+
+    ``skill_name`` is a COLUMN on both row types — ``write_emitted_wake`` passes
+    it, and ``emit_llm_event`` stamps the resolved routine's skill — so the join
+    needs no metadata parse and no cron-store lookup.
     """
-    if session_id:
+    cap = _plus_seconds(start, _SESSION_SPAN_CAP)
+    if skill_name:
         row = conn.execute(
-            "SELECT MAX(substr(ts,1,19)) FROM audit_log"
+            "SELECT MIN(substr(ts,1,19)) FROM audit_log"
             " WHERE action_type = 'LLM_TURN_COMPLETED'"
-            " AND json_extract(metadata,'$.session_id') = ?"
-            " AND substr(ts,1,19) >= ?",
-            (session_id, start),
+            " AND skill_name = ? AND substr(ts,1,19) >= ?",
+            (skill_name, start),
         ).fetchone()
         if row and row[0]:
-            return str(row[0])
+            return min(str(row[0]), cap)
+    return _plus_seconds(start, _UNCLOSED_SESSION_SPAN)
+
+
+def _plus_seconds(start: str, seconds: int) -> str:
     return _iso_floor(
         (
             datetime.strptime(start, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
-            + timedelta(seconds=_UNCLOSED_SESSION_SPAN)
+            + timedelta(seconds=seconds)
         ).isoformat()
     )
 

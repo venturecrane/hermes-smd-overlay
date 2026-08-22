@@ -1074,14 +1074,19 @@ class _Ledger:
             },
         )
 
-    def wake(self, ts, *, needs_you, skill="deadline-miss-escalator", session_id=None):
-        meta = {"decision_basis": "deadline", "digest_needs_you": needs_you}
-        if session_id:
-            meta["session_id"] = session_id
-        self.add(ts, "EMITTED_WAKE", meta, skill_name=skill)
+    def wake(self, ts, *, needs_you, skill="deadline-miss-escalator"):
+        # NO session_id, matching the live rows: ``pre_run.py`` writes this
+        # before the turn exists, and 0 of 17 pilot rows carry one. The routine
+        # is on the ``skill_name`` COLUMN, which is what the span joins on.
+        self.add(
+            ts,
+            "EMITTED_WAKE",
+            {"decision_basis": "deadline", "digest_needs_you": needs_you},
+            skill_name=skill,
+        )
 
-    def turn(self, ts, session_id):
-        self.add(ts, "LLM_TURN_COMPLETED", {"session_id": session_id})
+    def turn(self, ts, skill="deadline-miss-escalator"):
+        self.add(ts, "LLM_TURN_COMPLETED", {"session_id": _CRON_SESSION}, skill_name=skill)
 
     def dispatched(self, ts, recipients):
         self.add(
@@ -1243,8 +1248,8 @@ def test_send_refusals_counts_a_wake_that_sent_nothing(tmp_path):
     """
 
     def build(led):
-        led.wake(_ts(4), needs_you=5, session_id=_CRON_SESSION)
-        led.turn(_ts(3.9), _CRON_SESSION)
+        led.wake(_ts(4), needs_you=5)
+        led.turn(_ts(3.9))
 
     facts = _facts(tmp_path, build)
     assert facts.count == 1
@@ -1255,17 +1260,17 @@ def test_send_refusals_counts_a_wake_that_sent_nothing(tmp_path):
 
 def test_send_refusals_ignores_a_wake_with_nothing_to_say(tmp_path):
     def build(led):
-        led.wake(_ts(4), needs_you=0, session_id=_CRON_SESSION)
-        led.turn(_ts(3.9), _CRON_SESSION)
+        led.wake(_ts(4), needs_you=0)
+        led.turn(_ts(3.9))
 
     assert _facts(tmp_path, build).count == 0
 
 
 def test_send_refusals_clears_a_wake_that_reached_a_person(tmp_path):
     def build(led):
-        led.wake(_ts(4), needs_you=3, session_id=_CRON_SESSION)
+        led.wake(_ts(4), needs_you=3)
         led.dispatched(_ts(3.95), ["scott@smd.services"])
-        led.turn(_ts(3.9), _CRON_SESSION)
+        led.turn(_ts(3.9))
 
     assert _facts(tmp_path, build).count == 0
 
@@ -1276,19 +1281,51 @@ def test_send_refusals_a_probe_only_dispatch_does_not_clear_a_wake(tmp_path):
     would be the thing that silences it."""
 
     def build(led):
-        led.wake(_ts(4), needs_you=3, session_id=_CRON_SESSION)
+        led.wake(_ts(4), needs_you=3)
         led.dispatched(_ts(3.95), ["ss-probe-7f2@agentmail.to"])
-        led.turn(_ts(3.9), _CRON_SESSION)
+        led.turn(_ts(3.9))
 
     facts = _facts(tmp_path, build)
     assert facts.count == 1
     assert facts.events[0]["kind"] == "unsent"
 
 
-def test_send_refusals_a_wake_with_no_session_id_uses_the_fixed_span(tmp_path):
-    """``pre_run.py`` writes the wake row before the turn exists, so it names no
-    session. The span is then a fixed window from the wake: a dispatch inside it
-    clears the fact, one an hour later belongs to somebody else."""
+def test_send_refusals_span_ends_at_this_routines_own_turn(tmp_path):
+    """The span is joined on SKILL and time — neither row carries a session id.
+
+    ``EMITTED_WAKE`` is written by the pre_run child before the turn exists (0 of
+    17 pilot rows carry a session id, read live 2026-08-22), and the broker
+    writes ``CONFIRM_SEND_DISPATCHED`` without one. So another routine's turn row
+    must not close this routine's span, or a busy seat would clear every silence
+    with whatever happened to run next.
+    """
+
+    def build(led):
+        led.wake(_ts(4), needs_you=2)
+        led.turn(_ts(3.99), skill="medical-records-chaser")  # someone else's turn
+        led.dispatched(_ts(3.95), ["scott@smd.services"])  # after it, before ours
+        led.turn(_ts(3.9))
+
+    # The dispatch is inside OUR span (wake .. our turn), so the wake is cleared.
+    assert _facts(tmp_path, build).count == 0
+
+
+def test_send_refusals_a_span_stops_at_the_cap(tmp_path):
+    """A turn row four hours after the wake belongs to the next run. Borrowing
+    its dispatch would clear a silence it had nothing to do with."""
+
+    def build(led):
+        led.wake(_ts(6), needs_you=2)
+        led.dispatched(_ts(4.0), ["scott@smd.services"])  # two hours later
+        led.turn(_ts(2.0))  # the next run's turn
+
+    assert _facts(tmp_path, build).count == 1
+
+
+def test_send_refusals_a_wake_with_no_turn_row_uses_the_fixed_span(tmp_path):
+    """The routine crashed, or the ledger has a gap. The span is then a short
+    fixed window from the wake: a dispatch inside it clears the fact, one an hour
+    later belongs to somebody else."""
 
     def build(led):
         led.wake(_ts(4), needs_you=2)
@@ -1303,7 +1340,7 @@ def test_send_refusals_a_wake_with_no_session_id_uses_the_fixed_span(tmp_path):
     assert _facts(tmp_path, build_silent).count == 1
 
 
-def test_send_refusals_holds_a_wake_whose_session_may_still_be_running(tmp_path):
+def test_send_refusals_holds_a_wake_whose_turn_may_still_be_running(tmp_path):
     """A wake five minutes ago has not yet failed to send anything."""
     assert _facts(tmp_path, lambda led: led.wake(_ts(0.08), needs_you=2)).count == 0
 
@@ -1311,12 +1348,13 @@ def test_send_refusals_holds_a_wake_whose_session_may_still_be_running(tmp_path)
 def test_send_refusals_last_ts_is_the_max_across_both_kinds(tmp_path):
     def build(led):
         led.refused_tool_call(_ts(6))
-        led.wake(_ts(4), needs_you=1, session_id=_CRON_SESSION)
-        led.turn(_ts(3.9), _CRON_SESSION)
+        led.wake(_ts(4), needs_you=1)
+        led.turn(_ts(3.9))
         led.confirm_send_failed(_ts(2))
 
     facts = _facts(tmp_path, build)
     assert facts.count == 3
+    assert (facts.refused, facts.unsent) == (2, 1)
     assert facts.last_ts == _ts(2)
     assert facts.events[0]["kind"] == "refused"
 
