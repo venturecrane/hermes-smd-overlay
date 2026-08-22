@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from shared import heartbeat as hb
@@ -180,7 +181,7 @@ def _emitter(**overrides):
         ingest_url="https://smd.services/api/internal/heartbeat",
         healthchecks_url=overrides.get("healthchecks_url"),
         version="ref123",
-        audit_db_path_fn=lambda: None,
+        audit_db_path_fn=overrides.get("audit_db_path_fn", lambda: None),
         post_fn=post_fn,
         ping_fn=ping_fn,
         # Hermetic default: tests never run the real filesystem check.
@@ -927,7 +928,10 @@ def test_audit_facts_empty_ledger_counts_zero(tmp_path):
 
 
 def test_audit_facts_missing_file_answers_nothing(tmp_path):
-    assert hb.read_audit_facts("/no/such/audit.db") == (None, None, None, None)
+    # Compared against a CONSTRUCTED empty facts object rather than a literal
+    # tuple: every field defaults to None, so this keeps saying "the seat has no
+    # opinion about anything" as fields are added, instead of counting them.
+    assert hb.read_audit_facts("/no/such/audit.db") == hb.AuditLedgerFacts(None, None, None, None)
 
 
 def test_payload_carries_a_zero_write_failure_count():
@@ -983,3 +987,406 @@ def test_payload_omits_head_on_an_unchained_ledger():
     )
     assert "audit_head" not in p
     assert "audit_rows" not in p
+
+
+# ---------------------------------------------------------------------------
+# Send refusals on the wire (ss-console#2547)
+#
+# The 2026-08-19 shape: five refusals in 26 seconds, every one an audit row
+# nobody was watching. The 08-20 shape: five needs-you items and no attempt at
+# all. From outside the seat "refused", "did not try" and "nothing to report"
+# were the same picture; these fields are what tells them apart.
+# ---------------------------------------------------------------------------
+
+_LEDGER_DDL = (
+    "CREATE TABLE audit_log ("
+    "  id TEXT PRIMARY KEY, ts TEXT NOT NULL, action_type TEXT NOT NULL,"
+    "  actor TEXT, actor_role TEXT, skill_name TEXT, matter_ref TEXT,"
+    "  metadata TEXT, prev_hash TEXT, row_hash TEXT)"
+)
+
+_NOW = datetime(2026, 8, 21, 18, 0, 0, tzinfo=timezone.utc)
+
+_CRON_SESSION = "cron_a726fd5efd24_20260820_070000"
+
+
+def _ts(hours_ago: float) -> str:
+    """An audit ``ts`` in the ledger's real spelling (millisecond + ``Z``)."""
+    at = _NOW - timedelta(hours=hours_ago)
+    return at.strftime("%Y-%m-%dT%H:%M:%S.") + f"{at.microsecond // 1000:03d}Z"
+
+
+class _Ledger:
+    """A ledger builder that speaks in the row shapes the seat actually writes."""
+
+    def __init__(self, path):
+        self.conn = sqlite3.connect(str(path))
+        self.conn.execute(_LEDGER_DDL)
+        self._n = 0
+
+    def add(self, ts, action_type, metadata, skill_name=None):
+        self._n += 1
+        self.conn.execute(
+            "INSERT INTO audit_log (id, ts, action_type, actor, actor_role,"
+            " skill_name, metadata) VALUES (?, ?, ?, 'operator', 'agent', ?, ?)",
+            (f"row{self._n:04d}", ts, action_type, skill_name, json.dumps(metadata)),
+        )
+        self.conn.commit()
+
+    def refused_tool_call(self, ts, *, skill="deadline-miss-escalator", error_type="Refused: date"):
+        self.add(
+            ts,
+            "TOOL_CALL_COMPLETED",
+            {
+                "tool": "smd_send_message",
+                "outcome": "error",
+                "error_type": error_type,
+                "resolved_action_class": "external_send_internal",
+                "cron_job_id": "a726fd5efd24",
+                "session_id": _CRON_SESSION,
+                "routine": f"op-managed:operator:{skill}",
+            },
+            skill_name=skill,
+        )
+
+    def ok_tool_call(self, ts):
+        self.add(
+            ts,
+            "TOOL_CALL_COMPLETED",
+            {
+                "tool": "smd_send_message",
+                "outcome": "ok",
+                "resolved_action_class": "external_send_internal",
+                "cron_job_id": "a726fd5efd24",
+            },
+        )
+
+    def confirm_send_failed(self, ts, *, outcome="refused", reason="recipient x@y.example"):
+        self.add(
+            ts,
+            "CONFIRM_SEND_FAILED",
+            {
+                "customer": "pilot-smokeball",
+                "verb": "msgraph_send",
+                "outcome": outcome,
+                "reason": reason,
+                "recipients": ["scott@smd.services"],
+            },
+        )
+
+    def wake(self, ts, *, needs_you, skill="deadline-miss-escalator", session_id=None):
+        meta = {"decision_basis": "deadline", "digest_needs_you": needs_you}
+        if session_id:
+            meta["session_id"] = session_id
+        self.add(ts, "EMITTED_WAKE", meta, skill_name=skill)
+
+    def turn(self, ts, session_id):
+        self.add(ts, "LLM_TURN_COMPLETED", {"session_id": session_id})
+
+    def dispatched(self, ts, recipients):
+        self.add(
+            ts,
+            "CONFIRM_SEND_DISPATCHED",
+            {"outcome": "sent", "verb": "msgraph_send", "recipients": recipients},
+        )
+
+
+_facts_seq = 0
+
+
+def _facts(tmp_path, build):
+    # A fresh DB per call: a test that builds two ledgers is comparing two
+    # worlds, and reusing one file would silently union them.
+    global _facts_seq
+    _facts_seq += 1
+    db = tmp_path / f"audit-{_facts_seq}.db"
+    ledger = _Ledger(db)
+    build(ledger)
+    ledger.conn.close()
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return hb.count_send_refusals(conn, _NOW)
+    finally:
+        conn.close()
+
+
+def test_send_refusals_zero_reaches_the_wire(tmp_path):
+    """A ledger with nothing to report answers 0, and 0 is EMITTED.
+
+    This is the field's whole reason for existing: a seat whose routines all
+    reached their humans must be distinguishable from a seat nobody is reading.
+    Truthiness-omitting the zero would send the healthy case as silence to a
+    console that is watching for silence.
+    """
+    facts = _facts(tmp_path, lambda led: led.ok_tool_call(_ts(1)))
+    assert facts.count == 0
+    assert facts.last_ts is None
+    assert facts.events == []
+    payload = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        send_refusals=facts.count,
+        send_refusals_json=facts.events,
+    )
+    assert payload["send_refusals"] == 0
+    assert payload["send_refusals_json"] == []
+    assert "send_refusals_last_ts" not in payload
+
+
+def test_send_refusals_counts_a_cron_send_refusal(tmp_path):
+    facts = _facts(tmp_path, lambda led: led.refused_tool_call(_ts(2)))
+    assert facts.count == 1
+    assert facts.events[0]["kind"] == "refused"
+    assert facts.events[0]["routine"] == "op-managed:operator:deadline-miss-escalator"
+    assert facts.events[0]["tool"] == "smd_send_message"
+    assert facts.events[0]["reason"] == "Refused: date"
+
+
+def test_send_refusals_excludes_rows_older_than_the_window(tmp_path):
+    def build(led):
+        led.refused_tool_call(_ts(25))
+        led.refused_tool_call(_ts(23))
+
+    assert _facts(tmp_path, build).count == 1
+
+
+def test_send_refusals_excludes_rows_after_the_window(tmp_path):
+    """The window is closed at BOTH ends.
+
+    For the ticker the upper bound is "now" and never bites. For the retro
+    falsifier — the same function, asked about a day in the past — an open window
+    counts events that had not happened yet: a dry run reported 08-19's five
+    refusals against 08-18, whose known answer is zero.
+    """
+
+    def build(led):
+        led.refused_tool_call(_ts(1))
+        led.refused_tool_call(_ts(-3))  # three hours after ``now``
+
+    assert _facts(tmp_path, build).count == 1
+
+
+def test_send_refusals_ignores_a_wake_after_the_window(tmp_path):
+    def build(led):
+        led.wake(_ts(-3), needs_you=4)
+
+    assert _facts(tmp_path, build).count == 0
+
+
+def test_send_refusals_ignores_an_interactive_refusal(tmp_path):
+    """A refusal on a session a PERSON is driving is not a page.
+
+    They can see the refusal in front of them. The pager exists for refusals
+    nobody is looking at, which is what the cron-shaped-session clause selects.
+    """
+
+    def build(led):
+        led.add(
+            _ts(1),
+            "TOOL_CALL_COMPLETED",
+            {
+                "tool": "smd_send_message",
+                "outcome": "error",
+                "error_type": "Refused: date",
+                "resolved_action_class": "external_send_internal",
+                "session_id": "telegram-3391",
+            },
+        )
+
+    assert _facts(tmp_path, build).count == 0
+
+
+def test_send_refusals_ignores_a_failed_read(tmp_path):
+    """An errored READ is a connector problem, not a message nobody got."""
+
+    def build(led):
+        led.add(
+            _ts(1),
+            "TOOL_CALL_COMPLETED",
+            {
+                "tool": "mcp_smokeball_list_matters",
+                "outcome": "error",
+                "error_type": "HTTPError",
+                "resolved_action_class": "read",
+                "cron_job_id": "a726fd5efd24",
+            },
+        )
+
+    assert _facts(tmp_path, build).count == 0
+
+
+def test_send_refusals_counts_confirm_send_failed(tmp_path):
+    """The broker's own refusal counts, and its REASON is the closed vocabulary.
+
+    ``CONFIRM_SEND_FAILED.reason`` is ``str(exc)`` and can quote the address the
+    broker refused; ``outcome`` says the same thing about kind and carries no
+    address off the seat.
+    """
+    facts = _facts(
+        tmp_path,
+        lambda led: led.confirm_send_failed(_ts(3), reason="not on roster: jane@gmail.example"),
+    )
+    assert facts.count == 1
+    assert facts.events[0]["reason"] == "refused"
+    assert facts.events[0]["tool"] == "msgraph_send"
+    assert "gmail.example" not in json.dumps(facts.events)
+
+
+def test_send_refusals_counts_a_wake_that_sent_nothing(tmp_path):
+    """The 2026-08-20 instance: five items waiting, no attempt, no refusal row.
+
+    Nothing refusal-shaped can see this, which is why the fact carries two kinds
+    rather than being a refusal counter.
+    """
+
+    def build(led):
+        led.wake(_ts(4), needs_you=5, session_id=_CRON_SESSION)
+        led.turn(_ts(3.9), _CRON_SESSION)
+
+    facts = _facts(tmp_path, build)
+    assert facts.count == 1
+    assert facts.events[0]["kind"] == "unsent"
+    assert facts.events[0]["needs_you"] == 5
+    assert facts.events[0]["routine"] == "deadline-miss-escalator"
+
+
+def test_send_refusals_ignores_a_wake_with_nothing_to_say(tmp_path):
+    def build(led):
+        led.wake(_ts(4), needs_you=0, session_id=_CRON_SESSION)
+        led.turn(_ts(3.9), _CRON_SESSION)
+
+    assert _facts(tmp_path, build).count == 0
+
+
+def test_send_refusals_clears_a_wake_that_reached_a_person(tmp_path):
+    def build(led):
+        led.wake(_ts(4), needs_you=3, session_id=_CRON_SESSION)
+        led.dispatched(_ts(3.95), ["scott@smd.services"])
+        led.turn(_ts(3.9), _CRON_SESSION)
+
+    assert _facts(tmp_path, build).count == 0
+
+
+def test_send_refusals_a_probe_only_dispatch_does_not_clear_a_wake(tmp_path):
+    """A send to the falsifier's own probe address is not a routine reaching a
+    human. If it cleared the fact, the instrument used to prove the pager works
+    would be the thing that silences it."""
+
+    def build(led):
+        led.wake(_ts(4), needs_you=3, session_id=_CRON_SESSION)
+        led.dispatched(_ts(3.95), ["ss-probe-7f2@agentmail.to"])
+        led.turn(_ts(3.9), _CRON_SESSION)
+
+    facts = _facts(tmp_path, build)
+    assert facts.count == 1
+    assert facts.events[0]["kind"] == "unsent"
+
+
+def test_send_refusals_a_wake_with_no_session_id_uses_the_fixed_span(tmp_path):
+    """``pre_run.py`` writes the wake row before the turn exists, so it names no
+    session. The span is then a fixed window from the wake: a dispatch inside it
+    clears the fact, one an hour later belongs to somebody else."""
+
+    def build(led):
+        led.wake(_ts(4), needs_you=2)
+        led.dispatched(_ts(3.9), ["scott@smd.services"])
+
+    assert _facts(tmp_path, build).count == 0
+
+    def build_silent(led):
+        led.wake(_ts(4), needs_you=2)
+        led.dispatched(_ts(3.0), ["scott@smd.services"])
+
+    assert _facts(tmp_path, build_silent).count == 1
+
+
+def test_send_refusals_holds_a_wake_whose_session_may_still_be_running(tmp_path):
+    """A wake five minutes ago has not yet failed to send anything."""
+    assert _facts(tmp_path, lambda led: led.wake(_ts(0.08), needs_you=2)).count == 0
+
+
+def test_send_refusals_last_ts_is_the_max_across_both_kinds(tmp_path):
+    def build(led):
+        led.refused_tool_call(_ts(6))
+        led.wake(_ts(4), needs_you=1, session_id=_CRON_SESSION)
+        led.turn(_ts(3.9), _CRON_SESSION)
+        led.confirm_send_failed(_ts(2))
+
+    facts = _facts(tmp_path, build)
+    assert facts.count == 3
+    assert facts.last_ts == _ts(2)
+    assert facts.events[0]["kind"] == "refused"
+
+
+def test_send_refusals_json_is_capped_at_the_newest_five(tmp_path):
+    def build(led):
+        for hours in (9, 8, 7, 6, 5, 4, 3):
+            led.refused_tool_call(_ts(hours))
+
+    facts = _facts(tmp_path, build)
+    assert facts.count == 7
+    assert [e["ts"] for e in facts.events] == [_ts(3), _ts(4), _ts(5), _ts(6), _ts(7)]
+
+
+def test_send_refusals_reason_is_bounded(tmp_path):
+    facts = _facts(
+        tmp_path, lambda led: led.refused_tool_call(_ts(1), error_type="Refused: " + "x" * 900)
+    )
+    assert len(facts.events[0]["reason"]) == 200
+
+
+def test_read_audit_facts_carries_the_refusal_fields(tmp_path):
+    """The ticker's own read, not only the pure query."""
+    db = tmp_path / "audit.db"
+    ledger = _Ledger(db)
+    ledger.refused_tool_call(datetime.now(timezone.utc).isoformat())
+    ledger.conn.close()
+    facts = hb.read_audit_facts(str(db))
+    assert facts.send_refusals == 1
+    assert facts.send_refusals_last_ts is not None
+    assert facts.send_refusals_json[0]["kind"] == "refused"
+
+
+def test_read_audit_facts_on_a_pre_metadata_ledger_still_reports_timestamps(tmp_path):
+    """A ledger with no ``metadata`` column at all. The refusal read must degrade
+    on its own — sharing a handler with the timestamp read would let a missing
+    column report a working seat as silent, the #2498 confusion again."""
+    db = tmp_path / "audit.db"
+    _make_audit_db(str(db), [("01A", "2026-08-01T10:00:00+00:00", "escalator")])
+    facts = hb.read_audit_facts(str(db))
+    assert facts.last_audit_ts == "2026-08-01T10:00:00+00:00"
+    assert facts.send_refusals is None  # cannot answer — the console HOLDS
+    assert facts.send_refusals_json is None
+
+
+def test_payload_omits_refusals_when_the_seat_cannot_answer():
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        send_refusals=None,
+        send_refusals_last_ts=None,
+        send_refusals_json=None,
+    )
+    assert "send_refusals" not in p
+    assert "send_refusals_last_ts" not in p
+    assert "send_refusals_json" not in p
+
+
+def test_ticker_puts_the_refusal_fields_on_the_wire(tmp_path):
+    """End to end through the emitter: the fields reach the POST body."""
+    db = tmp_path / "audit.db"
+    ledger = _Ledger(db)
+    ledger.refused_tool_call(datetime.now(timezone.utc).isoformat())
+    ledger.conn.close()
+    em, calls = _emitter(audit_db_path_fn=lambda: str(db))
+    em._tick()
+    body = json.loads(calls["posts"][0][2])
+    assert body["send_refusals"] == 1
+    assert body["send_refusals_last_ts"]
+    assert body["send_refusals_json"][0]["tool"] == "smd_send_message"

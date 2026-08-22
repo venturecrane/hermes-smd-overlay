@@ -36,11 +36,12 @@ key out of the agent.
 from __future__ import annotations
 
 import http.client
+import json
 import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
@@ -79,12 +80,313 @@ class AuditLedgerFacts(NamedTuple):
     and ``rows`` are ss-console #2500's off-Machine chain pin: the ``row_hash``
     of the newest CHAINED row and the total row count, read in the same pass so
     the two can never describe different moments of the ledger.
+
+    ``send_refusals`` / ``send_refusals_last_ts`` / ``send_refusals_json`` are
+    ss-console#2547: how many times in the last day a routine tried to reach a
+    human and could not, or had something to say and never tried. Three fields
+    rather than one because the console pages on the TIMESTAMP (a new event, not
+    a nonzero level) and a human reading the page needs the routine and the
+    reason without opening the seat.
     """
 
     last_audit_ts: str | None
     last_skill_ts: str | None
     head: str | None
     rows: int | None
+    send_refusals: int | None = None
+    send_refusals_last_ts: str | None = None
+    send_refusals_json: list[dict] | None = None
+
+
+class SendRefusalFacts(NamedTuple):
+    """A day of a seat's failures to reach a human, counted two ways.
+
+    ``count`` is refusals PLUS silent wakes; ``last_ts`` is the newest event of
+    either kind (the console's paging marker); ``events`` is the newest few,
+    each naming the routine, the tool, and the reason — never a value.
+    """
+
+    count: int
+    last_ts: str | None
+    events: list[dict]
+
+
+#: Trailing window. A day, because the routines this watches fire daily: a
+#: shorter window would let a morning refusal age out before anyone read the
+#: page, and a longer one would keep re-describing an event already handled.
+SEND_REFUSAL_WINDOW_HOURS = 24
+
+#: How many events ride the beat. Enough to show a pattern (five refusals in one
+#: minute IS the 2026-08-19 shape), few enough to keep the payload small.
+_SEND_REFUSAL_EVENT_CAP = 5
+
+#: Cap on a reason string. Reasons here are refusal MESSAGES, which name kinds
+#: rather than values by construction (``outbound._identifier_refusal_message``
+#: names the identifier kinds and never the identifier), so this bound is about
+#: payload size and a readable subject line, NOT redaction. The kinds sit at the
+#: front of every message this path produces, so the cap keeps the diagnostic
+#: half.
+_MAX_REASON_CHARS = 200
+
+#: A wake with no ``LLM_TURN_COMPLETED`` to close its session gets this much
+#: room to have sent something. Only reached when the turn wrote no LLM row at
+#: all — a crash, or a ledger gap — where the honest bound is a short fixed one
+#: rather than "until the next thing happened".
+_UNCLOSED_SESSION_SPAN = 30 * 60
+
+#: Recipients the falsifier and the smoke tests send to. A dispatch that reached
+#: ONLY these is not a routine reaching a human, so it does not clear a wake.
+_PROBE_RECIPIENT_PREFIX = "ss-probe"
+
+
+def _iso_floor(value: str | None) -> str:
+    """The comparable prefix of an audit ``ts``: ``YYYY-MM-DDTHH:MM:SS``.
+
+    Rows are written by three different processes and two repos —
+    ``shared.ids.iso_utc`` stamps ``...123Z`` while test fixtures and older rows
+    carry ``...+00:00`` — so the offset spelling is not something this query may
+    depend on. Every timestamp on both sides of every comparison goes through
+    here, which makes the comparison a comparison of INSTANTS in a fixed-width
+    field rather than of two spellings that happen to sort.
+    """
+    return (value or "")[:19]
+
+
+def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalFacts:
+    """Every time in the trailing day this seat had something for a human and
+    did not deliver it. THE PURE QUERY — the ticker and the retro-falsifier
+    (``tests/tools/send_refusals_retro.py``) both call exactly this, so a number
+    reported from a live seat and a number computed from a ledger copy cannot
+    be produced by two different definitions.
+
+    Two kinds, because "refused" and "did not try" look identical from outside
+    and BOTH happened:
+
+    * ``refused`` — a routine's send was turned down. Two row shapes carry that:
+      a ``TOOL_CALL_COMPLETED`` whose outcome is not ``ok`` on a resolved
+      ``external_send*`` class from a cron-shaped session (the gate refusing
+      before dispatch — the 2026-08-19 identifier and em-dash refusals), and a
+      ``CONFIRM_SEND_FAILED`` (the broker refusing or the transport failing
+      after dispatch was authorized). The first is scoped to cron sessions on
+      purpose: a person talking to the Operator can see their own refusal and
+      does not need a page.
+    * ``unsent`` — an ``EMITTED_WAKE`` that woke the routine WITH needs-you
+      items, whose session then dispatched nothing to a real address. This is
+      the 2026-08-20 instance: five items waiting and not one send attempted,
+      which no refusal-shaped query can see because there is no refusal.
+
+    THE SESSION SPAN, and why it is joined on time. ``EMITTED_WAKE`` is written
+    by ``pre_run.py``, a process that has no session id yet (the turn it decides
+    for has not started), and the broker writes ``CONFIRM_SEND_DISPATCHED``
+    without one on the seats measured. So the span runs from the wake row to the
+    last ``LLM_TURN_COMPLETED`` of the session the wake names when it names one,
+    and ``_UNCLOSED_SESSION_SPAN`` past the wake when it does not. Overlapping a
+    neighbouring routine's dispatch can only SUPPRESS a page, never invent one,
+    which is the direction an alert should err in when its own join is
+    approximate.
+
+    Raises on a ledger this query cannot run against (an older schema, a missing
+    JSON1 build). The caller runs it in its own try and omits the fields, so a
+    seat that cannot answer holds rather than reporting a reassuring zero.
+    """
+    cutoff = _iso_floor(_as_utc(now).isoformat())
+    horizon = _iso_floor((_as_utc(now) - timedelta(hours=SEND_REFUSAL_WINDOW_HOURS)).isoformat())
+    events: list[dict] = []
+    events.extend(_refused_events(conn, horizon, cutoff))
+    events.extend(_unsent_events(conn, horizon, cutoff))
+    # Newest first, so the cap keeps the newest rather than whichever kind the
+    # queries happened to run in.
+    events.sort(key=lambda e: e["ts"], reverse=True)
+    last_ts = events[0]["ts"] if events else None
+    return SendRefusalFacts(
+        count=len(events),
+        last_ts=last_ts,
+        events=events[:_SEND_REFUSAL_EVENT_CAP],
+    )
+
+
+def _refused_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[dict]:
+    """Refusal rows in the window, as events.
+
+    The window is closed at BOTH ends. For the live ticker the upper bound is
+    "now" and costs nothing, but this same function answers the retro-falsifier's
+    question about a day in the past, and an open-ended window there counts
+    events that had not happened yet: a dry run over the pilot ledger reported
+    2026-08-19's five refusals against 08-18, a day whose known answer is zero.
+    The instrument's own falsifier found it, which is what a falsifier is for.
+
+    ``json_extract`` does the field predicates in SQLite so the trailing day's
+    ``TOOL_CALL_COMPLETED`` rows — the bulk of any seat's ledger — are filtered
+    by the engine rather than parsed one at a time in a 1-vCPU gate process on
+    every beat.
+
+    ``LIKE 'cron\\_%' ESCAPE '\\'`` is deliberate: unescaped, ``_`` is a
+    single-character wildcard and the clause would also match a session named
+    ``cronjob-...``. Belt and braces beside ``cron_job_id``, which is what a
+    MANAGED job's row actually carries; the LIKE is what catches an unmanaged
+    one-shot whose id never resolved to a stored job.
+    """
+    sql = (
+        "SELECT ts, action_type, skill_name,"
+        " json_extract(metadata,'$.routine') AS routine,"
+        " json_extract(metadata,'$.skill') AS skill,"
+        " json_extract(metadata,'$.tool') AS tool,"
+        " json_extract(metadata,'$.verb') AS verb,"
+        " json_extract(metadata,'$.error_type') AS error_type,"
+        " json_extract(metadata,'$.outcome') AS outcome"
+        " FROM audit_log"
+        " WHERE substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+        " AND ("
+        "   (action_type = 'TOOL_CALL_COMPLETED'"
+        "    AND json_extract(metadata,'$.outcome') IS NOT NULL"
+        "    AND json_extract(metadata,'$.outcome') <> 'ok'"
+        "    AND json_extract(metadata,'$.resolved_action_class') LIKE 'external\\_send%' ESCAPE '\\'"
+        "    AND (json_extract(metadata,'$.cron_job_id') IS NOT NULL"
+        "         OR json_extract(metadata,'$.session_id') LIKE 'cron\\_%' ESCAPE '\\'))"
+        "   OR action_type = 'CONFIRM_SEND_FAILED'"
+        " )"
+    )
+    out: list[dict] = []
+    for (
+        ts,
+        action_type,
+        skill_name,
+        routine,
+        skill,
+        tool,
+        verb,
+        error_type,
+        outcome,
+    ) in conn.execute(sql, (horizon, cutoff)):
+        if action_type == "CONFIRM_SEND_FAILED":
+            # The broker's row carries ``reason = str(exc)``, which can quote the
+            # recipient it refused. ``outcome`` is the closed vocabulary next to
+            # it (``refused`` / ``transport_error``) and says the same thing about
+            # kind without carrying an address off the seat.
+            reason = outcome
+        else:
+            reason = error_type or outcome
+        out.append(
+            _event(
+                ts=ts,
+                kind="refused",
+                routine=routine or skill or skill_name,
+                tool=tool or verb,
+                reason=reason,
+            )
+        )
+    return out
+
+
+def _unsent_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[dict]:
+    """Wakes that carried needs-you items and produced no send to a real person."""
+    wakes = conn.execute(
+        "SELECT ts, skill_name,"
+        " json_extract(metadata,'$.routine') AS routine,"
+        " json_extract(metadata,'$.session_id') AS session_id,"
+        " json_extract(metadata,'$.digest_needs_you') AS needs_you"
+        " FROM audit_log"
+        " WHERE action_type = 'EMITTED_WAKE'"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+        " AND CAST(COALESCE(json_extract(metadata,'$.digest_needs_you'), 0) AS INTEGER) > 0",
+        (horizon, cutoff),
+    ).fetchall()
+    out: list[dict] = []
+    for ts, skill_name, routine, session_id, needs_you in wakes:
+        start = _iso_floor(ts)
+        end = _session_span_end(conn, session_id, start)
+        if end > cutoff:
+            # The session may still be running. Nothing to conclude yet, and a
+            # page for a routine that is mid-turn would be a page for nothing.
+            continue
+        if _dispatched_to_a_person(conn, start, end):
+            continue
+        event = _event(
+            ts=ts,
+            kind="unsent",
+            routine=routine or skill_name,
+            tool=None,
+            reason="no_send_attempted",
+        )
+        try:
+            event["needs_you"] = int(needs_you)
+        except (TypeError, ValueError):
+            pass
+        out.append(event)
+    return out
+
+
+def _session_span_end(conn: sqlite3.Connection, session_id: str | None, start: str) -> str:
+    """When the wake's session stopped being able to send.
+
+    The last ``LLM_TURN_COMPLETED`` of the named session, or a fixed span past
+    the wake when the wake names no session (``pre_run.py`` has none to name) or
+    when that session wrote no turn row at all.
+    """
+    if session_id:
+        row = conn.execute(
+            "SELECT MAX(substr(ts,1,19)) FROM audit_log"
+            " WHERE action_type = 'LLM_TURN_COMPLETED'"
+            " AND json_extract(metadata,'$.session_id') = ?"
+            " AND substr(ts,1,19) >= ?",
+            (session_id, start),
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    return _iso_floor(
+        (
+            datetime.strptime(start, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            + timedelta(seconds=_UNCLOSED_SESSION_SPAN)
+        ).isoformat()
+    )
+
+
+def _dispatched_to_a_person(conn: sqlite3.Connection, start: str, end: str) -> bool:
+    """True iff a dispatch inside ``[start, end]`` reached a non-probe address.
+
+    ``recipients`` is a JSON ARRAY, and it is parsed here rather than in SQL on
+    purpose: ``json_each`` is a table-valued function that not every SQLite build
+    exposes, while the row count it would save is tiny (dispatch rows are rare).
+    The predicate that matters — "somebody other than the probe was written to" —
+    is worth more than the microseconds.
+    """
+    rows = conn.execute(
+        "SELECT metadata FROM audit_log"
+        " WHERE action_type = 'CONFIRM_SEND_DISPATCHED'"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?",
+        (start, end),
+    ).fetchall()
+    for (metadata,) in rows:
+        try:
+            recipients = json.loads(metadata or "{}").get("recipients")
+        except (ValueError, TypeError, AttributeError):
+            # An unparseable dispatch row is still a dispatch. Treat it as one:
+            # suppressing a page is the recoverable direction, inventing one on a
+            # seat that DID email its owner is not.
+            return True
+        if not isinstance(recipients, list):
+            return True
+        for recipient in recipients:
+            if isinstance(recipient, str) and not recipient.strip().lower().startswith(
+                _PROBE_RECIPIENT_PREFIX
+            ):
+                return True
+    return False
+
+
+def _event(*, ts: str, kind: str, routine, tool, reason) -> dict:
+    """One wire-shaped event. Strings only, bounded, never a value from a body."""
+    return {
+        "ts": str(ts or ""),
+        "kind": kind,
+        "routine": str(routine or ""),
+        "tool": str(tool or ""),
+        "reason": str(reason or "")[:_MAX_REASON_CHARS],
+    }
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def read_audit_facts(db_path: str | None) -> AuditLedgerFacts:
@@ -136,11 +438,24 @@ def read_audit_facts(db_path: str | None) -> AuditLedgerFacts:
         except sqlite3.Error as exc:
             logger.debug("heartbeat: audit chain column unavailable: %s", exc)
         rows = _scalar(conn, "SELECT COUNT(*) FROM audit_log")
+        # Send refusals in their OWN try, for the same reason the chain read has
+        # one: this query needs ``json_extract`` and a ``metadata`` column, and a
+        # ledger too old for either must not take ``last_audit_ts`` down with it
+        # and report a working seat as silent. Absence here means the seat cannot
+        # answer, and the console holds — never a reassuring zero (ss#2547).
+        refusals: SendRefusalFacts | None = None
+        try:
+            refusals = count_send_refusals(conn, datetime.now(timezone.utc))
+        except (sqlite3.Error, ValueError) as exc:
+            logger.debug("heartbeat: send-refusal read unavailable: %s", exc)
         return AuditLedgerFacts(
             last_audit,
             last_skill,
             head,
             rows if isinstance(rows, int) else None,
+            refusals.count if refusals is not None else None,
+            refusals.last_ts if refusals is not None else None,
+            refusals.events if refusals is not None else None,
         )
     except sqlite3.Error:
         # DB exists but audit_log table not created yet, or a transient lock.
@@ -187,6 +502,9 @@ def build_payload(
     audit_write_failures: int | None = None,
     audit_head: str | None = None,
     audit_rows: int | None = None,
+    send_refusals: int | None = None,
+    send_refusals_last_ts: str | None = None,
+    send_refusals_json: list[dict] | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -292,6 +610,22 @@ def build_payload(
         payload["audit_head"] = audit_head
     if audit_rows is not None:
         payload["audit_rows"] = audit_rows
+    # ss-console#2547: how often a routine could not reach a human. Same
+    # is-not-None discipline as the write-failure tally above, and here it is the
+    # whole point twice over. 0 is what says "every routine that had something to
+    # say said it" — the value that lets a repaired seat stop paging — and it is
+    # exactly the value truthiness would drop, sending the healthy case as
+    # silence to a console watching for silence. The TIMESTAMP is what the pager
+    # keys on (a new event, never a nonzero level), so it must ride even on a
+    # beat where the count has not moved; and the events must ride with it,
+    # because a page that names neither the routine nor the reason sends someone
+    # to the seat to find out what it was about.
+    if send_refusals is not None:
+        payload["send_refusals"] = send_refusals
+    if send_refusals_last_ts:
+        payload["send_refusals_last_ts"] = send_refusals_last_ts
+    if send_refusals_json is not None:
+        payload["send_refusals_json"] = send_refusals_json
     return payload
 
 
@@ -668,6 +1002,9 @@ class HeartbeatEmitter:
             audit_write_failures=audit_write_failures,
             audit_head=ledger.head,
             audit_rows=ledger.rows,
+            send_refusals=ledger.send_refusals,
+            send_refusals_last_ts=ledger.send_refusals_last_ts,
+            send_refusals_json=ledger.send_refusals_json,
         )
         import json
 
