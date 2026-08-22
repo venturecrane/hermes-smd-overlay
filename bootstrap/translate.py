@@ -1074,6 +1074,24 @@ _CEILING_SOUL_LINE: dict[str, str] = {
     "refused": "do not perform this action at all",
 }
 
+# Per-(action, ceiling) overrides where the generic ceiling sentence would send
+# the model down the wrong path. The generic "confirm" line was written for
+# sends (compose, ask, send on approval). A COMMITMENT at confirm is different:
+# the gate itself mints the proposal and the line the administrator answers
+# (hermes-smd-overlay#303). Read live on pilot-smokeball 2026-08-22: with the
+# generic line the model asked for approval in prose, never called the tool,
+# so nothing was ever proposed and a "yes" had nothing to bind to.
+_ACTION_CEILING_SOUL_LINE: dict[tuple[str, str], str] = {
+    ("commitment", "confirm"): (
+        "CALL the tool as soon as an Operator administrator asks for the act; do "
+        "not ask for permission in your own words first. The gate withholds the "
+        'call and hands you back a line beginning "[act " naming exactly what '
+        "would be done; put that line in your reply verbatim and end the turn. "
+        "When the administrator answers that line, call the same tool again with "
+        "the same values and report what the system recorded"
+    ),
+}
+
 
 def _send_posture_soul_section(persona: dict[str, Any]) -> str:
     """Render the persona's AUTHORED exposure into SOUL.md (ADR 0035 / ss ADR 0073).
@@ -1096,7 +1114,10 @@ def _send_posture_soul_section(persona: dict[str, Any]) -> str:
     for action, ceiling in raw.items():
         if not isinstance(action, str) or not isinstance(ceiling, str):
             continue
-        desc = _CEILING_SOUL_LINE.get(ceiling.strip().lower())
+        key = ceiling.strip().lower()
+        desc = _ACTION_CEILING_SOUL_LINE.get(
+            (action.strip().lower(), key)
+        ) or _CEILING_SOUL_LINE.get(key)
         if desc is None:
             continue
         lines.append(f"- **{action}**: {ceiling.strip().lower()} — {desc}.")
