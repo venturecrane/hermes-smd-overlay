@@ -133,6 +133,27 @@ DEFEATERS: tuple[str, ...] = (
     "unless",
 )
 
+#: An explicit refusal, in the sender's OWN words. A strict subset of
+#: :data:`DEFEATERS`, and the distinction is the whole of ss-console#2546's
+#: change to this module. Before it, ANY defeater with a named tag produced
+#: DECLINED, which was harmless while a decline only shaped a sentence the model
+#: said. It is not harmless now: a decline calls a broker verb, writes a row, and
+#: emails the person who asked to tell them their rule was refused. "Wait, which
+#: letters?" and "hold off until Monday" both contain defeaters and neither is a
+#: refusal, so neither may spend somebody else's request.
+DECLINE_TOKENS: tuple[str, ...] = (
+    "no",
+    "nope",
+    "decline",
+    "declined",
+    "reject",
+    "rejected",
+    "do not apply",
+    "don't apply",
+    "dont apply",
+    "not applying",
+)
+
 #: Verdict kinds returned by :func:`resolve`.
 CONFIRMED = "confirmed"
 DECLINED = "declined"
@@ -146,6 +167,9 @@ ASK_AMBIGUOUS = "ambiguous"
 ASK_UNKNOWN_TAG = "unknown_tag"
 ASK_NOT_THEIRS = "not_theirs"
 ASK_QUALIFIED = "qualified"
+#: A negation that is not an explicit refusal, or an explicit refusal the sender
+#: has no standing to give. Either way the rule stays open and the Operator asks.
+ASK_UNCLEAR_REFUSAL = "unclear_refusal"
 #: An affirmative when the only thing outstanding carries no tag and is not
 #: answerable on this channel (a send withheld for a Telegram approval).
 ASK_UNNAMEABLE = "unnameable"
@@ -268,6 +292,8 @@ class Reading:
     affirmative: bool
     apply_others: bool
     negated: bool
+    #: An EXPLICIT refusal was written, not merely a word that defeats a yes.
+    declining: bool = False
 
 
 def read_own_text(body: Any) -> Reading:
@@ -284,7 +310,13 @@ def read_own_text(body: Any) -> Reading:
     negated = any(_contains_phrase(text, token) for token in DEFEATERS)
     apply_others = any(_contains_phrase(text, token) for token in APPLY_TOKENS)
     bare = any(_contains_phrase(text, token) for token in BARE_AFFIRMATIVES)
-    return Reading(affirmative=bare or apply_others, apply_others=apply_others, negated=negated)
+    declining = any(_contains_phrase(text, token) for token in DECLINE_TOKENS)
+    return Reading(
+        affirmative=bare or apply_others,
+        apply_others=apply_others,
+        negated=negated,
+        declining=declining,
+    )
 
 
 def _sender_may_confirm(
@@ -317,6 +349,71 @@ def _sender_may_confirm(
     if apply_others:
         return for_admin and is_admin
     return not for_admin and stated_by == sender
+
+
+def may_decline(row: dict[str, Any], sender: Any, is_admin: bool) -> bool:
+    """Whether THIS sender may refuse THIS rule ON SOMEBODY ELSE'S BEHALF.
+
+    NOT a test of whether the reply reads as a refusal: that is
+    :func:`resolve`'s job, and a person refusing their OWN rule is a perfectly
+    ordinary decline that this returns False for. This answers the narrower
+    question the ACT needs: does saying no here close somebody else's request
+    in the broker and send them a letter about it.
+
+    Three conditions, and each closes a different way a decline could be
+    manufactured (ss-console#2546):
+
+    * the row is ``for_admin``: a rule somebody stated about their own work is
+      not another person's to refuse; they simply do not confirm it;
+    * the sender is an Operator admin, because refusing a firm-level request is
+      an act of authority, and the seat classifies that against the authored list
+      rather than believing the message;
+    * the sender is not the person who stated it, because one address that could
+      both raise and refuse a request is a loop with no second person in it, and
+      the row would read as though somebody in authority had answered.
+
+    An ACT is out of scope here and stays so: declining an act is "do not do
+    it", which is what happens anyway when nobody confirms it.
+    """
+    if str(row.get("kind") or "rule") == "tool_call":
+        return False
+    if not bool(row.get("for_admin")) or not is_admin:
+        return False
+    address = str(sender or "").strip().lower()
+    return str(row.get("instructed_by") or "").strip().lower() != address
+
+
+def _declined_or_ask(
+    named: list[dict[str, Any]],
+    named_ids: tuple[str, ...],
+    reading: Reading,
+) -> Verdict:
+    """A negation that named a rule: a real refusal, or a question?
+
+    Two conditions, and ss-console#2546 added both, because DECLINED can now
+    SPEND something: on a rule somebody else asked for it closes the proposal in
+    the broker and emails them to say so. So it is reached only on an EXPLICIT
+    refusal (a word from :data:`DECLINE_TOKENS`, not merely any defeater) over
+    EXACTLY ONE named rule.
+
+    "Wait, which letters?" carries a defeater and is a question; before this it
+    read as a refusal, which was harmless while a decline only shaped a
+    sentence. "No" over two quoted tags refuses something the seat cannot
+    identify, so it asks which.
+
+    WHOSE rule it is, and whether this sender has the standing to close it, is
+    deliberately NOT decided here: a person refusing their OWN rule is an
+    ordinary decline that spends nothing, and reporting that as a question would
+    ask somebody to repeat themselves. :func:`may_decline` answers that separate
+    question where the broker verb is actually called.
+    """
+    if not reading.declining or len(named) != 1:
+        return Verdict(kind=ASK, reason=ASK_UNCLEAR_REFUSAL, candidates=named_ids)
+    return Verdict(
+        kind=DECLINED,
+        proposal_id=str(named[0].get("proposal_id") or ""),
+        candidates=named_ids,
+    )
 
 
 def resolve(
@@ -375,7 +472,7 @@ def resolve(
         # the person they declined is also wrong. The Operator restates.
         if reading.affirmative:
             return Verdict(kind=ASK, reason=ASK_QUALIFIED, candidates=named_ids)
-        return Verdict(kind=DECLINED, candidates=named_ids)
+        return _declined_or_ask(named, named_ids, reading)
     if not reading.affirmative:
         return Verdict(kind=ASK, reason=ASK_NEEDS_AFFIRMATIVE, candidates=named_ids)
 
@@ -397,6 +494,7 @@ def resolve(
 
 __all__ = [
     "APPLY_TOKENS",
+    "ASK_UNCLEAR_REFUSAL",
     "ASK",
     "ASK_AMBIGUOUS",
     "ASK_NEEDS_AFFIRMATIVE",
@@ -408,6 +506,7 @@ __all__ = [
     "BARE_AFFIRMATIVES",
     "CONFIRMED",
     "DECLINED",
+    "DECLINE_TOKENS",
     "DEFEATERS",
     "NONE",
     "RULE_TAG",
@@ -415,6 +514,7 @@ __all__ = [
     "Verdict",
     "email_body",
     "find_tags",
+    "may_decline",
     "read_own_text",
     "resolve",
     "strip_quoted",

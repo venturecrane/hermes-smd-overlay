@@ -222,7 +222,18 @@ import time
 from collections import OrderedDict
 from typing import Any
 
-from shared import act_broker, admin_possession, provenance, read_capture, rule_confirm
+from shared import (
+    act_broker,
+    admin_possession,
+    provenance,
+    read_capture,
+    rule_confirm,
+    rule_dispatch,
+    send_dispatch,
+)
+from shared import (
+    operations_request as ops_request,
+)
 from shared.action_classes import ActionClass, BannedToolError, classify_tool
 from shared.customer_config import CustomerConfig
 from shared.inbound import (
@@ -235,6 +246,8 @@ from shared.outbound_recipient import DRAFT_RECORD_TOOLS, extract_to_recipients
 from shared.pending_acts import PENDING_ACTS, ConfirmedAct
 from shared.pending_send import PENDING_SEND
 from shared.tool_registration import register_wrapped_tool
+
+from . import sweeper as lapse_sweeper
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +286,15 @@ TOOL_PENDING = "establish_pending"
 TOOL_SUBMIT = "establish_submit"
 TOOL_STATUS = "establish_status"
 
+TOOL_OPERATIONS = "operations_request"
+
 ESTABLISH_TOOLS = (TOOL_STAGE, TOOL_PROPOSE, TOOL_PENDING, TOOL_SUBMIT, TOOL_STATUS)
+
+#: Gated by this plugin's hook like the five above, but NOT one of them: it
+#: establishes nothing and touches no spool. It carries a request OUT of the
+#: firm to SMD, which is why it is here at all: this is the plugin that already
+#: knows who the verified sender is (ss-console#2546).
+LOOP_TOOLS = (TOOL_OPERATIONS,)
 
 #: The intake's terminal status for a run whose object the applier has picked
 #: up (``establish_intake.intake.STATUS_INSTALLED``). Duplicated rather than
@@ -338,6 +359,22 @@ _MAX_INSTALLED = 8
 #: does not say WHY is the same dead end for the firm as the false claim.
 _LAST_SUBMIT_REFUSAL: OrderedDict[str, str] = OrderedDict()
 _MAX_REFUSALS = 8
+
+#: Sessions in which ``operations_request`` has actually passed a request to SMD
+#: (ss-console#2546). Read by :func:`_operations_gate`, which refuses a reply
+#: that PROMISES a routine change on a turn where nothing was passed on. The
+#: register holds the fact, never the model's account of it: the entry is
+#: written after the send returns sent, so a refused send leaves the gate armed
+#: and the reply has to say the request did not go.
+_OPERATIONS_SENT: OrderedDict[str, int] = OrderedDict()
+_MAX_OPERATIONS = 8
+
+#: Proposal ids whose lapse or decline this session has already reported, so a
+#: person who sends three messages in a row is told once. The broker is the
+#: durable half (``establish_lapse_notified`` is a conditional UPDATE and only
+#: one caller can win); this only saves the round trip.
+_OUTCOMES_REPORTED: OrderedDict[str, set[str]] = OrderedDict()
+_MAX_OUTCOMES = 8
 
 #: Phrases that assert a rule is ALREADY in force. Deliberately not a list of
 #: "words about rules": each of these is a completed-state claim, and the
@@ -933,6 +970,95 @@ _CONFIRMED_NOTE = (
     "you have not observed."
 )
 
+_FOR_ADMIN_ON_ADMIN_MESSAGE = (
+    "Refused: for_admin marks a rule as WAITING for an administrator, and this "
+    "turn's sender is one. Propose it with for_admin false and ask them to "
+    "confirm it themselves; marking it otherwise would email the firm's "
+    "administrators a request from somebody who could simply have said yes."
+)
+
+_DECLINED_ADMIN_NOTE = (
+    "You declined [rule {proposal_id}] on the firm's behalf. It is closed, and "
+    "{requester} has ALREADY been emailed to say so. Confirm to this "
+    "administrator that it will not be applied and that the person who asked "
+    "has been told. Do not send anything yourself."
+)
+
+_OPERATIONS_NUDGE = (
+    "If what they are asking for is WHEN something runs, WHICH channel it "
+    "arrives on, what you remember, how much you may do on your own, or "
+    "turning a routine on or off, that is not a rule about how work reads and "
+    f"you cannot change it. Call {TOOL_OPERATIONS} with a one-sentence summary "
+    "of what they asked for, and say what it tells you to say. Never promise "
+    "that a routine will start, stop, or change."
+)
+
+_OPERATIONS_NO_SENDER = (
+    "Refused: an operations request is recorded against the person who made it, "
+    "and this turn has no verified sender. Ask them to email the request in."
+)
+
+_OPERATIONS_NO_SUMMARY = (
+    "Refused: summary is required, and it is what SMD reads first. One "
+    "sentence saying what the person asked for."
+)
+
+_OPERATIONS_TOOL_DESCRIPTION = (
+    "Pass an operations request to SMD: a change to WHEN something runs, WHICH "
+    "channel it arrives on, what this Operator remembers, how much it may do on "
+    "its own, or turning a routine on or off. Those are SMD changes, not yours. "
+    "The request is emailed to SMD with the person's own message attached, and "
+    "the tool returns the sentence to say back to them."
+)
+
+_OPERATIONS_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": (
+                "One sentence saying what the person asked for, in their terms. "
+                "SMD reads their original message too; this is the subject line."
+            ),
+        }
+    },
+    "required": ["summary"],
+}
+
+#: A first-person promise about future behaviour. Each is a completed or
+#: committed claim ("I will start", "I have scheduled") rather than a word about
+#: schedules, because a reply that merely MENTIONS a routine is fine and common.
+_ROUTINE_PROMISE_VERBS = (
+    r"\bi (?:will|shall) (?:start|begin|send|run|schedule|set up|turn|stop|switch)\b",
+    r"\bi'?ll (?:start|begin|send|run|schedule|set up|turn|stop|switch)\b",
+    r"\bi(?:'ve| have) (?:scheduled|set up|turned|started|stopped|switched)\b",
+    r"\bfrom now on,? i(?:'ll| will)\b",
+    r"\bi(?:'m| am) now (?:sending|running|scheduling)\b",
+)
+
+#: The other half of the conjunction. A promise only trips the gate when it is a
+#: promise about a ROUTINE; "I will send you the draft" is ordinary work.
+_ROUTINE_OBJECTS = (
+    r"\bdigest\b",
+    r"\broutine\b",
+    r"\bschedule[ds]?\b",
+    r"\brecurring\b",
+    r"\bdaily\b",
+    r"\bweekly\b",
+    r"\bevery (?:day|morning|monday|tuesday|wednesday|thursday|friday|week|month)\b",
+    r"\beach (?:day|morning|week|month)\b",
+    r"\bautonom(?:y|ous)\b",
+)
+
+_OPERATIONS_PROMISE_MESSAGE = (
+    "Withheld: this reply promises that a routine will start, stop, or change, "
+    "and nothing has been passed to SMD on this turn. Routines, schedules, "
+    "channels, memory, autonomy and on/off are SMD changes (ADR 0085). Call "
+    f"{TOOL_OPERATIONS} with what they asked for, then say what it tells you to "
+    "say. If you did not mean to promise a routine change, take the promise out "
+    "and send the reply again."
+)
+
 _DECLINED_NOTE = (
     "The person did NOT agree to the rule you read back ({candidates}). Do not "
     f"call {TOOL_SUBMIT}. Acknowledge that nothing was recorded, and if they "
@@ -1432,6 +1558,22 @@ def _submit(args: dict[str, Any], **kwargs: Any) -> str:
     session_id = provenance.resolve_session(kwargs.get("session_id"))
     if isinstance(response, dict):
         _note_submit_outcome(session_id, payload, response)
+        if response.get("ok") and payload.get("proposal_id"):
+            # ss-console#2546. The seat asks the broker whether the rule
+            # INSTALLED and, if it did, tells the person who asked for it. It
+            # polls rather than trusting the model's account of a status call,
+            # for the same reason _in_effect_gate exists: "in effect" is a fact
+            # about the seat, and the seat is the only thing entitled to assert
+            # it. Best-effort by design -- an unanswered poll costs one note,
+            # which the fallback path picks up, never the commit.
+            try:
+                _notify_on_install(
+                    session_id,
+                    str(payload.get("proposal_id") or ""),
+                    str(response.get("run_id") or ""),
+                )
+            except Exception:  # noqa: BLE001 -- the rule is committed either way
+                logger.debug("hermes-smd-establishment: install notification failed", exc_info=True)
         if not response.get("ok") and payload.get("proposal_id"):
             # The model's next move after a refusal is the one that goes wrong:
             # it re-reads the rule, rewrites it, and submits again, which is the
@@ -1530,11 +1672,315 @@ def _propose(args: dict[str, Any], **kwargs: Any) -> str:
     if _is_old_broker(response):
         return _OLD_BROKER_MESSAGE
     if isinstance(response, dict) and response.get("ok"):
-        _remember_readback(
-            provenance.resolve_session(kwargs.get("session_id")),
-            str(response.get("readback") or ""),
-        )
+        session_id = provenance.resolve_session(kwargs.get("session_id"))
+        _remember_readback(session_id, str(response.get("readback") or ""))
+        # ss-console#2546. The request goes NOW, from here, on the seat's own
+        # authority. Two conditions and no others: the rule waits on an
+        # administrator, and this call actually created something. A duplicate
+        # (the same person, the same sentence, already open) returns the row
+        # they already have, and paging an administrator a second time about it
+        # would put two tags in front of them, only one of which answering
+        # would close.
+        if bool(args.get("for_admin")) and not response.get("duplicate_of"):
+            note = _notify_admins_of(session_id, response, args)
+            if note:
+                response = dict(response)
+                response["seat_note"] = note
     return json.dumps(response, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# The rule-request loop (ss-console#2546)
+#
+# Four deterministic sends, all through the seat's own gate, none composed by
+# the model. See shared/rule_dispatch.py for what each one says and why it is a
+# template; this half is the plumbing: who to send to, when, and what to record
+# afterwards.
+# ---------------------------------------------------------------------------
+
+_AUDIT_CLIENT: Any = None
+_AUDIT_SLUG: str | None = None
+_AUDIT_WIRED = False
+
+
+def _audit_client() -> tuple[Any, str | None]:
+    """Lazily resolve ``(client, slug)``; cached. Mirrors ``shared.spec_gate``."""
+    global _AUDIT_CLIENT, _AUDIT_SLUG, _AUDIT_WIRED
+    if _AUDIT_WIRED:
+        return _AUDIT_CLIENT, _AUDIT_SLUG
+    _AUDIT_WIRED = True
+    try:
+        from shared.audit_client import audit_client_from_env
+        from shared.secrets import require
+
+        secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
+        slug = secrets_map["SMD_CUSTOMER_SLUG"]
+        _AUDIT_CLIENT = audit_client_from_env(customer_slug=slug)
+        _AUDIT_SLUG = slug
+    except Exception as exc:  # noqa: BLE001 -- audit is best-effort vs the send
+        logger.debug("hermes-smd-establishment: audit client unconfigured (%s)", exc)
+        _AUDIT_CLIENT = None
+        _AUDIT_SLUG = None
+    return _AUDIT_CLIENT, _AUDIT_SLUG
+
+
+def _emit_audit(*, action_type: str, metadata: dict[str, Any], session_id: str = "") -> None:
+    """Write one row through the same client every shared gate uses.
+
+    Best-effort and never fatal: this is called AFTER the message it records has
+    already gone, so a failure here loses the record of a send, not the send.
+    """
+    from shared.audit_contract import INSERT_SQL, agent_event_params
+
+    client, slug = _audit_client()
+    if client is None or slug is None:
+        logger.warning("hermes-smd-establishment: %s not recorded (no audit client)", action_type)
+        return
+    params = agent_event_params(
+        action_type=action_type,
+        metadata=metadata,
+        session_id=session_id or None,
+    )
+    client.execute(INSERT_SQL, *params)
+
+
+def _customer_slug() -> str:
+    """The seat's own label, for a message body. Never a gate."""
+    _client, slug = _audit_client()
+    if slug:
+        return slug
+    try:
+        from shared.secrets import get_secret
+
+        return get_secret("SMD_CUSTOMER_SLUG")
+    except Exception:  # noqa: BLE001 -- a slug is a label
+        return ""
+
+
+def _routing_addresses() -> list[str]:
+    """Who this engagement emails when a non-admin asks for a firm rule.
+
+    Read live from ``customer.yaml`` per call (ADR 0044 posture) and fail-closed
+    to ``[]``. Empty is not an error state: it is a firm that has named nobody,
+    and the caller's contract is then to SAY nobody was asked.
+    """
+    cfg = _load_config()
+    if cfg is None:
+        return []
+    try:
+        return list(cfg.rule_requests_to)
+    except Exception:  # noqa: BLE001 -- an unreadable config names nobody
+        logger.debug("hermes-smd-establishment: rule_requests_to unreadable", exc_info=True)
+        return []
+
+
+def _notify_admins_of(session_id: str, response: dict[str, Any], args: dict[str, Any]) -> str:
+    """A non-admin's rule was just recorded. Email the named administrators.
+
+    Called from the ``establish_propose`` HANDLER, not from a hook, and that is
+    the deterministic half: the moment the broker says a ``for_admin`` row
+    exists, the request goes, without the model deciding to send it. Same
+    reasoning as ``_dispatch_approved_send`` in the trust plugin, which exists
+    because the model does not reliably re-invoke a send on "yes".
+
+    Returns the sentence appended to the tool result, and it is a sentence about
+    what DID happen either way: an Operator that says an administrator was asked
+    when nothing left the building is the failure this whole issue is about.
+    """
+    proposal_id = str(response.get("proposal_id") or "")
+    notification = rule_dispatch.notify_admins(
+        proposal_id=proposal_id,
+        text=str(args.get("text") or ""),
+        requester=_normalize_address(args.get("instructed_by")),
+        rule_requests_to=_routing_addresses(),
+        send=send_dispatch.dispatch,
+        emit=_emit_audit,
+        session_id=session_id,
+    )
+    return notification.note
+
+
+def _notify_requester(
+    *, kind: str, row: dict[str, Any], by: str = "", session_id: str = ""
+) -> bool:
+    """Tell the person who asked how their rule ended. True iff the note went."""
+    notification = rule_dispatch.notify_outcome(
+        kind=kind,
+        proposal_id=str(row.get("proposal_id") or ""),
+        text=str(row.get("text") or ""),
+        requester=_normalize_address(row.get("instructed_by")),
+        by=by,
+        send=send_dispatch.dispatch,
+        session_id=session_id,
+    )
+    return notification.sent
+
+
+def _mark_outcome_reported(proposal_id: str) -> None:
+    """Tell the broker the person has been told. Conditional on its side."""
+    try:
+        _broker_request({"action": "establish_lapse_notified", "proposal_id": proposal_id})
+    except Exception:  # noqa: BLE001 -- the note already went
+        logger.debug(
+            "hermes-smd-establishment: could not mark %s reported", proposal_id, exc_info=True
+        )
+
+
+def _report_outstanding_outcomes(session_id: str, rows: list[dict[str, Any]]) -> None:
+    """Report any of THESE rows that ended without their author being told.
+
+    The fallback path, not the design: the sweeper reports a lapse within
+    seconds of it happening, and this catches the case where the sweeper could
+    not send at the time and the person is now in front of us anyway.
+
+    IT COSTS NOTHING ON AN ORDINARY TURN, which is why it takes rows rather than
+    fetching them. The only turn that reaches here is one whose message could be
+    an answer, and that turn has already asked the broker what this person has
+    outstanding; asking a second time would put a round trip on every attributed
+    turn, which is exactly the property ``_confirmation_note``'s early return
+    exists to protect.
+    """
+    seen = _OUTCOMES_REPORTED.setdefault(session_id, set())
+    for row in rows:
+        state = str(row.get("state") or "open")
+        proposal_id = str(row.get("proposal_id") or "")
+        if state not in ("lapsed", "declined") or not proposal_id or proposal_id in seen:
+            continue
+        if row.get("lapse_notified"):
+            continue
+        if _notify_requester(
+            kind=state,
+            row=row,
+            by=str(row.get("declined_by") or ""),
+            session_id=session_id,
+        ):
+            _mark_outcome_reported(proposal_id)
+            seen.add(proposal_id)
+    _OUTCOMES_REPORTED.move_to_end(session_id)
+    while len(_OUTCOMES_REPORTED) > _MAX_OUTCOMES:
+        _OUTCOMES_REPORTED.popitem(last=False)
+
+
+def _decline_rule(session_id: str, sender: str, row: dict[str, Any]) -> bool:
+    """Record an administrator's refusal, then tell the person who asked.
+
+    The broker is the authority on whether the decline lands: its UPDATE is
+    conditional, so two administrators answering at the same moment produce one
+    decline and one note.
+    """
+    proposal_id = str(row.get("proposal_id") or "")
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id)
+    except Exception:  # noqa: BLE001 -- an unresolvable origin is not a reason to stop
+        origin = None
+    try:
+        response = _broker_request(
+            {
+                "action": "establish_decline",
+                "proposal_id": proposal_id,
+                "declined_by": sender,
+                "source_ref": (origin.message_id if origin else "") or session_id or "reply",
+            }
+        )
+    except Exception:  # noqa: BLE001 -- an unreachable broker declines nothing
+        logger.warning("hermes-smd-establishment: decline of %s failed", proposal_id, exc_info=True)
+        return False
+    if not isinstance(response, dict) or not response.get("ok"):
+        logger.info("hermes-smd-establishment: decline of %s refused by broker", proposal_id)
+        return False
+    if _notify_requester(kind="declined", row=response, by=sender, session_id=session_id):
+        _mark_outcome_reported(proposal_id)
+    return True
+
+
+def _fetch_row(proposal_id: str) -> dict[str, Any]:
+    """One proposal by id, in any state. ``{}`` on any fault."""
+    try:
+        response = _broker_request(
+            {"action": TOOL_PENDING, "proposal_id": proposal_id, "include_outcomes": True}
+        )
+    except Exception:  # noqa: BLE001 -- a missed row costs one note
+        return {}
+    rows = response.get("pending") if isinstance(response, dict) else None
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        return rows[0]
+    return {}
+
+
+def _notify_on_install(session_id: str, proposal_id: str, run_id: str) -> None:
+    """A confirmed rule was committed. Did it INSTALL, and who should hear?
+
+    The seat polls the broker itself rather than believing the model's account
+    of the status call, which is the rule ``_in_effect_gate`` already enforces
+    on the reply. Only an ``installed`` status produces a note, and only for a
+    rule somebody OTHER than the confirming administrator asked for: an admin
+    who states and confirms their own rule needs no letter about it.
+    """
+    if not proposal_id or not run_id:
+        return
+    try:
+        response = _broker_request({"action": TOOL_STATUS, "run_id": run_id})
+    except Exception:  # noqa: BLE001 -- a missed note costs the fallback path
+        logger.debug("hermes-smd-establishment: install poll failed", exc_info=True)
+        return
+    result = response.get("result") if isinstance(response, dict) else None
+    if not isinstance(result, dict) or result.get("status") != _STATUS_INSTALLED:
+        return
+    row = _fetch_row(proposal_id)
+    if not row or not row.get("for_admin"):
+        return
+    entry = _ADMIN_STASH.get(session_id) or {}
+    applied_by = _normalize_address(entry.get("sender"))
+    if _normalize_address(row.get("instructed_by")) == applied_by:
+        return
+    _notify_requester(kind="installed", row=row, by=applied_by, session_id=session_id)
+
+
+def _fetch_unreported_outcomes() -> list[dict[str, Any]]:
+    """Everything on this seat that ended and whose author has not been told.
+
+    ONE CALL DOES TWO THINGS, and that is the point rather than a coincidence:
+    the broker sweeps expired rows on every establishment verb, so asking this
+    question is what causes an overdue rule to become a lapse. Nothing in this
+    process computes an expiry or holds a clock.
+    """
+    try:
+        response = _broker_request({"action": TOOL_PENDING, "include_outcomes": True})
+    except Exception:  # noqa: BLE001 -- an unreachable broker reports nothing
+        logger.debug("hermes-smd-establishment: outcome sweep unreachable", exc_info=True)
+        return []
+    rows = response.get("pending") if isinstance(response, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def _sweep_lapses_once() -> lapse_sweeper.SweepResult:
+    """One pass, wired to the live broker and the live send gate.
+
+    The sends go out on an EMPTY session id, which is the honest value: no
+    session opened them. The taint register reads an unknown session as
+    untainted (``shared.inbound.SessionTaint.trust_class``), so the note is
+    classified on the recipient alone, exactly as an internal alert is.
+    """
+    return lapse_sweeper.run_sweep_once(
+        fetch=_fetch_unreported_outcomes,
+        notify=lambda *, kind, row, by: _notify_requester(kind=kind, row=row, by=by, session_id=""),
+        mark=_mark_outcome_reported,
+    )
+
+
+def start_lapse_sweeper(
+    interval_s: float = lapse_sweeper.DEFAULT_SWEEP_INTERVAL_S,
+) -> Any:
+    """Start the lapse reporter. Never raises out of ``register``."""
+    try:
+        return lapse_sweeper.start_sweeper_thread(sweep=_sweep_lapses_once, interval_s=interval_s)
+    except Exception:  # noqa: BLE001 -- a seat without a sweeper still works
+        logger.warning(
+            "hermes-smd-establishment: lapse sweeper did not start; a lapse is then "
+            "reported on the requester's next message instead",
+            exc_info=True,
+        )
+        return None
 
 
 def _pending(args: dict[str, Any], **_: Any) -> str:
@@ -1544,12 +1990,119 @@ def _pending(args: dict[str, Any], **_: Any) -> str:
             "action": TOOL_PENDING,
             "sender": args.get("sender"),
             "include_for_admin": bool(args.get("include_for_admin")),
+            "include_outcomes": bool(args.get("include_outcomes")),
             "proposal_id": args.get("proposal_id"),
         }
     )
     if _is_old_broker(response):
         return _OLD_BROKER_MESSAGE
     return json.dumps(response, ensure_ascii=False)
+
+
+def _note_operations_sent(session_id: str) -> None:
+    """This session has actually passed a request to SMD."""
+    if not session_id:
+        return
+    _OPERATIONS_SENT[session_id] = _OPERATIONS_SENT.get(session_id, 0) + 1
+    _OPERATIONS_SENT.move_to_end(session_id)
+    while len(_OPERATIONS_SENT) > _MAX_OPERATIONS:
+        _OPERATIONS_SENT.popitem(last=False)
+
+
+def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
+    """Pass one operations request to SMD, and return the sentence to say.
+
+    THE POINT OF THE TOOL, stated plainly: before it, "start sending me a
+    digest every Monday" got a polite acknowledgement and reached nobody. The
+    Operator could not make the change and had no way to hand it on, so the
+    person believed the request was in hand when there was no path from that
+    sentence to anyone at SMD.
+
+    The send goes through the SAME gate a composed send does
+    (:mod:`shared.send_dispatch`), so a tainted turn refuses it exactly as it
+    refuses any other send, and the sentence returned then says the request was
+    NOT passed on. The two sentences are the whole design: which one the model
+    gets is decided by whether the message went, not by the model.
+    """
+    session_id = provenance.resolve_session(kwargs.get("session_id"))
+    entry = _ADMIN_STASH.get(session_id) if session_id else None
+    sender = _normalize_address(entry.get("sender")) if entry else ""
+    if not sender:
+        return _OPERATIONS_NO_SENDER
+    summary = ops_request.summarize(args.get("summary"))
+    if not summary:
+        return _OPERATIONS_NO_SUMMARY
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id)
+    except Exception:  # noqa: BLE001 -- an unresolvable origin loses one line
+        origin = None
+    message = ops_request.build(
+        sender=sender,
+        summary=summary,
+        message_id=(origin.message_id if origin else ""),
+        customer_slug=_customer_slug(),
+    )
+    result = send_dispatch.dispatch(
+        to=message["to"],
+        subject=message["subject"],
+        text=message["text"],
+        session_id=session_id,
+    )
+    if not result.sent:
+        reason = result.reason or "the send was refused"
+        logger.info("hermes-smd-establishment: operations request NOT passed on (%s)", reason)
+        return ops_request.REFUSED_REPLY.format(reason=reason)
+    _note_operations_sent(session_id)
+    logger.info(
+        "hermes-smd-establishment: operations request from %s passed to SMD (message %s)",
+        sender,
+        result.message_id,
+    )
+    return ops_request.FIXED_REPLY
+
+
+def _promises_routine_change(blob: str) -> bool:
+    """Does this reply promise that a routine will start, stop, or change?
+
+    A CONJUNCTION, deliberately: a first-person promise AND a routine object.
+    Either half alone is ordinary. "I will send you the draft" is the work; "the
+    digest runs on Mondays" is a description. Only the pair is a commitment the
+    Operator cannot keep, because it cannot change a routine at all.
+    """
+    if not blob:
+        return False
+    text = re.sub(r"\s+", " ", blob.lower())
+    if not any(re.search(pattern, text) for pattern in _ROUTINE_PROMISE_VERBS):
+        return False
+    return any(re.search(pattern, text) for pattern in _ROUTINE_OBJECTS)
+
+
+def _operations_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, Any] | None:
+    """Withhold a reply that promises a routine change nobody was told about.
+
+    The twin of ``_in_effect_gate``, and the same argument: the Operator may not
+    assert a state of the world it has not brought about. Here the state is a
+    schedule, and the only way this seat can affect one is by asking SMD, so a
+    promise with no ``operations_request`` behind it on this turn is a promise
+    the firm has no reason to believe.
+
+    Deliberately session-scoped rather than turn-scoped: the tool and the reply
+    are two calls in one exchange, and a person is owed one answer, not a gate
+    that fires on the second sentence of it.
+    """
+    session = _as_session(session_id)
+    if session and _OPERATIONS_SENT.get(session):
+        return None
+    body = " ".join(
+        str(value)
+        for key, value in (args or {}).items()
+        if key in ("text", "body", "body_text", "html", "message", "content")
+        and isinstance(value, str)
+    )
+    if not _promises_routine_change(body):
+        return None
+    logger.info("hermes-smd-establishment: reply withheld (promised a routine change)")
+    return {"action": "block", "message": _OPERATIONS_PROMISE_MESSAGE}
 
 
 def _status(args: dict[str, Any], **_: Any) -> str:
@@ -2030,7 +2583,9 @@ def _person_pref_pointer(sender_id: Any) -> str | None:
         return None
 
 
-def _fetch_pending(sender: str, is_admin: bool) -> list[dict[str, Any]]:
+def _fetch_pending(
+    sender: str, is_admin: bool, include_outcomes: bool = False
+) -> list[dict[str, Any]]:
     """The sender's outstanding rules, from the broker. ``[]`` on any fault.
 
     Best-effort by contract, like the preference pointer beside it: a broker
@@ -2045,6 +2600,12 @@ def _fetch_pending(sender: str, is_admin: bool) -> list[dict[str, Any]]:
                 "action": TOOL_PENDING,
                 "sender": sender,
                 "include_for_admin": bool(is_admin),
+                # ss-console#2546. OPT-IN on the broker's side, and the default
+                # matters: the confirmation path must keep seeing ONLY rows a
+                # person could still confirm, or the Operator would offer the
+                # firm a rule an administrator has already refused. Only the
+                # outcome-reporting path asks for the rest.
+                "include_outcomes": bool(include_outcomes),
             }
         )
     except Exception:  # noqa: BLE001 — an unreachable broker costs the turn nothing
@@ -2176,7 +2737,25 @@ def _confirmation_note(
         # Nothing that could be an answer. Skip the broker round trip entirely —
         # this runs on every attributed turn.
         return None
-    pending = _fetch_pending(sender, is_admin)
+    # ss-console#2546. The SAME round trip now answers two questions: what can
+    # this person still confirm, and has anything of theirs ended without them
+    # being told. Terminal rows are split off immediately and never reach the
+    # matcher, so an affirmative can never bind to a rule that has already
+    # lapsed or been declined.
+    rows = _fetch_pending(sender, is_admin, include_outcomes=True)
+    pending = [r for r in rows if str(r.get("state") or "open") == "open"]
+    ended = [
+        r
+        for r in rows
+        if str(r.get("state") or "open") in ("lapsed", "declined")
+        and not r.get("lapse_notified")
+        and _normalize_address(r.get("instructed_by")) == sender
+    ]
+    if ended:
+        try:
+            _report_outstanding_outcomes(session_id, ended)
+        except Exception:  # noqa: BLE001 -- a missed report must not cost a turn
+            logger.debug("hermes-smd-establishment: outcome report failed", exc_info=True)
     # A withheld send carries no tag and cannot be named, but it is still
     # something outstanding, so it counts when deciding whether a bare
     # affirmative is ambiguous (ss-console operator-own-matter).
@@ -2199,6 +2778,26 @@ def _confirmation_note(
             scope=str(row.get("scope") or "firm_adjust"),
         )
     if verdict.kind == rule_confirm.DECLINED:
+        # ss-console#2546. A decline is an ACT now, not just a sentence: it
+        # closes the proposal in the broker and tells the person who asked. The
+        # matcher only reaches here on an explicit refusal, over exactly one
+        # rule, from an administrator who is not the person who stated it, so
+        # this branch never fires on "wait, which letters?".
+        row = next(
+            (p for p in pending if str(p.get("proposal_id")) == (verdict.proposal_id or "")),
+            None,
+        )
+        # may_decline, not a hand-rolled check: the standing question is
+        # answered in one place, and the broker independently answers it again
+        # from the row it holds, so this is the first of two noes rather than
+        # the only one. A person refusing their OWN rule falls through to the
+        # note below and spends nothing, which is correct.
+        if row is not None and rule_confirm.may_decline(row, sender, is_admin):
+            if _decline_rule(session_id, sender, row):
+                return _DECLINED_ADMIN_NOTE.format(
+                    proposal_id=str(row.get("proposal_id") or ""),
+                    requester=str(row.get("instructed_by") or "the person who asked"),
+                )
         return _DECLINED_NOTE.format(candidates=", ".join(verdict.candidates))
     if verdict.kind == rule_confirm.ASK:
         if verdict.reason == rule_confirm.ASK_NOT_THEIRS:
@@ -2323,6 +2922,7 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         if not is_admin:
             lines.append(_FOR_ADMIN_LINE.format(admins=_admin_names(cfg)))
         lines.append(_SCHEDULE_LIMIT_LINE)
+        lines.append(_OPERATIONS_NUDGE)
         # ss-console#2529. Last, and after the nudge, because it is an
         # instruction about THIS message rather than a standing capability
         # note: when the person just answered a readback, what to do about it
@@ -2627,6 +3227,13 @@ def _rule_gate(
     if not is_admin and not args.get("for_admin"):
         return {"action": "block", "message": _REFUSAL_MESSAGE}
     if is_admin:
+        # ss-console#2546. The other direction, and it is new: an admin may not
+        # mark their OWN rule as waiting for an admin. It used to be merely
+        # pointless; now it would email the routing list a request from somebody
+        # who could simply have said yes, and would let one address both raise
+        # and answer a request with nobody else involved.
+        if args.get("for_admin"):
+            return {"action": "block", "message": _FOR_ADMIN_ON_ADMIN_MESSAGE}
         return _possession_gate(sender, tool_name)
     return None
 
@@ -2720,6 +3327,16 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     establish rather than one about document coverage.
     """
     tool_name = kwargs.get("tool_name")
+    if tool_name == TOOL_OPERATIONS:
+        # Attribution only. It writes nothing to the firm's records and reaches
+        # only SMD's own desk, so what it needs is a verified person to record
+        # the request against; the send itself is gated downstream exactly as a
+        # composed one is.
+        session_id = kwargs.get("session_id")
+        entry = _ADMIN_STASH.get(session_id) if isinstance(session_id, str) else None
+        if not entry or not _normalize_address(entry.get("sender")):
+            return {"action": "block", "message": _OPERATIONS_NO_SENDER}
+        return None
     if tool_name not in ESTABLISH_TOOLS:
         withheld = _containment_gate(tool_name, kwargs.get("args"))
         if withheld is not None:
@@ -2730,6 +3347,13 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             # send that another gate then blocks is a debt the retry no longer
             # owes.
             withheld = _in_effect_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))
+            if withheld is not None:
+                return withheld
+            # ss-console#2546. Before the readback gate for the same reason the
+            # in-effect gate is: the readback gate SPENDS the debt on delivery,
+            # and a debt spent by a send another gate then blocks is one the
+            # retry no longer owes.
+            withheld = _operations_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))
             if withheld is not None:
                 return withheld
             return _readback_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))
@@ -2842,9 +3466,25 @@ def register(ctx: Any) -> None:
         description=_STATUS_DESCRIPTION,
         emoji="",
     )
+    register_wrapped_tool(
+        ctx,
+        name=TOOL_OPERATIONS,
+        toolset="establishment",
+        schema=_OPERATIONS_TOOL_SCHEMA,
+        handler=_operations_request,
+        requires_env=[_SOCKET_ENV],
+        description=_OPERATIONS_TOOL_DESCRIPTION,
+        emoji="",
+    )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    # ss-console#2546. A rule nobody answers has to lapse and be reported even
+    # when nobody is talking to the seat, and A&P's crons are all off, so the
+    # trigger cannot be a scheduled routine. One daemon thread, the
+    # hermes-smd-reply sweeper shape, started unconditionally and no-op on a
+    # seat with nothing outstanding.
+    start_lapse_sweeper()
     logger.info(
         "hermes-smd-establishment registered %s + admin gate + nudge + read capture",
         ", ".join(ESTABLISH_TOOLS),
@@ -2853,6 +3493,9 @@ def register(ctx: Any) -> None:
 
 __all__ = [
     "ESTABLISH_TOOLS",
+    "start_lapse_sweeper",
+    "LOOP_TOOLS",
+    "TOOL_OPERATIONS",
     "SPEC_PROPERTIES",
     "TOOL_PENDING",
     "TOOL_PROPOSE",

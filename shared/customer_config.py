@@ -433,6 +433,46 @@ class CustomerConfig:
                 out.append(norm)
         return out
 
+    @property
+    def rule_requests_to(self) -> list[str]:
+        """Return ``scope.rule_requests_to``: who is EMAILED when somebody who
+        is not an admin asks for a firm-level rule (ss-console#2546).
+
+        TRAFFIC, NEVER AUTHORITY. Every entry in :attr:`admins` may still apply
+        a rule; this only decides whose inbox rings. A firm with a litigating
+        partner and an office manager on the same admin list does not want the
+        partner paged each time a paralegal asks for a different sign-off, and
+        before this key the only way to spare him was to take his authority
+        away.
+
+        INTERSECTED WITH :attr:`admins` HERE, not merely validated upstream.
+        The console validator refuses a non-admin entry at authoring time; this
+        is the runtime backstop, and it matters because the two failures differ.
+        A routed address that is not an admin would be a person asked to answer
+        a question they cannot answer, on a send the broker's own recipient
+        fence would refuse anyway. Dropping it is the honest reading of a config
+        that says two contradictory things.
+
+        FAIL-CLOSED TO ``[]`` on any malformed shape, exactly like
+        :attr:`admins`. Empty means no admin is emailed, and the caller's
+        contract is then to SAY so, never to claim somebody was asked.
+        """
+        scope = self._data.get("scope")
+        if not isinstance(scope, dict):
+            return []
+        raw = scope.get("rule_requests_to")
+        if not isinstance(raw, list):
+            return []
+        known = set(self.admins)
+        out: list[str] = []
+        for entry in raw:
+            if not isinstance(entry, str):
+                continue
+            norm = entry.strip().lower()
+            if norm in known and norm not in out:
+                out.append(norm)
+        return out
+
     def sender_is_admin(self, sender_address: object) -> bool:
         """True iff ``sender_address`` exactly matches an entry in ``scope.admins``.
 
