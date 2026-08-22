@@ -335,6 +335,14 @@ def _emit_spec_gate_audit(
 # the model looking for an escape hatch instead of reading the spec.
 _INTERNAL_ARTIFACT_CLASSES = frozenset({"work_product", "record"})
 
+#: Payload key marking a body as a FIXED TEMPLATE this repo authored, not prose
+#: a model composed (ss-console#2546). Set by the out-of-turn dispatcher in
+#: ``plugins/hermes-smd-trust`` and read here through ``check_spec_gate``'s
+#: ``templated`` argument. It is a per-payload key rather than a module flag
+#: deliberately: a sweeper thread and a live turn can both be in flight, and a
+#: flag would let one turn's posture leak into another's.
+TEMPLATED_BODY_ARG = "_smd_templated_body"
+
 
 def _refuse(
     *,
@@ -434,6 +442,7 @@ def check_spec_gate(
     tool_call_id: str = "",
     body: str | None = "",
     output_class: str | None = None,
+    templated: bool = False,
 ) -> dict | None:
     """Gate an output on having read its class's authored spec.
 
@@ -449,6 +458,18 @@ def check_spec_gate(
     that knows the class states it. See the module docstring for why that is
     safe: an explicit class selects which authored declaration is consulted and
     can only ever make the check stricter.
+
+    ``templated`` says the body is a fixed template from this repo rather than
+    prose a model composed (ss-console#2546). It skips EXACTLY ONE branch: the
+    voice branch's "was the spec read this session" test, which asks whether the
+    model consulted the firm's voice before writing, a question with no meaning
+    about bytes the model did not write, and one that would otherwise refuse
+    every deterministic notification on a seat that declares a voice spec.
+    Nothing else is skipped: a tampered or unprovable spec still refuses, a
+    missing one is still a broken control, and every FORMAT assertion still runs
+    against the template's actual text. It also grants nothing to the session:
+    a model-composed send later in the same turn, with no spec read, is refused
+    exactly as it was before.
 
     Returns a block directive to refuse, or ``None`` to let the output proceed.
     """
@@ -542,6 +563,16 @@ def check_spec_gate(
                 )
             if voice_state == _STATE_MISSING:
                 broken.append("voice")
+            elif templated:
+                # ss-console#2546. The one branch a fixed template is exempt
+                # from, and only this one. The spec IS installed and IS
+                # hash-verified (both checked above); what cannot be asked is
+                # whether the model read it, because the model did not write
+                # this body. Marking the spec read instead would have been the
+                # tempting fix and is the one this deliberately avoids: it would
+                # leave the session holding a read it never performed, and the
+                # next model-composed send would sail through the gate.
+                pass
             elif not SPEC_STATUS.was_read(session_id, output_class, "voice"):
                 return _refuse(
                     tool_name=tool_name,
@@ -594,4 +625,4 @@ def check_spec_gate(
     return {"action": "block", "message": _draft_message(output_class, reason)}
 
 
-__all__ = ["check_spec_gate", "resolve_output_class"]
+__all__ = ["TEMPLATED_BODY_ARG", "check_spec_gate", "resolve_output_class"]

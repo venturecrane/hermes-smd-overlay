@@ -212,6 +212,20 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         "RULE_PROPOSED",
         "ESTABLISHMENT_SUBMITTED",
         "ESTABLISHMENT_RESULT",
+        # ss-console#2546, the loop closing round the silences #2529 left. Two
+        # of these are broker-side like the three above (an administrator's
+        # decline; a rule that lapsed unanswered and whose author has now been
+        # told). RULE_REQUEST_NOTIFIED is the one this repo WRITES: the
+        # establishment plugin emits it when a non-admin's rule has actually
+        # been emailed to the administrators the firm named on
+        # scope.rule_requests_to, carrying who was notified and never the rule's
+        # text. It is its own row rather than a field on the send's row because
+        # the two answer different questions: the send row says a message left,
+        # this says a specific request reached the people authorized to answer
+        # it.
+        "RULE_REQUEST_NOTIFIED",
+        "RULE_DECLINED",
+        "RULE_LAPSED",
     }
 )
 

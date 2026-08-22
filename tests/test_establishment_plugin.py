@@ -128,7 +128,13 @@ def test_registers_three_tools_and_three_hooks(establishment):
             hooks.append(name)
 
     plugin.register(Ctx())
-    assert [t["name"] for t in tools] == list(plugin.ESTABLISH_TOOLS)
+    # ss-console#2546 adds a SIXTH tool that is not an establishment verb:
+    # operations_request establishes nothing and touches no spool, it carries a
+    # routine / schedule / channel ask to SMD. It lives in this plugin because
+    # this is the plugin that already knows who the verified sender is, and it
+    # is declared in its own tuple so ESTABLISH_TOOLS keeps meaning "the verbs
+    # the admin gate governs".
+    assert [t["name"] for t in tools] == list(plugin.ESTABLISH_TOOLS) + list(plugin.LOOP_TOOLS)
     # Wrapped function shape — a bare JSON-schema advertises empty parameters.
     assert all("parameters" in t["schema"] for t in tools)
     assert sorted(hooks) == ["post_tool_call", "pre_llm_call", "pre_tool_call"]
