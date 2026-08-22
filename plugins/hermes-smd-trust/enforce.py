@@ -1000,6 +1000,40 @@ def _reclassify_send(
     return ActionClass.EXTERNAL_SEND
 
 
+def resolved_send_class(tool_name: str, args: dict, session_id: str) -> ActionClass | None:
+    """The recipient-resolved action class for a send, for a NON-enforcing reader.
+
+    ``evaluate_tool_call`` computes this on its way to a ceiling decision and
+    keeps it; the outbound gate runs afterwards in the same callback and needs
+    the same answer for a reason that is not authorization — the staff-class
+    em-dash normalization (ss#2547). Exposed rather than recomputed there
+    because recipient classification is a SAFETY classification, and a second
+    copy of it living next to a content filter is a copy that drifts in the
+    direction nobody is reading.
+
+    Returns ``None`` for anything that is not a proactive send, and never
+    raises: a reader that cannot resolve the class must fall back to the
+    strictest treatment (no normalization), not to an error.
+    """
+    try:
+        classification = classify_tool(tool_name)
+    except Exception:  # noqa: BLE001 — a banned or unknown tool has no send class
+        return None
+    if classification.action_class is not ActionClass.EXTERNAL_SEND:
+        return None
+    try:
+        tainted = SESSION_TAINT.trust_class(session_id) != TRUST_CLASS_INTERNAL
+    except Exception:  # noqa: BLE001 — unknown taint reads as tainted (strictest)
+        tainted = True
+    try:
+        return _reclassify_send(
+            tool_name, args or {}, classification.action_class, session_id, tainted
+        )
+    except Exception:  # noqa: BLE001 — see docstring
+        logger.debug("trust: send-class resolution failed for %s", tool_name, exc_info=True)
+        return None
+
+
 def _resolve_send_recipients(tool_name: str, args: dict, session_id: str) -> set[str]:
     """Normalized recipient set for a proactive send — the confirm-approval
     match key (ADR 0071 #1806). Empty when the recipient is unresolvable (a

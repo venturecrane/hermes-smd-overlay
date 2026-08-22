@@ -30,10 +30,11 @@ not the row.
 
 import logging
 import os
+import re
 from datetime import date, timedelta
 from typing import Any
 
-from shared import identifier_filter, provenance
+from shared import identifier_filter, provenance, spec_gate
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
 from shared.audit_contract import CANONICAL_TOOL_CALL_KEY, agent_event_params
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
@@ -914,6 +915,86 @@ _BODY_REQUIRED_SEND_TOOLS: frozenset[str] = frozenset(
 )
 
 
+# ---------------------------------------------------------------------------
+# Staff-class dash normalization (ss-console#2547)
+#
+# The em dash is a Tier-1 fabrication marker because the tone rules ban it on
+# shipped user-facing copy — copy that carries the FIRM's voice to someone
+# outside it. On 2026-08-19 that rule refused the deadline escalator's fifth and
+# last attempt to tell Scott about a court date seven days away. The recipient
+# was Scott. The consequence of the marker reaching him would have been a dash
+# in an ops email; the consequence of the refusal was silence about a deadline.
+#
+# The rule is not wrong, it was pointed at the wrong class. So on the STAFF class
+# alone the dash is normalized instead of refused, and every outbound class keeps
+# the marker exactly as it was — client, vendor and unrostered-external copy is
+# what the tone rule was written about, and there the refusal is the point.
+#
+# NORMALIZE BEFORE THE SCAN, AND SEND WHAT WAS SCANNED. The args dict is mutated
+# in place, which is the established way this hook reaches the tool (the
+# workspace broker's grant and the report renderer's html half both do it), and
+# it means the gate cannot end up scanning one body while the transport carries
+# another. Anything else would put a difference between the inspected text and
+# the sent text, which is the shape of every bypass this file exists to close.
+#
+# Horizontal whitespace around the dash is absorbed so "a — b" becomes "a, b"
+# rather than "a ,  b". NEWLINES ARE NOT: a line beginning with a dash is a list
+# item, and eating the newline would silently join two bullets into one
+# sentence — a change to what the message SAYS, which a punctuation normalizer
+# has no business making.
+# ---------------------------------------------------------------------------
+
+_DASH_RE = re.compile(r"[ \t]*[—–][ \t]*")
+
+#: The output class whose sends are normalized rather than refused.
+_DASH_NORMALIZED_CLASS = "staff"
+
+#: Which send args are rewritten. The scan keys minus nothing: every field the
+#: scanner reads is a field the recipient sees, so normalizing a subset would
+#: leave a marker in the half that was not rewritten and refuse anyway.
+_DASH_NORMALIZE_KEYS = _SEND_SCAN_KEYS
+
+
+def _normalize_staff_dashes(tool_name: str, args: dict | None, session_id: str) -> bool:
+    """Rewrite em/en dashes in a STAFF-class send, in place. True iff anything
+    changed.
+
+    Fail-quiet and fail-STRICT: any failure to resolve the class leaves the body
+    untouched, so the send meets the marker gate exactly as it does today. The
+    worst case of this function not running is the refusal that already happens.
+    """
+    if not isinstance(args, dict):
+        return False
+    try:
+        from . import enforce  # local: avoids an import cycle at package load
+
+        resolved = enforce.resolved_send_class(tool_name, args, session_id)
+        if resolved is None:
+            return False
+        if spec_gate.resolve_output_class(resolved.value) != _DASH_NORMALIZED_CLASS:
+            return False
+    except Exception:  # noqa: BLE001 — see docstring
+        logger.debug(
+            "outbound gate: staff-class resolution failed for %s", tool_name, exc_info=True
+        )
+        return False
+    changed = False
+    for key in _DASH_NORMALIZE_KEYS:
+        value = args.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        rewritten = _DASH_RE.sub(", ", value)
+        if rewritten != value:
+            args[key] = rewritten
+            changed = True
+    if changed:
+        logger.info(
+            "outbound gate: normalized dashes in a staff-class %s before the marker scan (ss#2547)",
+            tool_name,
+        )
+    return changed
+
+
 def _is_gated_send_tool(tool_name: str) -> bool:
     """True iff ``tool_name`` delivers content externally (EXTERNAL_SEND)."""
     if not tool_name:
@@ -954,6 +1035,10 @@ def check_outbound_send(
     """
     if not _is_gated_send_tool(tool_name):
         return None
+    # Staff-class dash normalization runs FIRST and mutates ``args``, so the body
+    # extracted below — the body every tier scans — is byte-for-byte the body the
+    # transport will carry (ss#2547).
+    _normalize_staff_dashes(tool_name, args, session_id)
     body = _extract_send_body(args)
     if not body.strip():
         if tool_name in _BODY_REQUIRED_SEND_TOOLS:

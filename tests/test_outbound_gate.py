@@ -15,11 +15,13 @@ Three layers under test:
 
 import hashlib
 import importlib
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from shared import outbound_gate, provenance
+from shared import outbound_gate, pre_run_handoff, provenance
 from shared.fabrication_markers import FabricationMarkersError, load_markers
 from tests.conftest import load_plugin
 
@@ -918,3 +920,278 @@ def test_module_imports_are_stable() -> None:
     importlib.import_module("shared.outbound_gate")
     importlib.import_module("shared.fabrication_markers")
     importlib.import_module("shared.citation_filter")
+    importlib.import_module("shared.pre_run_handoff")
+
+
+# ---------------------------------------------------------------------------
+# The escalator's two silences (ss-console#2547)
+#
+# On 2026-08-19 the deadline escalator tried five times to tell Scott about a
+# court date seven days out. Four attempts were refused for the DATES — read
+# from Smokeball by the routine's own pre-run script, which no session could see
+# — and the fifth for an EM DASH, a marker written to keep the firm's voice out
+# of client copy, applied to an ops email to the firm's own principal.
+#
+# Both halves are tested here rather than in isolation, because the thing under
+# test is whether a routine can reach a human, and either half alone still
+# leaves it mute.
+# ---------------------------------------------------------------------------
+
+_STAFF = "scott@smd.services"
+_CLIENT = "jane@gmail.example"
+
+
+@pytest.fixture
+def rostered(trust_plugin, monkeypatch):
+    """A roster on which ``_STAFF`` is firm staff and ``_CLIENT`` is a client."""
+    enforce = trust_plugin.enforce
+    monkeypatch.setattr(enforce, "_resolve_roster", lambda: [_STAFF])
+    monkeypatch.setattr(enforce, "_resolve_typed_roster", lambda: [(_CLIENT, "client")])
+    yield
+
+
+def _fabrication_rows(fake: "_FakeD1Client") -> list:
+    return [c for c in fake.calls if "FABRICATION_FILTER_TRIGGERED" in c[1]]
+
+
+def test_a_staff_send_with_an_em_dash_goes_out_normalized(
+    trust_plugin, rostered, monkeypatch
+) -> None:
+    """The 08-19 fifth attempt. The dash is a tone rule about the firm's voice
+    leaving the firm; the recipient here IS the firm. Normalize, do not refuse —
+    and record no fabrication row, because nothing was fabricated."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    fake = _wire_fake_audit(trust_plugin.outbound)
+    args = {
+        "to": [_STAFF],
+        "subject": "Deadline digest",
+        "text": "Two deadlines need you — both this week.",
+    }
+    assert (
+        trust_plugin.outbound.check_outbound_send(
+            tool_name="smd_send_message", args=args, session_id="sess-dash", tool_call_id="c"
+        )
+        is None
+    )
+    assert args["text"] == "Two deadlines need you, both this week."
+    assert _fabrication_rows(fake) == []
+
+
+def test_the_normalized_body_is_the_body_that_ships(trust_plugin, rostered, monkeypatch) -> None:
+    """The args dict the tool will run on is what was rewritten. A normalizer
+    that scanned one string and shipped another would be a bypass, not a fix."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    args = {
+        "to": [_STAFF],
+        "subject": "Digest — two items",
+        "text": "Item one—item two.",
+        "html": "<p>Item one — item two.</p>",
+    }
+    trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message", args=args, session_id="sess-ship", tool_call_id="c"
+    )
+    assert "—" not in json.dumps(args)
+    assert args["subject"] == "Digest, two items"
+    assert args["html"] == "<p>Item one, item two.</p>"
+
+
+def test_normalization_does_not_join_two_bullets(trust_plugin, rostered, monkeypatch) -> None:
+    """A dash at the start of a line is a list item. Absorbing the newline would
+    change what the message says, which a punctuation rewrite may not do."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    args = {"to": [_STAFF], "text": "Needs you:\n— first item — urgent\n— second"}
+    trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message", args=args, session_id="sess-bullets", tool_call_id="c"
+    )
+    assert "—" not in args["text"]  # it DID normalize...
+    assert args["text"].count("\n") == 2  # ...without swallowing a line break
+    assert args["text"].splitlines()[1] == ", first item, urgent"
+
+
+def test_a_client_send_with_an_em_dash_is_still_refused(
+    trust_plugin, rostered, monkeypatch
+) -> None:
+    """The falsifier. The tone rule keeps its whole meaning on the classes it
+    was written about; only the staff class moves."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    args = {"to": [_CLIENT], "text": "Your matter is progressing — we will update you."}
+    blocked = trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message", args=args, session_id="sess-client", tool_call_id="c"
+    )
+    assert blocked is not None and blocked["action"] == "block"
+    assert "—" in args["text"]  # untouched
+
+
+def test_an_unrostered_send_with_an_em_dash_is_still_refused(
+    trust_plugin, rostered, monkeypatch
+) -> None:
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    args = {"to": ["opposing@counsel.example"], "text": "Received — thank you."}
+    blocked = trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message", args=args, session_id="sess-outside", tool_call_id="c"
+    )
+    assert blocked is not None and blocked["action"] == "block"
+
+
+# ---- the pre-run handoff, on the send path it was refused on --------------
+
+
+def test_a_pre_run_date_is_refused_before_seeding_and_allowed_after(
+    trust_plugin, rostered, monkeypatch, tmp_path
+) -> None:
+    """The 08-19 date refusals, and their fix, in one test.
+
+    The escalator's script read ``2026-08-26`` out of Smokeball and handed it to
+    the model as text. Before the handoff nothing in the session had read it, so
+    the gate refused — correctly, on the evidence it had. After the handoff is
+    taken for that session, the same body sends.
+    """
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-handoff")  # non-empty: not the empty carve
+    ob = trust_plugin.outbound
+
+    def send():
+        return ob.check_outbound_send(
+            tool_name="smd_send_message",
+            args={
+                "to": [_STAFF],
+                "subject": "Deadline digest",
+                "text": "Response to written discovery is due 2026-08-26.",
+            },
+            session_id="sess-handoff",
+            tool_call_id="c",
+        )
+
+    before = send()
+    assert before is not None and before["action"] == "block"
+
+    started = datetime(2026, 8, 22, 14, 0, 0, tzinfo=timezone.utc)
+    pre_run_handoff.write_handoff(
+        "deadline-miss-escalator", started, ["2026-08-26"], [], hermes_home=str(tmp_path)
+    )
+    taken = pre_run_handoff.take_handoff(
+        "deadline-miss-escalator", started + timedelta(minutes=1), hermes_home=str(tmp_path)
+    )
+    provenance.record_read("sess-handoff", " ".join(taken["dates"]))
+
+    assert send() is None
+
+
+def test_an_ack_code_in_the_handoff_does_not_verify(
+    trust_plugin, rostered, monkeypatch, tmp_path
+) -> None:
+    """The projection is the safety property, so it gets its own falsifier.
+
+    A script may write anything into its handoff. Only the date atoms come back
+    out, so a case-number-shaped token sitting in the same file certifies
+    nothing — otherwise a pre-run would become a way to launder any identifier
+    the script cared to print.
+    """
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-ack")
+
+    started = datetime(2026, 8, 22, 14, 0, 0, tzinfo=timezone.utc)
+    pre_run_handoff.write_handoff(
+        "deadline-miss-escalator",
+        started,
+        ["2026-08-26", "1:24-cv-01234"],  # the script wrote both down
+        [],
+        hermes_home=str(tmp_path),
+    )
+    taken = pre_run_handoff.take_handoff(
+        "deadline-miss-escalator", started + timedelta(minutes=1), hermes_home=str(tmp_path)
+    )
+    provenance.record_read("sess-ack", " ".join(taken["dates"]))
+
+    blocked = trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message",
+        args={"to": [_STAFF], "text": "Filed under case number 1:24-cv-01234."},
+        session_id="sess-ack",
+        tool_call_id="c",
+    )
+    assert blocked is not None and blocked["action"] == "block"
+
+
+# ---- the fence: a turn cannot author its own provenance -------------------
+
+
+def test_write_file_to_the_handoff_path_is_refused(trust_plugin, monkeypatch, tmp_path) -> None:
+    """A sentinel the agent can write is not a sentinel."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    target = str(pre_run_handoff.handoff_path("deadline-miss-escalator", str(tmp_path)))
+    blocked = trust_plugin.on_pre_tool_call(
+        tool_name="write_file",
+        args={"path": target, "content": '{"dates": ["2026-08-26"]}'},
+        task_id="t",
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert isinstance(blocked, dict) and blocked["action"] == "block"
+    assert ".smd" in blocked["message"]
+
+
+def test_code_execution_naming_the_handoff_path_is_refused(
+    trust_plugin, monkeypatch, tmp_path
+) -> None:
+    """Through code, too. A fence only the file tools honour is a detour, and a
+    path inside a program is a string, not an argument anyone can resolve."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    blocked = trust_plugin.on_pre_tool_call(
+        tool_name="execute_code",
+        args={"code": "open('.smd/pre_run/deadline-miss-escalator.json','w').write('{}')"},
+        task_id="t",
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert isinstance(blocked, dict) and blocked["action"] == "block"
+    assert ".smd" in blocked["message"]
+
+
+def test_reading_the_state_directory_is_not_fenced(
+    trust_plugin, env_autonomous, monkeypatch, tmp_path
+) -> None:
+    """Reads are how an operator debugs a seat, and a read certifies nothing —
+    ``record_seat_text`` files the seat's own text as explicitly NOT a record."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert (
+        trust_plugin.on_pre_tool_call(
+            tool_name="read_file",
+            args={"path": str(tmp_path / ".smd" / "audit_status.json")},
+            task_id="t",
+            session_id="s",
+            tool_call_id="c",
+        )
+        is None
+    )
+
+
+def test_a_write_elsewhere_is_not_fenced(
+    trust_plugin, env_autonomous, monkeypatch, tmp_path
+) -> None:
+    """The falsifier for the fence: it must refuse one directory, not writing."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    assert (
+        trust_plugin.on_pre_tool_call(
+            tool_name="write_file",
+            args={"path": str(tmp_path / "notes" / "scratch.txt"), "content": "hello"},
+            task_id="t",
+            session_id="s",
+            tool_call_id="c",
+        )
+        is None
+    )
