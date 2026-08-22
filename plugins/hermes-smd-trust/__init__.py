@@ -16,10 +16,20 @@ this plugin does not cross-import the audit plugin.
 import json
 import logging
 import os
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from shared import act_broker, matter_binding, matter_gate, provenance, report_render, spec_stamp
+from shared import (
+    act_broker,
+    cron_attribution,
+    matter_binding,
+    matter_gate,
+    pre_run_handoff,
+    provenance,
+    report_render,
+    spec_stamp,
+)
 from shared.broker_audit import write_decision
 from shared.pending_acts import PENDING_ACTS, tool_call_failed
 from shared.pending_send import PENDING_SEND
@@ -89,6 +99,119 @@ def _attach_html_body(tool_name: str, args: dict) -> None:
     if not report_render.looks_like_report(text):
         return  # prose reply, not a report — leave the send exactly as it was
     args["html"] = report_render.render_markdown(text)
+
+
+# ---------------------------------------------------------------------------
+# The .smd fence (ss-console#2547)
+#
+# ``$HERMES_HOME/.smd/`` is where the overlay's own processes keep state that
+# other overlay processes TRUST: the audit-write-failure tally, the boot
+# sentinels the heartbeat reports from, the routine-change spool, and — the
+# reason this fence exists — the pre-run handoff, which tells the identifier
+# gate what a routine's script read before the session began.
+#
+# A handoff the agent can author is not a handoff. It would let a turn write
+# down any date it liked and then cite it as read, which is the exact inversion
+# of the control: the gate would go on refusing composed identifiers, and pass
+# the ones the model had thought to certify first. The same argument covers
+# every other file in there, and it is not hypothetical — during the A&P
+# rehearsal the identifier gate was defeated by nothing more exotic than the
+# seat reading its own skill text (ss-console#2511).
+#
+# So no tool writes here, by any route: not the file tools, not a shell command,
+# not a python snippet inside execute_code, not a subagent. READS are untouched —
+# reading .smd is how an operator debugs a seat, and a read certifies nothing
+# (``provenance.record_seat_text`` records exactly that kind of read as
+# seat-sourced, i.e. as NOT a record).
+#
+# The refusal is audited by the SAME path every ceiling refusal is: a block
+# returned from ``pre_tool_call`` surfaces as an error result, and the audit
+# plugin writes the TOOL_CALL_COMPLETED row for it on the way out (see this
+# module's docstring). No new action type, no second emitter.
+# ---------------------------------------------------------------------------
+
+#: Reading is free; anything that could put bytes on the volume is fenced. The
+#: set is derived from the registry rather than named tool by tool, so a write
+#: tool added later is fenced the day it lands instead of the day someone
+#: remembers this list.
+_FENCED_ACTION_CLASSES = frozenset(
+    {
+        enforce.ActionClass.INTERNAL_WRITE,
+        enforce.ActionClass.CODE_EXECUTION,
+        enforce.ActionClass.DESTRUCTIVE,
+    }
+)
+
+#: The distinctive marker. Matched as a path SEGMENT so a relative target
+#: (``.smd/pre_run/x.json``) is caught alongside an absolute one, and so a
+#: command line or a code blob that mentions the directory is caught at all —
+#: a path inside ``execute_code`` is a string in a program, not an argument that
+#: could be resolved.
+_SMD_FENCE_SEGMENT = ".smd/"
+
+#: Bounds on the arg walk. A fence that can be made expensive is a way to slow
+#: every tool call on a 1-vCPU seat.
+_FENCE_MAX_STRINGS = 200
+_FENCE_MAX_DEPTH = 6
+
+
+def _fence_strings(value: Any, depth: int = 0):
+    """Yield the strings in a tool's args, bounded in depth and count."""
+    if depth > _FENCE_MAX_DEPTH:
+        return
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _fence_strings(item, depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _fence_strings(item, depth + 1)
+
+
+def _targets_smd_dir(text: str) -> bool:
+    """True iff ``text`` names something inside ``$HERMES_HOME/.smd/``."""
+    if _SMD_FENCE_SEGMENT in text:
+        return True
+    fence_root = str(Path(os.environ.get("HERMES_HOME", "/opt/data")) / ".smd")
+    return fence_root in text
+
+
+def _smd_dir_fence(tool_name: str, args: dict) -> dict | None:
+    """Block directive when a write-class call names the seat's own state dir.
+
+    Fail-OPEN on an unclassifiable tool, deliberately: this fence is a second
+    wall behind the ceiling, and a classification failure already refuses the
+    call one layer up (``enforce.evaluate_tool_call`` fails closed). Turning a
+    classification error into a fence refusal here would misname the fault, and
+    a refusal that names the wrong subsystem costs a diagnosis (ss#2103).
+    """
+    try:
+        classification = enforce.classify_tool(tool_name)
+    except Exception:  # noqa: BLE001 — see docstring; the ceiling owns this fault
+        return None
+    if classification.action_class not in _FENCED_ACTION_CLASSES:
+        return None
+    for index, text in enumerate(_fence_strings(args)):
+        if index >= _FENCE_MAX_STRINGS:
+            break
+        if _targets_smd_dir(text):
+            logger.warning(
+                "hermes-smd-trust: %s targets the .smd state directory; refusing (ss#2547)",
+                tool_name,
+            )
+            return {
+                "action": "block",
+                "message": (
+                    "Refused: .smd is this seat's own health and provenance state, "
+                    "written only by the processes that own it. Nothing you run may "
+                    "write there — not a file tool, not a shell command, not code. "
+                    "If you are trying to establish where a value came from, read it "
+                    "from the firm's own records; a note you write to yourself is not "
+                    "a source. Do not retry."
+                ),
+            }
+    return None
 
 
 _PAUSE_CACHE_TTL_S = 2.0
@@ -205,6 +328,14 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
                     "until an authorized person resumes it. Do not retry; end the turn."
                 ),
             }
+
+        # The .smd fence (ss#2547). Ahead of the ceiling because it is not a
+        # question about this seat's entitlements: no exposure any customer
+        # could author permits a turn to write the seat's own provenance, so
+        # there is nothing for the ceiling resolver to say about it.
+        fence_block = _smd_dir_fence(tool_name, args)
+        if fence_block is not None:
+            return fence_block
 
         # Authored-spec read observation (ss ADR 0083 #2084). Runs BEFORE the
         # ceiling check because it is pure observation on a READ-class tool that
@@ -779,6 +910,72 @@ def _profiles_root() -> Path:
     return Path(os.environ.get("HERMES_HOME", "/opt/data")) / "profiles"
 
 
+# ---------------------------------------------------------------------------
+# Pre-run handoff seeding (ss-console#2547)
+#
+# A cron routine's ``pre_run.py`` reads the firm's records BEFORE the session
+# exists and hands what it read to the model as prompt text. Until now nothing
+# carried that read into the provenance register, so on 2026-08-19 the deadline
+# escalator was refused five times on the very dates its own script had just
+# pulled out of Smokeball. The gate was right about what it could see; the read
+# simply had no representative inside the session.
+#
+# ONE SESSION, ONE ATTEMPT. The mark goes down BEFORE the take, so a session
+# whose handoff is missing, stale, or out of window does not go looking again on
+# its next turn — by then it would be outside the binding window anyway, and a
+# per-turn retry is how a bounded lookup becomes a per-turn file stat forever.
+# ---------------------------------------------------------------------------
+
+#: Resolved session ids that have already been offered their handoff. Bounded
+#: the same way and for the same reason as ``provenance._registers``: a
+#: long-lived Machine must not grow a set of every session it ever ran. Oldest
+#: out first — an evicted session's only cost is that it could take a handoff
+#: twice, and ``take_handoff``'s consume-once rename makes the second take
+#: return nothing anyway. Belt on a brace.
+_HANDOFF_SEEDED: "OrderedDict[str, bool]" = OrderedDict()
+_MAX_HANDOFF_SEEDED = 256
+
+
+def _seed_from_pre_run_handoff(session_id: str) -> None:
+    """Seed this cron session's register from its routine's pre-run read.
+
+    Returns silently on every path that is not "a cron session, whose routine
+    names a skill, whose handoff was written for this session". A non-cron
+    session never reaches the take at all: an interactive turn must not inherit
+    a routine's reads.
+
+    ONLY DATE ATOMS ARE SEEDED, and that is enforced twice — ``take_handoff``
+    returns nothing but dates, and this passes only those dates to
+    ``record_read``. The projection is what makes a script's output safe to
+    trust: the script reads authored dates out of the firm's system of record
+    verbatim, and everything else it emits (subjects, ACK codes, its own
+    sentences) is composition that must go on failing the gate.
+    """
+    resolved = provenance.resolve_session(session_id)
+    if not resolved or resolved in _HANDOFF_SEEDED:
+        return
+    routine = cron_attribution.resolve_routine(session_id)
+    if routine is None or not routine.skill:
+        return
+    started_at = cron_attribution.parse_cron_session_started_at(session_id)
+    if started_at is None:
+        return
+    _HANDOFF_SEEDED[resolved] = True
+    while len(_HANDOFF_SEEDED) > _MAX_HANDOFF_SEEDED:
+        _HANDOFF_SEEDED.popitem(last=False)
+    taken = pre_run_handoff.take_handoff(routine.skill, started_at)
+    dates = (taken or {}).get("dates") or []
+    if not dates:
+        return
+    provenance.record_read(resolved, " ".join(dates))
+    logger.info(
+        "hermes-smd-trust: seeded %d pre-run date(s) for %s from %s's handoff (ss#2547)",
+        len(dates),
+        resolved,
+        routine.skill,
+    )
+
+
 def on_pre_llm_call(**kwargs: Any) -> dict | None:
     """Note the turn's REAL session id, and capture a current-turn send approval.
 
@@ -801,6 +998,15 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         provenance.note_session(session_id)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: pre_llm_call session note failed", exc_info=True)
+    try:
+        # 3. Seed this cron session's register from its routine's pre-run read
+        # (ss#2547). AFTER note_session, because the seeding keys on the resolved
+        # id and note_session is what makes the resolution this turn's own. Its
+        # OWN try: a handoff that cannot be read must cost a refusal the human
+        # can clear, never the turn.
+        _seed_from_pre_run_handoff(session_id)
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.debug("hermes-smd-trust: pre-run handoff seeding failed", exc_info=True)
     try:
         # Clear the authored-spec read marks at the start of every turn (ss ADR
         # 0083 #2084). A spec read three turns ago must not certify THIS turn's

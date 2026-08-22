@@ -42,6 +42,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,14 @@ _DEFAULT_HERMES_HOME = "/opt/data"
 # ``cron_{job_id}_{YYYYMMDD}_{HHMMSS}`` — job ids are 12-hex today, but the id
 # is matched non-greedily against the trailing timestamp rather than by shape,
 # so an id containing an underscore would still parse.
-_CRON_SESSION_RE = re.compile(r"^cron_(?P<job_id>.+)_\d{8}_\d{6}$")
+#
+# The timestamp halves are CAPTURED (ss-console#2547) so the pre-run handoff can
+# bind a handoff file to the one session it was produced for. One regex, two
+# readers: a second copy of this shape living beside the window check is exactly
+# how a parser and its subject drift, and the drift would be invisible here — a
+# handoff that never binds seeds nothing and the gate goes on refusing in
+# silence, which is the failure class the handoff exists to end.
+_CRON_SESSION_RE = re.compile(r"^cron_(?P<job_id>.+)_(?P<date>\d{8})_(?P<time>\d{6})$")
 
 # ``op-managed:<persona>:<skill>`` per bootstrap/cron_materialize.py.
 _MANAGED_NAME_RE = re.compile(r"^op-managed:(?P<persona>[^:]+):(?P<skill>.+)$")
@@ -78,6 +86,37 @@ def parse_cron_session(session_id: str) -> str | None:
         return None
     m = _CRON_SESSION_RE.match(session_id)
     return m.group("job_id") if m else None
+
+
+def parse_cron_session_started_at(session_id: str) -> datetime | None:
+    """The wall-clock instant embedded in a cron session id, as a NAIVE datetime.
+
+    ``cron_{job_id}_{YYYYMMDD}_{HHMMSS}`` — the scheduler stamps the id when it
+    fires the turn, so this is the only fact about a cron turn's start time the
+    hooks can read without asking anything.
+
+    NAIVE ON PURPOSE, and the caller decides the clock. Nothing in the id says
+    whether the scheduler formatted local time or UTC, and this module cannot
+    find out from inside the agent process. Attaching a tzinfo here would be
+    inventing that answer and hiding it behind a type; handing back the digits as
+    they were written leaves the question with the one caller that has to answer
+    it — ``shared.pre_run_handoff.take_handoff``, which tries both readings and
+    explains there why that is safe.
+
+    Returns ``None`` for a non-cron id or a stamp that is not a real instant
+    (``..._20260231_120000``). Never raises: this is enrichment, like every other
+    entry point in this module.
+    """
+    try:
+        if not isinstance(session_id, str):
+            return None
+        m = _CRON_SESSION_RE.match(session_id)
+        if m is None:
+            return None
+        return datetime.strptime(f"{m.group('date')}{m.group('time')}", "%Y%m%d%H%M%S")
+    except Exception as exc:  # noqa: BLE001 — enrichment, never the obligation
+        logger.debug("cron_attribution: session start parse failed for %r: %s", session_id, exc)
+        return None
 
 
 def _identity_from_job(job: dict[str, Any]) -> RoutineIdentity | None:
@@ -164,4 +203,9 @@ def resolve_routine(session_id: str, *, hermes_home: str | None = None) -> Routi
         return None
 
 
-__all__ = ["RoutineIdentity", "parse_cron_session", "resolve_routine"]
+__all__ = [
+    "RoutineIdentity",
+    "parse_cron_session",
+    "parse_cron_session_started_at",
+    "resolve_routine",
+]
