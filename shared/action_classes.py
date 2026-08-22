@@ -609,6 +609,16 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # establish_pending reads and is classed as a read.
     "establish_propose": ActionClass.INTERNAL_WRITE,
     "establish_pending": ActionClass.READ,
+    # ss-console#2546. INTERNAL_WRITE on the same argument establish_propose
+    # carries: the tool itself writes nothing client-facing and reaches no
+    # tenant surface, and every seat authors internal_write at draft_for_review
+    # or better, so passing a request to SMD works on every seat with no
+    # entitlement widening. The SEND it performs is separately and fully gated
+    # as an external_send_internal through evaluate_tool_call, which is where a
+    # tainted turn refuses it. An unmapped name would be REFUSED terminally
+    # (the ss#1915 invisibility), so this mapping is part of the change rather
+    # than a follow-up.
+    "operations_request": ActionClass.INTERNAL_WRITE,
     # Seat self-description (hermes-smd-initiation, ss-console #2222 card rows
     # 1+7). READ, and nothing subtler: it opens the seat's own customer.yaml, its
     # own scheduler store, and the root-owned spec manifest, writes nothing, and

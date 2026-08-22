@@ -34,6 +34,8 @@ from shared.broker_audit import write_decision
 from shared.pending_acts import PENDING_ACTS, tool_call_failed
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
+from shared.send_dispatch import DispatchResult, set_sender
+from shared.spec_gate import TEMPLATED_BODY_ARG
 from shared.spec_status import SPEC_STATUS
 from shared.tool_registration import register_wrapped_tool
 from shared.workspace_broker import GRANT_ARG, authorize
@@ -898,6 +900,101 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     return f"[Dispatched your approved send to {recipients} (message {message_id}). Do not send it again.]"
 
 
+def _dispatch_internal_message(
+    *,
+    to: list[str],
+    subject: str,
+    text: str,
+    session_id: str = "",
+    cc: list[str] | None = None,
+    templated: bool = True,
+) -> DispatchResult:
+    """Send one seat-authored message OUT OF TURN, through the full gate.
+
+    Published to :mod:`shared.send_dispatch` at register so the establishment
+    plugin and its sweeper can reach it; they cannot import this package (see
+    that module's header for why). Same shape and the same safety argument as
+    :func:`_dispatch_approved_send`, which is the precedent: the overlay is
+    deterministic where the model is not, so when the overlay knows a specific
+    message must go, it sends it rather than asking the model to.
+
+    IT DOES NOT BYPASS ANYTHING. The payload is authorized through the SAME
+    ``evaluate_tool_call`` a model's own ``smd_send_message`` goes through, on
+    the SAME session, so the exposure ceiling, the taint gate, the content floor
+    and the fabrication scan all apply. A tainted turn refuses this send exactly
+    as it refuses a composed one, and the caller is required to say so rather
+    than claim the notification went.
+
+    ``templated`` says the body is a FIXED template from this repo. It is passed
+    down to the spec gate and skips exactly one branch there, the one that asks
+    whether the MODEL consulted the firm's voice spec, which is a meaningless
+    question about bytes the model did not write. Every format assertion still
+    runs. See ``shared.spec_gate.check_spec_gate``.
+    """
+    recipients = tuple(a for a in (to or ()) if isinstance(a, str) and a.strip())
+    if not recipients:
+        return DispatchResult(sent=False, reason="no recipient")
+    payload: dict[str, Any] = {
+        "to": list(recipients),
+        "subject": subject,
+        "text": text,
+    }
+    if cc:
+        payload["cc"] = [a for a in cc if isinstance(a, str) and a.strip()]
+    if templated:
+        # Read by enforce -> spec_gate. A key rather than a global because two
+        # of these can be in flight in one process (the sweeper thread and a
+        # turn), and a global would let one turn's posture leak into another's.
+        payload[TEMPLATED_BODY_ARG] = True
+    customer_slug = _AUDIT_CUSTOMER_SLUG or ""
+    if not customer_slug:
+        try:
+            customer_slug = get_secret("SMD_CUSTOMER_SLUG")
+        except KeyError:
+            customer_slug = ""
+    try:
+        block = enforce.evaluate_tool_call(
+            _SEND_TOOL_NAME, payload, customer_slug, session_id=session_id
+        )
+    except Exception as exc:  # noqa: BLE001 (an indeterminate gate must not send)
+        logger.exception("hermes-smd-trust: out-of-turn send gate raised; NOT dispatching")
+        return DispatchResult(
+            sent=False,
+            reason=f"the seat could not authorize the send ({exc})",
+            recipients=recipients,
+        )
+    if block is not None:
+        reason = block.get("message", "withheld") if isinstance(block, dict) else "withheld"
+        logger.info("hermes-smd-trust: out-of-turn send withheld by gate (%s)", reason)
+        return DispatchResult(sent=False, reason=str(reason), recipients=recipients)
+    # The gate may have rewritten the payload (it consumes approvals and stores
+    # its own copy); everything below reads what the gate allowed.
+    payload.pop(TEMPLATED_BODY_ARG, None)
+    _attach_html_body(_SEND_TOOL_NAME, payload)
+    send_session_id = _resolved_session({"session_id": session_id})
+    send_matter_ref = matter_gate.matter_ref_for(
+        send_session_id, matter_gate.cited_matters(matter_gate.body_from_args(payload))
+    )
+    try:
+        if _seat_email_adapter() == _ADAPTER_MSGRAPH:
+            message_id = outbound_send.send_via_msgraph(
+                payload, session_id=send_session_id, matter_ref=send_matter_ref
+            )
+        else:
+            message_id = outbound_send.send_message(
+                payload=payload, session_id=send_session_id, matter_ref=send_matter_ref
+            )
+    except outbound_send.OutboundSendError as exc:
+        logger.error("hermes-smd-trust: out-of-turn send failed (%s)", exc)
+        return DispatchResult(sent=False, reason=str(exc), recipients=recipients)
+    logger.info(
+        "hermes-smd-trust: dispatched out-of-turn message to %s (message %s)",
+        ", ".join(recipients),
+        message_id,
+    )
+    return DispatchResult(sent=True, message_id=message_id, recipients=recipients)
+
+
 def _profiles_root() -> Path:
     """Where the per-persona profile trees live: ``$HERMES_HOME/profiles``.
 
@@ -1086,6 +1183,11 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    # ss-console#2546. The rule-request loop sends from three places that are
+    # not this plugin and cannot import it. Publishing the sender here keeps
+    # the gate and the transport in one file and stops anyone reimplementing
+    # them against the raw broker clients, which ARE importable from shared.
+    set_sender(_dispatch_internal_message)
     register_wrapped_tool(
         ctx,
         name=_SEND_TOOL_NAME,

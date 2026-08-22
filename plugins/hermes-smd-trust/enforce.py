@@ -1673,6 +1673,10 @@ def evaluate_tool_call(
             # have the authored shape" — the binary half of ADR 0083 §3, and
             # the only half a machine can decide rather than grade.
             body=_extract_send_body(args),
+            # ss-console#2546. True only for a body the OVERLAY templated (the
+            # out-of-turn rule-request notifications). It skips the voice-READ
+            # branch inside the gate and nothing else. See check_spec_gate.
+            templated=bool(args.get(spec_gate.TEMPLATED_BODY_ARG)),
         )
         if spec_block is not None:
             return spec_block

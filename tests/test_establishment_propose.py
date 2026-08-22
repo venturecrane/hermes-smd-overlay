@@ -301,7 +301,17 @@ def test_propose_marshals_exactly_the_broker_fields(plugin):
 def test_pending_marshals_exactly_the_broker_fields(plugin):
     mod, requests, _ = plugin
     mod._pending({"sender": ADMIN, "include_for_admin": True, "extra": "dropped"})
-    assert set(requests[0]) == {"action", "sender", "include_for_admin", "proposal_id"}
+    # include_outcomes joins the closed field set at ss-console#2546. It is
+    # forwarded rather than defaulted so the seat can ask the broker for rules
+    # that ENDED without their author being told; it defaults to false, so the
+    # confirmation path keeps seeing only rows a person could still confirm.
+    assert set(requests[0]) == {
+        "action",
+        "sender",
+        "include_for_admin",
+        "include_outcomes",
+        "proposal_id",
+    }
 
 
 @pytest.mark.parametrize(
