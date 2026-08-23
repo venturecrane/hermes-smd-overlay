@@ -68,7 +68,7 @@ def _row(proposal_id=RULE, *, instructed_by=ADMIN, for_admin=False, scope="firm_
     return {
         "proposal_id": proposal_id,
         "scope": scope,
-        "subject": {"output_class": "outbound", "property": "voice"},
+        "subject": {"output_class": "outbound_client", "property": "voice"},
         "text": TEXT,
         "readback": f"[rule {proposal_id}] {TEXT}",
         "instructed_by": instructed_by,
@@ -223,7 +223,7 @@ def test_a_firm_adjust_without_a_proposal_id_is_refused(plugin):
     mod, _state = plugin
     _turn(mod, ADMIN, "x")
     verdict = _submit_gate(
-        mod, {"scope": "firm_adjust", "output_class": "outbound", "spec_body": TEXT}
+        mod, {"scope": "firm_adjust", "output_class": "outbound_client", "spec_body": TEXT}
     )
     assert verdict["action"] == "block"
     assert mod.TOOL_PROPOSE in verdict["message"]

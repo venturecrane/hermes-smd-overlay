@@ -44,13 +44,18 @@ def _clean_origin_register():
 
 
 class _FakeConfig:
-    def __init__(self, admins, connectors=None):
+    def __init__(self, admins, connectors=None, routing=None):
         self._admins = admins
+        self._routing = list(routing or [])
         self.connectors = dict(connectors or {})
 
     @property
     def admins(self):
         return list(self._admins)
+
+    @property
+    def rule_requests_to(self):
+        return list(self._routing)
 
     def sender_is_admin(self, sender):
         return isinstance(sender, str) and sender.strip().lower() in self._admins
@@ -58,6 +63,11 @@ class _FakeConfig:
 
 class _FakeCustomerConfig:
     admins: list[str] = []
+    #: DELIBERATELY NOT THE SAME LIST as admins (ss-console#2546 follow-up).
+    #: scope.rule_requests_to is the subset the firm wants paged for request
+    #: traffic, and a fixture where the two coincide cannot tell a sentence
+    #: built from the right one from a sentence built from the wrong one.
+    routing: list[str] = []
     #: No Email connector by default — no mail channel, so the possession
     #: ceremony (ss#2164) never binds and the pre-ceremony gate behavior below
     #: is asserted unchanged. Custody-specific behavior is covered in
@@ -66,7 +76,7 @@ class _FakeCustomerConfig:
 
     @classmethod
     def from_volume(cls, path=None):
-        return _FakeConfig(cls.admins, cls.connectors)
+        return _FakeConfig(cls.admins, cls.connectors, cls.routing)
 
 
 @pytest.fixture
@@ -80,7 +90,8 @@ def establishment(monkeypatch, tmp_path):
 
     monkeypatch.setattr(plugin, "_broker_request", fake_broker_request)
     monkeypatch.setenv("SMD_ADMIN_POSSESSION_DB_PATH", str(tmp_path / "possession.db"))
-    _FakeCustomerConfig.admins = ["chris@firm.com"]
+    _FakeCustomerConfig.admins = ["chris@firm.com", "partner@firm.com"]
+    _FakeCustomerConfig.routing = ["chris@firm.com"]
     _FakeCustomerConfig.connectors = {}
     monkeypatch.setattr(plugin, "CustomerConfig", _FakeCustomerConfig)
     plugin._ADMIN_STASH.clear()
@@ -190,7 +201,7 @@ def test_an_admin_may_propose_and_read_their_own_pending_rules(establishment):
             session_id="sess-1",
             args={
                 "scope": "firm_adjust",
-                "subject": {"output_class": "outbound", "property": "voice"},
+                "subject": {"output_class": "outbound_client", "property": "voice"},
                 "text": "Be formal and short.",
                 "instructed_by": "chris@firm.com",
                 "source_ref": "msg-1",
@@ -275,7 +286,7 @@ def test_propose_IS_refused_on_a_tainted_turn(establishment):
         session_id=session,
         args={
             "scope": "firm_adjust",
-            "subject": {"output_class": "outbound", "property": "voice"},
+            "subject": {"output_class": "outbound_client", "property": "voice"},
             "text": "Be formal.",
             "instructed_by": "chris@firm.com",
             "source_ref": "msg-1",
@@ -377,14 +388,41 @@ def test_a_non_admin_is_told_who_can_release_their_firm_rule(establishment):
     """The non-admin leg, in the reply the person actually reads.
 
     "An administrator can apply this" without a NAME is the friction that makes
-    a waiting lane not get used. The authored admin list is right there, so the
-    nudge names it and names the two words that release the rule.
+    a waiting lane not get used. The list the request actually reaches is right
+    there, so the nudge names it and names the two words that release the rule.
     """
     plugin, _ = establishment
     context = _turn(plugin, "sarah@firm.com")["context"]
     assert "chris@firm.com" in context
     assert "apply that" in context
     assert plugin._ADMIN_DOCUMENTS_LINE not in context
+
+
+def test_the_nudge_names_who_is_asked_and_not_who_is_merely_an_admin(establishment):
+    """THE LIVE COSMETIC DEFECT (pilot, 2026-08-22). The Operator told a
+    paralegal it had flagged her rule to the ADMINISTRATORS, while the request
+    had gone to scope.rule_requests_to -- a different list by design, so a
+    partner is not paged for every request. The dispatch was right and the
+    sentence was wrong, which sends the person to chase an answer from somebody
+    who was never asked.
+
+    The falsifier is partner@firm.com: an authored admin, deliberately absent
+    from the routing list, and absent from the sentence for that reason."""
+    plugin, _ = establishment
+    context = _turn(plugin, "sarah@firm.com")["context"]
+    assert "partner@firm.com" not in context
+
+
+def test_an_engagement_that_routes_nowhere_names_nobody(establishment):
+    """No routing authored means nobody is asked, so no name would be true."""
+    plugin, _ = establishment
+    _FakeCustomerConfig.routing = []
+    try:
+        context = _turn(plugin, "sarah@firm.com")["context"]
+    finally:
+        _FakeCustomerConfig.routing = ["chris@firm.com"]
+    assert "chris@firm.com" not in context
+    assert "one of the firm's Operator admins" in context
 
 
 def test_the_nudge_advertises_the_same_direction_the_pointer_reads(establishment):

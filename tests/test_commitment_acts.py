@@ -545,7 +545,7 @@ def _rule_row(proposal_id: str = "0b91ee42") -> dict:
         "proposal_id": proposal_id,
         "kind": "rule",
         "scope": "firm_adjust",
-        "subject": {"output_class": "outbound", "property": "voice"},
+        "subject": {"output_class": "outbound_client", "property": "voice"},
         "text": "In client letters, be more formal and shorter.",
         "readback": f"[rule {proposal_id}] In client letters, be more formal and shorter.",
         "instructed_by": ADMIN,

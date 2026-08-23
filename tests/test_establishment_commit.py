@@ -84,7 +84,7 @@ def _row(*, scope="firm_adjust", instructed_by=ADMIN, subject=None):
     return {
         "proposal_id": RULE,
         "scope": scope,
-        "subject": subject or {"output_class": "outbound", "property": "voice"},
+        "subject": subject or {"output_class": "outbound_client", "property": "voice"},
         "text": TEXT,
         "readback": READBACK,
         "instructed_by": instructed_by,
@@ -155,7 +155,7 @@ def test_a_confirmed_commit_sends_only_the_id(plugin):
             "phase": "install",
             "spec_body": PARAPHRASE,
             "text": PARAPHRASE,
-            "output_class": "outbound",
+            "output_class": "outbound_client",
             "property": "voice",
             "instructed_by": ADMIN,
             "source_ref": "msg-41",
