@@ -29,6 +29,8 @@ both sides, which is what they are for.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 import time
 
@@ -531,6 +533,11 @@ def plugin(monkeypatch, tmp_path):
         "resolved": [],
         "asked": [],
         "ops_row": None,
+        # ss-console#2546 (the duplicate-letter fix). The broker's outcome
+        # claim, modelled here as what it is on the seat: ONE holder per
+        # proposal, in a store that outlives any single process's register.
+        "claims": {},
+        "claimed_by": [],
     }
 
     def fake_broker_request(payload):
@@ -591,6 +598,41 @@ def plugin(monkeypatch, tmp_path):
         if action == "ops_ask_sent":
             state["asked"].append(payload.get("proposal_id"))
             return {"ok": True, "proposal_id": payload.get("proposal_id"), "ask_sent": True}
+        if action == "establish_notify_claim":
+            proposal_id = payload.get("proposal_id")
+            if state.get("claim_broker_unreachable"):
+                raise RuntimeError("broker socket is unreachable")
+            if state.get("claim_verb_unknown"):
+                # An older console: the verb tuple in server.py does not carry
+                # this action, so handle() falls through to its own refusal.
+                return {
+                    "ok": False,
+                    "error": "ValueError",
+                    "message": "unsupported broker action",
+                }
+            if proposal_id in state["claims"] or proposal_id in state["marked"]:
+                return {
+                    "ok": True,
+                    "claimed": False,
+                    "proposal_id": proposal_id,
+                    "reason": "another observer is sending this outcome",
+                }
+            state["claims"][proposal_id] = payload.get("claimed_by")
+            state["claimed_by"].append(payload.get("claimed_by"))
+            return {
+                "ok": True,
+                "claimed": True,
+                "proposal_id": proposal_id,
+                "reason": None,
+            }
+        if action == "establish_notify_release":
+            proposal_id = payload.get("proposal_id")
+            # The broker refuses to release a row already recorded as reported,
+            # so a release can never reopen a letter that went.
+            released = proposal_id in state["claims"] and proposal_id not in state["marked"]
+            if released:
+                state["claims"].pop(proposal_id, None)
+            return {"ok": True, "released": released, "proposal_id": proposal_id}
         if action == "establish_lapse_notified":
             state["marked"].append(payload.get("proposal_id"))
             for row in state["pending"]:
@@ -2381,3 +2423,247 @@ def test_the_three_operations_types_are_declared_in_the_audit_vocabulary():
         "OPS_REQUEST_RESOLVED",
         "OPS_REQUEST_LAPSED",
     } <= module.ACCEPTED_ACTION_TYPES
+
+
+# ---------------------------------------------------------------------------
+# 11. THE CLAIM MOVES TO THE BROKER (ss-console#2546, live 2026-08-23)
+#
+# Section 10 added a claim and the letter still went twice: on overlay fc8f88c1
+# the requester was mailed the same outcome 12 s apart
+# (vfy_01M0QK1927KP54R7J13J2TH3WZ). The claim was an IN-PROCESS one, and this
+# seat runs the plugin in two processes -- `hermes -p operator gateway run`
+# (pid 658) and its child `hermes-smd-webhook-gate` (pid 1115) -- each with its
+# own sweeper thread and therefore its own copy of ``_OUTCOME_CLAIMED``. Both
+# read the row as unreported, which was TRUE, both sent, and only then did one
+# of them mark it.
+#
+# So the claim now asks the BROKER, which is the one process both share. The
+# local register survives as a cheap first filter and is given back the moment
+# the broker refuses -- a leaked local claim would turn the duplicate this fixes
+# into the silence the whole issue exists to end.
+#
+# HOW A SECOND PROCESS IS SPELLED HERE: clear ``_OUTCOME_CLAIMED`` between two
+# calls. That is precisely what another process is -- same broker, its own
+# register -- and it is why these tests fail at origin/main while section 10's
+# pass there.
+#
+# THE FALSIFIER for this section: delete the
+# ``_claim_outcome_send_across_processes`` call from ``_notify_requester`` and
+# every duplicate test below fails with two letters where one was asserted. The
+# release tests fail instead when the release is deleted, and the fail-closed
+# tests fail when the refusal is turned into a send.
+# ---------------------------------------------------------------------------
+
+
+def _second_process(mod):
+    """The other process on this seat: same broker, its own empty register."""
+    mod._OUTCOME_CLAIMED.clear()
+
+
+def test_a_second_process_is_refused_by_the_broker(plugin):
+    """THE LIVE DEFECT. The local register cannot see the other process, so the
+    letter went twice; the broker can, so it goes once."""
+    mod, state = plugin
+    row = _ops_row(state="committed")
+
+    assert mod._notify_requester(kind="done", row=dict(row)) is True
+    _second_process(mod)
+    assert mod._notify_requester(kind="done", row=dict(row)) is False
+
+    assert len(_ops_notes(state)) == 1
+
+
+def test_the_sweepers_of_two_processes_send_one_letter(plugin):
+    """The same defect through the path it actually took: two sweeper threads,
+    one per process, on a row neither has marked yet."""
+    mod, state = plugin
+    state["pending"] = [_ops_row(state="committed")]
+
+    first = mod._sweep_lapses_once()
+    _second_process(mod)
+    second = mod._sweep_lapses_once()
+
+    assert first.reported == 1
+    assert second.reported == 0
+    assert len(_ops_notes(state)) == 1
+    assert state["marked"] == [OPS]
+
+
+def test_the_install_notice_is_covered_by_the_same_broker_claim(plugin):
+    """One seam, every letter. The rule letters race across processes exactly as
+    the operations letters do, and they share ``_notify_requester``.
+
+    THE SECOND OBSERVER RUNS INSIDE THE FIRST ONE'S SEND, and that is the whole
+    care in this test. Run them one after the other and the broker's MARK stops
+    the second on its own -- so the test would pass with no claim at all and
+    would be measuring the wrong guard. The window this fix exists for is the one
+    before the mark: the letter is in flight, the row still reads unreported, and
+    a second process reads it. Re-entering from inside the send puts the second
+    observer exactly there, deterministically.
+    """
+    mod, state = plugin
+    state["pending"] = [_installed_row()]
+    real_send = mod.send_dispatch.dispatch
+    inner: list[bool] = []
+
+    def send_and_let_the_other_process_in(**kwargs):
+        if not inner:
+            # The other process: its own empty register, the same broker, and a
+            # row that nobody has marked yet because we are still sending.
+            _second_process(mod)
+            inner.append(mod._notify_install_observed("sess-2", RULE))
+        return real_send(**kwargs)
+
+    mod.send_dispatch.dispatch = send_and_let_the_other_process_in
+
+    assert mod._notify_install_observed("sess-1", RULE) is True
+    assert inner == [False]
+    assert len(_install_notes(state)) == 1
+
+
+def test_the_claim_is_taken_before_the_letter_is_dispatched(plugin):
+    """Order is the whole control. A claim taken after the send would be a
+    record of a duplicate rather than a guard against one."""
+    mod, state = plugin
+    order: list[str] = []
+    real_send = mod.send_dispatch.dispatch
+
+    def watched_send(**kwargs):
+        order.append("send")
+        return real_send(**kwargs)
+
+    mod.send_dispatch.dispatch = watched_send
+    real_request = mod._broker_request
+
+    def watched_request(payload):
+        if payload.get("action") == "establish_notify_claim":
+            order.append("claim")
+        return real_request(payload)
+
+    mod._broker_request = watched_request
+    mod._notify_requester(kind="done", row=_ops_row(state="committed"))
+
+    assert order == ["claim", "send"]
+
+
+def test_a_refused_broker_claim_gives_the_LOCAL_claim_back(plugin):
+    """THE LINE THAT MAKES TWO LAYERS SOUND, and its own falsifier: delete the
+    release on the refusal path and this process can never retry the row -- so
+    when the holder's claim goes stale, or the seat is reprovisioned, the letter
+    still never goes. A leaked local claim turns a duplicate into a silence."""
+    mod, state = plugin
+    row = _ops_row(state="committed")
+    state["claims"][OPS] = "the-other-process"
+
+    assert mod._notify_requester(kind="done", row=dict(row)) is False
+    assert OPS not in mod._OUTCOME_CLAIMED
+
+    # And the proof that it matters: the holder goes away, and THIS process --
+    # same register, no restart -- can send.
+    state["claims"].pop(OPS)
+    assert mod._notify_requester(kind="done", row=dict(row)) is True
+    assert len(_ops_notes(state)) == 1
+
+
+def test_a_failed_send_releases_the_brokers_claim_too(plugin):
+    """A send that did not go must leave the row sendable by ANY process, not
+    just by the one that failed."""
+    mod, state = plugin
+    state["pending"] = [_ops_row(state="committed")]
+    state["send_ok"] = False
+
+    first = mod._sweep_lapses_once()
+    assert first.reported == 0
+    assert state["claims"] == {}
+
+    state["send_ok"] = True
+    _second_process(mod)
+    second = mod._sweep_lapses_once()
+    assert second.reported == 1
+    assert state["marked"] == [OPS]
+
+
+def test_a_send_that_raised_releases_the_brokers_claim(plugin):
+    """The wider release path, for the same reason its in-process twin is wide:
+    a claim that leaked on an exception would hold the row for the whole stale
+    window while a person waits."""
+    mod, state = plugin
+
+    def exploding_send(**kwargs):
+        raise RuntimeError("transport fell over")
+
+    mod.send_dispatch.dispatch = exploding_send
+    with pytest.raises(RuntimeError):
+        mod._notify_requester(kind="done", row=_ops_row(state="committed"))
+
+    assert state["claims"] == {}
+    assert OPS not in mod._OUTCOME_CLAIMED
+
+
+def test_a_broker_too_old_to_arbitrate_sends_nothing(plugin, caplog):
+    """FAIL CLOSED, and this is the case that will actually happen: the broker
+    ships in the seat image and this plugin ships at the pinned OVERLAY_REF, so
+    between the two merges there is a seat whose broker does not know the verb.
+    A missing once-guard is not a reason to send twice. The row stays unmarked,
+    so the letter is late rather than lost."""
+    mod, state = plugin
+    state["claim_verb_unknown"] = True
+
+    with caplog.at_level(logging.WARNING):
+        assert mod._notify_requester(kind="done", row=_ops_row(state="committed")) is False
+
+    assert _ops_notes(state) == []
+    assert state["marked"] == []
+    assert "cannot arbitrate" in caplog.text
+
+
+def test_an_unreachable_broker_sends_nothing(plugin, caplog):
+    """Same posture for a broker that is not answering at all: a claim we could
+    not take is not a claim we hold."""
+    mod, state = plugin
+    state["claim_broker_unreachable"] = True
+
+    with caplog.at_level(logging.WARNING):
+        assert mod._notify_requester(kind="done", row=_ops_row(state="committed")) is False
+
+    assert _ops_notes(state) == []
+    assert state["marked"] == []
+    assert OPS not in mod._OUTCOME_CLAIMED
+
+
+def test_a_row_the_broker_calls_reported_is_never_claimed_again(plugin):
+    """The durable mark outranks the claim, on this side too. A process that
+    just restarted holds no memory of the first letter, and must not send a
+    second one."""
+    mod, state = plugin
+    row = _ops_row(state="committed")
+    state["marked"].append(OPS)
+
+    _second_process(mod)
+    assert mod._notify_requester(kind="done", row=dict(row)) is False
+    assert _ops_notes(state) == []
+
+
+def test_the_claim_names_the_process_that_holds_it(plugin):
+    """Diagnostic, and it is the reason this defect was findable at all: the two
+    senders had to be nameable before anyone could see there were two."""
+    mod, state = plugin
+    mod._notify_requester(kind="done", row=_ops_row(state="committed"))
+
+    assert len(state["claimed_by"]) == 1
+    label = state["claimed_by"][0]
+    assert label.endswith(f":{os.getpid()}")
+    assert len(label) <= 120
+
+
+def test_a_letter_with_no_proposal_id_still_asks_no_broker(plugin):
+    """The degenerate case keeps its old answer: there is nothing to claim on,
+    and refusing on that basis would turn a malformed broker answer into a person
+    who is never told."""
+    mod, state = plugin
+    row = _ops_row(state="committed")
+    row["proposal_id"] = ""
+
+    assert mod._notify_requester(kind="done", row=row) is True
+    assert state["claims"] == {}
+    assert len(_ops_notes(state)) == 1

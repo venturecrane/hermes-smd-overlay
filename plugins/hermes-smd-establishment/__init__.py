@@ -100,6 +100,19 @@ So every outcome letter is now claimed by proposal id before it is dispatched
 (:data:`_OUTCOME_CLAIMED`, taken in :func:`_notify_requester`), and the claim is
 released only when the send did not go.
 
+AND THAT CLAIM IS THE BROKER'S, because the first version of it was this
+process's and the letter still went twice (2026-08-23, overlay fc8f88c1,
+vfy_01M0QK1927KP54R7J13J2TH3WZ: the same outcome letter 12 s apart). The seat
+runs this plugin in TWO processes -- `hermes -p operator gateway run` (pid 658)
+and its child `hermes-smd-webhook-gate` (pid 1115) -- each with its own sweeper
+thread and its own copy of the register above, so an in-process claim was two
+claims, each correct about the only process it could see. The broker is the one
+process both share: :func:`_claim_outcome_send_across_processes` asks it, and a
+refusal -- a lost race, an unreachable broker, or a broker too old to know the
+verb -- means this observer sends nothing and marks nothing. A missing
+once-guard is not a reason to send twice, and an unmarked row is a letter that
+is late rather than lost.
+
 THE LINE THAT KEEPS IT HONEST: committed is not installed. A commit means the
 submission reached the intake spool; the run can still be converging and can
 still fail, and ``accepted_pending_install`` is a real terminal answer that
@@ -250,6 +263,7 @@ import logging
 import os
 import re
 import socket
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -2242,6 +2256,114 @@ def _outcome_is_claimed(proposal_id: str) -> bool:
         return proposal_id in _OUTCOME_CLAIMED
 
 
+def _process_label() -> str:
+    """Which of this seat's processes is speaking, for the broker's claim.
+
+    Diagnostic, not load-bearing: the broker's UPDATE decides who sends, and it
+    would decide the same thing if every process called itself "x". It is stored
+    because the duplicate this fixes was only diagnosable once the two senders
+    could be named -- `hermes -p operator gateway run` (pid 658) and
+    `hermes-smd-webhook-gate` (pid 1115) -- and a claim that recorded nothing
+    would leave the next such defect exactly as opaque.
+    """
+    try:
+        name = os.path.basename(sys.argv[0] or "") or "unknown"
+    except Exception:  # noqa: BLE001 -- a label is never worth an exception
+        name = "unknown"
+    return f"{name[:80]}:{os.getpid()}"
+
+
+def _claim_outcome_send_across_processes(proposal_id: str) -> bool:
+    """Take the right to send this letter FROM THE BROKER. False if refused.
+
+    THE CONTROL, and the reason the in-process claim above is not it. This seat
+    runs the plugin in two processes -- the gateway and its webhook-gate child --
+    each with its own sweeper thread and therefore its own copy of
+    :data:`_OUTCOME_CLAIMED`. On 2026-08-23 both read the row as unreported,
+    which was TRUE (neither had sent yet), both sent, and only then did one of
+    them mark it: the requester got the same letter 12 s apart
+    (vfy_01M0QK1927KP54R7J13J2TH3WZ). The broker is the one process both share,
+    so the claim that means anything lives there.
+
+    FAIL CLOSED, and that word is doing real work in both directions:
+
+    * A lost race (``ok`` true, ``claimed`` false) is the system working. The
+      other observer is sending; this one returns False, sends nothing, and
+      marks nothing.
+    * An UNREACHABLE OR OLDER BROKER -- one that does not know this verb, which
+      is every broker until ss-console#2564 merges and the seat is reprovisioned
+      -- also returns False, at WARNING. A missing once-guard is not a reason to
+      send twice, and the row stays unmarked so the letter is not lost: it goes
+      as soon as a broker that can arbitrate is underneath us.
+
+    The second case means this plugin sends NO outcome letters on a seat whose
+    broker predates the verb. That is deliberate and it is the safer half of the
+    trade for a window measured in one reprovision: the alternative is knowingly
+    shipping the duplicate we just diagnosed.
+    """
+    try:
+        response = _broker_request(
+            {
+                "action": "establish_notify_claim",
+                "proposal_id": proposal_id,
+                "claimed_by": _process_label(),
+            }
+        )
+    except Exception:  # noqa: BLE001 -- an unreachable broker cannot arbitrate
+        logger.warning(
+            "hermes-smd-establishment: could not reach the broker to claim the outcome "
+            "letter for %s; sending nothing rather than risking a second copy",
+            proposal_id,
+            exc_info=True,
+        )
+        return False
+    if not isinstance(response, dict):
+        logger.warning(
+            "hermes-smd-establishment: the broker's answer to the outcome claim for %s "
+            "was not readable; sending nothing rather than risking a second copy",
+            proposal_id,
+        )
+        return False
+    if response.get("claimed") is True:
+        return True
+    if response.get("ok") is True:
+        # An ordinary loss, and the broker said which kind it was.
+        logger.debug(
+            "hermes-smd-establishment: outcome letter for %s was not claimed (%s)",
+            proposal_id,
+            response.get("reason") or "another observer holds it",
+        )
+        return False
+    logger.warning(
+        "hermes-smd-establishment: this broker cannot arbitrate the outcome letter for "
+        "%s (%s: %s); sending nothing rather than risking a second copy. Expect this "
+        "until the seat carries a broker with establish_notify_claim.",
+        proposal_id,
+        response.get("error") or "refused",
+        response.get("message") or "",
+    )
+    return False
+
+
+def _release_outcome_claim_across_processes(proposal_id: str) -> None:
+    """Give the broker's claim back, because the letter did not go.
+
+    Wider than the failure it names, exactly like its in-process twin: a claim
+    that leaked on a failure would hold the row for the whole stale window while
+    a person waits. The broker refuses to release a row already recorded as
+    reported, so this cannot reopen a letter that did go.
+    """
+    try:
+        _broker_request({"action": "establish_notify_release", "proposal_id": proposal_id})
+    except Exception:  # noqa: BLE001 -- the claim expires on its own
+        logger.debug(
+            "hermes-smd-establishment: could not release the outcome claim for %s; "
+            "it expires on its own",
+            proposal_id,
+            exc_info=True,
+        )
+
+
 def _notify_requester(
     *, kind: str, row: dict[str, Any], by: str = "", session_id: str = ""
 ) -> bool:
@@ -2259,6 +2381,19 @@ def _notify_requester(
     the install notice -- so one claim at this seam is one claim for all of them.
     Putting it at the four call sites instead would make "exactly once" an
     agreement between four functions again, which is the shape that failed.
+
+    TWO LAYERS, ONE CONTROL. The in-process register is a cheap first filter and
+    nothing more: it answers the common case (two threads of ONE process) without
+    a round trip. The control is the BROKER's claim, because the register is
+    per-process and this seat runs two -- the gateway and its webhook-gate child,
+    pids 658 and 1115 on pilot-smokeball, each with its own sweeper thread and
+    its own copy of the register. That is why the first fix did not hold: it was
+    two claims, and each was correct about the only process it could see.
+
+    The local layer is kept rather than deleted because it also backs the peek in
+    :func:`_notify_install_observed`, and because a refused local claim costs
+    microseconds where a refused remote one costs a socket. It is only sound
+    because the remote refusal RELEASES it -- see the body.
 
     A DENIED CLAIM RETURNS FALSE, not True, and the difference matters: False
     means the caller does not mark the row reported. The observer holding the
@@ -2287,13 +2422,25 @@ def _notify_requester(
             proposal_id,
         )
         return False
+    if not _claim_outcome_send_across_processes(proposal_id):
+        # THE LOCAL CLAIM IS GIVEN BACK, and this line is the whole reason the
+        # two layers can coexist. A refusal here is another PROCESS holding the
+        # row, or a broker that cannot arbitrate at all. Keeping the local claim
+        # would make this process permanently unable to retry -- so when the
+        # holder's claim went stale, or the seat was reprovisioned onto a broker
+        # that knows the verb, this process would still sit out, and the letter
+        # would never go. A leaked local claim turns a duplicate into a silence.
+        _release_outcome_claim(proposal_id)
+        return False
     try:
         sent = _dispatch_outcome_letter(kind=kind, row=row, by=by, session_id=session_id)
     except Exception:  # noqa: BLE001 -- a claim that leaked would be a silence
         _release_outcome_claim(proposal_id)
+        _release_outcome_claim_across_processes(proposal_id)
         raise
     if not sent:
         _release_outcome_claim(proposal_id)
+        _release_outcome_claim_across_processes(proposal_id)
     return sent
 
 
