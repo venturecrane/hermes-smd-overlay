@@ -1,5 +1,5 @@
 {
-  "version": "2026-05-29.2",
+  "version": "2026-08-22.1",
   "description": "Canonical high-risk fabrication / uncontracted-commitment markers for the outbound provenance gate (ADR 0028 Tier-1, universal across verticals). This file is the SINGLE source of truth: the hermes-smd-overlay vendors a copy and a CI hash-check asserts the bytes match this artifact at its pinned SHA, so the two repos cannot drift. Derived from the CLAUDE.md 'No fabricated client-facing content' Pattern A/B rule and the Tone & Positioning style markers. Match `literal_ci` and `regex` case-insensitively; `literal` exactly.",
   "markers": [
     {
@@ -85,6 +85,12 @@
       "kind": "literal_ci",
       "value": "training and handoff",
       "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83)."
+    },
+    {
+      "id": "record-narration-about-a-person",
+      "kind": "regex",
+      "value": "(?:\\b(?:record|log|sav|stor|add|updat|not|keep|kept|writ|put)\\w*\\b[^.\\n]{0,40}\\byour\\s+(?:profile|preferences)\\b|\\byour\\s+(?:profile|preferences)\\b[^.\\n]{0,40}\\b(?:record|log|sav|stor|updat)\\w*\\b|\\bprofile\\s+(?:on|about)\\s+you\\b)",
+      "note": "Conduct floor (ss-console#2552): the Operator speaks about what it will do, never about what it holds on you. It must not volunteer that a preference was recorded, where it lives, or that a profile exists. Triggered by a live confirm email reading 'That preference is recorded to your profile'. Storage itself is trust-contracted (ADR 0048); narrating it is the defect. Nouns are scoped to profile/preferences deliberately: 'your file' and 'your record' carry heavy legitimate legal usage ('We have added your medical records to your file') and matching them false-positives on attributed firm prose. Asked directly what is known about them, the Operator answers in full: this bans volunteering, not disclosure."
     }
   ]
 }
