@@ -2043,6 +2043,77 @@ def test_the_ordinary_promise_gate_is_unchanged_outside_the_pass_on_turn(plugin)
     assert "promises that a routine will start" in block["message"]
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        # THE LIVE SENTENCE (ss-console#2546, vfy_01M0R3Y7F00M639BF8E0N7DFG7).
+        "When it's set up, you'll start seeing it automatically.",
+        # The same promise with each half of the pronoun clause on its own.
+        "Once it's live, you'll get it without asking.",
+        "It'll start showing up after that.",
+        "After it is configured, you will receive it.",
+        # Curly apostrophe, which is what a mail client sends.
+        "When it’s set up, you’ll start seeing it automatically.",
+    ],
+)
+def test_the_pass_on_turn_may_not_promise_a_routine_by_pronoun(plugin, body):
+    """THE LIVE GAP. Every routine noun the conjunction looks for has been
+    replaced by "it", and the sentence still tells the person the thing they
+    just asked for is coming. Naming a routine by pronoun is how people write."""
+    mod, _state = plugin
+    mod._note_operations_sent("sess-1")
+    block = mod._operations_gate("sess-1", "smd_send_message", {"text": body})
+    assert block is not None
+    assert "SMD makes" in block["message"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "You'll start seeing it automatically once it's set up.",
+        "It'll arrive every Monday.",
+        "When it's live, you'll get the digest.",
+    ],
+)
+def test_the_pronoun_sentences_are_untouched_outside_the_pass_on_turn(plugin, body):
+    """THE FALSIFIER FOR THE SCOPING, restated for the pronoun clause, which is
+    the half that fires with no routine object at all. Outside a pass-on session
+    "it" refers to something that already exists and the sentence is true."""
+    mod, _state = plugin
+    assert mod._operations_gate("sess-1", "smd_send_message", {"text": body}) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Once the digest's in place, no more chasing.",
+        "When the summary's set up, it'd go out weekly.",
+    ],
+)
+def test_the_named_clause_reads_contractions_too(plugin, body):
+    """The same contraction gap on the NOUN side. "Once it is live" was read and
+    "once it's live" was not, which made the gate an apostrophe away from open
+    even for sentences that name the routine outright."""
+    mod, _state = plugin
+    mod._note_operations_sent("sess-1")
+    assert mod._operations_gate("sess-1", "smd_send_message", {"text": body}) is not None
+
+
+def test_a_plain_acknowledgement_still_goes_out_on_the_pass_on_turn(plugin):
+    """The person is owed an answer. A reply that says what happened and nothing
+    about the future is the reply the tool asks for, and it must pass."""
+    mod, _state = plugin
+    mod._note_operations_sent("sess-1")
+    assert (
+        mod._operations_gate(
+            "sess-1",
+            "smd_send_message",
+            {"text": "SMD makes those changes; I have passed your request on."},
+        )
+        is None
+    )
+
+
 def test_the_widened_gate_is_a_conjunction_too(plugin):
     """A future marker alone is ordinary work even on the pass-on turn: the
     person still gets an answer to whatever else they wrote."""
