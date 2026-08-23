@@ -393,6 +393,14 @@ _MAX_REFUSALS = 8
 _OPERATIONS_SENT: OrderedDict[str, int] = OrderedDict()
 _MAX_OPERATIONS = 8
 
+#: Sessions in which SMD's answer to an operations request was RECORDED this
+#: turn (ss-console#2546, the second wave). Read for exactly one thing: the
+#: confirmation matcher is skipped on that turn, because the message that
+#: answered SMD's request is not an answer to anything the firm can confirm and
+#: running it through ``resolve`` would ask "which rule do you mean?".
+_OPS_RESOLVED: OrderedDict[str, str] = OrderedDict()
+_MAX_OPS_RESOLVED = 8
+
 #: Proposal ids whose lapse or decline this session has already reported, so a
 #: person who sends three messages in a row is told once. The broker is the
 #: durable half (``establish_lapse_notified`` is a conditional UPDATE and only
@@ -1125,7 +1133,80 @@ _OPERATIONS_NUDGE = (
     "turning a routine on or off, that is not a rule about how work reads and "
     f"you cannot change it. Call {TOOL_OPERATIONS} with a one-sentence summary "
     "of what they asked for, and say what it tells you to say. Never promise "
-    "that a routine will start, stop, or change."
+    "that a routine will start, stop, or change, and never describe what the "
+    "routine would do once it exists. SMD answers the request in their own "
+    "time, and this seat tells the person the answer when it comes -- so you do "
+    "not need to promise them anything, and you must not."
+)
+
+_OPERATIONS_FUTURE_MESSAGE = (
+    "Withheld: this reply DESCRIBES a routine that does not exist yet. You have "
+    "passed the request to SMD on this turn, and nothing has been decided or "
+    "built, so a sentence about what the person will get, or about what happens "
+    "once it is live, is a promise the firm has no reason to believe. Say only "
+    "that SMD makes changes of that kind and that their request has been passed "
+    "on. Do not describe the routine, when it starts, or what it will contain."
+)
+
+#: What SMD is told when their reply named a request but said neither of the two
+#: words. A FIXED template on the sweeper's path, not prose the model composes:
+#: it is a message this seat sends to SMD under its own name about the firm's
+#: request, and the model has no part in it.
+_OPS_ASK_UNPARSED_SUBJECT = "Please answer this in one word [ops {proposal_id}]"
+
+_OPS_ASK_UNPARSED_BODY = """Your reply came back but this seat could not read it
+as an answer, so the request is still open and {requester} has not been told
+anything:
+
+{readback}
+
+Reply keeping [ops {proposal_id}] in the subject, starting with one of:
+
+  done                     -- you have made the change
+  done, <what you did>     -- the same, with a line they will see
+  no, <why not>            -- you are not making it, and your words are quoted
+
+You are asked once. If nobody answers within seven days the request lapses and
+{requester} is told that instead.
+"""
+
+_OPS_RECORDED_NOTE = (
+    "SMD's answer to [ops {proposal_id}] has ALREADY been recorded by this seat "
+    "({outcome}), and {requester} will be told automatically. Reply with one "
+    "short line acknowledging that the answer was received and nothing else. Do "
+    "not repeat their answer back to them, do not offer to tell {requester} "
+    "yourself, and do not call a send tool for that purpose."
+)
+
+_OPS_NOT_RECORDED_NOTE = (
+    "SMD answered [ops {proposal_id}], but this seat COULD NOT record the "
+    "answer: {reason}. Say exactly that in one line, and ask them to write to "
+    "the person who asked directly. Do not say the answer was recorded."
+)
+
+_OPS_ALREADY_ANSWERED_NOTE = (
+    "[ops {proposal_id}] has already ended, so this reply changed nothing and "
+    "the person who asked has already been told, or is about to be. Acknowledge "
+    "in one line and do nothing else."
+)
+
+_OPS_ASKED_NOTE = (
+    'SMD\'s reply named [ops {proposal_id}] but did not say "done" or "no", so '
+    "nothing was recorded and the person who asked has been told nothing. This "
+    "seat has ALREADY emailed SMD asking for one of those two words. Say that in "
+    "one line and do not call a send tool: the message is already gone."
+)
+
+_OPS_ASK_NOT_SENT_NOTE = (
+    'SMD\'s reply named [ops {proposal_id}] but did not say "done" or "no", so '
+    "nothing was recorded. This seat could not ask them for a plain answer: "
+    "{reason}. Say exactly that in one line."
+)
+
+_OPS_ALREADY_ASKED_NOTE = (
+    'SMD\'s reply named [ops {proposal_id}] but did not say "done" or "no", and '
+    "they have already been asked once for a plain answer. Nothing was recorded "
+    "and nothing further was sent. Say that in one line."
 )
 
 _OPERATIONS_NO_SENDER = (
@@ -1184,6 +1265,26 @@ _ROUTINE_OBJECTS = (
     r"\beach (?:day|morning|week|month)\b",
     r"\bautonom(?:y|ous)\b",
 )
+
+#: The other half of the widened gate (ss-console#2546, critique item 3). Not a
+#: PROMISE but a DESCRIPTION: "once it is live, the digest will arrive every
+#: Monday" promises nothing in the first person and is still a sentence about a
+#: routine that does not exist, sent on the one turn where the person has just
+#: been told SMD might build it. These fire only in a session that has actually
+#: passed a request on, because outside it "the Monday digest will include the
+#: three new matters" is a true statement about a routine that already runs.
+_ROUTINE_FUTURE_MARKERS = (
+    r"\b(?:will|would|is going to|are going to)\b",
+    r"\byou(?:'ll| will) (?:get|receive|see|start)\b",
+    r"\b(?:once|when|after) (?:it|this|that|the \w+) (?:is|goes|gets) "
+    r"(?:live|set up|in place|running|enabled)\b",
+)
+
+#: Sentence boundaries, for the "same sentence" half of the conjunction. Coarse
+#: on purpose: a false JOIN (two sentences read as one) can only make the gate
+#: fire more often, and a withheld reply costs one retry while a promised routine
+#: costs the firm's belief in everything else the seat says.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
 _OPERATIONS_PROMISE_MESSAGE = (
     "Withheld: this reply promises that a routine will start, stop, or change, "
@@ -1962,10 +2063,42 @@ def _notify_admins_of(session_id: str, response: dict[str, Any], args: dict[str,
     return notification.note
 
 
+def _is_ops_row(row: Any) -> bool:
+    """Is this a request only SMD could answer? Read from the STORED kind.
+
+    Never from the caller and never from the outcome word, because the two
+    letters are about different authorities: "your rule is in effect" says an
+    administrator of the FIRM applied something, and sending that about a routine
+    change would tell somebody their own colleagues decided a thing SMD decided.
+    """
+    return (
+        isinstance(row, dict) and str(row.get("kind") or "rule") == lapse_sweeper.OPS_REQUEST_KIND
+    )
+
+
 def _notify_requester(
     *, kind: str, row: dict[str, Any], by: str = "", session_id: str = ""
 ) -> bool:
-    """Tell the person who asked how their rule ended. True iff the note went."""
+    """Tell the person who asked how their request ended. True iff the note went.
+
+    ONE FUNCTION, TWO VOCABULARIES, dispatched on the row's stored kind
+    (ss-console#2546). Both outcome observers -- the sweeper and the requester's
+    own next turn -- reach the person through here, so putting the branch at this
+    seam is what makes it impossible for one of them to send the rule wording
+    about an operations request while the other sends the right one.
+    """
+    if _is_ops_row(row):
+        notification = rule_dispatch.notify_ops_outcome(
+            kind=kind,
+            proposal_id=str(row.get("proposal_id") or ""),
+            text=str(row.get("text") or ""),
+            requester=_normalize_address(row.get("instructed_by")),
+            by=by,
+            reason=str(row.get("outcome_reason") or ""),
+            send=send_dispatch.dispatch,
+            session_id=session_id,
+        )
+        return notification.sent
     notification = rule_dispatch.notify_outcome(
         kind=kind,
         proposal_id=str(row.get("proposal_id") or ""),
@@ -2012,7 +2145,10 @@ def _report_outstanding_outcomes(session_id: str, rows: list[dict[str, Any]]) ->
             continue
         # An install has its own send, because it has its own once-only lock
         # and its own "was anybody waiting" question (ss-console#2546 follow-up).
-        if kind == "installed":
+        # An OPERATIONS row never reaches this arm: ``outcome_kind`` gives it
+        # ``done`` rather than ``installed`` precisely so it cannot, and the
+        # assertion is here in readable form rather than only in that function.
+        if kind == "installed" and not _is_ops_row(row):
             if _notify_install_observed(session_id, proposal_id):
                 seen.add(proposal_id)
             continue
@@ -2336,9 +2472,44 @@ def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
         origin = SESSION_INBOUND_ORIGIN.get(session_id)
     except Exception:  # noqa: BLE001 -- an unresolvable origin loses one line
         origin = None
+    source_ref = (origin.message_id if origin else "") or session_id or "reply"
+    # THE ROW FIRST, THEN THE SEND, and the order is the whole of what this wave
+    # adds. The tag SMD quotes back is minted here, so a request that could not
+    # be recorded is never emailed: an answer to an untagged request has nothing
+    # to bind to, and the person who asked would be back in the silence.
+    try:
+        recorded = _broker_request(
+            {
+                "action": "ops_propose",
+                "instructed_by": sender,
+                "text": summary,
+                "source_ref": source_ref,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 -- an unreachable broker records nothing
+        logger.warning("hermes-smd-establishment: ops_propose failed", exc_info=True)
+        return ops_request.REFUSED_REPLY.format(reason=f"the request could not be recorded ({exc})")
+    if not isinstance(recorded, dict) or not recorded.get("ok"):
+        reason = str((recorded or {}).get("error") or "the request could not be recorded")
+        logger.info("hermes-smd-establishment: ops_propose refused (%s)", reason)
+        return ops_request.REFUSED_REPLY.format(reason=reason)
+    proposal_id = str(recorded.get("proposal_id") or "")
+    if recorded.get("duplicate_of"):
+        # The same person, the same request, already in front of SMD. A second
+        # email would put two tags on the desk only one of which answering would
+        # close, and the person is owed the same sentence either way: it was
+        # passed on, and nothing about the future is promised.
+        _note_operations_sent(session_id)
+        logger.info(
+            "hermes-smd-establishment: operations request from %s is already open as %s",
+            sender,
+            proposal_id,
+        )
+        return ops_request.FIXED_REPLY
     message = ops_request.build(
         sender=sender,
         summary=summary,
+        proposal_id=proposal_id,
         message_id=(origin.message_id if origin else ""),
         customer_slug=_customer_slug(),
     )
@@ -2351,14 +2522,50 @@ def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
     if not result.sent:
         reason = result.reason or "the send was refused"
         logger.info("hermes-smd-establishment: operations request NOT passed on (%s)", reason)
+        # GIVE THE ROW BACK. Nothing left the building, so nobody at SMD holds
+        # this tag and nobody ever will; leaving it open would put the requester
+        # on a seven-day clock ending in "lapsed unanswered", which is a letter
+        # about a request that was never made. ``withdrawn`` marks it ended AND
+        # reported in one statement, so the sweeper sends nothing.
+        _withdraw_operations_request(proposal_id, sender, source_ref)
         return ops_request.REFUSED_REPLY.format(reason=reason)
     _note_operations_sent(session_id)
     logger.info(
-        "hermes-smd-establishment: operations request from %s passed to SMD (message %s)",
+        "hermes-smd-establishment: operations request %s from %s passed to SMD (message %s)",
+        proposal_id,
         sender,
         result.message_id,
     )
     return ops_request.FIXED_REPLY
+
+
+def _withdraw_operations_request(proposal_id: str, sender: str, source_ref: str) -> None:
+    """End a request that never left the building. Best-effort, never fatal.
+
+    ``resolved_by`` is the SEAT, not a person, and that is the honest value: no
+    address at SMD decided anything here, the send was refused. It is recorded
+    against the seat's own operations desk so the ledger row names something
+    real rather than the requester, who did not withdraw their own request.
+    """
+    if not proposal_id:
+        return
+    try:
+        _broker_request(
+            {
+                "action": "ops_resolve",
+                "proposal_id": proposal_id,
+                "outcome": "withdrawn",
+                "resolved_by": ops_request.SMD_OPERATIONS_DESK,
+                "source_ref": source_ref,
+            }
+        )
+    except Exception:  # noqa: BLE001 -- the row expires on its own in a week
+        logger.warning(
+            "hermes-smd-establishment: could not withdraw operations request %s; "
+            "it will lapse on its own and the requester is told that instead",
+            proposal_id,
+            exc_info=True,
+        )
 
 
 def _promises_routine_change(blob: str) -> bool:
@@ -2377,28 +2584,69 @@ def _promises_routine_change(blob: str) -> bool:
     return any(re.search(pattern, text) for pattern in _ROUTINE_OBJECTS)
 
 
+def _describes_future_routine(blob: str) -> bool:
+    """Does this reply describe a routine that does not exist yet?
+
+    THE SECOND GATE, and it is scoped to exactly one turn: the pass-on turn, the
+    one where the person has just asked for a routine and been told SMD makes
+    those changes. On that turn every sentence about what the routine will do is
+    a sentence about something nobody has decided to build, and the person reads
+    it as the answer they were just told they would not get.
+
+    A CONJUNCTION AGAIN, and the same shape as :func:`_promises_routine_change`:
+    a future marker AND a routine object, IN THE SAME SENTENCE. Either half alone
+    is ordinary work -- "I will send you the draft" promises nothing about a
+    routine, and "the Monday digest" names one that may well already run.
+
+    SCOPED, NOT WIDENED (critique item 3). Outside a pass-on session this is
+    never consulted, so "The Monday digest will include the three new matters"
+    goes out untouched on every other turn of the seat's life.
+    """
+    if not blob:
+        return False
+    for sentence in _SENTENCE_SPLIT.split(blob.lower()):
+        text = re.sub(r"\s+", " ", sentence)
+        if not any(re.search(pattern, text) for pattern in _ROUTINE_FUTURE_MARKERS):
+            continue
+        if any(re.search(pattern, text) for pattern in _ROUTINE_OBJECTS):
+            return True
+    return False
+
+
 def _operations_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, Any] | None:
-    """Withhold a reply that promises a routine change nobody was told about.
+    """Withhold a reply that promises, or describes, a routine change.
 
     The twin of ``_in_effect_gate``, and the same argument: the Operator may not
     assert a state of the world it has not brought about. Here the state is a
-    schedule, and the only way this seat can affect one is by asking SMD, so a
-    promise with no ``operations_request`` behind it on this turn is a promise
-    the firm has no reason to believe.
+    schedule, and the only way this seat can affect one is by asking SMD.
+
+    TWO GATES, ONE PER SIDE OF THE PASS-ON (ss-console#2546):
+
+    * on an ordinary turn, a first-person PROMISE about a routine
+      (:func:`_promises_routine_change`) is withheld, because nothing was passed
+      to SMD and the promise has nothing behind it;
+    * on the pass-on turn itself, the promise gate would be satisfied -- the
+      request really did go -- and the failure moves next door: the reply narrates
+      the routine that was just asked for as though it were coming. So that turn
+      gets :func:`_describes_future_routine` instead, which is broader and
+      catches the third person too.
 
     Deliberately session-scoped rather than turn-scoped: the tool and the reply
     are two calls in one exchange, and a person is owed one answer, not a gate
     that fires on the second sentence of it.
     """
     session = _as_session(session_id)
-    if session and _OPERATIONS_SENT.get(session):
-        return None
     body = " ".join(
         str(value)
         for key, value in (args or {}).items()
         if key in ("text", "body", "body_text", "html", "message", "content")
         and isinstance(value, str)
     )
+    if session and _OPERATIONS_SENT.get(session):
+        if not _describes_future_routine(body):
+            return None
+        logger.info("hermes-smd-establishment: reply withheld (described a routine not yet built)")
+        return {"action": "block", "message": _OPERATIONS_FUTURE_MESSAGE}
     if not _promises_routine_change(body):
         return None
     logger.info("hermes-smd-establishment: reply withheld (promised a routine change)")
@@ -3055,6 +3303,37 @@ def _act_confirmation_note(
     )
 
 
+def _reportable_outcome(row: dict[str, Any]) -> bool:
+    """Has this row ENDED in a way its author has not been told about?
+
+    ``lapsed`` and ``declined`` for every kind, plus ``committed`` for an
+    OPERATIONS row (ss-console#2546): ``ops_resolve`` with ``done`` stamps
+    consumed_at and installed_at together, so SMD having made the change reads as
+    ``committed``, and a filter that only looked at the two refusal states would
+    tell somebody their request was declined but never that it was granted.
+
+    A committed RULE is deliberately not here. That one is the install notice,
+    which has its own once-only claim and its own "was anybody waiting" question,
+    and it is answered by the sweeper's ``notify_install`` arm.
+    """
+    state = str(row.get("state") or "open")
+    if state in ("lapsed", "declined"):
+        return True
+    return state == "committed" and _is_ops_row(row)
+
+
+def _clear_confirmation_stash(session_id: str) -> None:
+    """Drop what an EARLIER turn confirmed, before this turn decides anything.
+
+    Its own function because two callers now need it and only one of them goes on
+    to run the matcher: a turn that answered SMD skips the confirmation path
+    entirely (ss-console#2546), and skipping it without this would leave the
+    previous turn's permission standing over a submit on this one.
+    """
+    _CONFIRMED_STASH.pop(session_id, None)
+    _CONFIRMED_TEXT.pop(session_id, None)
+
+
 def _confirmation_note(
     session_id: str, sender: str, is_admin: bool, user_message: Any
 ) -> str | None:
@@ -3069,8 +3348,7 @@ def _confirmation_note(
     what THIS message confirmed, so a later message that confirms nothing must
     not leave the previous turn's permission standing.
     """
-    _CONFIRMED_STASH.pop(session_id, None)
-    _CONFIRMED_TEXT.pop(session_id, None)
+    _clear_confirmation_stash(session_id)
     if not isinstance(user_message, str) or not user_message.strip():
         return None
     if (
@@ -3086,11 +3364,16 @@ def _confirmation_note(
     # matcher, so an affirmative can never bind to a rule that has already
     # lapsed or been declined.
     rows = _fetch_pending(sender, is_admin, include_outcomes=True)
-    pending = [r for r in rows if str(r.get("state") or "open") == "open"]
+    # ss-console#2546 (the operations half). An ops row is dropped from what a
+    # person may confirm, in readable form here as well as in the broker's SQL
+    # (``open_for`` excludes the kind, so on the live path this filter never
+    # fires). "The firm accidentally installed a routine change by saying yes"
+    # is the failure worth a refusal at every layer that could pass one through.
+    pending = [r for r in rows if str(r.get("state") or "open") == "open" and not _is_ops_row(r)]
     ended = [
         r
         for r in rows
-        if str(r.get("state") or "open") in ("lapsed", "declined")
+        if _reportable_outcome(r)
         and not r.get("lapse_notified")
         and _normalize_address(r.get("instructed_by")) == sender
     ]
@@ -3174,6 +3457,172 @@ def _confirmation_note(
             first=verdict.candidates[0] if verdict.candidates else "",
         )
     return None
+
+
+def _note_ops_resolved(session_id: str, proposal_id: str) -> None:
+    """This turn recorded SMD's answer. Bounded, like every register here."""
+    if not session_id:
+        return
+    _OPS_RESOLVED[session_id] = proposal_id
+    _OPS_RESOLVED.move_to_end(session_id)
+    while len(_OPS_RESOLVED) > _MAX_OPS_RESOLVED:
+        _OPS_RESOLVED.popitem(last=False)
+
+
+def _ask_smd_for_a_plain_answer(row: dict[str, Any], answerer: str) -> tuple[bool, str]:
+    """SMD replied but said neither word. Ask them for one, once.
+
+    THE ALTERNATIVE IS THE OLD SILENCE IN A NEW PLACE (critique item 4). A reply
+    the parser cannot read leaves the row open, and a row nobody notices sits
+    there for seven days and then tells the requester their request lapsed --
+    when in fact SMD answered it and this seat could not tell what they said.
+
+    SENT ON AN EMPTY SESSION ID, deliberately, and it is the one place this
+    feature steps around the taint register. The turn that reaches here is an
+    inbound email from SMD, which is untrusted content like any other inbound,
+    so the session is tainted and a send on it would be refused. What goes is a
+    FIXED template, to an address the CONFIG authored on ``scope.ops_reply_from``,
+    carrying nothing but the readback this seat itself composed and sent them
+    earlier -- not one character of the message that arrived. That is exactly the
+    sweeper's argument for the same value: the note is classified on the
+    recipient alone, as an internal alert is.
+
+    Returns ``(sent, reason)``. The broker mark is written by the CALLER and only
+    after this returns sent, the ordering ``lapse_notified`` uses: a mark written
+    first would trade a re-ask for a permanent silence.
+    """
+    proposal_id = str(row.get("proposal_id") or "")
+    readback = str(row.get("readback") or "") or (
+        f"[ops {proposal_id}] {str(row.get('text') or '')}"
+    )
+    requester = _normalize_address(row.get("instructed_by")) or "the person who asked"
+    result = send_dispatch.dispatch(
+        to=[answerer],
+        subject=_OPS_ASK_UNPARSED_SUBJECT.format(proposal_id=proposal_id),
+        text=_OPS_ASK_UNPARSED_BODY.format(
+            proposal_id=proposal_id, readback=readback, requester=requester
+        ),
+        session_id="",
+    )
+    return bool(result.sent), str(result.reason or "")
+
+
+def _ops_reply_note(
+    session_id: str, sender: str, cfg: Any, user_message: Any
+) -> tuple[str | None, bool]:
+    """Did SMD just answer an operations request? Record it, and say so.
+
+    THE RETURN HALF OF ss-console#2546. A person at the firm asked for a routine
+    change, the seat emailed SMD with an ``[ops XXXX]`` tag, and this is where
+    SMD's reply becomes an answer the person who asked will actually receive.
+
+    THREE THINGS MUST LINE UP, and the shape is :func:`rule_confirm.resolve`'s on
+    purpose:
+
+    1. an ``[ops XXXXXXXX]`` tag ANYWHERE in the prompt -- subject line, quoted
+       body, or SMD's own text. Anywhere, because the tag is what SMD is being
+       asked to leave alone rather than to retype;
+    2. a sender the config authored on ``scope.ops_reply_from``. THE TAG IS THE
+       CAPABILITY and this list is the second half of it; a tag from anyone else
+       is logged at WARNING and does nothing at all, so a near miss is visible in
+       the ledger rather than silent;
+    3. an answer this parser can read, in SMD's OWN text
+       (:func:`rule_confirm.read_ops_reply`).
+
+    IT RUNS ON A TAINTED SESSION AND FOR A SENDER WHO IS NOT AN ADMIN, and both
+    are load-bearing rather than incidental. ``team@smd.services`` is on neither
+    ``scope.admins`` nor ``scope.inbound_allow_from`` on either seat, and it must
+    stay off both -- being able to answer a request the Operator itself raised is
+    not inbound trust. Nothing here sends to the FIRM: the answer is written to
+    the broker, and the sweeper mails the requester on its own senderless pass.
+
+    Returns ``(note, resolved)``. ``resolved`` is True only when the broker
+    actually took the answer, and it is what makes the caller skip the
+    confirmation matcher: this message answered SMD's request, not the firm's.
+    """
+    if not isinstance(user_message, str) or not user_message.strip():
+        return None, False
+    tags = rule_confirm.find_tags(user_message, kinds=(rule_confirm.OPS_TAG_KIND,))
+    if not tags:
+        return None, False
+    proposal_id = tags[0]
+    if cfg is None or not cfg.sender_may_answer_ops(sender):
+        # Loud, and it does nothing. A silent miss here looks identical to a
+        # request nobody answered, which is the failure this whole issue is about.
+        logger.warning(
+            "hermes-smd-establishment: ops tag from unlisted sender (%s named %s); ignored",
+            sender,
+            proposal_id,
+        )
+        return None, False
+    row = _fetch_row(proposal_id)
+    if not row or not _is_ops_row(row):
+        logger.info("hermes-smd-establishment: [ops %s] names nothing this seat holds", proposal_id)
+        return None, False
+    if str(row.get("state") or "open") != "open":
+        logger.info("hermes-smd-establishment: [ops %s] was already answered", proposal_id)
+        return _OPS_ALREADY_ANSWERED_NOTE.format(proposal_id=proposal_id), False
+    reading = rule_confirm.read_ops_reply(user_message)
+    if reading.verdict == rule_confirm.OPS_NONE:
+        if row.get("ask_sent"):
+            return _OPS_ALREADY_ASKED_NOTE.format(proposal_id=proposal_id), False
+        sent, reason = _ask_smd_for_a_plain_answer(row, sender)
+        if not sent:
+            return (
+                _OPS_ASK_NOT_SENT_NOTE.format(
+                    proposal_id=proposal_id, reason=reason or "the send was refused"
+                ),
+                False,
+            )
+        try:
+            _broker_request({"action": "ops_ask_sent", "proposal_id": proposal_id})
+        except Exception:  # noqa: BLE001 -- the ask already went; a re-ask is bounded
+            logger.warning(
+                "hermes-smd-establishment: could not mark [ops %s] asked",
+                proposal_id,
+                exc_info=True,
+            )
+        return _OPS_ASKED_NOTE.format(proposal_id=proposal_id), False
+    outcome = "done" if reading.verdict == rule_confirm.OPS_DONE else "declined"
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id)
+    except Exception:  # noqa: BLE001 -- an unresolvable origin loses one field
+        origin = None
+    try:
+        response = _broker_request(
+            {
+                "action": "ops_resolve",
+                "proposal_id": proposal_id,
+                "outcome": outcome,
+                "resolved_by": sender,
+                "reason": reading.note or None,
+                "source_ref": (origin.message_id if origin else "") or session_id or "reply",
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 -- an unreachable broker records nothing
+        logger.warning(
+            "hermes-smd-establishment: ops_resolve of %s failed", proposal_id, exc_info=True
+        )
+        return _OPS_NOT_RECORDED_NOTE.format(proposal_id=proposal_id, reason=str(exc)), False
+    if not isinstance(response, dict) or not response.get("ok"):
+        reason = str((response or {}).get("error") or "the broker refused the answer")
+        logger.info("hermes-smd-establishment: ops_resolve of %s refused (%s)", proposal_id, reason)
+        return _OPS_NOT_RECORDED_NOTE.format(proposal_id=proposal_id, reason=reason), False
+    _note_ops_resolved(session_id, proposal_id)
+    logger.info(
+        "hermes-smd-establishment: [ops %s] answered %s by %s; the requester is told by the sweeper",
+        proposal_id,
+        outcome,
+        sender,
+    )
+    return (
+        _OPS_RECORDED_NOTE.format(
+            proposal_id=proposal_id,
+            outcome=outcome,
+            requester=_normalize_address(response.get("instructed_by")) or "the person who asked",
+        ),
+        True,
+    )
 
 
 def _resolve_attributed_sender(session_id: str, sender_id: str) -> str:
@@ -3267,13 +3716,29 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         lines.append(_CLASS_CHOICE_LINE)
         lines.append(_SCHEDULE_LIMIT_LINE)
         lines.append(_OPERATIONS_NUDGE)
-        # ss-console#2529. Last, and after the nudge, because it is an
-        # instruction about THIS message rather than a standing capability
-        # note: when the person just answered a readback, what to do about it
-        # is the most specific thing the model needs to know this turn.
-        note = _confirmation_note(session_id, sender_id, is_admin, kwargs.get("user_message"))
-        if note:
-            lines.append(note)
+        # ss-console#2546 (the operations half). BEFORE the confirmation
+        # matcher, and the order is the point: a message carrying an [ops XXXX]
+        # tag is SMD answering a request the Operator raised, not a person at
+        # the firm answering a readback, and running it through ``resolve``
+        # first would ask "which rule do you mean?" about a tag no rule holds.
+        ops_note, ops_resolved = _ops_reply_note(
+            session_id, sender_id, cfg, kwargs.get("user_message")
+        )
+        if ops_note:
+            lines.append(ops_note)
+        if ops_resolved:
+            # Skipped, but the stash is still CLEARED: what an earlier turn
+            # confirmed must not stand over a submit on this one merely because
+            # this turn went down the other path.
+            _clear_confirmation_stash(session_id)
+        else:
+            # ss-console#2529. Last, and after the nudge, because it is an
+            # instruction about THIS message rather than a standing capability
+            # note: when the person just answered a readback, what to do about it
+            # is the most specific thing the model needs to know this turn.
+            note = _confirmation_note(session_id, sender_id, is_admin, kwargs.get("user_message"))
+            if note:
+                lines.append(note)
         pointer = _person_pref_pointer(sender_id)
         if pointer:
             lines.append(pointer)

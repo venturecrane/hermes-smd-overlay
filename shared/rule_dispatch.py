@@ -29,6 +29,16 @@ broker-minted: an address, the person's own sentence read back verbatim, and a
 proposal tag. Nothing here states a timeline, a promise, or a commitment the
 firm has not made.
 
+THE OPERATIONS HALF (ss-console#2546, the second wave). A routine, a schedule, a
+channel, a memory setting, an autonomy level or an on/off is SMD's to change
+rather than the firm's, so it never reaches an administrator here at all — it
+reaches SMD's desk, and the silence to end is the one AFTER that: the desk
+answered and the person who asked never heard. :func:`notify_ops_outcome` is the
+three sentences that close it, and they are deliberately NOT the four above.
+"Your rule is in effect" says an administrator of the FIRM applied something,
+which is a different fact about a different authority; sending it about a routine
+change would tell somebody their own colleagues decided a thing SMD decided.
+
 WHY IT IS INJECTED. ``send`` and ``emit`` are arguments, not imports. The send
 has to run through the trust plugin's gate (see :mod:`shared.send_dispatch` for
 the layout reason), and every branch here has to be provable in a test without a
@@ -142,6 +152,67 @@ lapsed:
 Nothing changed. Say it again if you still want it, and it will be put to an
 administrator again.
 """
+
+#: SMD's operations desk, quoted in the lapsed notice so a person whose request
+#: nobody answered has somewhere to go that is not this seat. Mirrors
+#: ``shared.operations_request.SMD_OPERATIONS_DESK``; the two are the same desk
+#: and are written out here rather than imported so this module keeps its
+#: "templates and nothing else" shape.
+OPS_DESK = "team@smd.services"
+
+
+def _ops_readback(proposal_id: str, text: str) -> str:
+    """The operations readback, rendered the way the broker renders it.
+
+    Its own function beside :func:`_readback` rather than a parameter on it,
+    because the tag WORD is the whole difference between "a sentence the firm
+    agreed to" and "a change SMD made", and a caller passing the wrong one would
+    tell somebody their rule was set up.
+    """
+    return f"[ops {proposal_id}] {text}"
+
+
+_OPS_DONE_SUBJECT = "SMD set this up [ops {proposal_id}]"
+
+_OPS_DONE_BODY = """SMD has made the change you asked for:
+
+{readback}
+{note}
+Nothing else is needed from you. If it is not behaving the way you expected, say
+so and the Operator will pass that on the same way.
+"""
+
+_OPS_DECLINED_SUBJECT = "SMD declined this request [ops {proposal_id}]"
+
+_OPS_DECLINED_BODY = """SMD is not making the change you asked for:
+
+{readback}
+{note}
+Nothing changed. If the request was misread, say it again with what you meant
+and it will be put to SMD again.
+"""
+
+_OPS_LAPSED_SUBJECT = "Your request to SMD lapsed unanswered [ops {proposal_id}]"
+
+_OPS_LAPSED_BODY = (
+    """Nobody at SMD answered the change you asked for within a
+week, so the request has lapsed:
+
+{readback}
+
+Nothing changed. Ask for it again and it will be put to SMD again, or write to
+"""
+    + OPS_DESK
+    + """ directly.
+"""
+)
+
+#: How SMD's own words are quoted, and they ARE quoted rather than paraphrased.
+#: An Operator composing its own account of somebody else's business decision
+#: would be inventing client-facing content; a quotation is a report.
+_OPS_REASON_LINE = '\nSMD wrote: "{reason}"\n'
+_OPS_DONE_NOTE_LINE = '\nSMD\'s note: "{reason}"\n'
+
 
 _NOTIFIED_NOTE = (
     "The rule was recorded and this seat has ALREADY emailed it to {names} for "
@@ -325,12 +396,98 @@ def notify_outcome(
     )
 
 
+def notify_ops_outcome(
+    *,
+    kind: str,
+    proposal_id: str,
+    text: str,
+    requester: str,
+    send: SendFn,
+    by: str = "",
+    reason: str = "",
+    session_id: str = "",
+) -> Notification:
+    """Tell the person who asked how SMD answered their operations request.
+
+    THE HALF ss-console#2546 WAS MISSING. Before this the Operator told somebody
+    their request had been passed on, which was true, and that was the last they
+    heard of it: SMD's answer reached the desk's own mailbox and stopped there.
+    From where the person sat, a request that was granted and a request that was
+    ignored produced exactly the same silence.
+
+    THREE SENTENCES, NOT ONE PARAMETERISED SENTENCE, for the reason
+    :func:`notify_outcome` gives: the three are different news and the reader
+    must know which happened without parsing a clause. They are also DELIBERATELY
+    not that function's four — "your rule is in effect" says an administrator of
+    the FIRM applied something, which is a different fact about a different
+    authority, and sending it about a routine change would misattribute the
+    decision to the reader's own colleagues.
+
+    ``by`` IS NOT RENDERED, and its absence is the point rather than an omission.
+    Who at SMD answered is on the broker row and in the ledger; putting a named
+    individual in front of the firm would make the answer read as one person's
+    opinion instead of the firm's, and it is a person's address, which the
+    requester has no reason to hold.
+
+    ``reason`` is SMD's OWN WORDS, quoted. It is optional on a ``done`` (where it
+    reads as a note) and usual on a ``declined`` (where it is the answer). Its
+    absence renders as nothing at all rather than as an empty quotation.
+    """
+    proposal_id = _clean(proposal_id)
+    requester = _clean(requester)
+    if not requester:
+        return Notification(sent=False, note="", reason="no requester to tell")
+    readback = _ops_readback(proposal_id, _clean(text))
+    quoted = _clean(reason)
+    if kind == "done":
+        subject = _OPS_DONE_SUBJECT.format(proposal_id=proposal_id)
+        body = _OPS_DONE_BODY.format(
+            readback=readback,
+            note=_OPS_DONE_NOTE_LINE.format(reason=quoted) if quoted else "",
+        )
+    elif kind == "declined":
+        subject = _OPS_DECLINED_SUBJECT.format(proposal_id=proposal_id)
+        body = _OPS_DECLINED_BODY.format(
+            readback=readback,
+            note=_OPS_REASON_LINE.format(reason=quoted) if quoted else "",
+        )
+    elif kind == "lapsed":
+        subject = _OPS_LAPSED_SUBJECT.format(proposal_id=proposal_id)
+        body = _OPS_LAPSED_BODY.format(readback=readback)
+    else:  # pragma: no cover - a caller bug, not a runtime state
+        raise ValueError(f"unknown operations outcome kind: {kind!r}")
+    result = send(
+        to=[requester],
+        cc=[],
+        subject=subject,
+        text=body,
+        session_id=session_id,
+    )
+    sent = bool(getattr(result, "sent", False))
+    send_reason = _clean(getattr(result, "reason", ""))
+    if not sent:
+        logger.info(
+            "rule_dispatch: %s outcome for operations request %s NOT delivered (%s)",
+            kind,
+            proposal_id,
+            send_reason,
+        )
+    return Notification(
+        sent=sent,
+        note="",
+        recipients=(requester,),
+        reason=send_reason,
+    )
+
+
 __all__ = [
     "MAX_NOTIFIED",
+    "OPS_DESK",
     "RULE_REQUEST_NOTIFIED",
     "EmitFn",
     "Notification",
     "SendFn",
     "notify_admins",
+    "notify_ops_outcome",
     "notify_outcome",
 ]

@@ -63,7 +63,24 @@ from shared.inbound import UNTRUSTED_EMAIL_DELIMITER
 #: without guessing. The id is broker-minted and unique across both, so binding
 #: is by id and the word only tells the reader which sort of thing they are
 #: looking at.
-RULE_TAG = re.compile(r"\[(rule|act) ([0-9a-f]{8})\]")
+RULE_TAG = re.compile(r"\[(rule|act|ops) ([0-9a-f]{8})\]")
+
+#: The kinds :func:`find_tags` returns unless a caller names others. RULE and
+#: ACT are things a person at the FIRM answers, and they are the only two the
+#: confirmation matcher may ever see; OPS is deliberately absent from the default
+#: (ss-console#2546). An ``[ops XXXXXXXX]`` tag names a change only SMD makes, so
+#: a message quoting one is not an answer to anything the firm can confirm, and a
+#: default that returned it would make an SMD reply read as "which rule do you
+#: mean?" to the firm's own matcher.
+CONFIRMABLE_TAG_KINDS: tuple[str, ...] = ("rule", "act")
+
+#: The tag word an operations request carries. Its own constant because three
+#: places key on it and a typo in any of them is a silent miss.
+OPS_TAG_KIND = "ops"
+
+#: The proposal kind the broker stores an operations request under. Mirrors
+#: ``OPS_REQUEST_KIND`` in ss-console ``operator/workspace_broker/establishment.py``.
+OPS_REQUEST_KIND = "ops_request"
 
 #: A line that begins the quoted history. Everything from here down is somebody
 #: else's words (usually ours, quoted back), and none of it is the reply.
@@ -247,8 +264,14 @@ def strip_quoted(body: Any) -> str:
     return "\n".join(kept).strip()
 
 
-def find_tags(message: Any) -> tuple[str, ...]:
+def find_tags(message: Any, kinds: tuple[str, ...] = CONFIRMABLE_TAG_KINDS) -> tuple[str, ...]:
     """Every ``[rule XXXXXXXX]`` / ``[act XXXXXXXX]`` id, in order, de-duplicated.
+
+    ``kinds`` narrows which tag WORDS count, and the default deliberately
+    excludes ``ops`` (ss-console#2546): an operations request is answered by SMD
+    and can never be confirmed by anybody at the firm, so it must be invisible
+    to every caller on the confirmation path. The ops hook passes
+    ``kinds=("ops",)`` to ask the opposite question.
 
     Reads the WHOLE message, prompt preamble and quoted history included: on
     most mail clients the person's "yes" sits above a quoted copy of the
@@ -263,6 +286,8 @@ def find_tags(message: Any) -> tuple[str, ...]:
         return ()
     seen: list[str] = []
     for match in RULE_TAG.finditer(message):
+        if match.group(1) not in kinds:
+            continue
         tag = match.group(2)
         if tag not in seen:
             seen.append(tag)
@@ -317,6 +342,149 @@ def read_own_text(body: Any) -> Reading:
         negated=negated,
         declining=declining,
     )
+
+
+#: Verdict kinds returned by :func:`read_ops_reply`. ``DONE`` and ``OPS_DECLINED``
+#: each END an operations request in the broker; ``OPS_NONE`` leaves it open.
+OPS_DONE = "done"
+OPS_DECLINED = "declined"
+OPS_NONE = "none"
+
+#: Ceiling on the quoted note. Mirrors ``MAX_OUTCOME_REASON`` in ss-console
+#: ``operator/workspace_broker/establishment.py``, which re-normalizes and
+#: re-truncates whatever this sends; bounding it here too keeps the sentence the
+#: seat logs and the sentence the broker stores the same one.
+MAX_OPS_NOTE = 300
+
+#: A line that is nothing but a greeting, optionally with a first name. Skipped
+#: when looking for the answer line, because "Hi,\n\ndone" is one of the two
+#: commonest shapes a real reply takes and reading only the FIRST non-empty line
+#: would answer "Hi," instead of "done". Skipping can only ever move the read
+#: DOWN to the person's actual sentence: a line that carries any other word does
+#: not match, so nothing meaningful can be skipped past.
+_OPS_GREETING_ONLY = re.compile(
+    r"\A(?:hi|hey|hello|morning|good (?:morning|afternoon|evening)|thanks|thank you|sure|ok|okay)"
+    r"(?:\s+[a-z][a-z'\-]{0,30})?[\s,.:;!-]*\Z",
+    re.IGNORECASE,
+)
+
+#: SMD saying the change is made. ``yes`` is DELIBERATELY absent (critique item
+#: 7): a bare "yes" on this channel is as likely to be agreement with the request
+#: as a statement that it was carried out, and the difference is a person being
+#: told a routine exists when it does not. These four words all assert a
+#: completed act.
+_OPS_DONE_TOKENS = ("done", "set up", "applied", "installed")
+
+#: A done token at the start of a CLAUSE, not merely anywhere in the line. The
+#: clause boundary is what makes "No problem, done." read as done while leaving
+#: "the digest is not done yet" alone.
+_OPS_DONE = re.compile(
+    r"(?:\A|(?<=[,;:.\-])\s*)(" + "|".join(_OPS_DONE_TOKENS) + r")\b[\s,.;:!\-]*",
+    re.IGNORECASE,
+)
+
+#: A bare "no" that IS the answer: at the start of the line and followed by
+#: punctuation or the end of it. "No, not in this package" is a refusal; "No
+#: problem, done." is not, and that one case is why this is anchored and
+#: punctuated rather than a word search.
+_OPS_NO_BARE = re.compile(r"\Ano\b\s*(?:[,.;:!\-]+\s*|\Z)", re.IGNORECASE)
+
+#: A "no" carrying its own defeater: "no, cannot do that", "no not this month".
+_OPS_NO_DEFEATER = re.compile(
+    r"\Ano\b\s+(?=(?:not|can't|cant|cannot|won't|wont|declin(?:e|ed|ing))\b)",
+    re.IGNORECASE,
+)
+
+#: A refusal that never says "no" at all. The whole line rides the notice as the
+#: quoted note in this case, because "Can't do that this month" reads as a
+#: refusal only WITH its opening word.
+_OPS_REFUSAL_OPENER = re.compile(
+    r"\A(?:declin(?:e|ed|ing)|reject(?:ed)?|not going|not possible|can't|cant|cannot|won't|wont)\b",
+    re.IGNORECASE,
+)
+
+#: Any proposal tag, stripped out of a quoted note before it travels. The note
+#: rides an email the Operator sends under its own name to the person who asked,
+#: and a tag inside it would be a capability the seat handed onward: quoting an
+#: ``[ops XXXX]`` is how an answer binds to a request, so a note carrying one
+#: would let the requester's reply resolve something.
+_OPS_TAG_IN_NOTE = re.compile(r"\[(?:rule|act|ops) [0-9a-f]{8}\]")
+
+
+@dataclass(frozen=True)
+class OpsReading:
+    """What SMD's reply said about one operations request.
+
+    ``verdict`` is :data:`OPS_DONE`, :data:`OPS_DECLINED` or :data:`OPS_NONE`.
+    ``note`` is SMD's own remaining words on that line, quoted and never
+    paraphrased — the Operator composing its own account of somebody else's
+    business decision would be inventing client-facing content.
+    """
+
+    verdict: str
+    note: str = ""
+
+
+def _ops_answer_line(message: Any) -> str:
+    """SMD's own answer line: below the fence, above the quote, past the hello.
+
+    The same two cuts a confirmation gets (:func:`email_body` then
+    :func:`strip_quoted`) and for the same two reasons — our prompt preamble
+    carries "never" and "not", and a quoted copy of the request carries the word
+    "done" from the instructions we wrote into it. Reading either would make
+    every reply answer itself.
+    """
+    own = strip_quoted(email_body(message))
+    if not own:
+        return ""
+    for raw in own.splitlines():
+        line = raw.strip()
+        if not line or _OPS_GREETING_ONLY.match(line):
+            continue
+        return line
+    return ""
+
+
+def _ops_note(text: str) -> str:
+    """One line of SMD's own words, bounded, tag-free, ``""`` when there are none."""
+    folded = re.sub(r"\s+", " ", _OPS_TAG_IN_NOTE.sub("", text)).strip()
+    folded = folded.strip(" ,;:-")
+    return folded[:MAX_OPS_NOTE]
+
+
+def read_ops_reply(message: Any) -> OpsReading:
+    """Did SMD say the change is made, or that they will not make it?
+
+    A FUNCTION WITH A TABLE, for the reason :func:`resolve` is one: the answer
+    ends a request in the broker and sends the person who asked a letter saying
+    what SMD decided, so "is this a yes" cannot be a judgment made on a turn that
+    has other work to do.
+
+    THREE VERDICTS AND NO FOURTH. :data:`OPS_DONE` and :data:`OPS_DECLINED` each
+    end the row; :data:`OPS_NONE` leaves it open and is the answer to everything
+    ambiguous — an SMD reply that says "looking at it" must not resolve anything,
+    because the requester would then be told the matter is settled.
+
+    THE REFUSAL IS READ NARROWLY AND FIRST. "No" counts only at the start of the
+    answer line and only when it is followed by punctuation or by its own
+    defeater, so "No problem, done." is a done rather than a refusal — which is
+    not a curiosity, it is how people actually write the message.
+    """
+    line = _ops_answer_line(message)
+    if not line:
+        return OpsReading(verdict=OPS_NONE)
+    match = _OPS_NO_BARE.match(line) or _OPS_NO_DEFEATER.match(line)
+    if match is not None:
+        return OpsReading(verdict=OPS_DECLINED, note=_ops_note(line[match.end() :]))
+    if _OPS_REFUSAL_OPENER.match(line):
+        # The WHOLE line, opener included: "Can't do that this month" reads as a
+        # refusal only with the words that make it one, and a note that dropped
+        # them would quote SMD as having written "do that this month".
+        return OpsReading(verdict=OPS_DECLINED, note=_ops_note(line))
+    done = _OPS_DONE.search(line)
+    if done is not None:
+        return OpsReading(verdict=OPS_DONE, note=_ops_note(line[done.end() :]))
+    return OpsReading(verdict=OPS_NONE)
 
 
 def _sender_may_confirm(
@@ -436,7 +604,20 @@ def resolve(
     cannot be confirmed here, but they can make a bare affirmative ambiguous, so
     they are counted when deciding whether to ask.
     """
-    rows = [r for r in pending if isinstance(r, dict) and r.get("proposal_id")]
+    # ss-console#2546. AN OPERATIONS ROW IS NOT SOMETHING ANYBODY HERE CAN
+    # ANSWER, and it is dropped before the matcher sees it rather than refused
+    # afterwards. The broker's ``open_for`` already excludes the kind in SQL, so
+    # on the live path this filter never fires; it is here because "the firm
+    # accidentally installed a routine change by saying yes" is the failure
+    # worth a refusal at every layer that could pass one through, and a caller
+    # that fetches rows some other way must not become the exception.
+    rows = [
+        r
+        for r in pending
+        if isinstance(r, dict)
+        and r.get("proposal_id")
+        and str(r.get("kind") or "rule") != OPS_REQUEST_KIND
+    ]
     if not rows:
         if extra_open > 0 and read_own_text(message).affirmative:
             # Something IS waiting, it just is not something a tag can name, and
@@ -504,17 +685,26 @@ __all__ = [
     "ASK_UNKNOWN_TAG",
     "ASK_UNNAMEABLE",
     "BARE_AFFIRMATIVES",
+    "CONFIRMABLE_TAG_KINDS",
     "CONFIRMED",
     "DECLINED",
     "DECLINE_TOKENS",
     "DEFEATERS",
+    "MAX_OPS_NOTE",
     "NONE",
+    "OPS_DECLINED",
+    "OPS_DONE",
+    "OPS_NONE",
+    "OPS_REQUEST_KIND",
+    "OPS_TAG_KIND",
+    "OpsReading",
     "RULE_TAG",
     "Reading",
     "Verdict",
     "email_body",
     "find_tags",
     "may_decline",
+    "read_ops_reply",
     "read_own_text",
     "resolve",
     "strip_quoted",

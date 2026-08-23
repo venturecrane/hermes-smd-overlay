@@ -43,7 +43,11 @@ SMD_OPERATIONS_DESK = "team@smd.services"
 #: directly and which should not travel as a tool argument.
 MAX_SUMMARY_CHARS = 2000
 
-SUBJECT = "Operations request from {sender}"
+#: The subject SMD sees, and the tag is IN IT rather than only in the body
+#: (ss-console#2546). Reply chains vary wildly in what they quote, and SMD's
+#: answer has to carry the tag or the seat cannot bind it to the request it
+#: answers; a "Re:" subject survives clients that strip the quoted body entirely.
+SUBJECT = "Operations request from {sender} [ops {proposal_id}]"
 
 BODY = """{sender} asked the {slug} Operator for an operations change.
 
@@ -57,6 +61,17 @@ than this summary before acting.
 Routines, schedules, channels, memory, autonomy and on/off are SMD changes
 (ADR 0085). The Operator has told them the request was passed on and has
 promised nothing about when or whether it happens.
+
+TO ANSWER, reply to this email keeping [ops {proposal_id}] in the subject:
+
+  done                     -- you have made the change
+  done, <what you did>     -- the same, with a line they will see
+  no, <why not>            -- you are not making it, and your words are quoted
+
+{requester} is told your answer once, automatically, and nothing else is sent.
+An answer that is neither of those leaves the request open, and you are asked
+once for a plain "done" or "no". Nobody answering within seven days lapses it,
+and {requester} is told that too.
 """
 
 #: What the Operator says to the person. FIXED, and the send-time gate refuses a
@@ -97,8 +112,21 @@ def summarize(value: Any) -> str:
     return folded[:MAX_SUMMARY_CHARS]
 
 
-def build(*, sender: str, summary: str, message_id: str = "", customer_slug: str = "") -> dict:
+def build(
+    *,
+    sender: str,
+    summary: str,
+    proposal_id: str,
+    message_id: str = "",
+    customer_slug: str = "",
+) -> dict:
     """The message to SMD: recipient, subject, body.
+
+    ``proposal_id`` is the broker-minted eight-hex id of the row this request was
+    recorded under, and it is REQUIRED rather than optional (ss-console#2546): it
+    is the whole of how SMD's answer finds its way back to the person who asked,
+    so a message built without one would be the old silence in a new envelope. It
+    is rendered into the subject as well as the body.
 
     ``message_id`` is the id of the email the person wrote the request in. It is
     quoted verbatim, and when it is missing the body says so rather than
@@ -107,14 +135,18 @@ def build(*, sender: str, summary: str, message_id: str = "", customer_slug: str
     """
     sender = sender.strip() if isinstance(sender, str) else ""
     ref = message_id.strip() if isinstance(message_id, str) else ""
+    tag = proposal_id.strip().lower() if isinstance(proposal_id, str) else ""
+    requester = sender or "The person who asked"
     return {
         "to": [SMD_OPERATIONS_DESK],
-        "subject": SUBJECT.format(sender=sender or "an unattributed sender"),
+        "subject": SUBJECT.format(sender=sender or "an unattributed sender", proposal_id=tag),
         "text": BODY.format(
             sender=sender or "An unattributed sender",
             slug=(customer_slug or "").strip() or "client",
             summary=summary or "(the Operator recorded no summary)",
             message_ref=f"message {ref}" if ref else "not identified by the seat",
+            proposal_id=tag,
+            requester=requester,
         ),
     }
 
