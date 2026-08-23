@@ -89,6 +89,17 @@ got as far as being observed but not sent. All three call
 :func:`_notify_install_observed`, and exactly one letter goes, because the lock
 is the broker's conditional mark and not an agreement between the three.
 
+AND ONE CLAIM UNDER ALL OF THEM (ss-console#2546, live 2026-08-23T13:15Z). The
+broker's mark is written AFTER a send returns sent -- on purpose, so a send that
+never went cannot be recorded as a person having been told -- which leaves a
+window in which two observers have both read an unreported row and neither has
+written anything yet. On the pilot that window was 38 ms wide: the sweeper and
+the requester's own turn both mailed her SMD's answer to her operations request,
+and the second copy of the decline was rejected by the transport's rate limiter.
+So every outcome letter is now claimed by proposal id before it is dispatched
+(:data:`_OUTCOME_CLAIMED`, taken in :func:`_notify_requester`), and the claim is
+released only when the send did not go.
+
 THE LINE THAT KEEPS IT HONEST: committed is not installed. A commit means the
 submission reached the intake spool; the run can still be converging and can
 still fail, and ``accepted_pending_install`` is a real terminal answer that
@@ -239,6 +250,7 @@ import logging
 import os
 import re
 import socket
+import threading
 import time
 from collections import OrderedDict
 from typing import Any
@@ -401,6 +413,28 @@ _MAX_OPERATIONS = 8
 _OPS_RESOLVED: OrderedDict[str, str] = OrderedDict()
 _MAX_OPS_RESOLVED = 8
 
+#: Operations requests this session has SEEN END, and the only thing that lets a
+#: reply say one is closed (ss-console#2546, live 2026-08-23T13:21Z).
+#:
+#: THE LIVE FAILURE. A member of ``scope.admins`` who is NOT on
+#: ``scope.ops_reply_from`` replied "done" to an operations request. Every
+#: mechanism held: the answer was refused, no OPS_REQUEST_RESOLVED was written,
+#: the requester was told nothing, and the row stayed open. And then the Operator
+#: replied to them, "Got it, noted as complete. The ops request [7908bf4f] is
+#: closed on our end." Nothing was closed. From where that administrator sat, a
+#: refusal and an acceptance produced the same sentence -- which is worse than
+#: the refusal being silent, because they now believe the request is answered and
+#: will not chase it.
+#:
+#: WRITTEN FROM BROKER ANSWERS ONLY, never from anything the model said, exactly
+#: like :data:`_INSTALLED_RULES`. Two writers: the turn that successfully
+#: recorded the answer (``ops_resolve`` returned ok), and the turn that read a
+#: row already in a terminal state. Both are facts this seat observed; a
+#: refusal, an unreadable answer, or an unlisted sender writes nothing.
+_OPS_CLOSURE_SEEN: OrderedDict[str, set[str]] = OrderedDict()
+_MAX_OPS_CLOSURE_SEEN = 8
+
+
 #: Proposal ids whose lapse or decline this session has already reported, so a
 #: person who sends three messages in a row is told once. The broker is the
 #: durable half (``establish_lapse_notified`` is a conditional UPDATE and only
@@ -422,14 +456,41 @@ _MAX_OUTCOMES = 8
 _STATUS_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _MAX_STATUS_CACHE = 8
 
-#: Proposals this PROCESS has already sent an "in effect" note for. The durable,
-#: cross-restart, cross-observer lock is the broker's conditional mark; this
-#: closes the one window that mark cannot, which is two observers reaching the
-#: send in the same instant -- the in-handler poll and the model's own status
-#: call are seconds apart on the same turn. An entry is RELEASED when the send
-#: did not go, so the sweeper still retries it.
-_INSTALL_NOTIFIED: OrderedDict[str, None] = OrderedDict()
-_MAX_INSTALL_NOTIFIED = 32
+#: THE CLAIM. One proposal, one outcome letter, held across every observer in
+#: this process (ss-console#2546, live 2026-08-23T13:15Z).
+#:
+#: WHAT THE BROKER'S MARK CANNOT DO. ``establish_lapse_notified`` is a
+#: conditional UPDATE and it is the durable, cross-restart lock -- but it is
+#: written AFTER the send returns sent, deliberately, because a mark written
+#: first trades a duplicate note for a silence and silence is the failure this
+#: whole issue exists to end. That ordering leaves exactly one window open: two
+#: observers can both read an unreported row and both reach the transport before
+#: either has written the mark. On the pilot that window was 38 MILLISECONDS
+#: wide and a requester was told twice that SMD had answered her request, the
+#: second attempt hitting AgentMail's rate limiter (429).
+#:
+#: SO THE CLAIM IS TAKEN BEFORE THE SEND, and it is the only thing in this
+#: process that observers agree on: whoever claims a proposal id is the one that
+#: may reach the transport for it, and everybody else returns without sending.
+#: Not a widening of the broker's authority and not a replacement for it -- the
+#: mark still decides across restarts and across processes; this decides between
+#: two threads inside one.
+#:
+#: RELEASED ONLY WHEN THE SEND DID NOT GO, so a refused gate or an unreachable
+#: transport comes back on the next sweep. Retained when it went, because the
+#: row is then marked and there is nothing left to retry.
+#:
+#: EVERY OUTCOME KIND, not just the install. It started life as
+#: ``_INSTALL_NOTIFIED``, covering the one letter that had three observers; the
+#: operations letters have two apiece (the sweeper and the requester's own next
+#: turn) and raced for exactly the same reason, so the register is now keyed on
+#: the proposal alone and every letter -- installed, done, declined, lapsed, for
+#: a rule row or an operations row -- passes through it. A proposal has at most
+#: one outcome, so the id alone is the right key: there is no second letter this
+#: could wrongly suppress.
+_OUTCOME_CLAIM_LOCK = threading.Lock()
+_OUTCOME_CLAIMED: OrderedDict[str, None] = OrderedDict()
+_MAX_OUTCOME_CLAIMED = 64
 
 #: How the seat waits out an install. The intake converges over up to 90 s
 #: (``establish_intake._wait_for_converge``), and the pilot run that this fixes
@@ -497,6 +558,43 @@ _EFFECT_HEDGES = (
 #: "will" belonging to another verb in the same sentence does not launder
 #: the claim.
 _HEDGE_WINDOW = 24
+
+#: Phrases that assert an operations request is FINISHED. The twin of
+#: :data:`_EFFECT_CLAIMS`, and narrow in the same way: each of these is a
+#: completed-state claim about the request itself, not a word that happens to
+#: appear near one. Bare "done" is deliberately absent -- it is the answer SMD
+#: writes and the word the seat quotes back, and a gate that read every "done"
+#: as a closure claim would block the one turn that is entitled to say it.
+_OPS_CLOSURE_CLAIMS = (
+    "closed",
+    "complete",
+    "resolved",
+    "recorded",
+    "noted as done",
+    "marked done",
+    "marked as done",
+    "is done",
+    "now done",
+    "taken care of",
+    "all set",
+    "in effect",
+    "in force",
+)
+
+#: Read immediately before a closure phrase. :data:`_EFFECT_HEDGES` plus the
+#: bare negations, because the honest sentences this seat ASKS FOR are negative
+#: ones: "nothing was recorded", "no answer was recorded", "this seat could not
+#: record the answer". A gate that blocked those would leave the model with
+#: nothing true left to say, which is the failure one door down from the one it
+#: is closing.
+_OPS_CLOSURE_HEDGES = _EFFECT_HEDGES + (
+    "nothing",
+    "not ",
+    "never",
+    "no answer",
+    "neither",
+    "without",
+)
 
 _STAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1201,6 +1299,27 @@ _OPS_ASK_NOT_SENT_NOTE = (
     'SMD\'s reply named [ops {proposal_id}] but did not say "done" or "no", so '
     "nothing was recorded. This seat could not ask them for a plain answer: "
     "{reason}. Say exactly that in one line."
+)
+
+_OPS_UNLISTED_ANSWERER_NOTE = (
+    "This message carries the tag [ops {proposal_id}]. An operations request is "
+    "answered ONLY by SMD -- the addresses the firm's configuration names -- and "
+    "this message is not from one of them, so NOTHING was recorded and the "
+    "person who asked has been told nothing. Say plainly, in one or two lines, "
+    "that an answer to this request has to come from SMD and that you have "
+    "passed nothing on. Do NOT say the request is closed, done, complete, "
+    "resolved, recorded, or in effect: none of those is true."
+)
+
+_OPS_CLOSURE_UNPROVEN_MESSAGE = (
+    "Refused: this reply says operations request {proposal_id} is finished, and "
+    "this seat has not seen it end. Nothing was recorded on this turn and the "
+    "row is still open, so the sentence would tell the reader a thing that did "
+    "not happen.\n\n"
+    "An operations request ends only when SMD -- one of the addresses the firm's "
+    "configuration names on scope.ops_reply_from -- answers it. Send the reply "
+    "again saying what IS true: the request stands, an answer has to come from "
+    "SMD, and you have passed nothing on."
 )
 
 _OPS_ALREADY_ASKED_NOTE = (
@@ -2076,6 +2195,53 @@ def _is_ops_row(row: Any) -> bool:
     )
 
 
+def _claim_outcome_send(proposal_id: str) -> bool:
+    """Take the right to send THIS proposal's outcome letter. False if taken.
+
+    The whole of the cross-thread guard, and it is three lines because that is
+    all it can safely be: the test and the insert happen under one lock, so two
+    observers arriving in the same instant cannot both come away believing they
+    are the sender. Everything else about "exactly once" lives in the broker.
+    """
+    if not proposal_id:
+        return False
+    with _OUTCOME_CLAIM_LOCK:
+        if proposal_id in _OUTCOME_CLAIMED:
+            return False
+        _OUTCOME_CLAIMED[proposal_id] = None
+        _OUTCOME_CLAIMED.move_to_end(proposal_id)
+        while len(_OUTCOME_CLAIMED) > _MAX_OUTCOME_CLAIMED:
+            _OUTCOME_CLAIMED.popitem(last=False)
+        return True
+
+
+def _release_outcome_claim(proposal_id: str) -> None:
+    """Give the right back, because the letter did not go.
+
+    Called on a refused gate, an unreachable transport, and on any exception out
+    of the dispatch. A claim that leaked on a failure would be a permanent
+    silence for that proposal, which is worse than the duplicate it was added to
+    prevent, so the release path is deliberately wider than the failure it names.
+    """
+    if not proposal_id:
+        return
+    with _OUTCOME_CLAIM_LOCK:
+        _OUTCOME_CLAIMED.pop(proposal_id, None)
+
+
+def _outcome_is_claimed(proposal_id: str) -> bool:
+    """A peek, for skipping work whose answer the claim already decides.
+
+    NOT A GUARD. It takes nothing and it races; it exists only so an observer can
+    avoid a broker round trip it is about to be refused for. The decision is
+    always :func:`_claim_outcome_send`.
+    """
+    if not proposal_id:
+        return False
+    with _OUTCOME_CLAIM_LOCK:
+        return proposal_id in _OUTCOME_CLAIMED
+
+
 def _notify_requester(
     *, kind: str, row: dict[str, Any], by: str = "", session_id: str = ""
 ) -> bool:
@@ -2086,7 +2252,55 @@ def _notify_requester(
     own next turn -- reach the person through here, so putting the branch at this
     seam is what makes it impossible for one of them to send the rule wording
     about an operations request while the other sends the right one.
+
+    AND IT IS THEREFORE WHERE THE CLAIM GOES (ss-console#2546, live
+    2026-08-23T13:15Z). Every outcome letter this seat sends leaves from here --
+    the sweeper's, the requester's next turn's, the administrator's own decline,
+    the install notice -- so one claim at this seam is one claim for all of them.
+    Putting it at the four call sites instead would make "exactly once" an
+    agreement between four functions again, which is the shape that failed.
+
+    A DENIED CLAIM RETURNS FALSE, not True, and the difference matters: False
+    means the caller does not mark the row reported. The observer holding the
+    claim might still fail to send, and a mark written on its behalf would turn
+    somebody else's failed send into a permanent silence. False costs a retry;
+    True would cost the letter.
+
+    A ROW WITH NO ID IS SENT UNCLAIMED, loudly. There is nothing to key a claim
+    on, and refusing on that basis would turn a malformed broker answer into a
+    person who is never told -- which is the trade this module refuses
+    everywhere else. It cannot happen on the two sweeping paths (both skip an
+    id-less row before they reach here) and would mean a decline response that
+    came back without its own id.
     """
+    proposal_id = str(row.get("proposal_id") or "")
+    if not proposal_id:
+        logger.warning(
+            "hermes-smd-establishment: %s outcome has no proposal id; "
+            "sending it unclaimed rather than not at all",
+            kind,
+        )
+        return _dispatch_outcome_letter(kind=kind, row=row, by=by, session_id=session_id)
+    if not _claim_outcome_send(proposal_id):
+        logger.debug(
+            "hermes-smd-establishment: outcome letter for %s is already claimed in this process",
+            proposal_id,
+        )
+        return False
+    try:
+        sent = _dispatch_outcome_letter(kind=kind, row=row, by=by, session_id=session_id)
+    except Exception:  # noqa: BLE001 -- a claim that leaked would be a silence
+        _release_outcome_claim(proposal_id)
+        raise
+    if not sent:
+        _release_outcome_claim(proposal_id)
+    return sent
+
+
+def _dispatch_outcome_letter(
+    *, kind: str, row: dict[str, Any], by: str = "", session_id: str = ""
+) -> bool:
+    """Write and send the letter itself. The claim is the caller's business."""
     if _is_ops_row(row):
         notification = rule_dispatch.notify_ops_outcome(
             kind=kind,
@@ -2134,6 +2348,30 @@ def _report_outstanding_outcomes(session_id: str, rows: list[dict[str, Any]]) ->
     outstanding; asking a second time would put a round trip on every attributed
     turn, which is exactly the property ``_confirmation_note``'s early return
     exists to protect.
+
+    WHY THIS PATH STILL SENDS, given that the sweeper exists for exactly this
+    (ss-console#2546, the duplicate on 2026-08-23). The obvious repair for two
+    observers is to delete one, and the obvious one to delete is this one. It is
+    kept, for two reasons and against one temptation.
+
+    * The two are not interchangeable. The sweeper sends on an EMPTY session id,
+      which the taint register reads as untainted, so its note is classified on
+      the recipient alone; this path sends inside a live session carrying that
+      turn's taint. A gate that refuses one does not necessarily refuse the
+      other, so keeping both keeps a real second chance rather than a second
+      copy.
+    * Deleting it would make correctness depend on the sweeper thread being
+      alive, and this module does not know that: ``register`` throws the thread
+      handle away, and ``start_lapse_sweeper`` returns ``None`` on any failure
+      to start. Reconstructing that knowledge means a new piece of state whose
+      failure mode is SILENCE -- the failure this whole issue exists to end --
+      traded against a failure mode that is now impossible.
+
+    The temptation is to treat a duplicate as the thing worth engineering
+    against. It is not, and it never was; it is worth engineering against once
+    the fix costs nothing, which is what the claim in :func:`_notify_requester`
+    made true. Whichever observer arrives first sends, and the other returns in
+    microseconds having sent nothing.
     """
     seen = _OUTCOMES_REPORTED.setdefault(session_id, set())
     for row in rows:
@@ -2298,18 +2536,24 @@ def _notify_install_observed(session_id: str, proposal_id: str) -> bool:
     THE LOCK IS THE BROKER'S, not this process's. ``establish_lapse_notified`` is
     a conditional UPDATE: whichever caller reaches it first is the only one that
     marks the row, and every other observer then sees ``lapse_notified`` and
-    sends nothing. :data:`_INSTALL_NOTIFIED` closes the sub-second window that
+    sends nothing. :data:`_OUTCOME_CLAIMED` closes the sub-second window that
     mark cannot -- two observers can pass the read before either has written --
     and it is RELEASED when the send did not go, so a refused gate leaves the row
     unmarked and the sweeper tries again. Silence is the failure this whole issue
     exists to end; a duplicate is not.
+
+    THE CLAIM IS TAKEN INSIDE :func:`_notify_requester`, not here, since
+    ss-console#2546's second wave: the operations letters race the same way and
+    share that seam, so holding one register there covers every observer of every
+    outcome. What is left here is a PEEK, which decides nothing -- it only skips
+    a broker round trip whose answer is already settled.
 
     ONLY A RULE SOMEBODY WAS WAITING ON. A ``for_admin`` row is one a non-admin
     asked for and an administrator released, so there is always a person owed the
     news. An administrator who states and confirms their own rule is not sent a
     letter about it.
     """
-    if not proposal_id or proposal_id in _INSTALL_NOTIFIED:
+    if not proposal_id or _outcome_is_claimed(proposal_id):
         return False
     row = _fetch_row(proposal_id)
     if not row or not row.get("for_admin") or row.get("lapse_notified"):
@@ -2323,12 +2567,7 @@ def _notify_install_observed(session_id: str, proposal_id: str) -> bool:
     applied_by = _normalize_address(entry.get("sender"))
     if applied_by and _normalize_address(row.get("instructed_by")) == applied_by:
         return False
-    _INSTALL_NOTIFIED[proposal_id] = None
-    _INSTALL_NOTIFIED.move_to_end(proposal_id)
-    while len(_INSTALL_NOTIFIED) > _MAX_INSTALL_NOTIFIED:
-        _INSTALL_NOTIFIED.popitem(last=False)
     if not _notify_requester(kind="installed", row=row, by=applied_by, session_id=session_id):
-        _INSTALL_NOTIFIED.pop(proposal_id, None)
         logger.info(
             "hermes-smd-establishment: rule %s installed but the note did not go; "
             "the row stays unmarked and the sweeper retries",
@@ -2613,6 +2852,23 @@ def _describes_future_routine(blob: str) -> bool:
     return False
 
 
+#: The argument keys a composed message's prose can arrive under. Read RAW,
+#: never through ``json.dumps``, and that is load-bearing for any gate that
+#: cares about line structure: serialising turns every newline into a two-
+#: character escape, which flattens a quoted reply into one line and makes
+#: ``>``-prefixed history indistinguishable from the sender's own words.
+_BODY_KEYS = ("text", "body", "body_text", "html", "message", "content")
+
+
+def _send_body_text(args: Any) -> str:
+    """The prose a send tool was asked to deliver, newlines intact."""
+    return " ".join(
+        str(value)
+        for key, value in (args or {}).items()
+        if key in _BODY_KEYS and isinstance(value, str)
+    )
+
+
 def _operations_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, Any] | None:
     """Withhold a reply that promises, or describes, a routine change.
 
@@ -2636,12 +2892,7 @@ def _operations_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, An
     that fires on the second sentence of it.
     """
     session = _as_session(session_id)
-    body = " ".join(
-        str(value)
-        for key, value in (args or {}).items()
-        if key in ("text", "body", "body_text", "html", "message", "content")
-        and isinstance(value, str)
-    )
+    body = _send_body_text(args)
     if session and _OPERATIONS_SENT.get(session):
         if not _describes_future_routine(body):
             return None
@@ -2651,6 +2902,122 @@ def _operations_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, An
         return None
     logger.info("hermes-smd-establishment: reply withheld (promised a routine change)")
     return {"action": "block", "message": _OPERATIONS_PROMISE_MESSAGE}
+
+
+#: ``ops request 7908bf4f`` / ``ops 7908bf4f`` in prose, for a reply that names
+#: the request without reproducing the bracketed tag. The live sentence carried
+#: both forms in one message.
+_OPS_PROSE_REF = re.compile(r"\bops(?:\s+request)?\s+#?([0-9a-f]{8})\b")
+
+
+def _ops_ids_named(blob: str) -> tuple[str, ...]:
+    """Every operations request this body names, tagged or in prose.
+
+    Read from the WHOLE body, quoted history included, for the reason
+    ``rule_confirm.find_tags`` gives: the tag usually sits in the quoted copy of
+    the request, and naming one commits nothing on its own. What the body CLAIMS
+    is read from the model's own words alone, one function down.
+    """
+    ids = list(rule_confirm.find_tags(blob, kinds=(rule_confirm.OPS_TAG_KIND,)))
+    for match in _OPS_PROSE_REF.finditer(blob.lower()):
+        if match.group(1) not in ids:
+            ids.append(match.group(1))
+    return tuple(ids)
+
+
+def _claims_ops_closure(blob: str) -> bool:
+    """Does this body assert, unhedged, that an operations request has ended?
+
+    The shape of :func:`_claims_effect`, with two deliberate differences.
+
+    THE QUOTE COMES OFF FIRST. A reply to SMD reproduces SMD's message, and that
+    message is where the words "done" and "complete" live; scanning the quoted
+    half would read SMD's own answer as the Operator's claim about it. The tag is
+    still read from the whole body, because naming a request claims nothing.
+
+    THE HEDGES INCLUDE THE BARE NEGATIONS. Every honest sentence the seat asks
+    for on a refused, unreadable or unanswerable request is a negative one --
+    "nothing was recorded", "this seat could not record the answer" -- so a gate
+    that read the word "recorded" inside them would block the model from saying
+    the one true thing available to it.
+    """
+    lowered = rule_confirm.strip_quoted(rule_confirm.email_body(blob)).lower()
+    if not lowered:
+        return False
+    for phrase in _OPS_CLOSURE_CLAIMS:
+        start = 0
+        while True:
+            found = lowered.find(phrase, start)
+            if found < 0:
+                break
+            window = lowered[max(0, found - _HEDGE_WINDOW) : found]
+            if not any(hedge in window for hedge in _OPS_CLOSURE_HEDGES):
+                return True
+            start = found + 1
+    return False
+
+
+def _ops_closure_gate(session_id: Any, tool_name: str, args: Any) -> dict[str, Any] | None:
+    """A reply may not call an operations request finished until the seat saw it end.
+
+    THE LIVE FAILURE (pilot seat, 2026-08-23T13:21Z). ss-probe-admin, a member of
+    ``scope.admins`` and NOT of ``scope.ops_reply_from``, replied "done" to an
+    operations request. The mechanism did everything right: the answer was
+    refused, no OPS_REQUEST_RESOLVED row was written, the requester was told
+    nothing, and the row stayed open. The Operator then replied, "Got it, noted
+    as complete. The ops request [7908bf4f] is closed on our end."
+
+    Same argument as :func:`_in_effect_gate`, which exists because the same class
+    of instruction failed the same way two days earlier: the claim is checkable,
+    the check is cheap, and the cost of being wrong is a person who stops chasing
+    a request nobody is working on. An instruction cannot be the only control
+    over a sentence whose falsity is this cheap to detect.
+
+    THREE CONDITIONS, ALL REQUIRED:
+
+    1. **The reply names an operations request** -- a ``[ops XXXXXXXX]`` tag or
+       the prose form. No id, no gate.
+    2. **The model's own words assert it is finished**
+       (:func:`_claims_ops_closure`), quoted history discounted and negations
+       treated as hedges.
+    3. **This session has not seen that request end.** The permission is
+       :data:`_OPS_CLOSURE_SEEN`, written only from a broker answer: an
+       ``ops_resolve`` that returned ok, or a row fetched in a terminal state.
+
+    Condition 3 is what keeps the two entitled turns passing. The turn that
+    records SMD's answer may say the request is closed, because it is; so may the
+    turn that read a row which had already ended. The turn that recorded nothing
+    may not, and that is the whole of the defect.
+    """
+    session = _as_session(session_id)
+    if not session:
+        return None
+    try:
+        blob = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+    except (TypeError, ValueError):
+        blob = str(args)
+    # The id may be in the subject, so it is read from everything; the CLAIM is
+    # read from the prose fields alone and unserialised, because the quote
+    # stripper needs the newlines that ``json.dumps`` would have escaped.
+    named = _ops_ids_named(blob)
+    if not named:
+        return None
+    seen = _OPS_CLOSURE_SEEN.get(session, set())
+    unproven = [pid for pid in named if pid not in seen]
+    if not unproven:
+        return None
+    if not _claims_ops_closure(_send_body_text(args)):
+        return None
+    logger.info(
+        "hermes-smd-establishment: %s blocked; the body calls operations request %s "
+        "finished and this seat has not seen it end",
+        tool_name,
+        unproven[0],
+    )
+    return {
+        "action": "block",
+        "message": _OPS_CLOSURE_UNPROVEN_MESSAGE.format(proposal_id=unproven[0]),
+    }
 
 
 def _status(args: dict[str, Any], **_: Any) -> str:
@@ -3467,6 +3834,24 @@ def _note_ops_resolved(session_id: str, proposal_id: str) -> None:
     _OPS_RESOLVED.move_to_end(session_id)
     while len(_OPS_RESOLVED) > _MAX_OPS_RESOLVED:
         _OPS_RESOLVED.popitem(last=False)
+    _note_ops_closure_seen(session_id, proposal_id)
+
+
+def _note_ops_closure_seen(session_id: str, proposal_id: str) -> None:
+    """This seat has OBSERVED that an operations request has ended.
+
+    The only writer of the permission :func:`_ops_closure_gate` reads, and it is
+    written from a broker answer in both of its two callers -- a ``ops_resolve``
+    that returned ok, and a row this seat fetched and found in a terminal state.
+    Never from the model's account of either.
+    """
+    if not session_id or not proposal_id:
+        return
+    seen = _OPS_CLOSURE_SEEN.setdefault(session_id, set())
+    seen.add(proposal_id)
+    _OPS_CLOSURE_SEEN.move_to_end(session_id)
+    while len(_OPS_CLOSURE_SEEN) > _MAX_OPS_CLOSURE_SEEN:
+        _OPS_CLOSURE_SEEN.popitem(last=False)
 
 
 def _ask_smd_for_a_plain_answer(row: dict[str, Any], answerer: str) -> tuple[bool, str]:
@@ -3547,20 +3932,32 @@ def _ops_reply_note(
         return None, False
     proposal_id = tags[0]
     if cfg is None or not cfg.sender_may_answer_ops(sender):
-        # Loud, and it does nothing. A silent miss here looks identical to a
+        # Loud, and it records nothing. A silent miss here looks identical to a
         # request nobody answered, which is the failure this whole issue is about.
+        #
+        # AND IT NOW SAYS SO OUT LOUD (ss-console#2546, live 2026-08-23T13:21Z).
+        # The refusal held perfectly and the model then told the sender "the ops
+        # request is closed on our end", because nothing in front of it said
+        # otherwise: from where the model sat, an unlisted sender's answer and a
+        # listed one's produced the same silence. The note is the instruction
+        # half; :func:`_ops_closure_gate` is the half that holds when the
+        # instruction does not.
         logger.warning(
             "hermes-smd-establishment: ops tag from unlisted sender (%s named %s); ignored",
             sender,
             proposal_id,
         )
-        return None, False
+        return _OPS_UNLISTED_ANSWERER_NOTE.format(proposal_id=proposal_id), False
     row = _fetch_row(proposal_id)
     if not row or not _is_ops_row(row):
         logger.info("hermes-smd-establishment: [ops %s] names nothing this seat holds", proposal_id)
         return None, False
     if str(row.get("state") or "open") != "open":
         logger.info("hermes-smd-establishment: [ops %s] was already answered", proposal_id)
+        # The seat has READ the terminal state off the broker's own row, so a
+        # reply that calls this request finished is telling the truth and the
+        # closure gate must let it through.
+        _note_ops_closure_seen(session_id, proposal_id)
         return _OPS_ALREADY_ANSWERED_NOTE.format(proposal_id=proposal_id), False
     reading = rule_confirm.read_ops_reply(user_message)
     if reading.verdict == rule_confirm.OPS_NONE:
@@ -4210,6 +4607,12 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             # and a debt spent by a send another gate then blocks is one the
             # retry no longer owes.
             withheld = _operations_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))
+            if withheld is not None:
+                return withheld
+            # ss-console#2546, the false-closure half. Same position and the
+            # same reason as the two above: the readback gate SPENDS the debt on
+            # delivery, so every gate that can refuse a send runs before it.
+            withheld = _ops_closure_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))
             if withheld is not None:
                 return withheld
             return _readback_gate(kwargs.get("session_id"), tool_name, kwargs.get("args"))

@@ -29,6 +29,8 @@ both sides, which is what they are for.
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import pytest
 
@@ -628,7 +630,7 @@ def plugin(monkeypatch, tmp_path):
     mod._OUTCOMES_REPORTED.clear()
     mod._SUBMIT_RUNS.clear()
     mod._INSTALLED_RULES.clear()
-    for register in ("_INSTALL_NOTIFIED", "_STATUS_CACHE"):
+    for register in ("_OUTCOME_CLAIMED", "_STATUS_CACHE"):
         getattr(mod, register, {}).clear()
     SESSION_INBOUND_ORIGIN._origins.clear()
     SESSION_TAINT._tainted.clear()
@@ -1119,7 +1121,7 @@ def test_the_broker_mark_is_what_stops_the_second_letter(plugin):
     observation still sends nothing, because the row says it was reported."""
     mod, state = plugin
     _apply(mod, state)
-    mod._INSTALL_NOTIFIED.clear()  # the restart
+    mod._OUTCOME_CLAIMED.clear()  # the restart
     before = len(_install_notes(state))
 
     mod.on_post_tool_call(
@@ -1161,7 +1163,7 @@ def test_a_note_that_did_not_go_leaves_the_row_for_the_sweeper(plugin):
     _apply(mod, state)
 
     assert state["marked"] == []
-    assert RULE not in mod._INSTALL_NOTIFIED
+    assert RULE not in mod._OUTCOME_CLAIMED
 
     state["send_ok"] = True
     assert mod._notify_install_observed("sess-1", RULE) is True
@@ -1866,13 +1868,23 @@ def test_a_tainted_session_and_a_sender_who_is_nobody_at_the_firm_still_answers(
 
 def test_a_firm_administrator_quoting_the_tag_changes_nothing(plugin):
     """FALSIFIER for the answering list. christa@ runs the firm and may apply any
-    rule; she cannot answer for SMD, and the near miss is logged so it is visible
-    in the ledger rather than silent."""
+    rule; she cannot answer for SMD, and nothing about the request moves.
+
+    THE NOTE IS NEW (ss-console#2546, live 2026-08-23T13:21Z) and the silence it
+    replaces is the whole second defect: this returned ``None`` here, so from
+    where the model sat an unlisted sender's answer and a listed one's produced
+    the same nothing, and it replied "the ops request is closed on our end". The
+    MECHANISM is unchanged and asserted unchanged below -- nothing recorded,
+    nothing sent."""
     mod, state = plugin
     note, resolved = _smd_reply(mod, state, "Done.", sender=ADMIN)
-    assert (note, resolved) == (None, False)
+    assert resolved is False
     assert state["resolved"] == []
     assert state["sends"] == []
+    assert note is not None
+    assert f"[ops {OPS}]" in note
+    assert "answered ONLY by SMD" in note
+    assert "NOTHING was recorded" in note
 
 
 def test_an_unlisted_sender_is_logged_at_warning(plugin, caplog):
@@ -2023,6 +2035,331 @@ def test_a_rule_row_still_gets_the_rule_letter(plugin):
         by=ADMIN,
     )
     assert "Your rule was declined" in state["sends"][0]["subject"]
+
+
+# ---------------------------------------------------------------------------
+# 11. NOTHING IS CLOSED UNTIL THE SEAT SAW IT CLOSE
+#     (ss-console#2546, live 2026-08-23T13:21Z)
+#
+# ss-probe-admin@agentmail.to -- on scope.admins, NOT on scope.ops_reply_from --
+# replied "done" to "Re: Operations request from ss-probe-runner@agentmail.to
+# [ops 7908bf4f]". Every mechanism held: the answer was refused, no
+# OPS_REQUEST_RESOLVED row was written, the requester was told nothing, the row
+# stayed open. And then the Operator replied to them:
+#
+#     "Got it, noted as complete. The ops request [7908bf4f] is closed on our
+#      end."
+#
+# Nothing was closed. The failure is not the refusal, which worked; it is that
+# the refusal was SILENT toward the model, so an accepted answer and a refused
+# one looked identical from where it sat. Two layers, the shape _in_effect_gate
+# settled on the day before: a note that says what did not happen, and a gate
+# that holds when the note does not.
+#
+# THE FALSIFIERS for this section are named on each test: layer 1 fails when the
+# unlisted-sender branch goes back to returning None, layer 2 when the gate is
+# unwired from on_pre_tool_call, and the four pass-through tests fail if the gate
+# is widened to block the sentences the seat itself asks the model to write.
+# ---------------------------------------------------------------------------
+
+
+_CLOSURE_CLAIM = "Got it, noted as complete. The ops request [{ops}] is closed on our end."
+
+
+def _send_args(text):
+    return {"to": ["someone@firm.com"], "subject": f"Re: [ops {OPS}]", "text": text}
+
+
+def test_the_seat_refuses_to_call_an_unanswered_request_closed(plugin):
+    """THE LIVE SENTENCE, verbatim. Layer 2, and the falsifier for it is
+    unwiring ``_ops_closure_gate`` from ``on_pre_tool_call``."""
+    mod, _state = plugin
+    block = mod.on_pre_tool_call(
+        tool_name="smd_send_message",
+        session_id="sess-smd",
+        args=_send_args(_CLOSURE_CLAIM.format(ops=OPS)),
+    )
+    assert block is not None
+    assert block["action"] == "block"
+    assert OPS in block["message"]
+    assert "scope.ops_reply_from" in block["message"]
+
+
+def test_the_turn_that_recorded_smds_answer_may_say_it_is_closed(plugin):
+    """The permission, and the reason it is a permission rather than a phrase
+    list: this turn HAS seen the request end, off the broker's own answer."""
+    mod, state = plugin
+    note, resolved = _smd_reply(mod, state, "Done.")
+    assert resolved is True
+    assert note is not None
+
+    assert (
+        mod.on_pre_tool_call(
+            tool_name="smd_send_message",
+            session_id="sess-smd",
+            args=_send_args(_CLOSURE_CLAIM.format(ops=OPS)),
+        )
+        is None
+    )
+
+
+def test_a_request_that_had_already_ended_may_be_called_closed(plugin):
+    """The second writer of the permission. The seat read the terminal state off
+    the row, so the sentence is true and blocking it would leave the model
+    nothing accurate to say."""
+    mod, state = plugin
+    note, resolved = _smd_reply(mod, state, "Done.", row=_ops_row(state="declined"))
+    assert resolved is False
+    assert note is not None
+
+    assert (
+        mod.on_pre_tool_call(
+            tool_name="smd_send_message",
+            session_id="sess-smd",
+            args=_send_args(f"That request [ops {OPS}] is already closed."),
+        )
+        is None
+    )
+
+
+def test_the_prose_form_is_caught_too(plugin):
+    """The live message named the request both ways in one breath. A gate that
+    only read the bracketed tag would pass the half without it."""
+    mod, _state = plugin
+    block = mod.on_pre_tool_call(
+        tool_name="smd_send_message",
+        session_id="sess-smd",
+        args={"to": ["x@firm.com"], "text": f"ops request {OPS} is now complete."},
+    )
+    assert block is not None
+
+
+def test_quoting_smds_own_word_is_not_the_operators_claim(plugin):
+    """FALSIFIER for the quote-stripping half. A reply to SMD reproduces SMD's
+    message, and SMD's message is exactly where 'complete' lives. Reading the
+    quoted half as the Operator's claim would block every honest reply on the
+    one turn entitled to send it."""
+    mod, _state = plugin
+    body = (
+        "An answer to this has to come from SMD, and I have passed nothing on.\n\n"
+        f"> [ops {OPS}] send me a digest every Monday\n"
+        "> done, this is complete and closed\n"
+    )
+    assert (
+        mod.on_pre_tool_call(
+            tool_name="smd_send_message", session_id="sess-smd", args=_send_args(body)
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # What _OPS_ASKED_NOTE asks for.
+        "Nothing was recorded, and I have asked SMD for a plain answer.",
+        # What _OPS_NOT_RECORDED_NOTE asks for.
+        "SMD answered, but this seat could not record the answer.",
+        # What _OPS_UNLISTED_ANSWERER_NOTE asks for.
+        "An answer has to come from SMD. The request is not closed and I have passed nothing on.",
+        # An honest forward-looking sentence.
+        "I will tell you when SMD marks this complete.",
+    ],
+)
+def test_the_honest_sentences_the_seat_asks_for_still_go(plugin, body):
+    """FALSIFIER for the hedge list. Every one of these carries a closure word
+    and every one of them is true; a gate that blocked them would teach the model
+    to say nothing at all, which is the failure one door down."""
+    mod, _state = plugin
+    args = {"to": ["x@firm.com"], "subject": f"Re: [ops {OPS}]", "text": body}
+    assert (
+        mod.on_pre_tool_call(tool_name="smd_send_message", session_id="sess-smd", args=args) is None
+    )
+
+
+def test_a_reply_naming_no_request_is_none_of_this_gates_business(plugin):
+    """The first condition. An ordinary message that happens to say 'complete'
+    is not about an operations request and is not read as one."""
+    mod, _state = plugin
+    assert (
+        mod.on_pre_tool_call(
+            tool_name="smd_send_message",
+            session_id="sess-smd",
+            args={"to": ["x@firm.com"], "text": "The document review is complete."},
+        )
+        is None
+    )
+
+
+def test_the_note_and_the_gate_are_two_layers_not_one(plugin):
+    """WHY BOTH. The note is what makes the model write the true sentence; the
+    gate is what happens when it does not. ss-console#2546's first wave shipped
+    the instruction alone on a neighbouring claim and it failed live two days
+    later, which is the whole argument for the second layer."""
+    mod, state = plugin
+    note, resolved = _smd_reply(mod, state, "Done.", sender=ADMIN)
+    assert resolved is False
+    assert "Do NOT say the request is closed" in note
+
+    block = mod.on_pre_tool_call(
+        tool_name="smd_send_message",
+        session_id="sess-smd",
+        args=_send_args(_CLOSURE_CLAIM.format(ops=OPS)),
+    )
+    assert block is not None
+
+
+# ---------------------------------------------------------------------------
+# 10. ONE OUTCOME, ONE LETTER (ss-console#2546, live 2026-08-23T13:15Z)
+#
+# The loop above closed and then told somebody twice. An operations request was
+# resolved at 13:15:28.685Z; at 13:15:54.541Z and 13:15:54.579Z -- thirty-eight
+# milliseconds apart -- two outcome letters went to the same requester, and on
+# the decline leg the second one was rejected by AgentMail with HTTP 429.
+#
+# Neither observer was wrong to send. The sweeper's thirty-second tick and the
+# requester's own turn both read a row the broker still called unreported,
+# because the broker is marked AFTER a send returns sent and neither had got
+# there yet. The conditional mark is the cross-restart lock and it cannot be
+# anything else; what was missing was a lock between two threads in one process.
+#
+# THE FALSIFIER for this section: revert the claim (delete the
+# ``_claim_outcome_send`` call from ``_notify_requester``) and the three
+# duplicate tests below fail with two sends where one was asserted. The two
+# that pin the claim's RELEASE fail instead when the release is deleted -- they
+# are green at origin/main by construction, because they guard against a
+# silence this fix could introduce rather than against the defect it fixes.
+# ---------------------------------------------------------------------------
+
+
+def _ops_notes(state):
+    return [s for s in state["sends"] if "[ops " in s["subject"]]
+
+
+def test_two_observers_racing_one_outcome_send_one_letter(plugin):
+    """THE LIVE DEFECT, as two threads. Both reach the send in the window before
+    either has marked anything, which is the window the broker cannot close."""
+    mod, state = plugin
+    row = _ops_row(state="committed")
+    start = threading.Barrier(2, timeout=5)
+    real_send = mod.send_dispatch.dispatch
+
+    def slow_send(**kwargs):
+        # Wide enough that the loser is refused mid-flight rather than after.
+        time.sleep(0.15)
+        return real_send(**kwargs)
+
+    mod.send_dispatch.dispatch = slow_send
+    results: list[bool] = []
+    lock = threading.Lock()
+
+    def observer():
+        start.wait()
+        sent = mod._notify_requester(kind="done", row=dict(row))
+        with lock:
+            results.append(sent)
+
+    threads = [threading.Thread(target=observer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(_ops_notes(state)) == 1
+    assert sorted(results) == [False, True]
+
+
+def test_the_sweeper_and_the_requesters_own_turn_send_one_letter(plugin):
+    """THE LIVE PAIR, in the order they fired on the pilot. The turn's rows were
+    read before the sweeper marked anything, so its copy still says unreported --
+    which is exactly the state the second letter was sent out of."""
+    mod, state = plugin
+    row = _ops_row(state="committed")
+    state["pending"] = [row]
+    stale = dict(row)  # what the turn had already fetched
+
+    mod._sweep_lapses_once()
+    mod._report_outstanding_outcomes("sess-1", [stale])
+
+    assert len(_ops_notes(state)) == 1
+    assert state["marked"] == [OPS]
+
+
+def test_one_claim_covers_the_rule_letters_too(plugin):
+    """The install notice had its own register and the operations letters had
+    none. One register now, keyed on the proposal, so the rule letter's three
+    observers are covered by the same lock as the operations letters' two.
+
+    THE RACE, NOT THE SEQUENCE. Run one after the other, the broker's mark stops
+    the second observer on its own -- which is what makes the sequential version
+    of this test useless as a falsifier. Two threads inside the send window is
+    the case only the claim covers."""
+    mod, state = plugin
+    state["pending"] = [_installed_row()]
+    start = threading.Barrier(2, timeout=5)
+    real_send = mod.send_dispatch.dispatch
+
+    def slow_send(**kwargs):
+        time.sleep(0.15)
+        return real_send(**kwargs)
+
+    mod.send_dispatch.dispatch = slow_send
+
+    def observer():
+        start.wait()
+        mod._notify_install_observed("sess-1", RULE)
+
+    threads = [threading.Thread(target=observer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(_install_notes(state)) == 1
+
+
+def test_a_refused_letter_releases_the_claim_so_the_next_sweep_retries(plugin):
+    """THE SILENCE THIS FIX COULD HAVE INTRODUCED, and the reason the claim is
+    released rather than held. Green at origin/main on purpose: its falsifier is
+    deleting the release, not deleting the claim."""
+    mod, state = plugin
+    state["pending"] = [_ops_row(state="committed")]
+    state["send_ok"] = False
+
+    first = mod._sweep_lapses_once()
+    assert first.reported == 0
+    assert state["marked"] == []
+    assert OPS not in mod._OUTCOME_CLAIMED
+
+    state["send_ok"] = True
+    second = mod._sweep_lapses_once()
+    assert second.reported == 1
+    assert [s["to"] for s in _ops_notes(state)] == [[PARALEGAL], [PARALEGAL]]
+    assert state["marked"] == [OPS]
+
+
+def test_an_outcome_row_with_no_id_is_still_sent(plugin):
+    """Same reasoning, the degenerate case: there is nothing to key a claim on,
+    and refusing on that basis would turn a malformed broker answer into a person
+    who is never told. Also green at origin/main, for the same reason."""
+    mod, state = plugin
+    row = _ops_row(state="committed")
+    row["proposal_id"] = ""
+
+    assert mod._notify_requester(kind="done", row=row) is True
+    assert len(_ops_notes(state)) == 1
+
+
+def test_the_requesters_own_turn_still_reports_when_nothing_else_has(plugin):
+    """WHY THE IN-TURN SEND SURVIVED THE FIX. The obvious repair for two
+    observers is to delete one, and this is the one that would go. It stays
+    because a seat whose sweeper thread never started has no other reporter, and
+    the claim makes it cost nothing when the sweeper IS running."""
+    mod, state = plugin
+    mod._report_outstanding_outcomes("sess-1", [_ops_row(state="committed")])
+
+    assert [s["to"] for s in _ops_notes(state)] == [[PARALEGAL]]
+    assert state["marked"] == [OPS]
 
 
 def test_the_three_operations_types_are_declared_in_the_audit_vocabulary():

@@ -142,6 +142,14 @@ def run_sweep_once(
     refused gate and an unreachable transport, and both are conditions that
     clear on their own. A row that never clears them is bounded anyway, because
     the broker deletes it once it is old enough.
+
+    ``failed`` ALSO COUNTS A ROW ANOTHER OBSERVER IS SENDING RIGHT NOW
+    (ss-console#2546). Since the duplicate on 2026-08-23 every outcome letter is
+    claimed by proposal id before dispatch, and ``notify`` returns false to
+    whichever observer did not get the claim. That is not a distinct outcome
+    worth a fourth counter: if the holder's send goes, the row is marked and this
+    pass never sees it again; if it does not, the claim is released and the next
+    pass retries -- which is exactly what ``failed`` already means here.
     """
     reported = 0
     failed = 0
