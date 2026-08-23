@@ -1408,10 +1408,44 @@ _ROUTINE_OBJECTS = (
 #: three new matters" is a true statement about a routine that already runs.
 _ROUTINE_FUTURE_MARKERS = (
     r"\b(?:will|would|is going to|are going to)\b",
-    r"\byou(?:'ll| will) (?:get|receive|see|start)\b",
-    r"\b(?:once|when|after) (?:it|this|that|the \w+) (?:is|goes|gets) "
-    r"(?:live|set up|in place|running|enabled)\b",
+    r"\w'(?:ll|d)\b",
+    r"\b(?:once|when|after) (?:it|this|that|the \w+)(?:'s| is| goes| gets)\s+"
+    r"(?:live|set up|in place|running|enabled|configured|done)\b",
 )
+
+#: The gap the live reply walked through (ss-console#2546, verify
+#: vfy_01M0R3Y7F00M639BF8E0N7DFG7). "When it's set up, you'll start seeing it
+#: automatically." names the routine only by PRONOUN, so the conjunction above
+#: can never close on it: there is no routine noun in the sentence for the
+#: future marker to pair with. The contraction "it's" missed the
+#: "(it|this|that) (is|goes|gets)" alternation on top of that, which is why the
+#: markers above now carry the contracted forms as well.
+#:
+#: These fire ALONE -- no routine object required -- and only inside a pass-on
+#: session. That scoping is the whole licence for dropping the conjunction: on
+#: the one turn where the person has just been told SMD decides, "you'll start
+#: seeing it" has exactly one referent, the thing they asked for and were told
+#: they would not be promised. Outside that session this is never consulted, so
+#: "You'll receive the summary we discussed" goes out untouched on every other
+#: turn of the seat's life.
+_ROUTINE_PRONOUN_FUTURE = (
+    r"\b(?:once|when|after) (?:it|this|that)(?:'s| is| goes| gets)\s+"
+    r"(?:live|set up|in place|running|enabled|configured|done)\b",
+    r"\byou(?:'ll| will)\s+(?:get|receive|see|start)\b",
+    r"\bit(?:'ll| will)\s+(?:arrive|come|run|start|send|show)\b",
+)
+
+#: Mail clients autocorrect the ASCII apostrophe to a typographic one, and every
+#: contraction in the patterns above is written with the ASCII form. Folding is
+#: cheaper than doubling each alternation, and a gate that reads a curly-quoted
+#: contraction as unrelated to the ASCII one is one Outlook setting from open.
+_APOSTROPHE_FOLD = str.maketrans({"‘": "'", "’": "'", "ʼ": "'"})
+
+
+def _flatten(text: str) -> str:
+    """Lowercased, whitespace-collapsed, apostrophes folded to ASCII."""
+    return re.sub(r"\s+", " ", text.lower().translate(_APOSTROPHE_FOLD))
+
 
 #: Sentence boundaries, for the "same sentence" half of the conjunction. Coarse
 #: on purpose: a false JOIN (two sentences read as one) can only make the gate
@@ -2964,7 +2998,7 @@ def _promises_routine_change(blob: str) -> bool:
     """
     if not blob:
         return False
-    text = re.sub(r"\s+", " ", blob.lower())
+    text = _flatten(blob)
     if not any(re.search(pattern, text) for pattern in _ROUTINE_PROMISE_VERBS):
         return False
     return any(re.search(pattern, text) for pattern in _ROUTINE_OBJECTS)
@@ -2979,10 +3013,19 @@ def _describes_future_routine(blob: str) -> bool:
     a sentence about something nobody has decided to build, and the person reads
     it as the answer they were just told they would not get.
 
-    A CONJUNCTION AGAIN, and the same shape as :func:`_promises_routine_change`:
-    a future marker AND a routine object, IN THE SAME SENTENCE. Either half alone
-    is ordinary work -- "I will send you the draft" promises nothing about a
-    routine, and "the Monday digest" names one that may well already run.
+    TWO WAYS A SENTENCE QUALIFIES, and the second is why this was reopened.
+
+    * NAMED: a future marker AND a routine object, IN THE SAME SENTENCE. A
+      conjunction, the same shape as :func:`_promises_routine_change`, because
+      either half alone is ordinary work -- "I will send you the draft"
+      promises nothing about a routine, and "the Monday digest" names one that
+      may well already run.
+    * PRONOUN: :data:`_ROUTINE_PRONOUN_FUTURE` alone, no object required. The
+      live reply (ss-console#2546) ended "When it's set up, you'll start seeing
+      it automatically." -- every noun the conjunction looks for had been
+      replaced by "it", and the sentence promised the routine anyway. Naming a
+      thing by pronoun is how people write; a gate that only reads nouns reads
+      half the mail.
 
     SCOPED, NOT WIDENED (critique item 3). Outside a pass-on session this is
     never consulted, so "The Monday digest will include the three new matters"
@@ -2990,8 +3033,10 @@ def _describes_future_routine(blob: str) -> bool:
     """
     if not blob:
         return False
-    for sentence in _SENTENCE_SPLIT.split(blob.lower()):
-        text = re.sub(r"\s+", " ", sentence)
+    for sentence in _SENTENCE_SPLIT.split(blob):
+        text = _flatten(sentence)
+        if any(re.search(pattern, text) for pattern in _ROUTINE_PRONOUN_FUTURE):
+            return True
         if not any(re.search(pattern, text) for pattern in _ROUTINE_FUTURE_MARKERS):
             continue
         if any(re.search(pattern, text) for pattern in _ROUTINE_OBJECTS):
