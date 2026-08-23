@@ -2354,9 +2354,7 @@ def _release_outcome_claim_across_processes(proposal_id: str) -> None:
     reported, so this cannot reopen a letter that did go.
     """
     try:
-        _broker_request(
-            {"action": "establish_notify_release", "proposal_id": proposal_id}
-        )
+        _broker_request({"action": "establish_notify_release", "proposal_id": proposal_id})
     except Exception:  # noqa: BLE001 -- the claim expires on its own
         logger.debug(
             "hermes-smd-establishment: could not release the outcome claim for %s; "
