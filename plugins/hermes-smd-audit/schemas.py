@@ -226,6 +226,23 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         "RULE_REQUEST_NOTIFIED",
         "RULE_DECLINED",
         "RULE_LAPSED",
+        # ss-console#2546, the operations half. All three are BROKER-written
+        # (ss-console operator/workspace_broker/establishment.py), declared here
+        # for the reason RULE_DECLINED and RULE_LAPSED are: the vocabulary names
+        # every type a client ledger can CONTAIN, not only the ones this repo
+        # writes, and a seat whose audit layer refused a type its own broker had
+        # just written would drop the row that says who decided a change.
+        #
+        # They are deliberately not the RULE_* three. A rule is a sentence an
+        # administrator of the FIRM may apply; an operations request is a change
+        # only SMD makes, and a ledger that filed both under one name would make
+        # "who decided this" unanswerable from the rows. RECORDED is the ask,
+        # RESOLVED carries SMD's answer (done, declined or withdrawn) and whether
+        # a reason was given but never the reason itself, and LAPSED is nobody at
+        # SMD having answered within the week.
+        "OPS_REQUEST_RECORDED",
+        "OPS_REQUEST_RESOLVED",
+        "OPS_REQUEST_LAPSED",
     }
 )
 

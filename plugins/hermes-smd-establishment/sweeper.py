@@ -61,6 +61,11 @@ DEFAULT_SWEEP_INTERVAL_S = 30.0
 MAX_PER_PASS = 20
 
 
+#: The kind an operations request is stored under. Mirrors ``OPS_REQUEST_KIND``
+#: in ss-console ``operator/workspace_broker/establishment.py``.
+OPS_REQUEST_KIND = "ops_request"
+
+
 def outcome_kind(row: dict[str, Any]) -> str:
     """Which outcome this row is, in the vocabulary the notes are written in.
 
@@ -70,10 +75,31 @@ def outcome_kind(row: dict[str, Any]) -> str:
     can be committed and still converging, and only the flag says a run's result
     was read and the word seen. This collapses the pair into the one word the
     note is keyed on, and a committed row WITHOUT the flag collapses to nothing.
+
+    AN OPERATIONS ROW SPEAKS ITS OWN THREE WORDS (ss-console#2546). ``done``
+    rather than ``installed``, and the difference is not cosmetic: ``installed``
+    routes to :func:`notify_install`, which asks "was anybody at the firm waiting
+    on an administrator" and sends the rule letter. Nobody at the firm applied an
+    operations change — SMD did — so an ops row that came back as ``installed``
+    would tell the requester one of their colleagues had put a rule in force. All
+    three ops outcomes go through ``notify``, and the caller dispatches on the
+    row's stored kind from there.
+
+    THE KIND IS READ FROM THE ROW, never from the caller, for the same reason the
+    broker reads its TTL from the stored kind: nothing on the wire may decide
+    which letter a person gets.
     """
     if not isinstance(row, dict):
         return ""
     state = str(row.get("state") or "")
+    if str(row.get("kind") or "rule") == OPS_REQUEST_KIND:
+        if state in ("lapsed", "declined"):
+            return state
+        # ``ops_resolve`` with ``done`` stamps consumed_at AND installed_at
+        # together, so the broker's view says committed+installed; there is no
+        # converge window on a change SMD made by hand, and the ``installed``
+        # flag is therefore not a second condition here.
+        return "done" if state == "committed" else ""
     if state in ("lapsed", "declined"):
         return state
     if state == "committed" and row.get("installed"):
@@ -182,6 +208,7 @@ def start_sweeper_thread(
 __all__ = [
     "DEFAULT_SWEEP_INTERVAL_S",
     "MAX_PER_PASS",
+    "OPS_REQUEST_KIND",
     "SweepResult",
     "outcome_kind",
     "run_sweep_once",

@@ -52,6 +52,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_VOLUME_PATH = "/opt/data/customer.yaml"
 
+#: The two mail domains an operations answer may come from (ss-console#2546).
+#: Held HERE rather than read from the per-seat file on purpose: the point of
+#: ``scope.ops_reply_from`` is that a seat cannot be talked into widening who
+#: answers for SMD, and a config that could name an arbitrary domain would turn
+#: "SMD answers operations requests" into "whoever the config says does".
+#: ``smdurgan.com`` is on it because ``team@smd.services`` is an alias of that
+#: mailbox and a reply sent from the bare mailbox carries the bare address.
+#: Mirrors ``OPS_REPLY_DOMAINS`` in ss-console
+#: ``src/lib/operator/customer-yaml/sections-scope.ts``; the two must move
+#: together or an authored value would pass the console and be dropped here.
+OPS_REPLY_DOMAINS: frozenset[str] = frozenset({"smd.services", "smdurgan.com"})
+
 
 def _clean_str_list(value: Any) -> list[str]:
     """Coerce an unknown to a list of non-empty strings, dropping anything else.
@@ -472,6 +484,75 @@ class CustomerConfig:
             if norm in known and norm not in out:
                 out.append(norm)
         return out
+
+    @property
+    def ops_reply_from(self) -> list[str]:
+        """Return ``scope.ops_reply_from``: whose reply, quoting an ``[ops XXXX]``
+        tag, ends that operations request (ss-console#2546).
+
+        WHAT AN ENTRY MAY DO, and it is exactly one thing. Answer a request the
+        OPERATOR itself raised, by quoting the eight-hex tag that request carries,
+        and the whole effect of that answer is one templated notice to the person
+        at the firm who asked. It is NOT inbound trust. Being here does not put an
+        address on :attr:`inbound_allow_from`, does not make the sender an admin,
+        and a message from one of these addresses quoting no tag is the same
+        untrusted mail it was before.
+
+        THE TAG IS THE CAPABILITY, and the spoof class is identical for every
+        entry. No seat receives an SPF or DKIM verdict on inbound mail (ADR 0085
+        §5), so a forged ``From: team@smd.services`` is exactly as available as a
+        forged ``From: scott@smd.services``; naming one rather than the other buys
+        nothing, and what bounds the exposure is the effect rather than the sender.
+
+        TWO SHAPE RULES beyond person-form, mirroring the console validator
+        (``sections-scope.ts``) rather than trusting it: every entry must sit at
+        one of :data:`OPS_REPLY_DOMAINS`, so a customer.yaml cannot hand the
+        answering power to a third party, and an ``@domain`` grant is dropped,
+        because "anyone at SMD" is not a person and this list is read as the
+        people who answer.
+
+        FAIL-CLOSED TO ``[]`` on any malformed shape, exactly like :attr:`admins`
+        and for the same reason: it is read inside a per-turn hook, and the safe
+        direction for a broken read is that no reply resolves anything — the
+        request then lapses at seven days and the person who asked is told so,
+        which is a slow answer rather than a wrong one.
+        """
+        scope = self._data.get("scope")
+        if not isinstance(scope, dict):
+            return []
+        raw = scope.get("ops_reply_from")
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        for entry in raw:
+            if not isinstance(entry, str):
+                continue
+            norm = entry.strip().lower()
+            if norm.count("@") != 1 or norm.startswith("@"):
+                continue
+            local, _, domain = norm.partition("@")
+            if not local or domain not in OPS_REPLY_DOMAINS:
+                continue
+            if norm not in out:
+                out.append(norm)
+        return out
+
+    def sender_may_answer_ops(self, sender_address: object) -> bool:
+        """True iff ``sender_address`` exactly matches an entry in
+        ``scope.ops_reply_from``.
+
+        EXACT match only, no ``@domain`` widening — the same posture
+        :meth:`sender_is_admin` takes, and for a sharper reason here: the whole
+        list is two or three named people at SMD, and a domain match would make
+        every address SMD has ever owned an answerer. Fail-closed on a non-string,
+        an empty string, an unmatched sender, and an unauthored list.
+        """
+        if not isinstance(sender_address, str):
+            return False
+        addr = sender_address.strip().lower()
+        if not addr:
+            return False
+        return addr in self.ops_reply_from
 
     def sender_is_admin(self, sender_address: object) -> bool:
         """True iff ``sender_address`` exactly matches an entry in ``scope.admins``.
