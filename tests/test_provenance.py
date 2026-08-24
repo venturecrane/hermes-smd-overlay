@@ -161,7 +161,7 @@ def test_malformed_json_is_best_effort():
 
 
 def test_record_records_registers_numbers_dates_and_their_pairs():
-    from shared.identifier_filter import ProvenanceRegister, check, pair_key
+    from shared.identifier_filter import check, pair_key
 
     provenance._reset_for_tests()
     provenance.record_records(
