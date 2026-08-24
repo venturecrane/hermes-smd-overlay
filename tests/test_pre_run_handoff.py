@@ -23,7 +23,6 @@ import json
 import stat
 from datetime import datetime, timedelta, timezone
 
-
 from shared import cron_attribution, pre_run_handoff
 
 _SKILL = "deadline-miss-escalator"
