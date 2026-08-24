@@ -19,7 +19,9 @@ logic read-only. These are the numbers this script must reproduce; a zero on a
 day named here means the query is too narrow and must be widened BEFORE it
 ships, and a nonzero on 08-14 or 08-18 means it is too wide.
 
-    day       refused   unsent
+    day       refused   unsent   (degraded: 0 on every day below — the kind
+                                  first ships 2026-08-24 and no earlier row
+                                  carries a digest_degraded basis)
     2026-08-04      3        -
     2026-08-05      2        -
     2026-08-06      2        -
@@ -102,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"# {path}  (trailing {SEND_REFUSAL_WINDOW_HOURS}h window, ending each day 23:59:59Z)"
         )
-        print(f"{'day':<12}{'total':>6}{'refused':>9}{'unsent':>8}  last_ts")
+        print(f"{'day':<12}{'total':>6}{'refused':>9}{'unsent':>8}{'degraded':>10}  last_ts")
         for day in days:
             at = datetime.combine(day, datetime.max.time()).replace(
                 microsecond=0, tzinfo=timezone.utc
@@ -110,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             facts = count_send_refusals(conn, at)
             print(
                 f"{day.isoformat():<12}{facts.count:>6}{facts.refused:>9}{facts.unsent:>8}"
-                f"  {facts.last_ts or '-'}"
+                f"{facts.degraded:>10}  {facts.last_ts or '-'}"
             )
             if args.events:
                 for event in facts.events:

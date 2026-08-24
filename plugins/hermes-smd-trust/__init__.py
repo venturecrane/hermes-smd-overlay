@@ -1041,12 +1041,21 @@ def _seed_from_pre_run_handoff(session_id: str) -> None:
     session never reaches the take at all: an interactive turn must not inherit
     a routine's reads.
 
-    ONLY DATE ATOMS ARE SEEDED, and that is enforced twice — ``take_handoff``
-    returns nothing but dates, and this passes only those dates to
-    ``record_read``. The projection is what makes a script's output safe to
-    trust: the script reads authored dates out of the firm's system of record
-    verbatim, and everything else it emits (subjects, ACK codes, its own
-    sentences) is composition that must go on failing the gate.
+    ONLY DATE ATOMS AND VALIDATED RECORDS ARE SEEDED, and that is enforced
+    twice — ``take_handoff`` returns nothing but dates that scan as dates and
+    ``(matterNumber, dates)`` records whose number scans as a case number
+    (``pre_run_handoff._record_entries``), and this passes dates to
+    ``record_read`` and records to ``record_records``. Records seed through
+    ``add_record`` so the (number, date) PAIRINGS register too: a seeded number
+    cannot certify a date from a different matter. The projection is what makes
+    a script's output safe to trust: the script reads authored values out of the
+    firm's system of record verbatim, and everything else it emits (subjects,
+    ACK codes, its own sentences) is composition that must go on failing the
+    gate.
+
+    ``persona`` rides along because the scheduler runs the writer with the
+    PERSONA home as ``HERMES_HOME`` (2026-08-24 pilot probe, defect A) — the
+    reader must look where the writer wrote.
     """
     resolved = provenance.resolve_session(session_id)
     if not resolved or resolved in _HANDOFF_SEEDED:
@@ -1060,14 +1069,19 @@ def _seed_from_pre_run_handoff(session_id: str) -> None:
     _HANDOFF_SEEDED[resolved] = True
     while len(_HANDOFF_SEEDED) > _MAX_HANDOFF_SEEDED:
         _HANDOFF_SEEDED.popitem(last=False)
-    taken = pre_run_handoff.take_handoff(routine.skill, started_at)
+    taken = pre_run_handoff.take_handoff(routine.skill, started_at, persona=routine.persona)
     dates = (taken or {}).get("dates") or []
-    if not dates:
+    records = (taken or {}).get("records") or []
+    if not dates and not records:
         return
-    provenance.record_read(resolved, " ".join(dates))
+    if dates:
+        provenance.record_read(resolved, " ".join(dates))
+    if records:
+        provenance.record_records(resolved, records)
     logger.info(
-        "hermes-smd-trust: seeded %d pre-run date(s) for %s from %s's handoff (ss#2547)",
+        "hermes-smd-trust: seeded %d pre-run date(s) + %d record(s) for %s from %s's handoff (ss#2547)",
         len(dates),
+        len(records),
         resolved,
         routine.skill,
     )

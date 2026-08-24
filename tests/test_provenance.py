@@ -155,3 +155,52 @@ def test_malformed_json_is_best_effort():
     provenance.record_read("sess-bad", '{"value": [ this is not json')
     provenance.record_read("sess-bad2", "[]")
     provenance.record_read("sess-bad3", "null")
+
+
+# ---- record_records: the structured seeding entry point (2026-08-24) -------
+
+
+def test_record_records_registers_numbers_dates_and_their_pairs():
+    from shared.identifier_filter import check, pair_key
+
+    provenance._reset_for_tests()
+    provenance.record_records(
+        "sess-rr",
+        [
+            {"matterNumber": "2026-PI-101", "dates": ["2026-08-26"]},
+            {"matterNumber": "2026-PI-102", "dates": ["2026-09-04"]},
+        ],
+    )
+    reg = provenance.register_for("sess-rr")
+    assert reg.has_pairs
+    # The pairing registered is each record's own — asserted via the same
+    # pair_key the checker uses, so the seeder and checker cannot drift.
+    assert check("matter 2026-PI-101 due 2026-08-26", reg).unverified == ()
+    assert any(
+        h.kind.value == "pair" for h in check("matter 2026-PI-101 due 2026-09-04", reg).unverified
+    )
+    assert pair_key  # imported symbol is the shared canonicalizer
+
+
+def test_record_records_ignores_malformed_entries():
+    provenance._reset_for_tests()
+    provenance.record_records(
+        "sess-rr2",
+        [
+            "not a dict",
+            {"matterNumber": 42, "dates": ["2026-08-26"]},
+            {"matterNumber": "2026-PI-101", "dates": "2026-08-26"},
+            {"matterNumber": "2026-PI-103", "dates": ["2026-08-27", 7]},
+        ],
+    )
+    reg = provenance.register_for("sess-rr2")
+    from shared.identifier_filter import check
+
+    # Only the last entry was well-formed enough to seed.
+    assert check("matter 2026-PI-103 due 2026-08-27", reg).unverified == ()
+
+
+def test_record_records_on_an_empty_list_registers_nothing():
+    provenance._reset_for_tests()
+    provenance.record_records("sess-rr3", [])
+    assert not bool(provenance.register_for("sess-rr3"))

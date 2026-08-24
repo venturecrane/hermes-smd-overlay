@@ -2,68 +2,82 @@
 
 The handoff turns a routine's PRE-RUN read into a provenance source for the one
 session that read was performed for. Everything worth testing here is a way it
-could stop being "the one session": the binding window, the consume-once rename,
-a file from yesterday, and — the property the whole design rests on — that only
-DATE atoms come out of it, so an ACK code or a caption the script happened to
+could stop being "the one session": the recency window, the consume-once
+rename, a file from yesterday, the persona-home split that made the first
+shipped version inert (2026-08-24 defect A), and — the property the whole
+design rests on — that only DATE atoms and validated ``(matterNumber, dates)``
+records come out of it, so an ACK code or a caption the script happened to
 write down can never verify a draft.
+
+BINDING IS TESTED ON THE READER'S CLOCK. The first shipped version bound on the
+cron session id's wall-clock digits and was falsified by the pilot the first
+morning it ran (defect B: the id is stamped in the routine's cron timezone, the
+container runs UTC, nothing ever bound). These tests pass ``now=`` explicitly —
+the same seam the production caller leaves unset — so every window case is
+deterministic.
 """
 
 from __future__ import annotations
 
 import json
 import stat
-import time
 from datetime import datetime, timedelta, timezone
-
-import pytest
 
 from shared import cron_attribution, pre_run_handoff
 
 _SKILL = "deadline-miss-escalator"
 _STARTED = datetime(2026, 8, 22, 14, 0, 0, tzinfo=timezone.utc)
+#: A fresh reader clock: the scheduler starts the turn seconds after the script.
+_NOW = _STARTED + timedelta(minutes=2)
+#: Any non-None value proves "this is a cron session". Its VALUE is irrelevant
+#: to binding by design — see the defect-B regression test below.
+_CRON_PROOF = datetime(2026, 8, 22, 7, 0, 26)
 
 
-def _write(tmp_path, *, started_at=_STARTED, dates=("2026-08-29",), matter_ids=("2026-PI-101",)):
+def _write(
+    tmp_path,
+    *,
+    started_at=_STARTED,
+    dates=("2026-08-29",),
+    matter_ids=("2026-PI-101",),
+    records=None,
+):
     return pre_run_handoff.write_handoff(
-        _SKILL, started_at, dates, matter_ids, hermes_home=str(tmp_path)
+        _SKILL, started_at, dates, matter_ids, hermes_home=str(tmp_path), records=records
+    )
+
+
+def _take(tmp_path, *, now=_NOW, session=_CRON_PROOF, persona=None):
+    return pre_run_handoff.take_handoff(
+        _SKILL, session, hermes_home=str(tmp_path), persona=persona, now=now
     )
 
 
 def test_write_then_take_returns_the_dates(tmp_path):
     _write(tmp_path)
-    taken = pre_run_handoff.take_handoff(
-        _SKILL, _STARTED + timedelta(minutes=2), hermes_home=str(tmp_path)
-    )
-    assert taken == {"dates": ["2026-08-29"]}
+    assert _take(tmp_path) == {"dates": ["2026-08-29"], "records": []}
 
 
-def test_the_projection_carries_dates_and_nothing_else(tmp_path):
+def test_the_projection_carries_dates_and_records_and_nothing_else(tmp_path):
     """The load-bearing property. The FILE may record what the script saw; what
-    comes back out is the date atoms alone. An ACK code, a caption, a matter
-    number or a sentence of the script's own prose reaching the register would
-    let a script certify values nobody read."""
+    comes back out is the date atoms and validated records alone. An ACK code, a
+    caption, a bare matter id or a sentence of the script's own prose reaching
+    the register would let a script certify values nobody read."""
     pre_run_handoff.write_handoff(
         _SKILL,
         _STARTED,
         ["2026-08-29", "2026-09-02"],
-        ["2026-PI-101"],
+        ["f220c8e4-eab5-4fd9-8f1d-0becf715b390"],
         hermes_home=str(tmp_path),
     )
-    taken = pre_run_handoff.take_handoff(
-        _SKILL, _STARTED + timedelta(minutes=1), hermes_home=str(tmp_path)
-    )
-    assert set(taken) == {"dates"}
+    taken = _take(tmp_path)
+    assert set(taken) == {"dates", "records"}
     assert taken["dates"] == ["2026-08-29", "2026-09-02"]
+    assert taken["records"] == []
 
 
 def test_a_non_date_in_the_dates_field_does_not_come_back(tmp_path):
-    """The field name is not the projection; the SHAPE is.
-
-    The writer is an inline copy in another repository, so what lands in the
-    ``dates`` list is authored by code this module cannot test. If the field name
-    were the whole rule, a script that printed a case number into that list would
-    be laundering it into the register.
-    """
+    """The field name is not the projection; the SHAPE is."""
     path = pre_run_handoff.write_handoff(
         _SKILL,
         _STARTED,
@@ -71,44 +85,28 @@ def test_a_non_date_in_the_dates_field_does_not_come_back(tmp_path):
         [],
         hermes_home=str(tmp_path),
     )
-    # The FILE keeps what the script offered, so the difference is diagnosable.
     assert len(json.loads(path.read_text(encoding="utf-8"))["dates"]) == 4
-    taken = pre_run_handoff.take_handoff(
-        _SKILL, _STARTED + timedelta(minutes=1), hermes_home=str(tmp_path)
-    )
-    assert taken == {"dates": ["2026-08-29"]}
+    assert _take(tmp_path) == {"dates": ["2026-08-29"], "records": []}
 
 
 def test_a_longhand_date_is_still_a_date(tmp_path):
-    """The scripts emit whatever the firm's record spells. The predicate is the
-    gate's own extractor, so anything the gate would CALL a date qualifies."""
     pre_run_handoff.write_handoff(
         _SKILL, _STARTED, ["August 29, 2026", "8/29/26"], [], hermes_home=str(tmp_path)
     )
-    taken = pre_run_handoff.take_handoff(
-        _SKILL, _STARTED + timedelta(minutes=1), hermes_home=str(tmp_path)
-    )
-    assert taken["dates"] == ["August 29, 2026", "8/29/26"]
+    assert _take(tmp_path)["dates"] == ["August 29, 2026", "8/29/26"]
 
 
-def test_a_session_that_started_before_the_script_does_not_bind(tmp_path):
+# ---- recency binding (defect B's replacement) -----------------------------
+
+
+def test_a_fresh_file_binds(tmp_path):
     _write(tmp_path)
-    assert (
-        pre_run_handoff.take_handoff(
-            _SKILL, _STARTED - timedelta(seconds=1), hermes_home=str(tmp_path)
-        )
-        is None
-    )
+    assert _take(tmp_path, now=_STARTED + timedelta(seconds=30)) is not None
 
 
-def test_a_session_past_the_window_does_not_bind(tmp_path):
+def test_a_file_older_than_the_window_does_not_bind(tmp_path):
     _write(tmp_path)
-    assert (
-        pre_run_handoff.take_handoff(
-            _SKILL, _STARTED + timedelta(minutes=21), hermes_home=str(tmp_path)
-        )
-        is None
-    )
+    assert _take(tmp_path, now=_STARTED + timedelta(minutes=21)) is None
 
 
 def test_yesterdays_handoff_cannot_certify_todays_session(tmp_path):
@@ -116,53 +114,170 @@ def test_yesterdays_handoff_cannot_certify_todays_session(tmp_path):
     morning. Without the window a run that crashed before its turn would leave a
     handoff that verifies tomorrow's dates."""
     _write(tmp_path, started_at=_STARTED - timedelta(days=1))
-    assert (
-        pre_run_handoff.take_handoff(
-            _SKILL, _STARTED + timedelta(minutes=1), hermes_home=str(tmp_path)
-        )
-        is None
+    assert _take(tmp_path) is None
+
+
+def test_a_stamp_from_the_future_does_not_bind(tmp_path):
+    """Beyond the skew allowance, a future stamp is corruption, not clock drift."""
+    _write(tmp_path, started_at=_STARTED + timedelta(minutes=10))
+    assert _take(tmp_path, now=_STARTED) is None
+
+
+def test_small_clock_skew_is_tolerated(tmp_path):
+    _write(tmp_path, started_at=_STARTED + timedelta(seconds=45))
+    assert _take(tmp_path, now=_STARTED) is not None
+
+
+def test_a_naive_file_stamp_does_not_bind(tmp_path):
+    """The writer stamps an explicit UTC offset. A stamp that does not say which
+    clock it was on cannot be compared against any clock honestly."""
+    directory = pre_run_handoff.handoff_dir(str(tmp_path))
+    directory.mkdir(mode=0o700, parents=True)
+    pre_run_handoff.handoff_path(_SKILL, str(tmp_path)).write_text(
+        json.dumps({"skill": _SKILL, "started_at": "2026-08-22T14:00:00", "dates": ["2026-08-29"]}),
+        encoding="utf-8",
     )
+    assert _take(tmp_path) is None
+
+
+def test_the_session_stamp_value_is_irrelevant_to_binding(tmp_path):
+    """THE DEFECT-B REGRESSION. The pilot's scheduler stamps the cron session id
+    with the fire time in the routine's cron timezone (``…_070026`` for a
+    14:00Z fire) while the container clock is UTC — so any binding rule that
+    interprets those digits on a clock this module can see reads them seven
+    hours wrong, and the first shipped version never bound once in production.
+    Binding is by file recency now; the stamp is only proof the session is a
+    cron session, and a stamp from the WRONG clock must still seed."""
+    _write(tmp_path)
+    phoenix_local_stamp = datetime(2026, 8, 22, 7, 0, 26)  # 14:00Z, stamped Phoenix
+    assert _take(tmp_path, session=phoenix_local_stamp) is not None
+
+
+# ---- one session, one claim -----------------------------------------------
 
 
 def test_an_out_of_window_file_is_left_in_place(tmp_path):
-    """It may still belong to a session that has not started yet. Consuming on a
-    miss would let one early consult burn the handoff its own turn needs."""
     path = _write(tmp_path)
-    pre_run_handoff.take_handoff(_SKILL, _STARTED - timedelta(hours=1), hermes_home=str(tmp_path))
+    _take(tmp_path, now=_STARTED + timedelta(hours=2))
     assert path.exists()
     assert not pre_run_handoff.consumed_path(_SKILL, str(tmp_path)).exists()
 
 
 def test_taking_consumes_the_handoff_exactly_once(tmp_path):
     path = _write(tmp_path)
-    first = pre_run_handoff.take_handoff(
-        _SKILL, _STARTED + timedelta(minutes=1), hermes_home=str(tmp_path)
-    )
-    second = pre_run_handoff.take_handoff(
-        _SKILL, _STARTED + timedelta(minutes=2), hermes_home=str(tmp_path)
-    )
-    assert first == {"dates": ["2026-08-29"]}
+    first = _take(tmp_path)
+    second = _take(tmp_path, now=_NOW + timedelta(minutes=1))
+    assert first == {"dates": ["2026-08-29"], "records": []}
     assert second is None
     assert not path.exists()
     assert pre_run_handoff.consumed_path(_SKILL, str(tmp_path)).exists()
 
 
 def test_a_missing_handoff_is_not_an_error(tmp_path):
-    assert pre_run_handoff.take_handoff(_SKILL, _STARTED, hermes_home=str(tmp_path)) is None
+    assert _take(tmp_path) is None
 
 
 def test_a_malformed_handoff_seeds_nothing(tmp_path):
     directory = pre_run_handoff.handoff_dir(str(tmp_path))
     directory.mkdir(mode=0o700, parents=True)
     pre_run_handoff.handoff_path(_SKILL, str(tmp_path)).write_text("{not json", encoding="utf-8")
-    assert pre_run_handoff.take_handoff(_SKILL, _STARTED, hermes_home=str(tmp_path)) is None
+    assert _take(tmp_path) is None
 
 
 def test_a_non_cron_session_never_takes_a_handoff(tmp_path):
     """``session_started_at is None`` is how an interactive turn arrives here.
     A person's conversation must not inherit a routine's reads."""
     _write(tmp_path)
-    assert pre_run_handoff.take_handoff(_SKILL, None, hermes_home=str(tmp_path)) is None
+    assert _take(tmp_path, session=None) is None
+
+
+# ---- the persona home (defect A) ------------------------------------------
+
+
+def test_a_handoff_written_under_the_persona_home_is_found(tmp_path):
+    """THE DEFECT-A REGRESSION. The scheduler runs the writer with the PERSONA
+    home as ``HERMES_HOME`` (``/opt/data/profiles/operator``), so the file lands
+    under it — probed on the running pilot 2026-08-24, one unconsumed file per
+    routine, while the reader looked one root up and seeded nothing. A reader
+    that knows the persona looks where the writer wrote."""
+    persona_home = tmp_path / "profiles" / "operator"
+    pre_run_handoff.write_handoff(
+        _SKILL, _STARTED, ["2026-08-29"], [], hermes_home=str(persona_home)
+    )
+    taken = _take(tmp_path, persona="operator")
+    assert taken == {"dates": ["2026-08-29"], "records": []}
+    assert pre_run_handoff.consumed_path(_SKILL, str(tmp_path), "operator").exists()
+
+
+def test_the_plain_root_is_still_the_fallback(tmp_path):
+    """A seat where both processes share one ``HERMES_HOME`` keeps working."""
+    _write(tmp_path)
+    assert _take(tmp_path, persona="operator") == {"dates": ["2026-08-29"], "records": []}
+
+
+def test_without_a_persona_the_persona_home_is_not_searched(tmp_path):
+    persona_home = tmp_path / "profiles" / "operator"
+    pre_run_handoff.write_handoff(
+        _SKILL, _STARTED, ["2026-08-29"], [], hermes_home=str(persona_home)
+    )
+    assert _take(tmp_path) is None
+
+
+def test_a_persona_name_cannot_choose_the_path(tmp_path):
+    path = pre_run_handoff.handoff_path(_SKILL, str(tmp_path), "../../etc")
+    assert str(tmp_path) in str(path)
+    assert ".." not in path.parts
+
+
+# ---- the record projection (the 2026-08-24 widening) ----------------------
+
+
+def test_a_valid_record_comes_back_with_its_pairing_intact(tmp_path):
+    _write(
+        tmp_path,
+        records=[{"matterNumber": "2026-PI-101", "dates": ["2026-08-29", "2026-09-02"]}],
+    )
+    taken = _take(tmp_path)
+    assert taken["records"] == [
+        {"matterNumber": "2026-PI-101", "dates": ["2026-08-29", "2026-09-02"]}
+    ]
+
+
+def test_a_record_whose_number_is_not_a_case_number_is_dropped_whole(tmp_path):
+    """An ACK code, a GUID, or prose in the number slot drops the RECORD, not
+    just the field — a record is an association, and an association anchored on
+    a non-number associates nothing."""
+    _write(
+        tmp_path,
+        records=[
+            {"matterNumber": "ACK-6WS08D", "dates": ["2026-08-29"]},
+            {"matterNumber": "f220c8e4-eab5-4fd9-8f1d-0becf715b390", "dates": ["2026-08-29"]},
+            {"matterNumber": "call the paralegal", "dates": ["2026-08-29"]},
+        ],
+    )
+    assert _take(tmp_path)["records"] == []
+
+
+def test_a_record_with_no_surviving_dates_is_dropped(tmp_path):
+    _write(tmp_path, records=[{"matterNumber": "2026-PI-101", "dates": ["not a date"]}])
+    assert _take(tmp_path)["records"] == []
+
+
+def test_a_non_date_inside_a_records_dates_is_dropped(tmp_path):
+    _write(
+        tmp_path,
+        records=[{"matterNumber": "2026-PI-101", "dates": ["2026-08-29", "1:24-cv-01234"]}],
+    )
+    assert _take(tmp_path)["records"] == [{"matterNumber": "2026-PI-101", "dates": ["2026-08-29"]}]
+
+
+def test_records_are_bounded(tmp_path):
+    many = [{"matterNumber": f"2026-PI-{n:03d}", "dates": ["2026-08-29"]} for n in range(101, 351)]
+    _write(tmp_path, records=many)
+    assert len(_take(tmp_path)["records"]) == 100
+
+
+# ---- hygiene ---------------------------------------------------------------
 
 
 def test_the_handoff_is_private_to_its_owner(tmp_path):
@@ -178,65 +293,16 @@ def test_write_leaves_no_temp_file_behind(tmp_path):
 
 
 def test_a_skill_name_cannot_choose_the_path(tmp_path):
-    """The skill name reaches this module from a script's own argument."""
     path = pre_run_handoff.handoff_path("../../etc/passwd", str(tmp_path))
     assert path.parent == pre_run_handoff.handoff_dir(str(tmp_path))
     assert "/" not in path.name.removesuffix(".json")
 
 
 def test_the_file_records_matter_ids_even_though_the_projection_omits_them(tmp_path):
-    """The file is also a forensic record of what the script saw. Recording is
-    not seeding, and the two must be visibly different."""
     path = _write(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["matter_ids"] == ["2026-PI-101"]
     assert payload["skill"] == _SKILL
-
-
-@pytest.fixture
-def phoenix_clock(monkeypatch):
-    """Run the body on a seat seven hours behind UTC — the real seats' zone.
-
-    Pinned rather than inherited, because CI runs in UTC and on a UTC host the
-    two clock readings below are the SAME value: the pair of tests would both
-    pass while proving nothing about the ambiguity they exist for.
-    """
-    monkeypatch.setenv("TZ", "America/Phoenix")
-    time.tzset()
-    yield
-    monkeypatch.undo()
-    time.tzset()
-
-
-def test_a_local_clock_session_stamp_binds(tmp_path, phoenix_clock):
-    """The scheduler stamps the session id in wall-clock digits and does not say
-    which clock. A stamp written on the SEAT's clock binds..."""
-    _write(tmp_path)
-    local_stamp = (_STARTED + timedelta(minutes=1)).astimezone().replace(tzinfo=None)
-    assert local_stamp.hour == 7  # the ambiguity is real on this clock
-    assert pre_run_handoff.take_handoff(_SKILL, local_stamp, hermes_home=str(tmp_path)) == {
-        "dates": ["2026-08-29"]
-    }
-
-
-def test_a_utc_clock_session_stamp_binds(tmp_path, phoenix_clock):
-    """...and so does the same instant stamped in UTC. Picking one clock and
-    picking wrong would leave the control inert with no signal that it was."""
-    _write(tmp_path)
-    utc_stamp = (_STARTED + timedelta(minutes=1)).replace(tzinfo=None)
-    assert utc_stamp.hour == 14
-    assert pre_run_handoff.take_handoff(_SKILL, utc_stamp, hermes_home=str(tmp_path)) == {
-        "dates": ["2026-08-29"]
-    }
-
-
-def test_a_stamp_that_is_neither_clock_does_not_bind(tmp_path, phoenix_clock):
-    """Trying both readings is not the same as trying every reading. Seven hours
-    is what separates the two candidates; twenty minutes is what separates a
-    session from someone else's."""
-    _write(tmp_path)
-    stray = (_STARTED + timedelta(hours=3)).replace(tzinfo=None)
-    assert pre_run_handoff.take_handoff(_SKILL, stray, hermes_home=str(tmp_path)) is None
 
 
 def test_the_session_start_comes_out_of_the_cron_session_id():
@@ -256,12 +322,6 @@ def test_an_impossible_stamp_has_no_start():
 
 
 def test_write_on_an_unusable_home_returns_none_rather_than_raising(tmp_path):
-    """A pre-run must not die because an optimization could not be recorded.
-
-    A FILE standing where ``$HERMES_HOME`` should be is the cheapest way to make
-    every path operation under it fail, and it exercises the same handler a
-    read-only volume would.
-    """
     blocked = tmp_path / "not-a-directory"
     blocked.write_text("", encoding="utf-8")
     assert _write(blocked) is None
