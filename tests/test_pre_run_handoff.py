@@ -34,8 +34,14 @@ _NOW = _STARTED + timedelta(minutes=2)
 _CRON_PROOF = datetime(2026, 8, 22, 7, 0, 26)
 
 
-def _write(tmp_path, *, started_at=_STARTED, dates=("2026-08-29",), matter_ids=("2026-PI-101",),
-           records=None):
+def _write(
+    tmp_path,
+    *,
+    started_at=_STARTED,
+    dates=("2026-08-29",),
+    matter_ids=("2026-PI-101",),
+    records=None,
+):
     return pre_run_handoff.write_handoff(
         _SKILL, started_at, dates, matter_ids, hermes_home=str(tmp_path), records=records
     )
@@ -128,9 +134,7 @@ def test_a_naive_file_stamp_does_not_bind(tmp_path):
     directory = pre_run_handoff.handoff_dir(str(tmp_path))
     directory.mkdir(mode=0o700, parents=True)
     pre_run_handoff.handoff_path(_SKILL, str(tmp_path)).write_text(
-        json.dumps(
-            {"skill": _SKILL, "started_at": "2026-08-22T14:00:00", "dates": ["2026-08-29"]}
-        ),
+        json.dumps({"skill": _SKILL, "started_at": "2026-08-22T14:00:00", "dates": ["2026-08-29"]}),
         encoding="utf-8",
     )
     assert _take(tmp_path) is None
@@ -264,15 +268,11 @@ def test_a_non_date_inside_a_records_dates_is_dropped(tmp_path):
         tmp_path,
         records=[{"matterNumber": "2026-PI-101", "dates": ["2026-08-29", "1:24-cv-01234"]}],
     )
-    assert _take(tmp_path)["records"] == [
-        {"matterNumber": "2026-PI-101", "dates": ["2026-08-29"]}
-    ]
+    assert _take(tmp_path)["records"] == [{"matterNumber": "2026-PI-101", "dates": ["2026-08-29"]}]
 
 
 def test_records_are_bounded(tmp_path):
-    many = [
-        {"matterNumber": f"2026-PI-{n:03d}", "dates": ["2026-08-29"]} for n in range(101, 351)
-    ]
+    many = [{"matterNumber": f"2026-PI-{n:03d}", "dates": ["2026-08-29"]} for n in range(101, 351)]
     _write(tmp_path, records=many)
     assert len(_take(tmp_path)["records"]) == 100
 

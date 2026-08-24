@@ -1492,6 +1492,7 @@ def test_an_ordinary_suppressed_wake_is_not_degraded(tmp_path):
 def test_a_partial_degradation_on_an_emitted_wake_also_pages(tmp_path):
     """The digest shipped (explicit absences) but lookups failed — the
     degraded_reason the pre_run stamped on the EMITTED_WAKE row pages too."""
+
     def build(led):
         led.add(
             _ts(6),
@@ -1502,6 +1503,7 @@ def test_a_partial_degradation_on_an_emitted_wake_also_pages(tmp_path):
             },
             skill_name="deadline-miss-escalator",
         )
+
     facts = _facts(tmp_path, build)
     assert facts.degraded == 1
     assert "explicit absences" in facts.events[0]["reason"]
@@ -1510,5 +1512,6 @@ def test_a_partial_degradation_on_an_emitted_wake_also_pages(tmp_path):
 def test_an_ordinary_emitted_wake_is_not_degraded(tmp_path):
     def build(led):
         led.wake(_ts(7), needs_you=0)
+
     facts = _facts(tmp_path, build)
     assert facts.degraded == 0

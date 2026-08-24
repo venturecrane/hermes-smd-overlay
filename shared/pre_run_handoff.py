@@ -444,7 +444,6 @@ def take_handoff(
         return None
 
 
-
 def _as_utc(value: datetime) -> datetime:
     """A timezone-aware UTC instant. A naive value is read on the local clock —
     the same reading ``datetime.astimezone`` gives it, and the clock a script
