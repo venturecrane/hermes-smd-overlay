@@ -434,6 +434,46 @@ def record_read(session_id: str, text: str) -> None:
         logger.debug("provenance: record_read failed for session %s", session_id, exc_info=True)
 
 
+def record_records(session_id: str, records: list[dict]) -> None:
+    """Seed structured ``(matterNumber, dates)`` associations into the session's
+    register — the pre-run handoff's record half (ss-console#2547 widening,
+    2026-08-24 degraded-digest incident).
+
+    NOT ``record_read``. That path walks a text blob, and its association
+    extraction (:func:`_record_associations`) reads only STRING-valued fields —
+    a ``dates`` list would be silently dropped, seeding the numbers as bare
+    atoms with zero pairs: every number emittable beside any date, which is the
+    exact mispairing the pair check exists to catch. This entry point calls
+    ``add_record`` per record, so number, dates, and their pairings register
+    together by construction.
+
+    Callers pass ALREADY-VALIDATED records (``pre_run_handoff._record_entries``
+    is the validator); this function still bounds and type-checks defensively
+    but does not re-run identifier extraction. Best-effort like every recorder
+    here: a failure is logged, never raised.
+    """
+    if not session_id or not isinstance(records, list) or not records:
+        return
+    try:
+        reg = _registers.get(session_id)
+        if reg is None:
+            reg = ProvenanceRegister()
+            _registers[session_id] = reg
+            _evict_if_needed()
+        else:
+            _registers.move_to_end(session_id)  # LRU touch
+        for record in records[:_MAX_SEEDED_RECORDS]:
+            if not isinstance(record, dict):
+                continue
+            number = record.get("matterNumber")
+            dates = record.get("dates")
+            if not isinstance(number, str) or not isinstance(dates, list):
+                continue
+            reg.add_record(number, [d for d in dates if isinstance(d, str)])
+    except Exception:  # noqa: BLE001 — recording is best-effort, never fatal
+        logger.debug("provenance: record_records failed for session %s", session_id, exc_info=True)
+
+
 # Bound the per-blob walk. A listing returns at most a few hundred rows and the
 # gate must not become the expensive part of a read.
 _MAX_SEEDED_RECORDS = 200

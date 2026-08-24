@@ -1152,7 +1152,7 @@ def test_a_pre_run_date_is_refused_before_seeding_and_allowed_after(
     before = send()
     assert before is not None and before["action"] == "block"
 
-    started = datetime(2026, 8, 22, 14, 0, 0, tzinfo=timezone.utc)
+    started = datetime.now(timezone.utc)  # recency binding: the file must be fresh
     pre_run_handoff.write_handoff(
         "deadline-miss-escalator", started, ["2026-08-26"], [], hermes_home=str(tmp_path)
     )
@@ -1180,7 +1180,7 @@ def test_an_ack_code_in_the_handoff_does_not_verify(
     _wire_fake_audit(trust_plugin.outbound)
     _seed_unrelated_read(trust_plugin, "sess-ack")
 
-    started = datetime(2026, 8, 22, 14, 0, 0, tzinfo=timezone.utc)
+    started = datetime.now(timezone.utc)  # recency binding: the file must be fresh
     pre_run_handoff.write_handoff(
         "deadline-miss-escalator",
         started,
@@ -1200,6 +1200,109 @@ def test_an_ack_code_in_the_handoff_does_not_verify(
         tool_call_id="c",
     )
     assert blocked is not None and blocked["action"] == "block"
+
+
+def test_a_seeded_record_verifies_its_own_pairing_and_refuses_a_mispairing(
+    trust_plugin, rostered, monkeypatch, tmp_path
+) -> None:
+    """The 2026-08-24 widening, and its safety property, in one test.
+
+    A handoff record seeds (number, dates) THROUGH ``add_record``, so the
+    pairing registers with the atoms. The digest's own line — this matter's
+    number beside this matter's date — sends; the same number beside another
+    matter's date is exactly the mispairing the pair check exists to catch, and
+    still refuses.
+    """
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-rec")
+    ob = trust_plugin.outbound
+
+    started = datetime.now(timezone.utc)
+    pre_run_handoff.write_handoff(
+        "deadline-miss-escalator",
+        started,
+        ["2026-08-26", "2026-09-04"],
+        [],
+        hermes_home=str(tmp_path),
+        records=[
+            {"matterNumber": "2026-PI-101", "dates": ["2026-08-26"]},
+            {"matterNumber": "2026-PI-102", "dates": ["2026-09-04"]},
+        ],
+    )
+    taken = pre_run_handoff.take_handoff(
+        "deadline-miss-escalator", started + timedelta(minutes=1), hermes_home=str(tmp_path)
+    )
+    provenance.record_read("sess-rec", " ".join(taken["dates"]))
+    provenance.record_records("sess-rec", taken["records"])
+
+    def send(text):
+        return ob.check_outbound_send(
+            tool_name="smd_send_message",
+            args={"to": [_STAFF], "subject": "Deadline digest", "text": text},
+            session_id="sess-rec",
+            tool_call_id="c",
+        )
+
+    # The POSITIVE falsifier: a correctly-rendered multi-item digest, each
+    # matter beside its own date, adjacent across the list boundary. Pairs are
+    # active for the first time in this flow; a correct digest must PASS, or
+    # the fix trades a degraded digest for a refused one.
+    assert (
+        send(
+            "1. matter 2026-PI-101, response due 2026-08-26.\n"
+            "2. matter 2026-PI-102, hearing 2026-09-04."
+        )
+        is None
+    )
+    # And the mispairing still refuses.
+    blocked = send("matter 2026-PI-101, hearing 2026-09-04.")
+    assert blocked is not None and blocked["action"] == "block"
+
+
+def test_an_empty_register_refusal_offers_no_removal_hatch(
+    trust_plugin, rostered, monkeypatch
+) -> None:
+    """The 2026-08-24 degraded digest was the model COMPLYING with the refusal:
+    "or remove the unverified value and state that it needs confirmation",
+    fifteen items at a time, register empty. When nothing was read, the refusal
+    must offer reading or stopping — never a send with the values stripped."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    blocked = trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message",
+        args={"to": [_STAFF], "text": "Deadline 2026-09-04 is approaching."},
+        session_id="sess-empty-reg",
+        tool_call_id="c",
+    )
+    assert blocked is not None and blocked["action"] == "block"
+    message = blocked["message"]
+    assert "remove the unverified value" not in message
+    assert "not a deliverable" in message
+    assert "run failed" in message
+
+
+def test_a_populated_register_refusal_keeps_the_single_value_hatch(
+    trust_plugin, rostered, monkeypatch
+) -> None:
+    """Removing ONE stray unverified value from an otherwise-sourced draft is a
+    legitimate path and stays offered — the hatch closes only when the register
+    is empty and there is nothing sourced to fall back on."""
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    _seed_unrelated_read(trust_plugin, "sess-populated")
+    blocked = trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message",
+        args={"to": [_STAFF], "text": "Deadline 2026-09-04 is approaching."},
+        session_id="sess-populated",
+        tool_call_id="c",
+    )
+    assert blocked is not None and blocked["action"] == "block"
+    assert "remove the unverified value" in blocked["message"]
 
 
 # ---- the fence: a turn cannot author its own provenance -------------------

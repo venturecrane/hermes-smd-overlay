@@ -1428,3 +1428,62 @@ def test_ticker_puts_the_refusal_fields_on_the_wire(tmp_path):
     assert body["send_refusals"] == 1
     assert body["send_refusals_last_ts"]
     assert body["send_refusals_json"][0]["tool"] == "smd_send_message"
+
+
+# ---- the degraded kind (2026-08-24, the withheld digest) -------------------
+#
+# CROSS-REPO LITERAL PIN: the ``digest_degraded`` prefix below is written by
+# ``ss-console:operator/skills/deadline-miss-escalator/pre_run.py`` (bases
+# ``digest_degraded_suppressed`` and ``digest_degraded_audit_unavailable``) and
+# read by ``shared/heartbeat.py:_degraded_events``. Neither repo's CI can see
+# the other; these tests are the overlay-side half of the pin, and
+# ``ss-console``'s escalator tests are the writer-side half.
+
+
+def _suppressed(led, ts, basis, reason=None, skill="deadline-miss-escalator"):
+    metadata = {"decision_basis": basis, "platform": "cron-pre-run"}
+    if reason is not None:
+        metadata["degraded_reason"] = reason
+    led.add(ts, "SUPPRESSED_WAKE", metadata, skill_name=skill)
+
+
+def test_a_degraded_suppression_counts_and_moves_the_marker(tmp_path):
+    """A routine that withheld its own unfit output must page, not vanish. The
+    suppression was deliberate; the silence it creates must not be."""
+    facts = _facts(
+        tmp_path,
+        lambda led: _suppressed(
+            led,
+            _ts(3),
+            "digest_degraded_suppressed",
+            reason="12 deadlines withheld, nearest 2 days out, 12 lookups failed",
+        ),
+    )
+    assert facts.count == 1
+    assert facts.degraded == 1
+    assert facts.refused == 0 and facts.unsent == 0
+    assert facts.last_ts == _ts(3)
+    (event,) = facts.events
+    assert event["kind"] == "degraded"
+    assert "12 deadlines withheld" in event["reason"]
+
+
+def test_the_stripped_wake_basis_also_pages(tmp_path):
+    """``digest_degraded_audit_unavailable`` — the suppress row could not be
+    written so the turn woke stripped — is the SAME failure to reach a human,
+    and the prefix match is what keeps a new sibling basis paging by default."""
+    facts = _facts(
+        tmp_path, lambda led: _suppressed(led, _ts(4), "digest_degraded_audit_unavailable")
+    )
+    assert facts.degraded == 1
+    assert facts.events[0]["reason"] == "digest_degraded_audit_unavailable"
+
+
+def test_an_ordinary_suppressed_wake_is_not_degraded(tmp_path):
+    """The daily quiet tick — nothing in escalation range — is the healthy case
+    and must never page."""
+    facts = _facts(
+        tmp_path, lambda led: _suppressed(led, _ts(5), "no_deadline_in_escalation_range")
+    )
+    assert facts.count == 0
+    assert facts.degraded == 0

@@ -565,7 +565,9 @@ def _days_from_today_bucket(canonical: str) -> str:
     return ">365d"
 
 
-def _identifier_refusal_message(unverified: list, *, seat_sourced: bool = False) -> str:
+def _identifier_refusal_message(
+    unverified: list, *, seat_sourced: bool = False, register_was_empty: bool = False
+) -> str:
     """What the model sees on a refusal. Names kinds only — never raw values,
     never scan mechanics (which would teach evasion routes).
 
@@ -575,15 +577,39 @@ def _identifier_refusal_message(unverified: list, *, seat_sourced: bool = False)
     can see it read the value ten minutes ago, in a skill file. A refusal whose
     reason the reader can disprove is a refusal the reader works around; naming
     the actual distinction is what makes it followable.
+
+    ``register_was_empty`` REMOVES the remove-the-value escape hatch. On
+    2026-08-24 the pilot's escalator was refused three times on an empty
+    register, complied with "or remove the unverified value and state that it
+    needs confirmation" fifteen items at a time, and shipped a digest where
+    every line read "matter number unavailable" — an artifact worse than the one
+    refused, passed by the gate that refused it. Removing one stray unverified
+    value from an otherwise-sourced draft is a legitimate path; removing EVERY
+    value because nothing was read is laundering a failed run into a deliverable.
+    When nothing was read this session, the only honest moves are to read the
+    source records or to stop and report the run failed — so that is all the
+    refusal offers.
     """
     kinds = sorted({h.kind.value for h in unverified})
-    message = (
-        "Refused: this content contains identifier(s) not traceable to anything "
-        f"read this session ({', '.join(kinds)}). Re-read the source record that "
-        "contains the correct value and include it exactly as it appears there — "
-        "or remove the unverified value and state that it needs confirmation. "
-        "Do not guess, derive, or reformat identifiers."
-    )
+    if register_was_empty:
+        message = (
+            "Refused: this content contains identifier(s) not traceable to anything "
+            f"read this session ({', '.join(kinds)}), and nothing has been read from "
+            "the firm's records this session, so none of it can be verified. Do NOT "
+            "send a version with the unverified values removed — a report that names "
+            "no records is not a deliverable. Read the source records and include "
+            "each value exactly as it appears there, or stop without sending and "
+            "state that this run failed and needs attention. "
+            "Do not guess, derive, or reformat identifiers."
+        )
+    else:
+        message = (
+            "Refused: this content contains identifier(s) not traceable to anything "
+            f"read this session ({', '.join(kinds)}). Re-read the source record that "
+            "contains the correct value and include it exactly as it appears there — "
+            "or remove the unverified value and state that it needs confirmation. "
+            "Do not guess, derive, or reformat identifiers."
+        )
     if seat_sourced:
         message += (
             " At least one of these appears in your own instructions, skills, or "
@@ -750,7 +776,11 @@ def _check_identifiers(
     if should_block:
         return {
             "action": "block",
-            "message": _identifier_refusal_message(unverified, seat_sourced=seat_sourced),
+            "message": _identifier_refusal_message(
+                unverified,
+                seat_sourced=seat_sourced,
+                register_was_empty=register_was_empty,
+            ),
         }
     return None
 

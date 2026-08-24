@@ -15,13 +15,17 @@ had no source. What was missing was the source, not a looser rule.
 So the script's read becomes a source, and the whole design is about keeping it
 that and nothing more:
 
-* **A projection, not a payload.** Only DATE atoms are handed over and only date
-  atoms are seeded. An ACK code, a subject line, a matter caption or a sentence
-  of the script's prose never reaches the register — a value the script composed
-  must not verify just because the script wrote it down.
-* **Bound to one session.** The file carries the instant the script started, and
-  a session may take it only if that session began within
-  :data:`DEFAULT_WINDOW` of it. Yesterday's file cannot certify today's draft.
+* **A projection, not a payload.** Only DATE atoms and validated
+  ``(matterNumber, dates)`` records are handed over and seeded. An ACK code, a
+  subject line, a matter caption or a sentence of the script's prose never
+  reaches the register — a value the script composed must not verify just
+  because the script wrote it down. Records seed as ASSOCIATIONS (pairs), so a
+  seeded number cannot certify a date from a different matter.
+* **Bound to one session.** The file carries the instant the script started,
+  and a session may take it only while the file is younger than
+  :data:`DEFAULT_WINDOW` (recency on the reader's own clock — see
+  :func:`take_handoff` for why the session-stamp window this shipped with was
+  inert in production). Yesterday's file cannot certify today's draft.
 * **Consumed once.** Taking renames the file to ``<skill>.consumed.json``, so a
   second turn — a retry, a peer thread, an interactive session that happens to
   resolve to the same routine — finds nothing.
@@ -80,29 +84,56 @@ _MAX_DATES = 200
 #: Cap on the length of a single atom. Real dates are ten characters.
 _MAX_ATOM_CHARS = 64
 
+#: Cap on structured records one handoff may carry. A digest names tens of
+#: matters, not hundreds; past this the file is a bug or a probe.
+_MAX_RECORDS = 100
 
-def handoff_dir(hermes_home: str | None = None) -> Path:
+#: How far in the FUTURE a file's ``started_at`` may sit and still bind.
+#: Recency binding compares the writer's stamp against the reader's clock;
+#: both are the same Machine, but two processes can disagree by scheduler
+#: latency and coarse clock steps. Two minutes absorbs that without letting a
+#: stamp meaningfully from the future (a corrupt or forged value) bind.
+_MAX_CLOCK_SKEW = timedelta(minutes=2)
+
+
+def handoff_dir(hermes_home: str | None = None, persona: str | None = None) -> Path:
+    """The handoff directory — under the PERSONA home when ``persona`` is given.
+
+    WHY TWO ROOTS (the 2026-08-24 pilot probe, ss-console#2547 defect A). The
+    scheduler runs a persona's ``pre_run.py`` with ``HERMES_HOME`` set to the
+    persona home (``/opt/data/profiles/operator``), so the writer lands its file
+    under that root. The agent process reading in ``pre_llm_call`` has
+    ``HERMES_HOME=/opt/data``. The merged seeding shipped, ran, wrote a perfect
+    file — and the reader looked one root up and found nothing, every day. A
+    reader that knows the routine's persona can look where the writer actually
+    wrote; the plain root stays as the fallback for seats and tests where the
+    two processes share one ``HERMES_HOME``.
+    """
     home = hermes_home or os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME
-    return Path(home) / _HANDOFF_RELDIR
+    base = Path(home)
+    if persona:
+        base = base / "profiles" / _safe_skill(persona)
+    return base / _HANDOFF_RELDIR
 
 
-def handoff_path(skill: str, hermes_home: str | None = None) -> Path:
+def handoff_path(skill: str, hermes_home: str | None = None, persona: str | None = None) -> Path:
     """Where ``skill``'s handoff lives. One file per skill, overwritten each run.
 
     The skill name is sanitized rather than trusted: it reaches this module from
     a script's own ``--skill`` argument, and a name containing a separator would
     otherwise choose the path. A sanitized name can only ever name a file inside
-    the handoff directory.
+    the handoff directory. The persona name gets the same treatment for the same
+    reason.
     """
-    return handoff_dir(hermes_home) / f"{_safe_skill(skill)}.json"
+    return handoff_dir(hermes_home, persona) / f"{_safe_skill(skill)}.json"
 
 
-def consumed_path(skill: str, hermes_home: str | None = None) -> Path:
+def consumed_path(skill: str, hermes_home: str | None = None, persona: str | None = None) -> Path:
     """Where a taken handoff is renamed to. Kept (not deleted) so an operator
     reading the volume after a refusal can see whether a handoff existed at
     all — the difference between "the script wrote nothing" and "the window
     missed" is the first question anyone will ask."""
-    return handoff_dir(hermes_home) / f"{_safe_skill(skill)}.consumed.json"
+    return handoff_dir(hermes_home, persona) / f"{_safe_skill(skill)}.consumed.json"
 
 
 def _safe_skill(skill: str) -> str:
@@ -160,12 +191,63 @@ def _date_atoms(values: Iterable[object] | None) -> list[str]:
     return out
 
 
+def _record_entries(values: object) -> list[dict]:
+    """The structured records a session may seed associations from.
+
+    Same read-side enforcement posture as :func:`_date_atoms`, one level up: the
+    writer is code in another repository, so the field SHAPE is not trusted. A
+    record qualifies when its ``matterNumber`` reads as a case number and
+    nothing else under the identifier gate's own extractor, and its ``dates``
+    survive :func:`_date_atoms`. Anything the extractor reads differently — an
+    ACK code, a GUID, a sentence — is dropped whole, so a script cannot launder
+    a composed value into the register by wrapping it in a record.
+
+    WHY RECORDS AT ALL (2026-08-24, the degraded-digest incident). The original
+    projection carried dates only, and matter ids were deliberately withheld —
+    at that point nothing had asked for them. Then the pilot's escalator shipped
+    a digest where every item read "matter number unavailable", and the fix the
+    Captain directed projects real matter numbers from the firm's records into
+    the digest by code. Those numbers must verify, and they must verify AS
+    ASSOCIATIONS — ``(number, date)`` pairs per record — because a bare-atom
+    seeding would let the model pair any seeded number with any seeded date,
+    which is the exact mispairing the register's pair check exists to catch.
+    """
+    from shared.identifier_filter import IdKind, ProvenanceRegister, unverified_identifiers
+
+    out: list[dict] = []
+    if not isinstance(values, list):
+        return out
+    for entry in values:
+        if len(out) >= _MAX_RECORDS:
+            break
+        if not isinstance(entry, dict):
+            continue
+        number = entry.get("matterNumber")
+        if not isinstance(number, str):
+            continue
+        number = number.strip()
+        if not number or len(number) > _MAX_ATOM_CHARS:
+            continue
+        try:
+            hits = unverified_identifiers(number, ProvenanceRegister())
+        except Exception:  # noqa: BLE001 — an unscannable value is not a number
+            continue
+        if not hits or not all(hit.kind is IdKind.CASE_NUMBER for hit in hits):
+            continue
+        dates = _date_atoms(entry.get("dates"))
+        if not dates:
+            continue
+        out.append({"matterNumber": number, "dates": dates})
+    return out
+
+
 def write_handoff(
     skill: str,
     started_at: datetime,
     dates: Iterable[object] | None,
     matter_ids: Iterable[object] | None = None,
     hermes_home: str | None = None,
+    records: list[dict] | None = None,
 ) -> Path | None:
     """Record what this run of ``skill`` read, for the session about to start.
 
@@ -178,9 +260,15 @@ def write_handoff(
 
     ``matter_ids`` are recorded but NOT projected by :func:`take_handoff`. They
     are written because the file is also a forensic record of what the script
-    saw, and withheld from the projection because seeding matter numbers would
-    widen the gate along an axis nothing has asked for — the 2026-08-19 refusals
-    were date atoms, and a control should close the hole that was measured.
+    saw. (They were originally withheld from the projection because nothing had
+    asked for matter numbers; since the 2026-08-24 degraded-digest incident the
+    projection DOES carry matter numbers — but only through ``records``, whose
+    read-side validation is :func:`_record_entries`. Bare GUID matter ids still
+    never seed anything.)
+
+    ``records`` is the structured half: ``[{"matterNumber": …, "dates": […]}]``,
+    one entry per matter the script's pull resolved, associations known in code
+    rather than inferred. Stored lightly here; validated on the read side.
 
     Atomic by temp-file + rename inside the same directory, so a reader can only
     ever see a whole file. 0600 on the file, 0700 on the directory: the handoff
@@ -199,6 +287,15 @@ def write_handoff(
             "dates": _clean_atoms(dates),
             "matter_ids": _clean_atoms(matter_ids),
         }
+        if records:
+            payload["records"] = [
+                {
+                    "matterNumber": str(entry.get("matterNumber") or ""),
+                    "dates": _clean_atoms(entry.get("dates")),
+                }
+                for entry in records[:_MAX_RECORDS]
+                if isinstance(entry, dict)
+            ]
         target = handoff_path(skill, hermes_home)
         fd, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=".handoff-", suffix=".tmp")
         try:
@@ -225,54 +322,80 @@ def take_handoff(
     session_started_at: datetime | None,
     hermes_home: str | None = None,
     window: timedelta = DEFAULT_WINDOW,
+    persona: str | None = None,
+    now: datetime | None = None,
 ) -> dict | None:
     """The projection this session may seed from, or ``None``.
 
-    Returns ``{"dates": [...]}`` and nothing else, where every entry is a value
-    the identifier gate itself reads as a date (:func:`_date_atoms`). Two
-    narrowings, both enforced here rather than asked for at the call site,
-    because a caller cannot seed what it never receives: the file's other FIELDS
-    are not returned, and a non-date sitting in the ``dates`` field is not
-    returned either.
+    Returns ``{"dates": [...], "records": [...]}`` and nothing else: dates that
+    the identifier gate itself reads as dates (:func:`_date_atoms`), and records
+    that survive :func:`_record_entries` — the file's other fields are not
+    returned, and a non-date in ``dates`` or a non-case-number in a record is
+    not returned either. Enforced here rather than asked for at the call site,
+    because a caller cannot seed what it never receives.
 
-    Four ways to get ``None``, and they are all the same answer to the caller —
-    seed nothing, let the gate do what it does today:
+    Ways to get ``None``, all the same answer to the caller — seed nothing, let
+    the gate do what it does today:
 
     * no file (the script did not run, or wrote no handoff);
     * an unreadable or malformed file;
     * ``session_started_at`` is ``None`` (a non-cron session — an interactive
       turn must never inherit a routine's reads);
-    * the session started outside ``[started_at, started_at + window]``.
+    * a ``started_at`` that is missing, unparseable, or NAIVE — the writer
+      stamps an explicit UTC offset, and a stamp without one cannot be compared
+      against any clock honestly;
+    * a file older than ``window``, or stamped further than the skew allowance
+      into the future.
 
-    ON THE TWO CLOCK READINGS. ``session_started_at`` arrives NAIVE, parsed from
-    the digits in a cron session id (``cron_..._YYYYMMDD_HHMMSS``), and nothing
-    in the id says whether the scheduler formatted local time or UTC. Both
-    readings are tried and either may satisfy the window.
+    BINDING IS BY FILE RECENCY, NOT BY THE SESSION STAMP (2026-08-24, defect B).
+    The first shipped version parsed the digits out of the cron session id and
+    window-matched them against the file, trying the naive stamp on both the UTC
+    and the process-local clock — on the theory that those two readings differ by
+    the seat's UTC offset. The pilot falsified the theory the first morning it
+    ran: the scheduler stamps the id with the fire time in the ROUTINE'S cron
+    timezone (Phoenix, ``…_070026`` for a 14:00Z fire) while the container's
+    local clock is UTC, so both readings collapsed to the same wrong instant,
+    seven hours outside a twenty-minute window. Nothing bound, nothing seeded,
+    and the gate kept refusing in silence — the exact inert-control failure this
+    module's own docstring warned about.
 
-    That is close to free rather than a widening, because the two readings differ
-    by exactly the seat's UTC offset. On a seat whose offset exceeds the window —
-    the pilot and A&P are both Phoenix, UTC-7 — at most one reading can ever land
-    inside a twenty-minute window, so trying both picks the right clock instead
-    of guessing it. On a UTC seat the two readings are the same instant and the
-    question does not arise. Only a seat within twenty minutes of UTC could see
-    both match, and there the two candidate sessions are minutes apart anyway.
-
-    The alternative was to pick one clock, and picking wrong is the failure this
-    module exists to end: nothing would bind, nothing would seed, and the gate
-    would keep refusing in silence with no signal that the control was inert.
+    Recency needs no theory about a third clock this module cannot see. The
+    scheduler runs the script and then starts the turn, so at the only moment a
+    legitimate reader asks, the file is seconds-to-minutes old. ``started_at``
+    (writer's clock, explicit UTC) against ``now`` (reader's clock, same
+    Machine) spans one process boundary on one host. The cron-session guard
+    (``session_started_at`` must parse at all) still keeps interactive sessions
+    out; ``skill`` still names the one file; consume-once still bounds a claim
+    to a single session.
 
     On success the file is renamed to ``<skill>.consumed.json`` before the
     projection is returned, so a second caller in the same session — or a retry
     of the same turn — gets ``None``. A file that does NOT bind is left exactly
-    where it is: it may still belong to a session that has not started yet.
+    where it is, so an operator reading the volume after a refusal can see
+    whether a handoff existed at all.
+
+    ``persona`` names the routine's persona; the persona-home directory is
+    tried FIRST (that is where a scheduler-run writer's ``HERMES_HOME`` points —
+    defect A), then the plain root. ``now`` is a test seam; production callers
+    leave it unset.
     """
     try:
         if session_started_at is None:
             return None
-        path = handoff_path(skill, hermes_home)
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError:
+        path = None
+        raw = None
+        roots: list[str | None] = [persona, None] if persona else [None]
+        found_persona: str | None = None
+        for candidate_persona in roots:
+            candidate = handoff_path(skill, hermes_home, candidate_persona)
+            try:
+                raw = candidate.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            path = candidate
+            found_persona = candidate_persona
+            break
+        if path is None or raw is None:
             return None  # no handoff for this skill — the ordinary case
         try:
             payload = json.loads(raw)
@@ -281,30 +404,32 @@ def take_handoff(
             return None
         if not isinstance(payload, dict):
             return None
-        started_at = _parse_iso(payload.get("started_at"))
+        started_at = _parse_iso_aware(payload.get("started_at"))
         if started_at is None:
             return None
-        if not _in_window(started_at, session_started_at, window):
+        moment = _as_utc(now) if now is not None else datetime.now(timezone.utc)
+        age = moment - started_at
+        if age > max(window, timedelta(0)) or age < -_MAX_CLOCK_SKEW:
             logger.info(
-                "pre_run_handoff: %s is not bound to this session (started_at=%s, "
-                "session=%s); leaving it in place",
+                "pre_run_handoff: %s is not fresh (started_at=%s, now=%s); leaving it in place",
                 path,
                 payload.get("started_at"),
-                session_started_at.isoformat(),
+                moment.isoformat(),
             )
             return None
         # The projection. NOT ``_clean_atoms``: what the file offers and what the
         # register may be seeded from are two different lists, and the difference
         # is exactly the safety property (see :func:`_date_atoms`). Keeping the
-        # file's own ``dates`` verbatim leaves the two visible side by side, so
+        # file's own fields verbatim leaves the two visible side by side, so
         # "my date did not seed" is a diagnosable question rather than a silent
         # one.
         dates = _date_atoms(payload.get("dates"))
+        records = _record_entries(payload.get("records"))
         # Consume BEFORE returning. A rename that failed after the caller had the
         # projection would leave a handoff that seeds every subsequent turn, which
         # is the sticky-provenance shape this binding exists to prevent.
         try:
-            os.replace(path, consumed_path(skill, hermes_home))
+            os.replace(path, consumed_path(skill, hermes_home, found_persona))
         except OSError as exc:
             logger.warning(
                 "pre_run_handoff: could not consume %s (%s); refusing to seed from a "
@@ -313,23 +438,11 @@ def take_handoff(
                 exc,
             )
             return None
-        return {"dates": dates}
+        return {"dates": dates, "records": records}
     except Exception as exc:  # noqa: BLE001 — best-effort by contract
         logger.warning("pre_run_handoff: take failed for %r: %s", skill, exc)
         return None
 
-
-def _in_window(started_at: datetime, session_started_at: datetime, window: timedelta) -> bool:
-    """True iff ``session_started_at``, read on EITHER clock, falls in the window."""
-    span = max(window, timedelta(0))
-    if session_started_at.tzinfo is not None:
-        candidates = [session_started_at.astimezone(timezone.utc)]
-    else:
-        candidates = [
-            session_started_at.replace(tzinfo=timezone.utc),  # the id was UTC
-            session_started_at.astimezone(timezone.utc),  # the id was seat-local
-        ]
-    return any(started_at <= candidate <= started_at + span for candidate in candidates)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -349,6 +462,22 @@ def _parse_iso(value: object) -> datetime | None:
     except ValueError:
         return None
     return _as_utc(parsed)
+
+
+def _parse_iso_aware(value: object) -> datetime | None:
+    """Like :func:`_parse_iso`, but a NAIVE stamp is rejected rather than read
+    on the local clock. Recency binding compares the writer's stamp against the
+    reader's clock; a stamp that does not say which clock it was on cannot make
+    that comparison honest, and the real writer always stamps UTC."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 __all__ = [

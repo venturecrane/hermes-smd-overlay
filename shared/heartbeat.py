@@ -105,12 +105,12 @@ class SendRefusalFacts(NamedTuple):
     either kind (the console's paging marker); ``events`` is the newest few,
     each naming the routine, the tool, and the reason — never a value.
 
-    ``refused`` and ``unsent`` break the total apart. Only ``count`` rides the
-    heartbeat — the console pages on the timestamp, not on a level, and two more
-    integers would be two more fields to ingest for no decision they change. The
-    split exists for the retro-falsifier, whose known-good table is per kind, so
-    a run that matched the total by getting both halves wrong would still be
-    caught.
+    ``refused``, ``unsent``, and ``degraded`` break the total apart. Only
+    ``count`` rides the heartbeat — the console pages on the timestamp, not on a
+    level, and more integers would be more fields to ingest for no decision they
+    change. The split exists for the retro-falsifier, whose known-good table is
+    per kind, so a run that matched the total by getting the halves wrong would
+    still be caught.
     """
 
     count: int
@@ -118,6 +118,7 @@ class SendRefusalFacts(NamedTuple):
     events: list[dict]
     refused: int = 0
     unsent: int = 0
+    degraded: int = 0
 
 
 #: Trailing window. A day, because the routines this watches fire daily: a
@@ -188,6 +189,16 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
       items, whose session then dispatched nothing to a real address. This is
       the 2026-08-20 instance: five items waiting and not one send attempted,
       which no refusal-shaped query can see because there is no refusal.
+    * ``degraded`` — a ``SUPPRESSED_WAKE`` whose ``decision_basis`` starts with
+      ``digest_degraded``: the routine's own pre-run judged its output unfit to
+      send (2026-08-24 — a digest naming zero matters) and withheld it. The
+      person the digest was for got nothing, deliberately; this kind is what
+      turns that deliberate nothing into a page instead of a silence. The reason
+      carries the run's own counts from the row metadata so the page reads
+      "N deadlines withheld", not a bare basis token. The literal
+      ``digest_degraded`` prefix is written by ``ss-console``'s
+      ``operator/skills/deadline-miss-escalator/pre_run.py`` — two repos, one
+      string; the pin lives in ``tests/test_heartbeat.py``.
 
     THE SESSION SPAN, and why it is joined on skill and time. Neither end of it
     can be joined on a session id, because neither row has one: ``EMITTED_WAKE``
@@ -209,7 +220,8 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
     horizon = _iso_floor((_as_utc(now) - timedelta(hours=SEND_REFUSAL_WINDOW_HOURS)).isoformat())
     refused = _refused_events(conn, horizon, cutoff)
     unsent = _unsent_events(conn, horizon, cutoff)
-    events = refused + unsent
+    degraded = _degraded_events(conn, horizon, cutoff)
+    events = refused + unsent + degraded
     # Newest first, so the cap keeps the newest rather than whichever kind the
     # queries happened to run in.
     events.sort(key=lambda e: e["ts"], reverse=True)
@@ -220,6 +232,7 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
         events=events[:_SEND_REFUSAL_EVENT_CAP],
         refused=len(refused),
         unsent=len(unsent),
+        degraded=len(degraded),
     )
 
 
@@ -330,6 +343,40 @@ def _unsent_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[
         except (TypeError, ValueError):
             pass
         out.append(event)
+    return out
+
+
+def _degraded_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[dict]:
+    """Suppressed wakes whose basis says the routine withheld a degraded output.
+
+    The matching is a PREFIX (``digest_degraded``), not an equality, because the
+    suppression path has more than one basis (``digest_degraded_suppressed`` for
+    the clean suppress, ``digest_degraded_audit_unavailable`` for the stripped
+    wake when the suppress row itself could not be written) and a new sibling
+    basis must page by default rather than by remembering to update this query.
+    """
+    rows = conn.execute(
+        "SELECT ts, skill_name,"
+        " json_extract(metadata,'$.routine') AS routine,"
+        " json_extract(metadata,'$.decision_basis') AS basis,"
+        " json_extract(metadata,'$.degraded_reason') AS reason"
+        " FROM audit_log"
+        " WHERE action_type = 'SUPPRESSED_WAKE'"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+        " AND json_extract(metadata,'$.decision_basis') LIKE 'digest_degraded%'",
+        (horizon, cutoff),
+    ).fetchall()
+    out: list[dict] = []
+    for ts, skill_name, routine, basis, reason in rows:
+        out.append(
+            _event(
+                ts=ts,
+                kind="degraded",
+                routine=routine or skill_name,
+                tool=None,
+                reason=str(reason or basis or "digest_degraded"),
+            )
+        )
     return out
 
 
