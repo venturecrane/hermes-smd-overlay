@@ -363,8 +363,21 @@ def _degraded_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> lis
         " FROM audit_log"
         " WHERE action_type = 'SUPPRESSED_WAKE'"
         " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
-        " AND json_extract(metadata,'$.decision_basis') LIKE 'digest_degraded%'",
-        (horizon, cutoff),
+        " AND json_extract(metadata,'$.decision_basis') LIKE 'digest_degraded%'"
+        # PARTIAL degradation: the digest shipped (explicit absences per item)
+        # but some lookups failed, and the pre_run stamped degraded_reason onto
+        # the EMITTED_WAKE row instead. Same page, different row shape — a
+        # 1-of-40 run must not sail silently just because it sailed.
+        " UNION ALL"
+        " SELECT ts, skill_name,"
+        " json_extract(metadata,'$.routine') AS routine,"
+        " json_extract(metadata,'$.decision_basis') AS basis,"
+        " json_extract(metadata,'$.degraded_reason') AS reason"
+        " FROM audit_log"
+        " WHERE action_type = 'EMITTED_WAKE'"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+        " AND json_extract(metadata,'$.degraded_reason') IS NOT NULL",
+        (horizon, cutoff, horizon, cutoff),
     ).fetchall()
     out: list[dict] = []
     for ts, skill_name, routine, basis, reason in rows:
