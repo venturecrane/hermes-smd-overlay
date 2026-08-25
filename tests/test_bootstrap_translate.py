@@ -1100,7 +1100,8 @@ def test_translate_materializes_clio_stdio_mcp_server(tmp_path, monkeypatch):
     assert clio["env"]["ENCRYPTION_KEY"] == "f" * 64  # remapped from CLIO_ENCRYPTION_KEY
     # static env: TRANSPORT=stdio — without it clio-mcp defaults to HTTP mode and
     # fatals ("MCP_BASE_URL is required in HTTP mode"), closing the stdio
-    # connection on launch (the pilot-law first-boot failure).
+    # connection on launch (the pilot-law first-boot failure; that seat was
+    # retired 2026-08-25, the incident it names is why this test exists).
     assert clio["env"]["TRANSPORT"] == "stdio"
 
 

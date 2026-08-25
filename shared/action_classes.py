@@ -433,8 +433,24 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_delete_file": ActionClass.DESTRUCTIVE,
     # ----------------------------------------------------------------------
     # Clio MCP (oktopeak/clio-mcp v2.0.0) — the law wedge's ORIGINAL
-    # practice-management system of record, bound by pilot-law (Ashton & Price)
-    # and demo-law as `mcp:clio-oktopeak`. Hermes sanitizes the server key
+    # practice-management system of record. It was bound as `mcp:clio-oktopeak`
+    # by pilot-law and demo-law; NEITHER SEAT EXISTS ANY MORE (pilot-law was the
+    # Clio sandbox, authored 2026-06-05, never provisioned, retired in full
+    # 2026-08-25; demo-law has no seat directory either), and as of that date no
+    # customer.yaml binds Clio at all — the only remaining mention is the option
+    # menu in operator/customers/_template/customer.yaml.
+    #
+    # An earlier version of this comment read "bound by pilot-law (Ashton &
+    # Price)". That was wrong and worth correcting rather than deleting: Ashton
+    # & Price is the paying firm and runs SMOKEBALL, not Clio. Conflating a
+    # disposable sandbox with a real client in a trust-layer comment is how a
+    # reader ends up reasoning about the wrong seat.
+    #
+    # THE CLASSIFICATIONS BELOW STAY ANYWAY. They are fail-closed mappings, and
+    # their value is exactly that they are in place BEFORE a binding returns.
+    # Deleting them because nothing binds Clio today would restore EFF-07 the
+    # moment one does: unmapped tools fall through to READ -> autonomous.
+    # Hermes sanitizes the server key
     # `clio-oktopeak` -> `clio_oktopeak` (sanitize_mcp_name_component: every
     # non-[A-Za-z0-9_] char -> `_`), so every tool registers as
     # mcp_clio_oktopeak_<tool>. Surface pinned in
@@ -444,10 +460,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # THIS BLOCK CLOSES A LIVE FAIL-OPEN (EFF-07): the connector materializes
     # and is bound on two running Machines, but had ZERO classified tools — so
     # every Clio write went unmapped->READ->autonomous, fired even on an
-    # injection-tainted turn. The pilot-law config comment claiming create_matter
-    # / create_calendar_entry are "GATED / fail-closed" described only the SKILL
-    # authoring posture (draft-and-surface), which injection bypasses; nothing in
-    # the trust layer enforced it. Mirrors the Smokeball classification exactly:
+    # injection-tainted turn. The retired pilot-law config's comment claiming
+    # create_matter / create_calendar_entry were "GATED / fail-closed" described
+    # only the SKILL authoring posture (draft-and-surface), which injection
+    # bypasses; nothing in the trust layer enforced it. That config is gone, but
+    # the lesson is the reason this block exists: a claim in a customer.yaml
+    # comment is not a control. Mirrors the Smokeball classification exactly:
     # reads -> READ; note/task/document writes -> INTERNAL_WRITE; the
     # system-of-record / financial / scheduling commitments (create_matter,
     # create_calendar_entry, log_time_entry, create_activity) -> COMMITMENT

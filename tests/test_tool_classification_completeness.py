@@ -89,9 +89,11 @@ def _is_decided(tool_name: str) -> bool:
 # "anywhere" includes ss-console operator/customers/, which is NOT visible from
 # this overlay worktree. That invisibility is the trap: the first occupant
 # here, clio-oktopeak, was carved out as "dormant — bound to no live customer"
-# based on the overlay repo alone, then found bound by TWO live law configs
-# (pilot-law / Ashton & Price, and demo-law) as their active PracticeManagement
-# backend. A passing test that launders a live fail-open into "benign-dormant"
+# based on the overlay repo alone, then found bound by TWO law configs
+# (pilot-law and demo-law) as their active PracticeManagement backend. Both of
+# those seats have since been retired, which does NOT weaken the lesson: the
+# carve-out was wrong when it was written, and it was wrong for a reason that
+# outlives the seats. A passing test that launders a live fail-open into "benign-dormant"
 # is worse than no test. So: prefer classifying the surface
 # (PINNED_CONNECTOR_SURFACES) over a carve-out, and never assert dormancy from
 # the overlay alone. An entry here without an attached, current proof of
@@ -208,13 +210,20 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_smokeball_unprotect_funds",
         }
     ),
-    # Clio (mcp:clio-oktopeak, @oktopeak/clio-mcp) — the LIVE practice-management
-    # backend for the law configs that ride Clio while the Smokeball API is still
-    # gated: pilot-law (Ashton & Price) and demo-law both bind
-    # backend: mcp:clio-oktopeak, enabled: true (ss-console
-    # operator/customers/{pilot-law,demo-law}/customer.yaml). This is NOT a
-    # dormant entry — it is bound and active, so the full surface MUST be
-    # classified (it was the live EFF-07 hole until the surface was mapped).
+    # Clio (mcp:clio-oktopeak, @oktopeak/clio-mcp) — formerly the practice-
+    # management backend for the law configs that rode Clio while the Smokeball
+    # API was gated: pilot-law and demo-law both bound
+    # backend: mcp:clio-oktopeak, enabled: true. NEITHER SEAT EXISTS ANY MORE
+    # (pilot-law retired 2026-08-25; demo-law has no seat directory), and as of
+    # that date no customer.yaml binds Clio — the only mention left is the option
+    # menu in operator/customers/_template/customer.yaml.
+    #
+    # The surface stays classified regardless, and this is deliberate. The entry
+    # is NOT being converted to a dormancy carve-out: a carve-out is exactly what
+    # produced the live EFF-07 hole here the first time, and the header above
+    # says never to assert dormancy from the overlay alone. Classified-in-advance
+    # costs nothing; unmapped-on-return costs autonomous writes on an
+    # injection-tainted turn.
     # Runtime prefix is mcp_clio_oktopeak_ (Hermes sanitize_mcp_name_component
     # re.sub([^A-Za-z0-9_], "_") folds the dash). The 23-tool surface is sourced
     # from ss-console operator/verticals/law-firm/clio-surface.md; reads → READ,
