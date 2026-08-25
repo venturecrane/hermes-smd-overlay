@@ -831,7 +831,7 @@ def test_law_authored_autonomous_clean_send_is_not_floored(monkeypatch, env_vert
         monkeypatch, enforce, {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS}
     )
     args = {"subject": "Saw your note", "text": "Got it, that works on my end. Talk soon."}
-    assert enforce.evaluate_tool_call("agentmail:send_message", args, "pilot-law") is None
+    assert enforce.evaluate_tool_call("agentmail:send_message", args, "acme") is None
 
 
 def test_declared_floor_narrows_authored_autonomous_send_to_draft(monkeypatch) -> None:
@@ -871,7 +871,7 @@ def test_law_unauthored_send_stays_fail_closed(monkeypatch, env_vertical_law) ->
     granted nothing: unauthored is still no send, no draft."""
     enforce = _load_trust_module("enforce")
     _set_exposure(monkeypatch, enforce, {})
-    result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "pilot-law")
+    result = enforce.evaluate_tool_call("agentmail:send_message", {"text": "hi there"}, "acme")
     assert isinstance(result, dict)
     assert result["action"] == "block"
 
