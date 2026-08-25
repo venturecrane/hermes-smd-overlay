@@ -593,11 +593,29 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     #     tiers answer different orders of harm.
     _webhook_expected_tools_check()
 
+    # This line is the surface an operator reads to learn what was actually
+    # PROVEN at boot, and every check above it _die()s on failure — so the line
+    # is unreachable unless all of them passed. That makes it the seat's own
+    # report of its governance state, and it must name every gate that ran.
+    #
+    # It had drifted twice. It said "ACTIVE + AUDITING + SPEND-CAPPED" while the
+    # webhook read-surface check was already fail-closed and unnamed, and it
+    # stayed that way when the runaway-loop arms became a boot gate
+    # (overlay#319/#320). A reader would have concluded the seat's only circuit
+    # breaker was the spend one — a belief that was true for months and is
+    # exactly what the loop-brake work ended. A status line asserting LESS than
+    # the system knows is the same failure class as one asserting more.
+    #
+    # tests/test_activation_completion_log.py fails when a fail-closed gate is
+    # added without a claim here.
     logger.info(
-        "SMD overlay ACTIVE + AUDITING + SPEND-CAPPED on the live gateway: %d hook "
-        "type(s) in the live singleton, trust gate fired on banned %r, audit row written "
-        "(before=%s after=%s), cost breaker tripped+refused in the boot self-check "
-        "— self-check passed, operator is governed, auditing, and spend-capped.",
+        "SMD overlay ACTIVE + AUDITING + SPEND-CAPPED + LOOP-BRAKED on the live gateway: "
+        "%d hook type(s) in the live singleton, trust gate fired on banned %r, audit row "
+        "written (before=%s after=%s), cost breaker tripped+refused in the boot self-check, "
+        "runaway-loop arms proven fed through post_tool_call (a failure envelope trips the "
+        "ladder, a success resets the streak, an unrecognised status moves nothing), "
+        "webhook read surface resolved — self-check passed, operator is governed, "
+        "auditing, spend-capped, and loop-braked.",
         len(present),
         _BANNED_PROBE_TOOL,
         before,
