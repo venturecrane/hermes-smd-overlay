@@ -272,3 +272,43 @@ def html_text_content(rendered: str) -> str:
     longer holds.
     """
     return html_lib.unescape(_RE_TAG.sub(" ", rendered))
+
+
+# --- the block grammar, named ------------------------------------------------
+# ``looks_like_report`` and ``render_markdown`` both classify a line by the same
+# regexes. ``shared.message_structure`` needs that classification too, and a
+# second parser living next to this one is how two "grammars" drift into
+# disagreeing about what a list item is. So the classification gets a name and
+# an interface, and there stays exactly one place that decides.
+
+
+#: What ``block_kind`` returns for a line that opens a block. A line matching
+#: none of these is prose, and belongs to whatever paragraph is open.
+HEADING = "heading"
+ORDERED_ITEM = "ordered_item"
+UNORDERED_ITEM = "unordered_item"
+RULE = "rule"
+QUOTE = "quote"
+CONTINUATION = "continuation"
+
+
+def block_kind(line: str) -> str | None:
+    """Name the block this line opens, or ``None`` when the line is prose.
+
+    Pure and total: every string gets an answer and nothing is raised. The order
+    of the checks matches ``_render_line``'s, which is what makes this a
+    description of the renderer rather than a second opinion about it.
+    """
+    if _RE_HR.match(line):
+        return RULE
+    if _RE_HEADING.match(line):
+        return HEADING
+    if _RE_OL_ITEM.match(line):
+        return ORDERED_ITEM
+    if _RE_UL_ITEM.match(line):
+        return UNORDERED_ITEM
+    if _RE_QUOTE.match(line):
+        return QUOTE
+    if _RE_CONT.match(line):
+        return CONTINUATION
+    return None

@@ -142,6 +142,14 @@ _REASON_SPEC_HASH_MISMATCH = "spec_hash_mismatch"
 #: dispositions (ss-console #2234).
 _REASON_BODY_INDETERMINATE = "body_indeterminate"
 
+#: The repo-authored structure floor broke (ss#2090 refiled, the 2026-08-25
+#: digest). Deliberately NOT ``_REASON_FORMAT_VIOLATION``: that reason means the
+#: CUSTOMER's authored shape rules broke, read out of the root-owned manifest.
+#: Reusing it would tell an operator the firm's format rule failed on a seat
+#: where the firm authored nothing — the same misattribution class as the
+#: 2026-07-31 "trust-ceiling evaluation failed" wording.
+_REASON_STRUCTURE_FLOOR = "structure_floor"
+
 #: Per-property control states. The question is not "what is installed" but
 #: "what can this process PROVE about what is installed" — see
 #: ``shared.spec_manifest.manifest_state``.
@@ -626,3 +634,113 @@ def check_spec_gate(
 
 
 __all__ = ["TEMPLATED_BODY_ARG", "check_spec_gate", "resolve_output_class"]
+
+
+def check_structure_floor(
+    *,
+    tool_name: str,
+    action_class_value: str,
+    session_id: str,
+    tool_call_id: str = "",
+    body: str | None,
+    allowed: bool,
+) -> dict | None:
+    """The repo-authored structure floor (ss#2090 refiled; the 2026-08-25 digest).
+
+    Distinct from :func:`check_spec_gate` on both axes that matter. That gate
+    asks whether the CUSTOMER's authored spec was consulted, and binds only where
+    the seat declares one. This asks whether the message arrived as a document at
+    all, and binds wherever the routine is one we map — including the seats that
+    have authored nothing, which is most of them and all of them on day one.
+
+    WHAT IT COSTS, and why that is not the same answer as everywhere else
+    --------------------------------------------------------------------
+    ``staff`` PROCEEDS. Not as a concession, but as the same ruling
+    :data:`_PROCEED_ON_BROKEN_CONTROL` already encodes for the broken-control
+    case, for the same reason in the Captain's own words: a refusal there costs
+    them the message itself, silently. A person is waiting on ops mail. An ugly
+    digest is a bad morning; a missing one is the six days of 2026-08-04..09,
+    and the escalator was refused five times in a row on 2026-08-19 when a gate
+    blocked a cron turn that then simply recomposed the same body. Proceeding
+    also means this check cannot open a retry loop, because it never blocks the
+    class that runs on a schedule.
+
+    The outbound classes route to a human, because a shapeless message carrying
+    the FIRM's name to someone outside it is worth the delay.
+
+    Either way the row is written. For ``staff`` the row IS the disposition: the
+    2026-08-25 audit row read ``rules=["voice"]``, and the structural failure it
+    was sitting on had no field at all.
+
+    Returns a draft-routing block directive, or ``None`` to let the send proceed.
+    """
+    from shared import message_structure  # local import (enforce.py idiom)
+
+    try:
+        output_class = resolve_output_class(action_class_value)
+        if output_class is None:
+            return None
+
+        family = message_structure.family_for_skill(_routine_skill(session_id))
+        if family is None:
+            return None
+
+        violations = message_structure.check(body, family)
+        if not violations:
+            return None
+
+        _emit_spec_gate_audit(
+            tool_name=tool_name,
+            output_class=output_class,
+            reason=_REASON_STRUCTURE_FLOOR,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            detail=message_structure.rule_names(violations),
+        )
+
+        if output_class in _PROCEED_ON_BROKEN_CONTROL:
+            return None
+        if not allowed:
+            # Already routed to a person; nothing left for this gate to add.
+            return None
+        return {
+            "action": "block",
+            "message": (
+                f"Refused: this {output_class} message does not carry the "
+                f"structure its reader needs: {message_structure.describe(violations)}. "
+                "Re-compose it with headings and list items per this skill's "
+                "references/output-format.md. Create a draft for human review "
+                "instead. (ss#2090)"
+            ),
+        }
+    except Exception:  # noqa: BLE001 — a structure check must never break a send
+        logger.exception(
+            "spec gate: structure floor failed for %s; proceeding (the floor is a "
+            "legibility check, and failing it closed would cost the message)",
+            tool_name,
+        )
+        return None
+
+
+def _routine_skill(session_id: str) -> str | None:
+    """The skill of the cron routine this session belongs to, or ``None``.
+
+    Read from ``cron_attribution`` rather than the pre-run handoff, which cannot
+    serve: ``take_handoff`` renames the file to ``<skill>.consumed.json`` BEFORE
+    returning, so by send time it is gone; it returns ``{dates, records}`` and
+    nothing else by design; and ``daily-needs-you-digest`` never writes one at
+    all. A channel that cannot be read at the moment it is needed is worth
+    nothing, however unforgeable.
+
+    The trade, stated rather than hidden: ``cron/jobs.json`` is not inside the
+    ``.smd`` fence, so this is the weaker channel against a model that wanted to
+    evade the check. The threat model here is a model that FORGOT its format,
+    not one rewriting the cron store to publish an ugly digest.
+    """
+    from shared import cron_attribution  # local import (enforce.py idiom)
+
+    try:
+        routine = cron_attribution.resolve_routine(session_id)
+    except Exception:  # noqa: BLE001 — attribution is best-effort
+        return None
+    return getattr(routine, "skill", None) if routine is not None else None
