@@ -85,7 +85,7 @@ def _writer() -> AuditLogWriter | None:
     return _WRITER
 
 
-def _meter_loop_arms(kwargs: dict) -> None:
+def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
     """Feed the sticky-stop ladder's runaway-loop arms from one tool outcome.
 
     WHY THIS EXISTS. ADR 0062's ladder has four arms. Only the cost arm was
@@ -119,7 +119,7 @@ def _meter_loop_arms(kwargs: dict) -> None:
         status = kwargs.get("status")
         if status not in ("ok", "error", "blocked"):
             return  # unrecognised or absent envelope: record nothing, brake unchanged
-        breaker = _cost_breaker()
+        breaker = breaker if breaker is not None else _cost_breaker()
         if breaker is None:
             return  # not armed (no slug, or construction failed); already logged
         tool_name = kwargs.get("tool_name")
@@ -150,6 +150,137 @@ def _meter_loop_arms(kwargs: dict) -> None:
                 )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-audit: loop-arm metering failed: %s", exc)
+
+
+async def run_loop_arm_boot_probe() -> tuple[bool, str]:
+    """Negative-fire probe for the runaway-loop arms. Returns ``(ok, reason)``.
+
+    WHY A SECOND BOOT PROBE. ``cost_breaker.run_boot_probe`` proves the LADDER
+    halts. It cannot prove the loop arms are FED, because it drives the state
+    machine directly and the cost arm was already wired. The gap this closes is
+    the one that let ``record_tool_failure`` sit implemented, thresholded and
+    audited with no caller for months: every test passed, and nothing on a seat
+    ever called it.
+
+    So this probe drives the REAL hook handler -- ``_meter_loop_arms``, the same
+    function ``on_post_tool_call`` calls -- with the REAL envelope Hermes emits,
+    against a THROWAWAY ladder that never touches
+    ``/opt/data/smd/sticky_stop.db``. What it asserts is not "the ladder can
+    climb" but "a tool failure arriving at the hook moves it".
+
+    Three assertions, because two of them can pass while the control is useless:
+
+      1. A ``status="error"`` envelope trips the throwaway ladder to HARD_STOP.
+      2. A ``status="ok"`` envelope RESETS the streak. An arm that only climbs
+         would stop every healthy long-lived seat, so a probe that skipped this
+         would bless the worst regression this code can have.
+      3. An UNRECOGNISED envelope moves nothing. If detection ever stopped being
+         positive-only, an upstream rename would start manufacturing stops on
+         live seats -- and that failure is invisible to assertions 1 and 2.
+
+    Runs the sync handler in an executor: the activation handler owns the
+    gateway's event loop, and ``CostBreaker`` bridges to async via
+    ``asyncio.run``, which raises inside a running loop. Threading it is what
+    lets the probe exercise the real handler rather than a re-implementation of
+    it -- the re-implementation is exactly what would not have caught the
+    original bug.
+    """
+    import asyncio
+    import os
+    import sqlite3
+    import tempfile
+    from dataclasses import replace
+
+    from shared.cost_breaker import _CREATE_TABLE_SQL, CostBreaker, _NoAuditSink
+    from shared.sticky_stop import (
+        DEFAULT_THRESHOLDS,
+        SqliteStickyStopStore,
+        StickyStopLevel,
+        StickyStopMachine,
+    )
+
+    fd, tmp = tempfile.mkstemp(prefix="smd-looparm-probe-", suffix=".db")
+    os.close(fd)
+    os.unlink(tmp)
+    conn = None
+    try:
+        conn = sqlite3.connect(tmp, check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute(_CREATE_TABLE_SQL)
+        conn.commit()
+        # One failure IS the hard stop, so the probe needs a single envelope and
+        # cannot pass by accident on a ladder that merely counts.
+        thresholds = replace(
+            DEFAULT_THRESHOLDS,
+            tool_failure_warn=1,
+            tool_failure_soft_stop=1,
+            tool_failure_hard_stop=1,
+        )
+        breaker = CostBreaker(
+            customer="_probe",
+            persona="_probe",
+            machine=StickyStopMachine(
+                store=SqliteStickyStopStore(conn),
+                audit_writer=_NoAuditSink(),
+                thresholds=thresholds,
+            ),
+        )
+        loop = asyncio.get_running_loop()
+
+        async def feed(envelope: dict) -> None:
+            await loop.run_in_executor(None, _meter_loop_arms, envelope, breaker)
+
+        def level() -> str:
+            row = conn.execute(
+                "SELECT level FROM sticky_stop_state WHERE customer='_probe'"
+            ).fetchone()
+            return row[0] if row else StickyStopLevel.OK.value
+
+        def streak():
+            row = conn.execute(
+                "SELECT consecutive_tool_failures FROM sticky_stop_state WHERE customer='_probe'"
+            ).fetchone()
+            return row[0] if row else None
+
+        # 1. a failure envelope must trip it
+        await feed({"status": "error", "tool_name": "_probe_tool"})
+        if level() != StickyStopLevel.HARD_STOP.value:
+            return (
+                False,
+                f"a status=error envelope did not trip the tool-failure arm "
+                f"(level={level()}); the hook is not feeding record_tool_failure",
+            )
+
+        # 2. a success envelope must reset the streak
+        await feed({"status": "ok", "tool_name": "_probe_tool"})
+        if streak() != 0:
+            return (
+                False,
+                f"a status=ok envelope did not reset the failure streak "
+                f"(consecutive_tool_failures={streak()}); every long-lived seat "
+                "would eventually stop for no reason",
+            )
+
+        # 3. an unrecognised envelope must move nothing
+        before = streak()
+        await feed({"status": "no_such_status", "tool_name": "_probe_tool"})
+        if streak() != before:
+            return (
+                False,
+                "an unrecognised status moved the ladder; detection is no longer "
+                "positive-only, so an upstream envelope rename could stop a live seat",
+            )
+
+        return True, "loop arms fed: error trips, ok resets, unknown is inert"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"loop-arm probe raised: {type(exc).__name__}: {exc}"
+    finally:
+        if conn is not None:
+            conn.close()
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def on_post_tool_call(**kwargs: Any) -> None:
