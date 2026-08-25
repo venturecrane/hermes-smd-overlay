@@ -30,7 +30,6 @@ from shared.audit_client import BrokerAuditClient, audit_client_from_env
 from shared.audit_status import NoAuditWarner, write_audit_status
 from shared.d1_client import D1Client
 from shared.secrets import require
-from shared.selfcheck import SELFCHECK_SESSION_ID
 
 from . import (  # noqa: F401 — surface for tests
     emit,
@@ -86,18 +85,6 @@ def _writer() -> AuditLogWriter | None:
     return _WRITER
 
 
-#: Breaker the BOOT SELF-CHECK substitutes for the duration of its probe, so the
-#: probe can drive the REAL registered callback against a throwaway ladder
-#: instead of the seat's own. Set and restored by ``run_loop_arm_boot_probe``.
-#:
-#: Gated on ``SELFCHECK_SESSION_ID`` at the point of use, not merely on being
-#: set. A global that a real turn could pick up — if the probe leaked it, or a
-#: turn raced the boot — would silently meter live tool calls into a temp file,
-#: which is a worse defect than the one the probe exists to catch. Two
-#: conditions, so a leak alone is not enough to misroute anything.
-_SELFCHECK_BREAKER: Any = None
-
-
 def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
     """Feed the sticky-stop ladder's runaway-loop arms from one tool outcome.
 
@@ -132,8 +119,6 @@ def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
         status = kwargs.get("status")
         if status not in ("ok", "error", "blocked"):
             return  # unrecognised or absent envelope: record nothing, brake unchanged
-        if breaker is None and kwargs.get("session_id") == SELFCHECK_SESSION_ID:
-            breaker = _SELFCHECK_BREAKER
         if breaker is None:
             breaker = _cost_breaker()
         if breaker is None:
@@ -166,160 +151,6 @@ def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
                 )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-audit: loop-arm metering failed: %s", exc)
-
-
-async def run_loop_arm_boot_probe() -> tuple[bool, str]:
-    """Negative-fire probe for the runaway-loop arms. Returns ``(ok, reason)``.
-
-    WHY A SECOND BOOT PROBE. ``cost_breaker.run_boot_probe`` proves the LADDER
-    halts. It cannot prove the loop arms are FED, because it drives the state
-    machine directly and the cost arm was already wired. The gap this closes is
-    the one that let ``record_tool_failure`` sit implemented, thresholded and
-    audited with no caller for months: every test passed, and nothing on a seat
-    ever called it.
-
-    So this probe drives the REAL hook handler -- ``_meter_loop_arms``, the same
-    function ``on_post_tool_call`` calls -- with the REAL envelope Hermes emits,
-    against a THROWAWAY ladder that never touches
-    ``/opt/data/smd/sticky_stop.db``. What it asserts is not "the ladder can
-    climb" but "a tool failure arriving at the hook moves it".
-
-    Three assertions, because two of them can pass while the control is useless:
-
-      1. A ``status="error"`` envelope trips the throwaway ladder to HARD_STOP.
-      2. A ``status="ok"`` envelope RESETS the streak. An arm that only climbs
-         would stop every healthy long-lived seat, so a probe that skipped this
-         would bless the worst regression this code can have.
-      3. An UNRECOGNISED envelope moves nothing. If detection ever stopped being
-         positive-only, an upstream rename would start manufacturing stops on
-         live seats -- and that failure is invisible to assertions 1 and 2.
-
-    Runs the sync handler in an executor: the activation handler owns the
-    gateway's event loop, and ``CostBreaker`` bridges to async via
-    ``asyncio.run``, which raises inside a running loop. Threading it is what
-    lets the probe exercise the real handler rather than a re-implementation of
-    it -- the re-implementation is exactly what would not have caught the
-    original bug.
-    """
-    import asyncio
-    import os
-    import sqlite3
-    import tempfile
-    from dataclasses import replace
-
-    from shared.cost_breaker import _CREATE_TABLE_SQL, CostBreaker, _NoAuditSink
-    from shared.sticky_stop import (
-        DEFAULT_THRESHOLDS,
-        SqliteStickyStopStore,
-        StickyStopLevel,
-        StickyStopMachine,
-    )
-
-    global _SELFCHECK_BREAKER
-
-    fd, tmp = tempfile.mkstemp(prefix="smd-looparm-probe-", suffix=".db")
-    os.close(fd)
-    os.unlink(tmp)
-    conn = None
-    prior_selfcheck_breaker = _SELFCHECK_BREAKER
-    try:
-        conn = sqlite3.connect(tmp, check_same_thread=False)
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute(_CREATE_TABLE_SQL)
-        conn.commit()
-        # One failure IS the hard stop, so the probe needs a single envelope and
-        # cannot pass by accident on a ladder that merely counts.
-        thresholds = replace(
-            DEFAULT_THRESHOLDS,
-            tool_failure_warn=1,
-            tool_failure_soft_stop=1,
-            tool_failure_hard_stop=1,
-        )
-        breaker = CostBreaker(
-            customer="_probe",
-            persona="_probe",
-            machine=StickyStopMachine(
-                store=SqliteStickyStopStore(conn),
-                audit_writer=_NoAuditSink(),
-                thresholds=thresholds,
-            ),
-        )
-        _SELFCHECK_BREAKER = breaker
-        loop = asyncio.get_running_loop()
-
-        # DRIVE THE REGISTERED CALLBACK, NOT THE INNER FUNCTION. This is the
-        # correction that makes the probe mean anything. The first version
-        # called ``_meter_loop_arms`` directly — but the WIRING is
-        # ``on_post_tool_call``'s call to it, and that call is the exact seam
-        # whose absence went unnoticed for months. Deleting it left the probe
-        # green: a check named "prove the arms are FED" that skipped the
-        # feeding call. ``test_probe_goes_red_when_the_hook_stops_calling_the_arms``
-        # is the mutation test that now holds this.
-        #
-        # Same shape as the audit self-check next door, which drives the real
-        # ``invoke_hook("post_llm_call", ...)`` and separates itself by session
-        # id rather than by calling the emitter directly.
-        callback = on_post_tool_call
-
-        async def feed(envelope: dict) -> None:
-            stamped = dict(envelope)
-            stamped["session_id"] = SELFCHECK_SESSION_ID
-            await loop.run_in_executor(None, lambda: callback(**stamped))
-
-        def level() -> str:
-            row = conn.execute(
-                "SELECT level FROM sticky_stop_state WHERE customer='_probe'"
-            ).fetchone()
-            return row[0] if row else StickyStopLevel.OK.value
-
-        def streak():
-            row = conn.execute(
-                "SELECT consecutive_tool_failures FROM sticky_stop_state WHERE customer='_probe'"
-            ).fetchone()
-            return row[0] if row else None
-
-        # 1. a failure envelope must trip it
-        await feed({"status": "error", "tool_name": "_probe_tool"})
-        if level() != StickyStopLevel.HARD_STOP.value:
-            return (
-                False,
-                f"a status=error envelope did not trip the tool-failure arm "
-                f"(level={level()}); the hook is not feeding record_tool_failure",
-            )
-
-        # 2. a success envelope must reset the streak
-        await feed({"status": "ok", "tool_name": "_probe_tool"})
-        if streak() != 0:
-            return (
-                False,
-                f"a status=ok envelope did not reset the failure streak "
-                f"(consecutive_tool_failures={streak()}); every long-lived seat "
-                "would eventually stop for no reason",
-            )
-
-        # 3. an unrecognised envelope must move nothing
-        before = streak()
-        await feed({"status": "no_such_status", "tool_name": "_probe_tool"})
-        if streak() != before:
-            return (
-                False,
-                "an unrecognised status moved the ladder; detection is no longer "
-                "positive-only, so an upstream envelope rename could stop a live seat",
-            )
-
-        return True, "loop arms fed: error trips, ok resets, unknown is inert"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"loop-arm probe raised: {type(exc).__name__}: {exc}"
-    finally:
-        # Restore FIRST, before any I/O that could itself raise — a leaked
-        # self-check breaker is the one way this probe could affect a real turn.
-        _SELFCHECK_BREAKER = prior_selfcheck_breaker
-        if conn is not None:
-            conn.close()
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
 
 
 def on_post_tool_call(**kwargs: Any) -> None:

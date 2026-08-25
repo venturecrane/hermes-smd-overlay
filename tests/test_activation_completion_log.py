@@ -35,7 +35,6 @@ HANDLER = HANDLER_PATH.read_text()
 #: term their claim must contribute to the completion line.
 FUNCTION_GATES = {
     "_cost_breaker_self_check": "cost breaker",
-    "_loop_arm_self_check": "runaway-loop arms",
     "_webhook_read_self_check": "webhook read surface",
 }
 

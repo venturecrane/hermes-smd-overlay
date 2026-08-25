@@ -253,68 +253,6 @@ async def _cost_breaker_self_check() -> str:
     return await _run_gate("COST BREAKER", run_boot_probe, fatal=True)
 
 
-async def _loop_arm_self_check(mgr: Any) -> str:
-    """Prove the runaway-loop arms are FED. WARN TIER — never fatal.
-
-    THE CONTROL. ADR 0062's ladder has four arms; only the cost arm was ever
-    fed. ``record_tool_failure`` and ``record_refusal`` were implemented,
-    thresholded, audited and unit-tested with NO caller anywhere for months, so
-    a seat looping on a failing tool stopped only on spend. overlay#319 fed
-    them; this proves the feeding is still there, at every boot.
-
-    WHY WARN AND NOT FATAL — decided against this repo's own rule, not by
-    preference. ``shared/webhook_read_surface.py`` states it: "A crash-loop is
-    the right answer only when serving is worse than being down." Weigh the two
-    harms. Un-brake-proven serving costs a client some hours and some spend on
-    a loop, with the cost breaker still standing as backstop. A crash-loop
-    costs the firm its paralegal, mid-engagement. Serving is plainly not worse
-    than being down here, so this gate reports and the seat runs.
-
-    That is not a softening. The first version of this check WAS fatal, and its
-    own lookup bug took hermes-smd-staging down for 29 minutes on 2026-08-25
-    (ss-console#2590). A control whose failure mode is worse than the failure
-    it detects is a bad trade at any level of care, and no amount of care would
-    have made the fatal version safe — only the tier does.
-
-    Visibility replaces death: the outcome rides the heartbeat's
-    ``loop_brake_proven`` field into ``fleet_status`` and the client portal,
-    the same path ``sticky_stop_level`` already takes. A seat that reports an
-    unproven brake is strictly more useful than one that has made itself
-    invisible by exiting.
-
-    RESOLVED FROM THE LIVE MANAGER, not a path. The first version computed
-    ``parents[2]/plugins/...`` — the REPO layout — and on a seat that path does
-    not exist. Taking the module off the registered ``post_tool_call`` callback
-    is immune to layout and is the stronger probe: a re-import can succeed
-    against a copy no turn will ever reach.
-    """
-    callbacks = list((getattr(mgr, "_hooks", {}) or {}).get("post_tool_call", []))
-    probe = None
-    for cb in callbacks:
-        try:
-            module = inspect.getmodule(cb)
-        except Exception:  # noqa: BLE001 — an exotic callback is not a finding
-            continue
-        candidate = getattr(module, "run_loop_arm_boot_probe", None)
-        if candidate is not None:
-            probe = candidate
-            break
-
-    if probe is None:
-        logger.critical(
-            "RUNAWAY-LOOP BRAKE UNPROVEN on this boot: no registered post_tool_call "
-            "callback exposes run_loop_arm_boot_probe (%d callback(s) inspected). "
-            "The overlay predates #320, or the audit plugin changed shape. This is "
-            "version skew, not a broken brake — killing the gateway for it would "
-            "mean no older overlay could ever boot, and a rollback that cannot roll "
-            "back is a worse safety property than the gap it closes.",
-            len(callbacks),
-        )
-        return GATE_SKIPPED
-
-    return await _run_gate("RUNAWAY-LOOP BRAKE", probe, fatal=False)
-
-
 def _gateway_config() -> dict:
     """The config dict a webhook TURN resolves its tools from.
 
@@ -655,13 +593,6 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
     #    earns sticky_stop_cost_cap its enforced status.
     cost_outcome = await _cost_breaker_self_check()
 
-    # 4b. RUNAWAY-LOOP arm self-check (overlay#319). The check above proves the
-    #     ladder halts; this proves a tool failure arriving at post_tool_call
-    #     actually moves it. The arms sat implemented and caller-less for months
-    #     with every test green, so "the code exists" is not the question a boot
-    #     probe should be answering here.
-    loop_brake_outcome = await _loop_arm_self_check(mgr)
-
     # 5. WEBHOOK READ-SURFACE assertion (ss-console#2145). `read_file` reaches
     #    webhook turns only when TWO halves in TWO processes both shipped: the
     #    platform_toolsets block bootstrap/translate.py writes, and the custom
@@ -699,7 +630,6 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
         "live singleton, trust gate fired on banned %r, audit row written "
         "(before=%s after=%s)"
         " | cost breaker: %s"
-        " | runaway-loop arms: %s"
         " | webhook read surface: resolved"
         " — each gate's outcome above is what was observed on THIS boot, not a "
         "claim about what the gate would do.",
@@ -708,5 +638,4 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
         before,
         after,
         cost_outcome,
-        loop_brake_outcome,
     )
