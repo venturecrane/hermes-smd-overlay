@@ -178,6 +178,73 @@ async def _cost_breaker_self_check() -> None:
         _die(f"COST BREAKER INERT on this boot: {reason} (ADR 0062 §6, #1701)")
 
 
+async def _loop_arm_self_check() -> None:
+    """Prove the runaway-loop arms are FED, or refuse to serve (overlay#319).
+
+    The sibling check above proves the ladder HALTS. It cannot prove the arms
+    are WIRED, because it drives the state machine directly — and for months
+    that difference was the entire defect: ``record_tool_failure`` and
+    ``record_refusal`` were implemented, thresholded, audited and unit-tested,
+    with no caller anywhere in either repo. A seat looping on a failing tool
+    stopped only on spend, and every test was green about it.
+
+    So this drives the REAL ``post_tool_call`` handler with the REAL envelope
+    Hermes emits, against a throwaway ladder, at every boot. That is the
+    difference between "the brake exists" and "the brake is connected", and it
+    is the only one of the two that a caller-less arm fails.
+
+    It is also what will earn ``sticky_stop_tool_failure`` and
+    ``sticky_stop_refusal_cascade`` their enforced status in ss-console's
+    ``runtime-controls.yaml``. The registry's existing probe searches ss-console
+    only and cannot observe an overlay-side wiring — which is precisely why
+    those rows could not be moved on the strength of the code change alone.
+
+    ``_die`` on failure, matching the cost check: an Operator whose runaway
+    brake cannot fire must not serve.
+    """
+    try:
+        import importlib.util
+        import sys
+        from pathlib import Path as _Path
+
+        mod_name = "plugin_hermes_smd_audit"
+        module = sys.modules.get(mod_name)
+        if module is None:
+            init_path = (
+                _Path(__file__).resolve().parents[2]
+                / "plugins"
+                / "hermes-smd-audit"
+                / "__init__.py"
+            )
+            if not init_path.exists():
+                _die(f"loop-arm self-check: audit plugin not at {init_path}")
+                return
+            spec = importlib.util.spec_from_file_location(mod_name, init_path)
+            if spec is None or spec.loader is None:
+                _die("loop-arm self-check: could not build a spec for the audit plugin")
+                return
+            module = importlib.util.module_from_spec(spec)
+            # Registered BEFORE exec so the plugin's own `from . import emit`
+            # resolves; the same sequencing tests/test_audit_emit.py documents.
+            sys.modules[mod_name] = module
+            spec.loader.exec_module(module)
+    except Exception as e:  # noqa: BLE001
+        _die(f"loop-arm self-check import failed: {type(e).__name__}: {e}")
+        return
+
+    probe = getattr(module, "run_loop_arm_boot_probe", None)
+    if probe is None:
+        _die(
+            "RUNAWAY-LOOP BRAKE INERT on this boot: the audit plugin has no "
+            "run_loop_arm_boot_probe (overlay predates #320?)"
+        )
+        return
+
+    ok, reason = await probe()
+    if not ok:
+        _die(f"RUNAWAY-LOOP BRAKE INERT on this boot: {reason} (ADR 0062, overlay#319)")
+
+
 def _gateway_config() -> dict:
     """The config dict a webhook TURN resolves its tools from.
 
@@ -499,6 +566,13 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     #    the guard does not refuse. This is the recurring prod-boot probe that
     #    earns sticky_stop_cost_cap its enforced status.
     await _cost_breaker_self_check()
+
+    # 4b. RUNAWAY-LOOP arm self-check (overlay#319). The check above proves the
+    #     ladder halts; this proves a tool failure arriving at post_tool_call
+    #     actually moves it. The arms sat implemented and caller-less for months
+    #     with every test green, so "the code exists" is not the question a boot
+    #     probe should be answering here.
+    await _loop_arm_self_check()
 
     # 5. WEBHOOK READ-SURFACE assertion (ss-console#2145). `read_file` reaches
     #    webhook turns only when TWO halves in TWO processes both shipped: the
