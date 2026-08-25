@@ -61,8 +61,15 @@ def completion_line() -> str:
 
 
 def called_check_functions() -> set[str]:
-    """Every ``_*check*`` invoked at statement level inside ``handle()``."""
-    return set(re.findall(r"^\s+(?:await\s+)?(_\w*check\w*)\(\)", HANDLER, re.M))
+    """Every ``_*check*`` invoked at statement level inside ``handle()``.
+
+    Tolerant of both arguments and an assignment target, on purpose. Earlier
+    versions broke when a gate gained a parameter, and again when the call site
+    started capturing the gate's OUTCOME. A test that goes red because a gate
+    grew a return value is measuring the call signature, not whether the gate
+    runs.
+    """
+    return set(re.findall(r"^\s+(?:\w+ = )?(?:await\s+)?(_\w*check\w*)\(", HANDLER, re.M))
 
 
 def test_completion_line_names_every_function_gate() -> None:

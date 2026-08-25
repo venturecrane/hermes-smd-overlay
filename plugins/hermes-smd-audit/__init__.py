@@ -30,6 +30,7 @@ from shared.audit_client import BrokerAuditClient, audit_client_from_env
 from shared.audit_status import NoAuditWarner, write_audit_status
 from shared.d1_client import D1Client
 from shared.secrets import require
+from shared.selfcheck import SELFCHECK_SESSION_ID
 
 from . import (  # noqa: F401 — surface for tests
     emit,
@@ -85,6 +86,18 @@ def _writer() -> AuditLogWriter | None:
     return _WRITER
 
 
+#: Breaker the BOOT SELF-CHECK substitutes for the duration of its probe, so the
+#: probe can drive the REAL registered callback against a throwaway ladder
+#: instead of the seat's own. Set and restored by ``run_loop_arm_boot_probe``.
+#:
+#: Gated on ``SELFCHECK_SESSION_ID`` at the point of use, not merely on being
+#: set. A global that a real turn could pick up — if the probe leaked it, or a
+#: turn raced the boot — would silently meter live tool calls into a temp file,
+#: which is a worse defect than the one the probe exists to catch. Two
+#: conditions, so a leak alone is not enough to misroute anything.
+_SELFCHECK_BREAKER: Any = None
+
+
 def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
     """Feed the sticky-stop ladder's runaway-loop arms from one tool outcome.
 
@@ -119,7 +132,10 @@ def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
         status = kwargs.get("status")
         if status not in ("ok", "error", "blocked"):
             return  # unrecognised or absent envelope: record nothing, brake unchanged
-        breaker = breaker if breaker is not None else _cost_breaker()
+        if breaker is None and kwargs.get("session_id") == SELFCHECK_SESSION_ID:
+            breaker = _SELFCHECK_BREAKER
+        if breaker is None:
+            breaker = _cost_breaker()
         if breaker is None:
             return  # not armed (no slug, or construction failed); already logged
         tool_name = kwargs.get("tool_name")
@@ -199,10 +215,13 @@ async def run_loop_arm_boot_probe() -> tuple[bool, str]:
         StickyStopMachine,
     )
 
+    global _SELFCHECK_BREAKER
+
     fd, tmp = tempfile.mkstemp(prefix="smd-looparm-probe-", suffix=".db")
     os.close(fd)
     os.unlink(tmp)
     conn = None
+    prior_selfcheck_breaker = _SELFCHECK_BREAKER
     try:
         conn = sqlite3.connect(tmp, check_same_thread=False)
         conn.execute("PRAGMA busy_timeout = 5000")
@@ -225,10 +244,27 @@ async def run_loop_arm_boot_probe() -> tuple[bool, str]:
                 thresholds=thresholds,
             ),
         )
+        _SELFCHECK_BREAKER = breaker
         loop = asyncio.get_running_loop()
 
+        # DRIVE THE REGISTERED CALLBACK, NOT THE INNER FUNCTION. This is the
+        # correction that makes the probe mean anything. The first version
+        # called ``_meter_loop_arms`` directly — but the WIRING is
+        # ``on_post_tool_call``'s call to it, and that call is the exact seam
+        # whose absence went unnoticed for months. Deleting it left the probe
+        # green: a check named "prove the arms are FED" that skipped the
+        # feeding call. ``test_probe_goes_red_when_the_hook_stops_calling_the_arms``
+        # is the mutation test that now holds this.
+        #
+        # Same shape as the audit self-check next door, which drives the real
+        # ``invoke_hook("post_llm_call", ...)`` and separates itself by session
+        # id rather than by calling the emitter directly.
+        callback = on_post_tool_call
+
         async def feed(envelope: dict) -> None:
-            await loop.run_in_executor(None, _meter_loop_arms, envelope, breaker)
+            stamped = dict(envelope)
+            stamped["session_id"] = SELFCHECK_SESSION_ID
+            await loop.run_in_executor(None, lambda: callback(**stamped))
 
         def level() -> str:
             row = conn.execute(
@@ -275,6 +311,9 @@ async def run_loop_arm_boot_probe() -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, f"loop-arm probe raised: {type(exc).__name__}: {exc}"
     finally:
+        # Restore FIRST, before any I/O that could itself raise — a leaked
+        # self-check breaker is the one way this probe could affect a real turn.
+        _SELFCHECK_BREAKER = prior_selfcheck_breaker
         if conn is not None:
             conn.close()
         try:
