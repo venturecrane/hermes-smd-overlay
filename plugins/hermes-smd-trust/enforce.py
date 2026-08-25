@@ -1603,6 +1603,30 @@ def evaluate_tool_call(
                 session_match=session_match,
             )
 
+    # ---- Message structure floor (ss#2090 refiled; the 2026-08-25 digest) --
+    # Deliberately OUTSIDE the ``decision.allowed`` guard below, for the reason
+    # the matter-identity gate above states in full: on a seat where every send
+    # sits at the draft_for_review ceiling, ``allowed`` is False for EVERY send,
+    # so a check placed inside that block would never execute on the seat that
+    # most needs it. The CHECK runs either way and always writes its row; only
+    # the DISPOSITION reads ``allowed``, inside the gate.
+    #
+    # ``is_send`` carries EXTERNAL_SEND_INTERNAL, unlike the matter gate's
+    # narrower tuple above. That is deliberate and is the whole point: the staff
+    # digest is the message this floor exists for. On 2026-08-25 one went out as
+    # 4,280 characters of unbroken paragraph with every identifier correct.
+    if is_send:
+        structure_block = spec_gate.check_structure_floor(
+            tool_name=tool_name,
+            action_class_value=getattr(effective_action, "value", ""),
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            body=_extract_send_body(args),
+            allowed=decision.allowed,
+        )
+        if structure_block is not None:
+            return structure_block
+
     # Content-sensitivity floor (ADR 0031). Applies to sends that LEAVE the firm:
     # the outside class plus the typed client / records-vendor classes. Money /
     # contract / scope / legal content bound for a client or vendor is downgraded
