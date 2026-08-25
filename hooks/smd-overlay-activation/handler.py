@@ -178,69 +178,80 @@ async def _cost_breaker_self_check() -> None:
         _die(f"COST BREAKER INERT on this boot: {reason} (ADR 0062 §6, #1701)")
 
 
-async def _loop_arm_self_check() -> None:
+async def _loop_arm_self_check(mgr: Any) -> None:
     """Prove the runaway-loop arms are FED, or refuse to serve (overlay#319).
 
-    The sibling check above proves the ladder HALTS. It cannot prove the arms
-    are WIRED, because it drives the state machine directly — and for months
-    that difference was the entire defect: ``record_tool_failure`` and
+    The sibling cost check proves the ladder HALTS. It cannot prove the arms are
+    WIRED, because it drives the state machine directly — and for months that
+    difference was the entire defect: ``record_tool_failure`` and
     ``record_refusal`` were implemented, thresholded, audited and unit-tested,
-    with no caller anywhere in either repo. A seat looping on a failing tool
-    stopped only on spend, and every test was green about it.
+    with no caller anywhere. A seat looping on a failing tool stopped only on
+    spend, and every test was green about it.
 
-    So this drives the REAL ``post_tool_call`` handler with the REAL envelope
-    Hermes emits, against a throwaway ladder, at every boot. That is the
-    difference between "the brake exists" and "the brake is connected", and it
-    is the only one of the two that a caller-less arm fails.
+    RESOLVED FROM THE LIVE MANAGER, NOT FROM A PATH — and this is a correction,
+    not a preference. The first version of this check computed the plugin's
+    location as ``parents[2]/plugins/hermes-smd-audit/__init__.py``. That is the
+    REPO layout; on a seat the handler installs to
+    ``/opt/data/profiles/crane/hooks/``, so the path did not exist, the check
+    reported failure, and the gateway crash-looped for 29 minutes
+    (hermes-smd-staging, 2026-08-25 15:20Z; ss-console#2590 reverted it). Unit
+    tests could not catch it: they run from a checkout, where that path happens
+    to resolve.
 
-    It is also what will earn ``sticky_stop_tool_failure`` and
-    ``sticky_stop_refusal_cascade`` their enforced status in ss-console's
-    ``runtime-controls.yaml``. The registry's existing probe searches ss-console
-    only and cannot observe an overlay-side wiring — which is precisely why
-    those rows could not be moved on the strength of the code change alone.
+    Taking the module off the registered ``post_tool_call`` callback is both
+    immune to layout and a STRONGER probe. A re-import can succeed against a
+    copy of the plugin that no turn will ever reach; the registered callback is
+    by definition the object Hermes will actually call.
 
-    ``_die`` on failure, matching the cost check: an Operator whose runaway
-    brake cannot fire must not serve.
+    TWO OUTCOMES, DELIBERATELY DIFFERENT, and the split is the lesson from the
+    crash-loop:
+
+      * The probe RAN and FAILED -> ``_die``. The brake is broken; the seat must
+        not serve.
+      * The probe could not be FOUND -> CRITICAL log, boot CONTINUES. An overlay
+        predating #320 has no ``run_loop_arm_boot_probe``, and killing the
+        gateway for that would mean no older overlay could ever boot — a
+        rollback that cannot roll back is a worse safety property than the gap
+        it closes. The hook surface itself is already asserted above
+        (``post_tool_call`` is in ``_REQUIRED_HOOKS``), so this branch means
+        "version skew", never "ungoverned".
+
+    Conflating those two is exactly what took the seat down: a lookup miss was
+    treated as a proven-broken control.
     """
-    try:
-        import importlib.util
-        import sys
-        from pathlib import Path as _Path
+    callbacks = list((getattr(mgr, "_hooks", {}) or {}).get("post_tool_call", []))
+    probe = None
+    for cb in callbacks:
+        module = inspect.getmodule(cb)
+        candidate = getattr(module, "run_loop_arm_boot_probe", None)
+        if candidate is not None:
+            probe = candidate
+            break
 
-        mod_name = "plugin_hermes_smd_audit"
-        module = sys.modules.get(mod_name)
-        if module is None:
-            init_path = (
-                _Path(__file__).resolve().parents[2]
-                / "plugins"
-                / "hermes-smd-audit"
-                / "__init__.py"
-            )
-            if not init_path.exists():
-                _die(f"loop-arm self-check: audit plugin not at {init_path}")
-                return
-            spec = importlib.util.spec_from_file_location(mod_name, init_path)
-            if spec is None or spec.loader is None:
-                _die("loop-arm self-check: could not build a spec for the audit plugin")
-                return
-            module = importlib.util.module_from_spec(spec)
-            # Registered BEFORE exec so the plugin's own `from . import emit`
-            # resolves; the same sequencing tests/test_audit_emit.py documents.
-            sys.modules[mod_name] = module
-            spec.loader.exec_module(module)
-    except Exception as e:  # noqa: BLE001
-        _die(f"loop-arm self-check import failed: {type(e).__name__}: {e}")
-        return
-
-    probe = getattr(module, "run_loop_arm_boot_probe", None)
     if probe is None:
-        _die(
-            "RUNAWAY-LOOP BRAKE INERT on this boot: the audit plugin has no "
-            "run_loop_arm_boot_probe (overlay predates #320?)"
+        logger.critical(
+            "RUNAWAY-LOOP BRAKE UNPROVEN on this boot: no registered post_tool_call "
+            "callback exposes run_loop_arm_boot_probe (%d callback(s) inspected). The "
+            "overlay predates #320, or the audit plugin changed shape. Boot CONTINUES "
+            "— this is version skew, not a broken brake, and the arms may still be fed. "
+            "Verify with the ss-console registry row for sticky_stop_tool_failure.",
+            len(callbacks),
         )
         return
 
-    ok, reason = await probe()
+    try:
+        ok, reason = await probe()
+    except Exception as e:  # noqa: BLE001 — a probe fault is not a proven failure
+        logger.critical(
+            "RUNAWAY-LOOP BRAKE UNPROVEN on this boot: the probe raised "
+            "%s: %s. Boot CONTINUES — a fault in the checker is not evidence the "
+            "control is broken, and the checker must not be able to take a seat down "
+            "by being wrong about itself.",
+            type(e).__name__,
+            e,
+        )
+        return
+
     if not ok:
         _die(f"RUNAWAY-LOOP BRAKE INERT on this boot: {reason} (ADR 0062, overlay#319)")
 
@@ -572,7 +583,7 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     #     actually moves it. The arms sat implemented and caller-less for months
     #     with every test green, so "the code exists" is not the question a boot
     #     probe should be answering here.
-    await _loop_arm_self_check()
+    await _loop_arm_self_check(mgr)
 
     # 5. WEBHOOK READ-SURFACE assertion (ss-console#2145). `read_file` reaches
     #    webhook turns only when TWO halves in TWO processes both shipped: the

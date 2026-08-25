@@ -61,8 +61,14 @@ def completion_line() -> str:
 
 
 def called_check_functions() -> set[str]:
-    """Every ``_*check*`` invoked at statement level inside ``handle()``."""
-    return set(re.findall(r"^\s+(?:await\s+)?(_\w*check\w*)\(\)", HANDLER, re.M))
+    """Every ``_*check*`` invoked at statement level inside ``handle()``.
+
+    Argument-tolerant on purpose. The first version matched only ``()`` and went
+    red the moment ``_loop_arm_self_check`` started taking the live plugin
+    manager — a test that breaks when a gate gains a parameter is measuring the
+    call signature, not whether the gate runs.
+    """
+    return set(re.findall(r"^\s+(?:await\s+)?(_\w*check\w*)\(", HANDLER, re.M))
 
 
 def test_completion_line_names_every_function_gate() -> None:
