@@ -176,6 +176,44 @@ class CostBreaker:
             )
         )
 
+    def record_tool_failure(self, skill_name: str | None = None) -> StickyStopState:
+        """Record one failed tool call. Climbs the consecutive-failure ladder."""
+        return self._run(
+            self._machine.record_tool_failure(
+                customer=self._customer,
+                persona=self._persona,
+                skill_name=skill_name,
+            )
+        )
+
+    def record_tool_success(self) -> StickyStopState:
+        """Record one successful tool call; resets the consecutive-failure streak.
+
+        NOT optional, and not symmetry for its own sake. The ladder counts
+        CONSECUTIVE failures, so a caller that records failures and never
+        successes turns every seat into a slow march toward HARD_STOP —
+        the streak would only ever climb, and an Operator that failed eight
+        calls across eight healthy days would stop as if it had looped. The
+        failure and success arms must be fed from the same signal or neither
+        should be fed at all.
+        """
+        return self._run(
+            self._machine.record_tool_success(
+                customer=self._customer,
+                persona=self._persona,
+            )
+        )
+
+    def record_refusal(self, skill_name: str | None = None) -> StickyStopState:
+        """Record one trust-ceiling refusal. Climbs the refusal-cascade ladder."""
+        return self._run(
+            self._machine.record_refusal(
+                customer=self._customer,
+                persona=self._persona,
+                skill_name=skill_name,
+            )
+        )
+
     def assert_allowed(self) -> StickyStopState:
         """Raise StickyStopError when HARD_STOP is pinned; else return state."""
         return self._run(

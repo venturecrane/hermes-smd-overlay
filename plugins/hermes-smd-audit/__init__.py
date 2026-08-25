@@ -85,6 +85,73 @@ def _writer() -> AuditLogWriter | None:
     return _WRITER
 
 
+def _meter_loop_arms(kwargs: dict) -> None:
+    """Feed the sticky-stop ladder's runaway-loop arms from one tool outcome.
+
+    WHY THIS EXISTS. ADR 0062's ladder has four arms. Only the cost arm was
+    ever fed — ``record_cost_cents`` from the interactive meter and the job
+    segment loop. ``record_tool_failure`` and ``record_refusal`` were fully
+    implemented, thresholded, audited and tested, and appeared in no caller in
+    either repo. An Operator that spent too much stopped; an Operator stuck in
+    a loop failing the same call, or refusing every call, did not. The logic
+    was complete and simply never told anything had happened.
+
+    THE SIGNAL. ``post_tool_call`` fires after dispatch regardless of outcome
+    and carries ``status`` ("ok" | "error" | "blocked") plus ``error_type``
+    (None | "tool_error" | "plugin_block"). Both are pin-verified at the
+    firing site in docs/hook-surface.md rather than published upstream, so
+    they are re-checked at every Hermes rebase.
+
+    POSITIVE-ONLY DETECTION, and the direction matters. Every branch requires
+    an explicitly recognised ``status``; an absent or unfamiliar value records
+    NOTHING. If the envelope changes, the arms go quiet and the seat behaves
+    exactly as it did before this function existed — the old, unbraked
+    behaviour. The alternative (treating "no status" as failure) would let an
+    upstream rename manufacture a HARD_STOP on a healthy client seat, which is
+    a worse outcome than the gap being closed.
+
+    Success is recorded for the same reason it is required on the wrapper: the
+    ladder counts CONSECUTIVE failures, so feeding failures without successes
+    would make every long-lived seat eventually stop for no reason. Both come
+    off the same ``status`` field, so they can never be half-wired.
+    """
+    try:
+        status = kwargs.get("status")
+        if status not in ("ok", "error", "blocked"):
+            return  # unrecognised or absent envelope: record nothing, brake unchanged
+        breaker = _cost_breaker()
+        if breaker is None:
+            return  # not armed (no slug, or construction failed); already logged
+        tool_name = kwargs.get("tool_name")
+        tool_name = tool_name if isinstance(tool_name, str) and tool_name else None
+
+        if status == "ok":
+            breaker.record_tool_success()
+            return
+        if status == "error":
+            state = breaker.record_tool_failure(tool_name)
+        else:
+            # "blocked" is our own policy layer refusing, which is exactly what
+            # the refusal-cascade arm counts. A block from anything other than
+            # a plugin is not a refusal, so it is left alone rather than
+            # folded into either ladder.
+            if kwargs.get("error_type") != "plugin_block":
+                return
+            state = breaker.record_refusal(tool_name)
+
+        if state is not None and getattr(state, "level", None) is not None:
+            level = getattr(state.level, "value", state.level)
+            if level != "OK":
+                logger.warning(
+                    "hermes-smd-audit: sticky-stop ladder at %s after %s (tool=%s)",
+                    level,
+                    status,
+                    tool_name,
+                )
+    except Exception as exc:  # noqa: BLE001 — never raise out of a hook
+        logger.warning("hermes-smd-audit: loop-arm metering failed: %s", exc)
+
+
 def on_post_tool_call(**kwargs: Any) -> None:
     """Write one TOOL_CALL_COMPLETED audit row per tool invocation.
 
@@ -96,6 +163,12 @@ def on_post_tool_call(**kwargs: Any) -> None:
     Hermes dispatcher's own try/except is a backstop, not the primary
     guard.
     """
+    # Feed the runaway-loop arms BEFORE the writer check below. A dark ledger
+    # must not also disarm the brake: the audit writer and the sticky-stop
+    # ladder are different failure domains, and "D1 is unreachable" is not a
+    # reason to let a looping agent keep going.
+    _meter_loop_arms(kwargs)
+
     writer = _writer()
     if writer is None or _CUSTOMER_SLUG is None:
         # Registration failed; nothing to do. Rate-limited WARNING (#64) so a
