@@ -337,3 +337,121 @@ def test_a_real_turn_never_picks_up_the_selfcheck_breaker(audit_plugin, monkeypa
     )
     assert real.calls == [("failure", "t")], "a real turn must use the seat's breaker"
     assert throwaway.calls == [], "a real turn must never reach the self-check breaker"
+
+
+# --------------------------------------------------------------------------- #
+# The lookup, exercised at RUNTIME against a seat-shaped module.               #
+#                                                                             #
+# Two source-grep tests already guard this check and BOTH passed while the     #
+# lookup was broken on the seat. A structural assertion can say "it does not   #
+# build a path"; it cannot say "it finds the probe". Only running it can.      #
+# --------------------------------------------------------------------------- #
+
+
+def _load_activation_handler():
+    """Import the activation handler as a module so its lookup can be driven."""
+    import importlib.util
+
+    path = Path(__file__).parent.parent / "hooks" / "smd-overlay-activation" / "handler.py"
+    spec = importlib.util.spec_from_file_location("smd_activation_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["smd_activation_under_test"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeManager:
+    def __init__(self, callbacks):
+        self._hooks = {"post_tool_call": list(callbacks)}
+
+
+def _plugin_loaded_the_way_hermes_loads_it(register_in_sys_modules: bool):
+    """Load the audit plugin the way the gateway's loader does.
+
+    ``register_in_sys_modules=False`` reproduces the seat: Hermes' plugin loader
+    does not put plugins in ``sys.modules``, which is what broke the previous
+    lookup — ``inspect.getmodule`` resolves through ``sys.modules[__module__]``
+    and returned None for all 7 registered callbacks.
+    """
+    import importlib.util
+
+    path = Path(__file__).parent.parent / "plugins" / "hermes-smd-audit" / "__init__.py"
+    name = "audit_seat_shaped" if not register_in_sys_modules else "audit_registered"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # needed for `from . import emit` during exec
+    spec.loader.exec_module(module)
+    if not register_in_sys_modules:
+        del sys.modules[name]
+    return module
+
+
+def test_lookup_finds_the_probe_when_the_plugin_is_NOT_in_sys_modules() -> None:
+    """The exact seat condition, at runtime.
+
+    On 2026-08-25 the check reported UNPROVEN on a seat whose brake was fine,
+    because the lookup asked ``sys.modules`` to resolve a module that was never
+    registered there. Both source-grep tests stayed green through it.
+    """
+    handler = _load_activation_handler()
+    plugin = _plugin_loaded_the_way_hermes_loads_it(register_in_sys_modules=False)
+    mgr = _FakeManager([plugin.on_post_tool_call])
+
+    assert asyncio.run(handler._loop_arm_self_check(mgr)) == handler.GATE_PROVEN, (
+        "the lookup could not find run_loop_arm_boot_probe on a plugin loaded the "
+        "way the seat loads it — the same failure that reported UNPROVEN on a "
+        "healthy seat, invisible to every source-grep test"
+    )
+
+
+def test_lookup_ignores_callbacks_from_other_plugins() -> None:
+    """Seven callbacks are registered on post_tool_call; only one is ours."""
+    handler = _load_activation_handler()
+    plugin = _plugin_loaded_the_way_hermes_loads_it(register_in_sys_modules=False)
+
+    def someone_elses_callback(**_kw):
+        return None
+
+    mgr = _FakeManager([someone_elses_callback, plugin.on_post_tool_call])
+    assert asyncio.run(handler._loop_arm_self_check(mgr)) == handler.GATE_PROVEN
+
+
+def test_lookup_reports_SKIPPED_when_no_callback_carries_the_probe() -> None:
+    """And still does not kill the seat."""
+    handler = _load_activation_handler()
+
+    def unrelated(**_kw):
+        return None
+
+    assert asyncio.run(handler._loop_arm_self_check(_FakeManager([unrelated]))) == (
+        handler.GATE_SKIPPED
+    )
+
+
+def test_a_warn_tier_gate_does_not_page_as_fatal() -> None:
+    """Sentry maps CRITICAL to level=fatal and pages it high-priority.
+
+    The first boot of e355edbe did exactly that for a benign version-skew
+    condition. A gate whose BEHAVIOUR is warn-tier must carry a warn-tier
+    SIGNAL, or it pages on every boot of any older overlay until the alert
+    means nothing — the cost shared/selfcheck.py already records.
+    """
+    handler_src = (
+        Path(__file__).parent.parent / "hooks" / "smd-overlay-activation" / "handler.py"
+    ).read_text()
+    gate = handler_src[
+        handler_src.index("async def _loop_arm_self_check") : handler_src.index(
+            "def _gateway_config"
+        )
+    ]
+    assert "logger.critical" not in gate, (
+        "a non-fatal gate must not log CRITICAL — Sentry renders it as fatal and pages"
+    )
+
+    run_gate = handler_src[
+        handler_src.index("async def _run_gate") : handler_src.index(
+            "async def _cost_breaker_self_check"
+        )
+    ]
+    skipped_arms = run_gate[: run_gate.index("if ok:")]
+    assert "logger.critical" not in skipped_arms, "could-not-evaluate must not page as fatal"

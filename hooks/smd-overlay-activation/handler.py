@@ -198,7 +198,9 @@ async def _run_gate(name: str, probe, *, fatal: bool) -> str:
     try:
         ok, reason = await asyncio.wait_for(probe(), timeout=_GATE_TIMEOUT_S)
     except TimeoutError:
-        logger.critical(
+        # WARNING: could-not-evaluate is not a finding about the control. See
+        # the severity note on _loop_arm_self_check.
+        logger.warning(
             "%s UNPROVEN on this boot: probe exceeded %.0fs and was cancelled. Boot "
             "CONTINUES — a slow or wedged checker is not evidence the control is "
             "broken, and a startup that never finishes is worse than one that fails "
@@ -208,7 +210,7 @@ async def _run_gate(name: str, probe, *, fatal: bool) -> str:
         )
         return GATE_SKIPPED
     except Exception as e:  # noqa: BLE001 — a probe fault is not a finding
-        logger.critical(
+        logger.warning(
             "%s UNPROVEN on this boot: probe raised %s: %s. Boot CONTINUES.",
             name,
             type(e).__name__,
@@ -222,7 +224,10 @@ async def _run_gate(name: str, probe, *, fatal: bool) -> str:
     if fatal:
         _die(f"{name} INERT on this boot: {reason}")
     else:
-        logger.critical(
+        # ERROR, deliberately between the two: the control genuinely did not
+        # fire, which is actionable, but the process is not dying so `fatal`
+        # would be a lie about what happened.
+        logger.error(
             "%s UNPROVEN on this boot: %s. Boot CONTINUES — see the tier note on "
             "this gate for why this is not fatal.",
             name,
@@ -291,17 +296,41 @@ async def _loop_arm_self_check(mgr: Any) -> str:
     callbacks = list((getattr(mgr, "_hooks", {}) or {}).get("post_tool_call", []))
     probe = None
     for cb in callbacks:
-        try:
-            module = inspect.getmodule(cb)
-        except Exception:  # noqa: BLE001 — an exotic callback is not a finding
+        # ``cb.__globals__`` IS the defining module's namespace. ``inspect``
+        # ``.getmodule`` was the previous attempt and it FAILED ON THE SEAT
+        # (2026-08-25, e355edbe): it resolves via ``sys.modules[fn.__module__]``,
+        # and Hermes' plugin loader does not register plugins there, so it
+        # returned None for all 7 registered callbacks and the check reported
+        # UNPROVEN on a seat whose brake was fine.
+        #
+        # Confirmed on the box rather than reasoned about — loading the plugin
+        # with and without a sys.modules entry:
+        #     A registered   : getmodule -> True  | __globals__ has probe -> True
+        #     B unregistered : getmodule -> False | __globals__ has probe -> True
+        #
+        # This is the third lookup this check has had, and the pattern in all
+        # three failures is the same: every previous one asked the environment
+        # to resolve a name (a filesystem path, then a sys.modules key) when the
+        # object was already in hand. ``__globals__`` asks nothing.
+        target = getattr(cb, "__func__", cb)  # bound methods
+        namespace = getattr(target, "__globals__", None)
+        if not isinstance(namespace, dict):
             continue
-        candidate = getattr(module, "run_loop_arm_boot_probe", None)
+        candidate = namespace.get("run_loop_arm_boot_probe")
         if candidate is not None:
             probe = candidate
             break
 
     if probe is None:
-        logger.critical(
+        # WARNING, not CRITICAL. Sentry maps CRITICAL to level=fatal and pages
+        # it as high-priority — which is what happened on the first boot of
+        # e355edbe, for a condition that is benign by this branch's own
+        # reasoning. A gate whose BEHAVIOUR is warn-tier must have a warn-tier
+        # SIGNAL too, or it pages on every boot of any older overlay and the
+        # alert stops meaning anything. shared/selfcheck.py already records
+        # that exact cost: "A safety signal that fires on a known-good boot is
+        # a signal nobody reads."
+        logger.warning(
             "RUNAWAY-LOOP BRAKE UNPROVEN on this boot: no registered post_tool_call "
             "callback exposes run_loop_arm_boot_probe (%d callback(s) inspected). "
             "The overlay predates #320, or the audit plugin changed shape. This is "
