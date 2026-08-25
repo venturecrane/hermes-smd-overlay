@@ -154,19 +154,37 @@ def test_probe_leaves_no_state_file_behind(audit_plugin, tmp_path, monkeypatch) 
 # --------------------------------------------------------------------------- #
 
 
-def test_activation_handler_wires_the_check() -> None:
-    """Built is not wired — the same distinction the probe itself is about.
-
-    A perfect probe nobody calls at boot is the exact shape of the defect being
-    fixed, so the wiring is asserted rather than assumed.
-    """
-    handler = (
+def _handler_src() -> str:
+    return (
         Path(__file__).parent.parent / "hooks" / "smd-overlay-activation" / "handler.py"
     ).read_text()
+
+
+def _gate_body() -> str:
+    h = _handler_src()
+    return h[h.index("async def _loop_arm_self_check") : h.index("def _gateway_config")]
+
+
+def _gate_code() -> str:
+    """The gate's executable body, docstring stripped.
+
+    The docstring quotes the bad path deliberately, to record what went wrong.
+    An earlier draft of this file flagged its own explanation — a
+    forbidden-string check that cannot tell prose from code fires on the
+    documentation of the fix.
+    """
+    b = _gate_body()
+    return b[b.index('"""', b.index('"""') + 3) + 3 :]
+
+
+def test_activation_handler_wires_the_check() -> None:
+    """Built is not wired — the same distinction the probe itself is about."""
+    handler = _handler_src()
     assert "async def _loop_arm_self_check" in handler
-    assert re.search(r"^\s+await _loop_arm_self_check\(", handler, re.M)
-    # And it must sit with the other fail-closed boot gates, not in a branch.
-    assert "RUNAWAY-LOOP BRAKE INERT" in handler
+    assert re.search(r"^\s+\w+ = await _loop_arm_self_check\(", handler, re.M), (
+        "the gate must be called AND its outcome captured, or the completion "
+        "line cannot report what actually happened"
+    )
 
 
 def test_the_check_resolves_the_probe_from_the_live_manager_not_a_path() -> None:
@@ -174,83 +192,148 @@ def test_the_check_resolves_the_probe_from_the_live_manager_not_a_path() -> None
 
     The first version computed ``parents[2]/plugins/hermes-smd-audit/__init__.py``
     — the REPO layout. On a seat the handler installs to
-    ``/opt/data/profiles/crane/hooks/``, so the path did not exist, the check
-    reported failure, and the gateway exited 1 on every boot (ss-console#2590).
+    ``/opt/data/profiles/crane/hooks/``, so the path did not exist and the
+    gateway exited 1 on every boot (ss-console#2590).
 
     A path assertion cannot be tested from a checkout, because the checkout is
-    the one place the path resolves. So the assertion here is structural: the
-    check must read the live manager's registered callbacks and must NOT build a
-    filesystem path to the plugin at all.
+    the one place the path resolves. So this is structural.
     """
-    handler = (
-        Path(__file__).parent.parent / "hooks" / "smd-overlay-activation" / "handler.py"
-    ).read_text()
-    body = handler[
-        handler.index("async def _loop_arm_self_check") : handler.index("def _gateway_config")
-    ]
-    # Scan CODE only. The docstring quotes the bad path on purpose, to record
-    # what went wrong — and the first draft of this test flagged its own
-    # explanation. A forbidden-string check that cannot tell prose from code
-    # fires on the documentation of the fix.
-    code = body[body.index('"""', body.index('"""') + 3) + 3 :]
-    assert "_hooks" in code and "post_tool_call" in code, (
-        "the check must resolve the probe from the live PluginManager's registered "
-        "post_tool_call callbacks"
-    )
+    code = _gate_code()
+    assert "_hooks" in code and "post_tool_call" in code
     for forbidden in ("__file__", "parents[", "Path("):
         assert forbidden not in code, (
-            f"the check builds a filesystem path ({forbidden!r}). That is the exact "
-            "defect that crash-looped a seat: repo layout is not seat layout, and no "
-            "test run from a checkout can catch it."
+            f"the check builds a filesystem path ({forbidden!r}). Repo layout is "
+            "not seat layout, and no test run from a checkout can catch it."
         )
 
 
-def test_a_missing_probe_does_not_kill_the_seat() -> None:
-    """Version skew must not be fatal.
+def test_the_loop_arm_gate_is_WARN_TIER_and_cannot_kill_a_seat() -> None:
+    """The keystone of the retier, asserted directly.
 
-    An overlay predating #320 has no ``run_loop_arm_boot_probe``. Dying for that
-    would mean no older overlay could ever boot — a rollback that cannot roll
-    back is a worse safety property than the gap it closes. The hook surface is
-    already asserted separately, so this branch means "skew", never "ungoverned".
+    Per `shared/webhook_read_surface.py`: "A crash-loop is the right answer only
+    when serving is worse than being down." Un-brake-proven serving costs a
+    client some hours with the cost breaker still backstopping; a crash-loop
+    costs the firm its paralegal mid-engagement. So this gate reports and the
+    seat runs — and no future edit may quietly make it fatal again.
     """
-    handler = (
-        Path(__file__).parent.parent / "hooks" / "smd-overlay-activation" / "handler.py"
-    ).read_text()
-    body = handler[
-        handler.index("async def _loop_arm_self_check") : handler.index("def _gateway_config")
-    ]
-    probe_missing = body[body.index("if probe is None:") : body.index("try:")]
-    assert "_die(" not in probe_missing, (
-        "a probe that cannot be FOUND must not _die — conflating 'cannot evaluate' "
-        "with 'evaluated and failed' is what took the seat down"
-    )
-    assert "UNPROVEN" in probe_missing and "logger.critical" in probe_missing, (
-        "it must still be loud: silent skew is how an unproven brake reads as a proven one"
+    code = _gate_code()
+    assert "fatal=False" in code, "the loop-arm gate must be WARN tier"
+    assert "_die(" not in code, (
+        "the loop-arm gate must have NO path to _die. Its own fatal version took "
+        "a seat down for 29 minutes on a lookup bug."
     )
 
 
-def test_a_raising_probe_does_not_kill_the_seat() -> None:
-    """A fault in the checker is not evidence the control is broken. The checker
-    must not be able to take a seat down by being wrong about itself — which is
-    precisely what happened."""
-    handler = (
-        Path(__file__).parent.parent / "hooks" / "smd-overlay-activation" / "handler.py"
-    ).read_text()
-    body = handler[
-        handler.index("async def _loop_arm_self_check") : handler.index("def _gateway_config")
+def test_the_cost_gate_stays_FATAL() -> None:
+    """The retier is scoped, not a blanket softening. An operator whose SPEND
+    breaker cannot fire must still refuse to serve."""
+    h = _handler_src()
+    body = h[
+        h.index("async def _cost_breaker_self_check") : h.index("async def _loop_arm_self_check")
     ]
-    except_block = body[body.index("except Exception") : body.index("if not ok:")]
-    assert "_die(" not in except_block
-    assert "logger.critical" in except_block
+    assert "fatal=True" in body
 
 
-def test_a_probe_that_ran_and_failed_still_kills_the_seat() -> None:
-    """The whole point survives: a brake PROVEN broken must stop the seat."""
-    handler = (
-        Path(__file__).parent.parent / "hooks" / "smd-overlay-activation" / "handler.py"
-    ).read_text()
-    body = handler[
-        handler.index("async def _loop_arm_self_check") : handler.index("def _gateway_config")
-    ]
-    tail = body[body.index("if not ok:") :]
-    assert "_die(" in tail and "BRAKE INERT" in tail
+def test_run_gate_never_dies_on_a_probe_it_could_not_evaluate() -> None:
+    """SKIPPED is not UNPROVEN. Conflating them is what killed the seat: a
+    lookup miss was treated as a proven-broken brake."""
+    h = _handler_src()
+    body = h[h.index("async def _run_gate") : h.index("async def _cost_breaker_self_check")]
+    timeout_arm = body[body.index("except TimeoutError:") : body.index("except Exception")]
+    raise_arm = body[body.index("except Exception") : body.index("if ok:")]
+    for name, arm in (("timeout", timeout_arm), ("raise", raise_arm)):
+        assert "_die(" not in arm, f"the {name} path must not be fatal"
+        assert "GATE_SKIPPED" in arm, f"the {name} path must report SKIPPED, not UNPROVEN"
+
+
+def test_run_gate_bounds_every_probe() -> None:
+    """A hang is worse than a crash-loop: a crash-loop shows in the restart
+    count, a hang reads as a slow boot."""
+    h = _handler_src()
+    body = h[h.index("async def _run_gate") : h.index("async def _cost_breaker_self_check")]
+    assert "wait_for" in body and "_GATE_TIMEOUT_S" in body
+
+
+def test_handle_has_a_top_level_guard() -> None:
+    """A raise anywhere in handle() is swallowed by HookRegistry (handler.py:56),
+    which would silently skip every downstream gate and serve ungoverned with no
+    _die. One unguarded line disarms the checker."""
+    h = _handler_src()
+    body = h[h.index("async def handle(") :]
+    assert "except BaseException" in body, (
+        "handle() needs a top-level guard so a checker fault cannot silently "
+        "disarm the remaining gates"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# THE MUTATION TEST. This is the one that makes the probe mean anything.       #
+# --------------------------------------------------------------------------- #
+
+
+def test_probe_goes_red_when_the_hook_stops_calling_the_arms(audit_plugin, monkeypatch) -> None:
+    """Delete the WIRING and the probe must fail.
+
+    This is the defect the whole feature is about, reproduced exactly:
+    ``record_tool_failure`` sat implemented, thresholded, audited and
+    unit-tested for months with nothing calling it. The call that was missing is
+    ``on_post_tool_call``'s call to ``_meter_loop_arms`` — the registered
+    callback's call, not the inner function.
+
+    The first version of this probe invoked ``_meter_loop_arms`` DIRECTLY, so
+    removing that call left the probe green: a check named "prove the arms are
+    FED" that skipped the feeding. Same failure class as a wiring check that
+    greps an identifier and matches the import after the call is gone.
+
+    Making the registered callback a no-op is the faithful mutation — it is
+    precisely "the hook no longer reaches the arms".
+    """
+    monkeypatch.setattr(audit_plugin, "on_post_tool_call", lambda **_kw: None)
+    ok, reason = asyncio.run(audit_plugin.run_loop_arm_boot_probe())
+    assert not ok, (
+        "the probe passed while the hook did not call the arms at all — it is "
+        "measuring the inner function instead of the wiring, which is the exact "
+        "defect this feature exists to prevent"
+    )
+    assert "did not trip the tool-failure arm" in reason
+
+
+def test_probe_does_not_leak_its_throwaway_breaker(audit_plugin) -> None:
+    """A leaked self-check breaker would meter LIVE tool calls into a temp file
+    — worse than the defect the probe catches — so the restore is asserted
+    rather than assumed."""
+    assert audit_plugin._SELFCHECK_BREAKER is None
+    asyncio.run(audit_plugin.run_loop_arm_boot_probe())
+    assert audit_plugin._SELFCHECK_BREAKER is None, "probe leaked its throwaway breaker"
+
+
+class _RecordingBreaker:
+    """Records which arm was fed, without a database."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def record_tool_failure(self, skill_name=None):
+        self.calls.append(("failure", skill_name))
+
+    def record_tool_success(self):
+        self.calls.append(("success", None))
+
+    def record_refusal(self, skill_name=None):
+        self.calls.append(("refusal", skill_name))
+
+
+def test_a_real_turn_never_picks_up_the_selfcheck_breaker(audit_plugin, monkeypatch) -> None:
+    """Two conditions guard the substitution: the global being set AND the
+    self-check session id. Set the global by hand, drive a REAL-looking
+    envelope, and require it to reach the seat's own breaker."""
+    throwaway = _RecordingBreaker()
+    real = _RecordingBreaker()
+    monkeypatch.setattr(audit_plugin, "_SELFCHECK_BREAKER", throwaway)
+    monkeypatch.setattr(audit_plugin, "_cost_breaker", lambda: real)
+
+    audit_plugin._meter_loop_arms(
+        {"status": "error", "tool_name": "t", "session_id": "a-real-turn"}
+    )
+    assert real.calls == [("failure", "t")], "a real turn must use the seat's breaker"
+    assert throwaway.calls == [], "a real turn must never reach the self-check breaker"

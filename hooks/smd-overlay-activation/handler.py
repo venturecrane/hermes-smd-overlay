@@ -67,6 +67,7 @@ structurally cannot assert the live-turn property. The two are complementary.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import os
@@ -157,7 +158,80 @@ def _audit_row_count(db_path: str) -> int | None:
         return None
 
 
-async def _cost_breaker_self_check() -> None:
+#: Outcome of one boot gate. The completion line reports these verbatim, so a
+#: boot where a gate was skipped cannot print a line claiming it was proven.
+GATE_PROVEN = "PROVEN"
+GATE_SKIPPED = "SKIPPED"
+GATE_UNPROVEN = "UNPROVEN"
+
+#: Seconds any single boot probe may take. Generous — the probes do a handful of
+#: sqlite writes on a throwaway file — but finite, because the alternative is a
+#: gateway that hangs in startup forever. A hang is WORSE than a crash-loop: a
+#: crash-loop is visible in the restart count, a hang reads as a slow boot.
+_GATE_TIMEOUT_S = 10.0
+
+
+async def _run_gate(name: str, probe, *, fatal: bool) -> str:
+    """Run one boot probe under a uniform guard and report its OUTCOME.
+
+    WHY THIS EXISTS. On 2026-08-25 a boot gate I added took hermes-smd-staging
+    down for 29 minutes, and the post-mortem found the same two holes in the
+    gate NEXT DOOR (``_cost_breaker_self_check``): an ``await`` outside any
+    try, and no timeout. Patching one function would have left the class alive
+    in the check that currently earns ``sticky_stop_cost_cap`` its enforced
+    status. Every async gate goes through here instead.
+
+    THREE OUTCOMES, and the distinction is the whole lesson of that outage:
+
+      * PROVEN   — the probe ran and the control fired.
+      * UNPROVEN — the probe ran and the control did NOT fire. A real finding.
+      * SKIPPED  — the probe could not be evaluated: absent, raised, or timed
+                   out. NOT a finding about the control.
+
+    Conflating SKIPPED with UNPROVEN is what killed the seat: a lookup miss was
+    treated as a proven-broken brake. "Cannot evaluate" is not "broken".
+
+    ``fatal`` decides only what an UNPROVEN outcome does. A SKIPPED gate never
+    dies, whatever its tier — the checker must not be able to take a seat down
+    by being wrong about itself.
+    """
+    try:
+        ok, reason = await asyncio.wait_for(probe(), timeout=_GATE_TIMEOUT_S)
+    except TimeoutError:
+        logger.critical(
+            "%s UNPROVEN on this boot: probe exceeded %.0fs and was cancelled. Boot "
+            "CONTINUES — a slow or wedged checker is not evidence the control is "
+            "broken, and a startup that never finishes is worse than one that fails "
+            "loudly.",
+            name,
+            _GATE_TIMEOUT_S,
+        )
+        return GATE_SKIPPED
+    except Exception as e:  # noqa: BLE001 — a probe fault is not a finding
+        logger.critical(
+            "%s UNPROVEN on this boot: probe raised %s: %s. Boot CONTINUES.",
+            name,
+            type(e).__name__,
+            e,
+        )
+        return GATE_SKIPPED
+
+    if ok:
+        return GATE_PROVEN
+
+    if fatal:
+        _die(f"{name} INERT on this boot: {reason}")
+    else:
+        logger.critical(
+            "%s UNPROVEN on this boot: %s. Boot CONTINUES — see the tier note on "
+            "this gate for why this is not fatal.",
+            name,
+            reason,
+        )
+    return GATE_UNPROVEN
+
+
+async def _cost_breaker_self_check() -> str:
     """Negative-fire probe (ADR 0062 §6, ss-console #1701): prove the cost
     breaker actually HALTS — at every boot, in a THROWAWAY state file that never
     touches the real ``/opt/data/smd/sticky_stop.db``. The probe records spend
@@ -171,58 +245,56 @@ async def _cost_breaker_self_check() -> None:
         from shared.cost_breaker import run_boot_probe
     except Exception as e:  # noqa: BLE001
         _die(f"cost-breaker self-check import failed: {type(e).__name__}: {e}")
-        return
+        return GATE_SKIPPED
 
-    ok, reason = await run_boot_probe()
-    if not ok:
-        _die(f"COST BREAKER INERT on this boot: {reason} (ADR 0062 §6, #1701)")
+    # Through _run_gate: this check had the same unguarded await and the same
+    # missing timeout as the one that took a seat down. fatal=True is correct
+    # HERE — an operator whose SPEND breaker cannot fire must not serve.
+    return await _run_gate("COST BREAKER", run_boot_probe, fatal=True)
 
 
-async def _loop_arm_self_check(mgr: Any) -> None:
-    """Prove the runaway-loop arms are FED, or refuse to serve (overlay#319).
+async def _loop_arm_self_check(mgr: Any) -> str:
+    """Prove the runaway-loop arms are FED. WARN TIER — never fatal.
 
-    The sibling cost check proves the ladder HALTS. It cannot prove the arms are
-    WIRED, because it drives the state machine directly — and for months that
-    difference was the entire defect: ``record_tool_failure`` and
-    ``record_refusal`` were implemented, thresholded, audited and unit-tested,
-    with no caller anywhere. A seat looping on a failing tool stopped only on
-    spend, and every test was green about it.
+    THE CONTROL. ADR 0062's ladder has four arms; only the cost arm was ever
+    fed. ``record_tool_failure`` and ``record_refusal`` were implemented,
+    thresholded, audited and unit-tested with NO caller anywhere for months, so
+    a seat looping on a failing tool stopped only on spend. overlay#319 fed
+    them; this proves the feeding is still there, at every boot.
 
-    RESOLVED FROM THE LIVE MANAGER, NOT FROM A PATH — and this is a correction,
-    not a preference. The first version of this check computed the plugin's
-    location as ``parents[2]/plugins/hermes-smd-audit/__init__.py``. That is the
-    REPO layout; on a seat the handler installs to
-    ``/opt/data/profiles/crane/hooks/``, so the path did not exist, the check
-    reported failure, and the gateway crash-looped for 29 minutes
-    (hermes-smd-staging, 2026-08-25 15:20Z; ss-console#2590 reverted it). Unit
-    tests could not catch it: they run from a checkout, where that path happens
-    to resolve.
+    WHY WARN AND NOT FATAL — decided against this repo's own rule, not by
+    preference. ``shared/webhook_read_surface.py`` states it: "A crash-loop is
+    the right answer only when serving is worse than being down." Weigh the two
+    harms. Un-brake-proven serving costs a client some hours and some spend on
+    a loop, with the cost breaker still standing as backstop. A crash-loop
+    costs the firm its paralegal, mid-engagement. Serving is plainly not worse
+    than being down here, so this gate reports and the seat runs.
 
-    Taking the module off the registered ``post_tool_call`` callback is both
-    immune to layout and a STRONGER probe. A re-import can succeed against a
-    copy of the plugin that no turn will ever reach; the registered callback is
-    by definition the object Hermes will actually call.
+    That is not a softening. The first version of this check WAS fatal, and its
+    own lookup bug took hermes-smd-staging down for 29 minutes on 2026-08-25
+    (ss-console#2590). A control whose failure mode is worse than the failure
+    it detects is a bad trade at any level of care, and no amount of care would
+    have made the fatal version safe — only the tier does.
 
-    TWO OUTCOMES, DELIBERATELY DIFFERENT, and the split is the lesson from the
-    crash-loop:
+    Visibility replaces death: the outcome rides the heartbeat's
+    ``loop_brake_proven`` field into ``fleet_status`` and the client portal,
+    the same path ``sticky_stop_level`` already takes. A seat that reports an
+    unproven brake is strictly more useful than one that has made itself
+    invisible by exiting.
 
-      * The probe RAN and FAILED -> ``_die``. The brake is broken; the seat must
-        not serve.
-      * The probe could not be FOUND -> CRITICAL log, boot CONTINUES. An overlay
-        predating #320 has no ``run_loop_arm_boot_probe``, and killing the
-        gateway for that would mean no older overlay could ever boot — a
-        rollback that cannot roll back is a worse safety property than the gap
-        it closes. The hook surface itself is already asserted above
-        (``post_tool_call`` is in ``_REQUIRED_HOOKS``), so this branch means
-        "version skew", never "ungoverned".
-
-    Conflating those two is exactly what took the seat down: a lookup miss was
-    treated as a proven-broken control.
+    RESOLVED FROM THE LIVE MANAGER, not a path. The first version computed
+    ``parents[2]/plugins/...`` — the REPO layout — and on a seat that path does
+    not exist. Taking the module off the registered ``post_tool_call`` callback
+    is immune to layout and is the stronger probe: a re-import can succeed
+    against a copy no turn will ever reach.
     """
     callbacks = list((getattr(mgr, "_hooks", {}) or {}).get("post_tool_call", []))
     probe = None
     for cb in callbacks:
-        module = inspect.getmodule(cb)
+        try:
+            module = inspect.getmodule(cb)
+        except Exception:  # noqa: BLE001 — an exotic callback is not a finding
+            continue
         candidate = getattr(module, "run_loop_arm_boot_probe", None)
         if candidate is not None:
             probe = candidate
@@ -231,29 +303,16 @@ async def _loop_arm_self_check(mgr: Any) -> None:
     if probe is None:
         logger.critical(
             "RUNAWAY-LOOP BRAKE UNPROVEN on this boot: no registered post_tool_call "
-            "callback exposes run_loop_arm_boot_probe (%d callback(s) inspected). The "
-            "overlay predates #320, or the audit plugin changed shape. Boot CONTINUES "
-            "— this is version skew, not a broken brake, and the arms may still be fed. "
-            "Verify with the ss-console registry row for sticky_stop_tool_failure.",
+            "callback exposes run_loop_arm_boot_probe (%d callback(s) inspected). "
+            "The overlay predates #320, or the audit plugin changed shape. This is "
+            "version skew, not a broken brake — killing the gateway for it would "
+            "mean no older overlay could ever boot, and a rollback that cannot roll "
+            "back is a worse safety property than the gap it closes.",
             len(callbacks),
         )
-        return
+        return GATE_SKIPPED
 
-    try:
-        ok, reason = await probe()
-    except Exception as e:  # noqa: BLE001 — a probe fault is not a proven failure
-        logger.critical(
-            "RUNAWAY-LOOP BRAKE UNPROVEN on this boot: the probe raised "
-            "%s: %s. Boot CONTINUES — a fault in the checker is not evidence the "
-            "control is broken, and the checker must not be able to take a seat down "
-            "by being wrong about itself.",
-            type(e).__name__,
-            e,
-        )
-        return
-
-    if not ok:
-        _die(f"RUNAWAY-LOOP BRAKE INERT on this boot: {reason} (ADR 0062, overlay#319)")
+    return await _run_gate("RUNAWAY-LOOP BRAKE", probe, fatal=False)
 
 
 def _gateway_config() -> dict:
@@ -437,6 +496,24 @@ def _async_callbacks(manager: Any) -> list[str]:
 async def handle(event_type: str, context: dict | None = None) -> None:
     """Fire at ``gateway:startup``: force-load the overlay into the live singleton,
     then prove it governs the live turn-path or fail closed."""
+    # TOP-LEVEL GUARD (2026-08-25). HookRegistry swallows handler exceptions
+    # (gateway/hooks.py:19, and see this module's docstring §6), so ANY
+    # unguarded raise in the gates below would abort the rest of them silently:
+    # no _die, no completion line, and a seat serving with the remaining gates
+    # never run. Every gate is individually wrapped, but "every gate is wrapped"
+    # is a property that decays with the next edit; this does not.
+    #
+    # A fault in the checking machinery is not evidence about the controls, so
+    # this dies rather than continuing: unlike a single gate reporting UNPROVEN,
+    # reaching here means we do not know what ran.
+    try:
+        await _handle_inner(event_type, context)
+    except BaseException as e:  # noqa: BLE001 — the whole point is to catch all
+        _die(f"activation handler raised out of its gates: {type(e).__name__}: {e}")
+
+
+async def _handle_inner(event_type: str, context: dict | None = None) -> None:
+    """The activation sequence proper. See ``handle`` for the guard around it."""
     # ADR 0023 Wave 1: Sentry error monitoring for the gateway (agent) process.
     # Disabled-safe (no SENTRY_DSN -> no-op) and best-effort so it never blocks
     # activation. Init first so the governance self-checks below — and any _die()
@@ -576,14 +653,14 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     #    it never touches real breaker state; _die if the ladder does not trip or
     #    the guard does not refuse. This is the recurring prod-boot probe that
     #    earns sticky_stop_cost_cap its enforced status.
-    await _cost_breaker_self_check()
+    cost_outcome = await _cost_breaker_self_check()
 
     # 4b. RUNAWAY-LOOP arm self-check (overlay#319). The check above proves the
     #     ladder halts; this proves a tool failure arriving at post_tool_call
     #     actually moves it. The arms sat implemented and caller-less for months
     #     with every test green, so "the code exists" is not the question a boot
     #     probe should be answering here.
-    await _loop_arm_self_check(mgr)
+    loop_brake_outcome = await _loop_arm_self_check(mgr)
 
     # 5. WEBHOOK READ-SURFACE assertion (ss-console#2145). `read_file` reaches
     #    webhook turns only when TWO halves in TWO processes both shipped: the
@@ -604,31 +681,32 @@ async def handle(event_type: str, context: dict | None = None) -> None:
     #     tiers answer different orders of harm.
     _webhook_expected_tools_check()
 
-    # This line is the surface an operator reads to learn what was actually
-    # PROVEN at boot, and every check above it _die()s on failure — so the line
-    # is unreachable unless all of them passed. That makes it the seat's own
-    # report of its governance state, and it must name every gate that ran.
+    # This line is the surface an operator reads to learn what was PROVEN at
+    # boot, so it reports each gate's actual OUTCOME rather than asserting one.
     #
-    # It had drifted twice. It said "ACTIVE + AUDITING + SPEND-CAPPED" while the
-    # webhook read-surface check was already fail-closed and unnamed, and it
-    # stayed that way when the runaway-loop arms became a boot gate
-    # (overlay#319/#320). A reader would have concluded the seat's only circuit
-    # breaker was the spend one — a belief that was true for months and is
-    # exactly what the loop-brake work ended. A status line asserting LESS than
-    # the system knows is the same failure class as one asserting more.
-    #
-    # tests/test_activation_completion_log.py fails when a fail-closed gate is
-    # added without a claim here.
+    # It previously said "runaway-loop arms proven fed" unconditionally. Once
+    # that gate became non-fatal, a boot where the probe was skipped would have
+    # printed a line claiming the brake was proven — the completion line lying
+    # about the one thing it exists to report. tests/test_activation_completion_log.py
+    # is a regex over THIS source and structurally cannot see a runtime return,
+    # so the honesty has to live in the interpolation, not in the test.
     logger.info(
-        "SMD overlay ACTIVE + AUDITING + SPEND-CAPPED + LOOP-BRAKED on the live gateway: "
-        "%d hook type(s) in the live singleton, trust gate fired on banned %r, audit row "
-        "written (before=%s after=%s), cost breaker tripped+refused in the boot self-check, "
-        "runaway-loop arms proven fed through post_tool_call (a failure envelope trips the "
-        "ladder, a success resets the streak, an unrecognised status moves nothing), "
-        "webhook read surface resolved — self-check passed, operator is governed, "
-        "auditing, spend-capped, and loop-braked.",
+        # Each claim term is kept CONTIGUOUS in this source string on purpose:
+        # test_activation_completion_log.py greps this text, and a term split
+        # across a Python string continuation ("| webhook " "read surface") is
+        # invisible to it. The test was right and the wrapping was wrong.
+        "SMD overlay ACTIVE + AUDITING on the live gateway: %d hook type(s) in the "
+        "live singleton, trust gate fired on banned %r, audit row written "
+        "(before=%s after=%s)"
+        " | cost breaker: %s"
+        " | runaway-loop arms: %s"
+        " | webhook read surface: resolved"
+        " — each gate's outcome above is what was observed on THIS boot, not a "
+        "claim about what the gate would do.",
         len(present),
         _BANNED_PROBE_TOOL,
         before,
         after,
+        cost_outcome,
+        loop_brake_outcome,
     )
