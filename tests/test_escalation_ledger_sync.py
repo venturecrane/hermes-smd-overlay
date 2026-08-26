@@ -49,7 +49,7 @@ _COPY = _REPO_ROOT / "shared" / "escalation_ledger.py"
 #
 # 2026-08-11 (ss #2289 / this PR): item-key components are normalized before
 # hashing and has_stable_identity takes (source_id, matter_id).
-CANONICAL_SHA256 = "0e1e10f40a0f0ea77465ca6bfbbd042445d355ebc0d5b77e84cc9dda529c4aba"
+CANONICAL_SHA256 = "d1fe74f99326633814a6230ed086df71ccb7ea9b4d35c9cd7d1c0a3ba4b35307"
 
 CANONICAL_PATH = "operator/workspace_broker/escalation_ledger.py"
 CANONICAL_REPO = "venturecrane/ss-console"

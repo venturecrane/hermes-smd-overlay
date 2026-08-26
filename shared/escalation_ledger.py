@@ -35,6 +35,18 @@ the file directly; every write goes through the broker's uid-gated
 ``escalation_event_append`` verb, which calls ``validate_append`` and stamps
 ``ts``/``id`` server-side (the agent cannot backdate).
 
+A raise silences the same alarm, by the other door. ``should_fire`` reads
+``last_raised_date`` off a ``fired``/``chased`` row, so a raise recorded for an
+alert nobody received suppresses that deadline for ``refire_days`` — the alarm
+does not ring, and writes down that it rang. Fencing the ack against forgery
+while leaving the raise open bought nothing: on pilot-smokeball, 2026-08-20 wrote
+77 appends with zero sends, and 2026-08-26 wrote five ``fired`` rows in a turn
+whose only delivery attempt was a refused memo. So ``validate_append`` REJECTS a
+raise the broker did not witness, via the required ``send_witness`` keyword.
+The rule was already doctrine in the skills (``algorithm.md``: "if the send did
+not happen, write nothing"); it was prose addressed to the model, which is not a
+control.
+
 Pure stdlib. No imports from other ``workspace_broker`` modules, so the vendored
 copy is safe to load standalone inside a skill.
 """
@@ -63,6 +75,14 @@ IDENTITY_EPOCH = 2
 # The full event vocabulary. A ``fired`` or ``chased`` is a "raise" — an alarm
 # surfaced to a human; an ``acked`` references a prior raise; ``handed_off`` and
 # ``resolved`` are terminal for autonomous re-firing.
+#
+# INVARIANT for anyone adding a member here: a RAISING_EVENTS member asserts that
+# THE BROKER ITSELF TRANSMITTED to a person, because ``validate_append`` will
+# demand a witnessed dispatch before writing one. A draft-and-surface lane, where
+# a human sends the message (lien-ledger-tracker's chase is one today —
+# SKILL.md: "The chase outbound is draft-and-surface (a human sends it)"),
+# produces no dispatch row and must therefore use a NON-raising event kind, or it
+# will be refused forever and re-raise daily with nothing in the ledger.
 EVENTS: tuple[str, ...] = ("fired", "chased", "acked", "handed_off", "resolved")
 RAISING_EVENTS: tuple[str, ...] = ("fired", "chased")
 _REQUIRED_KEYS: tuple[str, ...] = ("ts", "skill", "item_key", "event")
@@ -443,11 +463,21 @@ def is_pre_identity_epoch(event) -> bool:
         return True
 
 
-def validate_append(existing_events, new_event: dict) -> None:
+def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
     """Raise ValueError unless ``new_event`` is a well-formed event that may be
-    appended. The load-bearing rule: an ``acked`` MUST reference a prior
-    ``fired``/``chased`` with the same token (or item_key) — you cannot ack an
-    alarm that never rang."""
+    appended. Two load-bearing rules, one per door into silence:
+
+    * an ``acked`` MUST reference a prior ``fired``/``chased`` with the same
+      token (or item_key) — you cannot ack an alarm that never rang;
+    * a ``fired``/``chased`` MUST be witnessed — you cannot record that an alarm
+      rang when it did not.
+
+    ``send_witness`` is a callable taking ``new_event`` and returning True iff
+    the broker itself dispatched a message to a non-probe recipient for that
+    event's session. It is keyword-only and has NO DEFAULT on purpose: a caller
+    that forgets it gets a TypeError rather than a silently unguarded raise.
+    Only the raise branch calls it, so non-raising events cost no lookup.
+    """
     if not isinstance(new_event, dict):
         raise ValueError("escalation event must be an object")
     kind = new_event.get("event")
@@ -457,6 +487,25 @@ def validate_append(existing_events, new_event: dict) -> None:
         raise ValueError("escalation event requires a non-empty item_key")
     if not str(new_event.get("skill") or "").strip():
         raise ValueError("escalation event requires a skill")
+    if kind in RAISING_EVENTS:
+        if not callable(send_witness):
+            raise ValueError(
+                "escalation raise requires a callable send_witness; refusing to write a "
+                "raise this process cannot vouch for"
+            )
+        if not send_witness(new_event):
+            # Instructive and TERMINAL. The overlay keeps the append handle alive
+            # after a broker refusal so the turn can retry the same identity, and
+            # this repo carries no runaway-loop brake today, so a message that
+            # reads as transient invites a retry storm. Say what would actually
+            # change the answer, and that waiting will not.
+            raise ValueError(
+                f"refusing to record a {kind} for this item: the broker dispatched no message "
+                "to a person in this session, so no alarm reached anyone. Record a raise only "
+                "after a send succeeds — deliver with smd_send_message; a memo, a task or a "
+                "draft is a log, never a delivery. Retrying this append will fail identically "
+                "until a send succeeds, and the item re-fires on the next scheduled run."
+            )
     if kind == "acked":
         token = new_event.get("token")
         key = str(new_event.get("item_key") or "")
