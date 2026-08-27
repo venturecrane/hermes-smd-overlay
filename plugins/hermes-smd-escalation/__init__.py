@@ -40,10 +40,31 @@ from collections import OrderedDict
 from dataclasses import asdict
 from typing import Any
 
-from shared import escalation_ledger
+from shared import escalation_ledger, provenance
 from shared.tool_registration import register_wrapped_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _resolved_session(kwargs: dict[str, Any]) -> str:
+    """The session id the broker's CONFIRM_SEND_* row was keyed under.
+
+    Same reconciliation `_smd_send_message` uses, and deliberately so: the broker
+    refuses a raise it cannot join to a dispatch, so the raise and the send must
+    agree on the id or a real delivery reads as no delivery. Core drops
+    `session_id` at some tool fire sites and passes only `task_id` (overlay #141);
+    `provenance.resolve_session` is the single place that reconciles them.
+
+    Never raises. An unresolvable session degrades to the empty string, which the
+    broker treats as the pre-plumbing caller shape and falls back to a bounded
+    recent-dispatch window rather than refusing outright.
+    """
+    raw = str(kwargs.get("session_id") or "")
+    try:
+        return provenance.resolve_session(raw)
+    except Exception:  # noqa: BLE001 — an audit join must not break an append
+        return raw
+
 
 _SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
 _LEDGER_PATH_ENV = "SMD_ESCALATION_LEDGER_PATH"
@@ -283,7 +304,7 @@ def _resolve_token_identity(ack_token: str) -> tuple[str, str | None]:
     )
 
 
-def _escalation_append(args: dict[str, Any], **_: Any) -> str:
+def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
     kind = str(args["event"])
     ack_token = args.get("ack_token")
     handle = args.get("append_handle")
@@ -412,6 +433,18 @@ def _escalation_append(args: dict[str, Any], **_: Any) -> str:
         "event": kind,
         "attempt": int(args["attempt"]),
         "token": token,
+        # ss-console: the broker refuses a `fired`/`chased` it did not witness
+        # dispatching to a person, and this is the key it joins the raise to the
+        # send on. Taken from the RUNTIME kwargs, never from `args`:
+        # `_APPEND_SCHEMA` sets `additionalProperties: false` precisely so the
+        # model cannot name this field, and a model-supplied session pointing at
+        # some other turn where a send did happen would defeat the control it is
+        # here to feed. Resolved through `provenance` for the same reason
+        # `_smd_send_message` does — core drops `session_id` at some tool fire
+        # sites (overlay #141), and the send row this must match was keyed by the
+        # resolver's answer, so reading raw kwargs would join on a different id
+        # and refuse a raise whose send is sitting right there.
+        "session_id": _resolved_session(kwargs),
     }
     response = _broker_request({"action": "escalation_event_append", "event": event})
     # The broker's verdict (ok/id or a validation error) goes back verbatim —

@@ -1125,11 +1125,20 @@ def test_a_pre_run_date_is_refused_before_seeding_and_allowed_after(
 ) -> None:
     """The 08-19 date refusals, and their fix, in one test.
 
-    The escalator's script read ``2026-08-26`` out of Smokeball and handed it to
-    the model as text. Before the handoff nothing in the session had read it, so
-    the gate refused — correctly, on the evidence it had. After the handoff is
-    taken for that session, the same body sends.
+    The escalator's script read a due date out of Smokeball and handed it to the
+    model as text. Before the handoff nothing in the session had read it, so the
+    gate refused — correctly, on the evidence it had. After the handoff is taken
+    for that session, the same body sends.
+
+    The date is computed rather than written down. This test asserts a REFUSAL,
+    and `_ambient_dates` deliberately exempts today and yesterday ("as of
+    today..." is legitimate composition without a read). A literal date is
+    therefore a time bomb: this test hardcoded ``2026-08-26``, the real incident
+    date, and began failing on 2026-08-26 when that date became ambient and the
+    gate correctly stopped refusing it. Any future date keeps the assertion about
+    provenance instead of about the calendar.
     """
+    due = (datetime.now(timezone.utc).date() + timedelta(days=45)).isoformat()
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     provenance._reset_for_tests()
@@ -1143,7 +1152,7 @@ def test_a_pre_run_date_is_refused_before_seeding_and_allowed_after(
             args={
                 "to": [_STAFF],
                 "subject": "Deadline digest",
-                "text": "Response to written discovery is due 2026-08-26.",
+                "text": f"Response to written discovery is due {due}.",
             },
             session_id="sess-handoff",
             tool_call_id="c",
@@ -1154,7 +1163,7 @@ def test_a_pre_run_date_is_refused_before_seeding_and_allowed_after(
 
     started = datetime.now(timezone.utc)  # recency binding: the file must be fresh
     pre_run_handoff.write_handoff(
-        "deadline-miss-escalator", started, ["2026-08-26"], [], hermes_home=str(tmp_path)
+        "deadline-miss-escalator", started, [due], [], hermes_home=str(tmp_path)
     )
     taken = pre_run_handoff.take_handoff(
         "deadline-miss-escalator", started + timedelta(minutes=1), hermes_home=str(tmp_path)
