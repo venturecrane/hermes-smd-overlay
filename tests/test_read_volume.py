@@ -89,6 +89,18 @@ def test_skill_md_read_marks_the_session() -> None:
     assert read_volume._sessions[SID].review is True
 
 
+def test_skill_view_of_gated_skill_marks_the_session() -> None:
+    # The path the live 2026-08-28 rehearsal actually took: the gateway-native
+    # skill tool, not read_file. A marker watching only read_file was inert.
+    read_volume.note_read(SID, "skill_view", {"name": read_volume.GATED_SKILL}, "")
+    assert read_volume._sessions[SID].review is True
+
+
+def test_skill_view_of_other_skill_does_not_mark() -> None:
+    read_volume.note_read(SID, "skill_view", {"name": "matter-inbox-router"}, "")
+    assert SID not in read_volume._sessions or not read_volume._sessions[SID].review
+
+
 def test_other_skill_md_read_does_not_mark() -> None:
     read_volume.note_read(
         SID, "read_file", {"path": "/app/skills/matter-inbox-router/SKILL.md"}, ""

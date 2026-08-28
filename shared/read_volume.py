@@ -16,11 +16,15 @@ sufficient, both are mechanical observations rather than model claims:
 * the webhook router dispatched the session to the gated skill (the direct
   route), recorded at dispatch — with the same unbound claim-once handoff
   ``shared.inbound`` uses, because dispatch-time session ids are often empty;
-* the session READ the gated skill's SKILL.md (``read_file`` observed at
-  post_tool_call) — the spine path: ``matter-inbox-router`` executes other
-  skills' procedures inside its own session and is REQUIRED to read the
-  procedure first, so the read is the earliest mechanical footprint of a
-  review on the path a live seat actually uses.
+* the session READ the gated skill's procedure — ``skill_view`` of the gated
+  skill, or ``read_file`` of its SKILL.md, observed at post_tool_call. This is
+  the spine path: ``matter-inbox-router`` executes other skills' procedures
+  inside its own session and reads the procedure first, so the read is the
+  earliest mechanical footprint of a review on the path a live seat actually
+  uses. BOTH tools are watched because the live 2026-08-28 rehearsal showed
+  the model reaches skills through the gateway-native ``skill_view``, never
+  ``read_file`` — a marker watching only the tool the docs named was inert on
+  the real turn.
 
 Ambiguity posture INVERTS ``claim_unbound``'s exactly-one rule: with two fresh
 unclaimed routes, ALL fresh claimant sessions are marked. Over-applying a read
@@ -219,11 +223,13 @@ def note_read(session_id: str, tool_name: str, args: Any, result: Any) -> None:
     try:
         if not session_id:
             return
-        if tool_name == "read_file":
-            path = ""
+        if tool_name in ("read_file", "skill_view"):
+            blob = ""
             if isinstance(args, dict):
-                path = str(args.get("path") or args.get("file_path") or "")
-            if GATED_SKILL in path and path.rstrip("/").endswith("SKILL.md"):
+                blob = " ".join(str(v) for v in args.values())
+            elif isinstance(args, str):
+                blob = args
+            if GATED_SKILL in blob and (tool_name == "skill_view" or "SKILL.md" in blob):
                 _state(session_id).review = True
             return
         if tool_name != COUNTED_TOOL:
