@@ -58,6 +58,25 @@ def test_string_result_parses() -> None:
     assert _total() == 12
 
 
+def test_runtime_dispatcher_envelope_parses() -> None:
+    # THE LIVE SHAPE (pilot rehearsal round 3): post_tool_call hands
+    # {"result": "<connector JSON as a string>"} — the fields sit inside a
+    # nested JSON string. This is the runtime envelope, not a convenience
+    # fixture; a parser test that skips it certifies a parser that fails live.
+    _mark()
+    inner = json.dumps(_read_result("f1", pages=25))
+    read_volume.note_read(SID, read_volume.COUNTED_TOOL, {}, json.dumps({"result": inner}))
+    assert _total() == 25
+
+
+def test_mcp_content_block_envelope_parses() -> None:
+    _mark()
+    inner = json.dumps(_read_result("f2", pages=7))
+    env = json.dumps({"content": [{"type": "text", "text": inner}]})
+    read_volume.note_read(SID, read_volume.COUNTED_TOOL, {}, env)
+    assert _total() == 7
+
+
 def test_docx_falls_back_to_char_estimate() -> None:
     _mark()
     read_volume.note_read(

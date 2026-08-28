@@ -197,12 +197,30 @@ def _as_payload(result: Any) -> Any:
 
 
 def _walk_read_fields(payload: Any) -> dict[str, Any] | None:
-    """Find the read envelope's fields at whatever wrapping depth they sit."""
+    """Find the read envelope's fields at whatever wrapping depth they sit.
+
+    LIVE-CAUGHT (pilot rehearsal round 3, 2026-08-28; the same trap
+    hermes-smd-establishment documented on 2026-08-11): the hook's ``result``
+    is ``{"result": "<the connector's JSON, as a string>"}`` — the fields live
+    inside a NESTED JSON STRING. A walker that only descends dicts and lists
+    finds nothing, records nothing, and the gate stays silent while the model
+    genuinely reads past the threshold. So string values that look like JSON
+    are parsed and descended too, bounded by the same node budget."""
     stack = [payload]
     depth = 0
     while stack and depth < 200:
         depth += 1
         node = stack.pop()
+        if isinstance(node, str):
+            text = node.strip()
+            if text.startswith("{") or text.startswith("["):
+                try:
+                    import json
+
+                    stack.append(json.loads(text))
+                except Exception:  # noqa: BLE001
+                    pass
+            continue
         if isinstance(node, dict):
             if "fileId" in node or "file_id" in node:
                 return node
