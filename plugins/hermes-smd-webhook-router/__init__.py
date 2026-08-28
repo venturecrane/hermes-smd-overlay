@@ -616,7 +616,9 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         try:
             read_volume.record_route(session_id, getattr(decision.trigger, "skill", "") or "")
         except Exception:  # noqa: BLE001 — must never perturb routing
-            logger.debug("hermes-smd-webhook-router: read_volume route record failed", exc_info=True)
+            logger.debug(
+                "hermes-smd-webhook-router: read_volume route record failed", exc_info=True
+            )
         # Record NON-internal items for the inbound plugin's pre_llm_call
         # chokepoint to fence + taint. Internal (rostered-colleague) mail is
         # NOT enqueued: fencing the firm's own requests behind "never act

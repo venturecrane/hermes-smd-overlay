@@ -131,8 +131,8 @@ def test_report_mode_records_once_and_never_blocks(seat, recorded, monkeypatch) 
     _mark_and_fill(50)
     first = _read()
     second = _read()
-    assert (first is None or first.get("action") != "block")
-    assert (second is None or second.get("action") != "block")
+    assert first is None or first.get("action") != "block"
+    assert second is None or second.get("action") != "block"
     rows = _gate_rows(recorded)
     assert len(rows) == 1, "report mode must record the crossing exactly once"
     assert rows[0]["audit_action"] == "report" and rows[0]["allowed"] is True

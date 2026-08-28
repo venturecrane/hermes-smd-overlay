@@ -132,7 +132,14 @@ def test_lru_bound_holds() -> None:
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(None, "block"), ("", "block"), ("garbage", "block"), ("report", "report"), ("off", "off"), ("BLOCK", "block")],
+    [
+        (None, "block"),
+        ("", "block"),
+        ("garbage", "block"),
+        ("report", "report"),
+        ("off", "off"),
+        ("BLOCK", "block"),
+    ],
 )
 def test_mode_parsing(monkeypatch, raw, expected) -> None:
     if raw is None:
