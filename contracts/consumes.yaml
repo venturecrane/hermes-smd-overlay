@@ -316,6 +316,26 @@ vars:
       customer.yaml. BLOCK here means a proven cross-matter send is downgraded
       to a human draft; it never refuses outright, and an UNRESOLVED membership
       is reported rather than enforced.
+  SMD_READ_VOLUME_GATE_MODE:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [trust, webhook-router]
+    note: >-
+      operator-only lever for the read-volume gate (agreement §2.8, routine 5;
+      ss#2603 family). Values: off | report | block. Unset or unrecognized =
+      block (fail-closed against operator typos). The THRESHOLD itself is
+      client-authored in customer.yaml
+      (personas[].skills[opposing-response-deficiency-review].settings
+      .review_threshold_pages) because it is a commercial contract term;
+      unauthored = gate inert. BLOCK refuses the document read that would carry
+      an opposing-response review past the authored page threshold and directs
+      the model to write the surface-only internal note ("at least N pages
+      across M documents; review suspended"). REPORT accumulates and records
+      one allowed report-class audit row at the crossing, never blocks. Scoped
+      to sessions marked as reviews by the webhook route or by the session
+      reading the gated skill's SKILL.md (the spine path); all other sessions
+      are never fenced.
   SMD_MULTI_MATTER_MODE:
     discovery: static
     stage: agent

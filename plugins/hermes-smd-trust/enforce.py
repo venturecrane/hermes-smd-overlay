@@ -56,7 +56,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from shared import act_broker, content_floor, matter_gate, spec_gate
+from shared import act_broker, content_floor, matter_gate, read_volume, spec_gate
 from shared.action_classes import (
     BANNED_TOOLS,
     TOOL_ACTION_CLASS_MAP,
@@ -1323,6 +1323,41 @@ def evaluate_tool_call(
             session_match=session_match,
         )
         return {"action": "block", "message": f"Refused: {mixing_refusal}"}
+
+    # 1c. The read-volume gate (agreement §2.8, routine 5). Same placement
+    # argument as the mixing fence above: not an exposure question — the
+    # authored threshold is a commercial term no ceiling should override — and
+    # a read-time refusal is the only control the model cannot talk past. The
+    # verdict is evaluated unconditionally (mode, scope, and threshold checks
+    # live in shared/read_volume.py); report mode records the crossing ONCE as
+    # an allowed row so rehearsal has an artifact to cite, and never blocks.
+    volume_verdict = read_volume.evaluate_read(session_id, tool_name)
+    if volume_verdict.report is not None:
+        _record_decision(
+            tool_call_id,
+            tool_name,
+            _resolve_active_persona(),
+            action_class=ActionClass.READ.value,
+            audit_action="report",
+            allowed=True,
+            reason=f"READ_VOLUME_GATE: {volume_verdict.report}",
+            session_id=session_id,
+            session_match=session_match,
+        )
+    elif volume_verdict.refusal is not None:
+        _record_decision(
+            tool_call_id,
+            tool_name,
+            _resolve_active_persona(),
+            action_class=ActionClass.READ.value,
+            audit_action="refuse",
+            allowed=False,
+            reason=f"READ_VOLUME_GATE: {volume_verdict.refusal}",
+            effective_ceiling=Ceiling.REFUSED,
+            session_id=session_id,
+            session_match=session_match,
+        )
+        return {"action": "block", "message": f"Refused: {volume_verdict.refusal}"}
 
     # 2. Resolve the active persona's exposure from the TRUSTED config + the
     # vertical floors, then enforce.

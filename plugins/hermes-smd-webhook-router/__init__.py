@@ -39,7 +39,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, inbound_message
+from shared import inbound, inbound_message, read_volume
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params, sender_key
@@ -608,6 +608,17 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         session_id = kwargs.get("session_id")
         if not isinstance(session_id, str):
             session_id = ""
+        # Read-volume gate (agreement §2.8): record that this dispatch routed to
+        # the gated review skill, so the trust plugin can meter the review's
+        # document reads. Empty dispatch session ids (the live-path norm) enqueue
+        # an unbound route claimed at the session's first pre_llm_call. The
+        # register ignores every non-gated skill. Never breaks routing.
+        try:
+            read_volume.record_route(session_id, getattr(decision.trigger, "skill", "") or "")
+        except Exception:  # noqa: BLE001 — must never perturb routing
+            logger.debug(
+                "hermes-smd-webhook-router: read_volume route record failed", exc_info=True
+            )
         # Record NON-internal items for the inbound plugin's pre_llm_call
         # chokepoint to fence + taint. Internal (rostered-colleague) mail is
         # NOT enqueued: fencing the firm's own requests behind "never act
