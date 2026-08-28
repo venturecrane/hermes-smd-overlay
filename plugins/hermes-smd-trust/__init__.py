@@ -27,6 +27,7 @@ from shared import (
     matter_gate,
     pre_run_handoff,
     provenance,
+    read_volume,
     report_render,
     spec_stamp,
 )
@@ -609,6 +610,13 @@ def on_post_tool_call(**kwargs: Any) -> None:
         matter_binding.record_from_read(
             resolved, result, tool_name=tool_name, args=kwargs.get("args")
         )
+        # Read-volume gate (agreement §2.8): two mechanical observations ride
+        # the same read stream — a read_file of the gated skill's SKILL.md
+        # marks the session as a review (the spine path), and a counted
+        # document read accumulates the review's pages from the connector's
+        # own envelope (pageCount / total_chars). Refused reads never reach
+        # post_tool_call, so they never accumulate.
+        read_volume.note_read(resolved, tool_name, kwargs.get("args"), result)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: post_tool_call provenance record failed", exc_info=True)
 
@@ -1127,6 +1135,15 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         SPEC_STATUS.clear_turn(provenance.resolve_session(session_id))
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: spec-read turn clear failed", exc_info=True)
+    try:
+        # Read-volume gate (agreement §2.8): claim any fresh dispatch-unkeyed
+        # review routes onto this session. Marks ALL fresh claimants while a
+        # route is pending (over-applying a read gate is recoverable;
+        # under-applying breaches the agreement — the inverse of
+        # claim_unbound's exactly-one rule, argued in shared/read_volume.py).
+        read_volume.claim_unbound_routes(provenance.resolve_session(session_id))
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.debug("hermes-smd-trust: read-volume route claim failed", exc_info=True)
     try:
         # Keep the authored-spec POINTER current on a RUNNING Machine.
         #
