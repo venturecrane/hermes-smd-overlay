@@ -134,6 +134,32 @@ def reset() -> None:
     _unbound_routes.clear()
 
 
+#: Shape-only trace journal. WHY: three rehearsal rounds produced a silent gate
+#: with no way to tell WHICH stage went dark (marking vs accumulation vs
+#: evaluation) — the gateway logs to stdout this venture cannot read, and the
+#: registers are process-internal. Every entry is structural (tool names, arg
+#: KEYS, value TYPES, counts) and never document content, capped per process,
+#: on tmpfs so a restart clears it. Permanent by design: the next silent-gate
+#: diagnosis starts from this file instead of four blind deploy cycles.
+_TRACE_PATH = "/tmp/read_volume_trace.jsonl"
+_TRACE_CAP = 120
+_trace_count = 0
+
+
+def _trace(event: str, **fields: Any) -> None:
+    global _trace_count
+    try:
+        if _trace_count >= _TRACE_CAP:
+            return
+        _trace_count += 1
+        import json as _json
+
+        with open(_TRACE_PATH, "a") as f:
+            f.write(_json.dumps({"event": event, **fields}) + "\n")
+    except Exception:  # noqa: BLE001 — tracing must never perturb the gate
+        pass
+
+
 def record_route(session_id: str, skill: str) -> None:
     """Webhook router: record that a dispatch routed to ``skill``.
 
@@ -240,6 +266,8 @@ def note_read(session_id: str, tool_name: str, args: Any, result: Any) -> None:
        first read still carries the full count). Never raises."""
     try:
         if not session_id:
+            if tool_name in ("read_file", "skill_view", COUNTED_TOOL):
+                _trace("no_session", tool=tool_name)
             return
         if tool_name in ("read_file", "skill_view"):
             blob = ""
@@ -247,17 +275,43 @@ def note_read(session_id: str, tool_name: str, args: Any, result: Any) -> None:
                 blob = " ".join(str(v) for v in args.values())
             elif isinstance(args, str):
                 blob = args
-            if GATED_SKILL in blob and (tool_name == "skill_view" or "SKILL.md" in blob):
+            marked = GATED_SKILL in blob and (tool_name == "skill_view" or "SKILL.md" in blob)
+            if marked:
                 _state(session_id).review = True
+            _trace(
+                "skill_read",
+                tool=tool_name,
+                marked=marked,
+                arg_keys=sorted(args.keys()) if isinstance(args, dict) else type(args).__name__,
+                gated_in_blob=GATED_SKILL in blob,
+                session=session_id[:24],
+            )
             return
         if tool_name != COUNTED_TOOL:
             return
         payload = _as_payload(result)
         fields = _walk_read_fields(payload) if payload is not None else None
         if fields is None:
+            _trace(
+                "counted_read_unparsed",
+                result_type=type(result).__name__,
+                result_head=(
+                    result[:60]
+                    if isinstance(result, str)
+                    else sorted(result.keys())[:8]
+                    if isinstance(result, dict)
+                    else None
+                ),
+                session=session_id[:24],
+            )
             return
         file_id = str(fields.get("fileId") or fields.get("file_id") or "")
         if not file_id:
+            _trace(
+                "counted_read_no_fileid",
+                field_keys=sorted(fields.keys())[:10],
+                session=session_id[:24],
+            )
             return
         state = _state(session_id)
         if file_id in state.pages_by_file or file_id in state.unmeasured:
@@ -286,7 +340,16 @@ def note_read(session_id: str, tool_name: str, args: Any, result: Any) -> None:
         name = fields.get("name")
         if isinstance(name, str) and name:
             state.names_by_file[file_id] = name
-    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        _trace(
+            "counted_read",
+            file_id=file_id[:12],
+            pages=state.pages_by_file.get(file_id),
+            total=sum(state.pages_by_file.values()),
+            review=state.review,
+            session=session_id[:24],
+        )
+    except Exception as exc:  # noqa: BLE001 — hook callbacks must be exception-safe
+        _trace("note_read_error", error=str(exc)[:120])
         logger.debug("read_volume: note_read failed", exc_info=True)
 
 
@@ -359,13 +422,34 @@ def evaluate_read(session_id: str, tool_name: str) -> Verdict:
             return Verdict()
         state = _sessions.get(session_id)
         if state is None or not state.review:
+            _trace(
+                "evaluate_pass",
+                why="no_state" if state is None else "not_review",
+                session=session_id[:24],
+                known_sessions=len(_sessions),
+            )
             return Verdict()
         threshold = _threshold()
         if threshold is None:
+            _trace("evaluate_pass", why="no_threshold", session=session_id[:24])
             return Verdict()
         total, docs, listing = _observed(state)
         if total < threshold:
+            _trace(
+                "evaluate_pass",
+                why="under",
+                total=total,
+                threshold=threshold,
+                session=session_id[:24],
+            )
             return Verdict()
+        _trace(
+            "evaluate_crossing",
+            total=total,
+            threshold=threshold,
+            mode=gate_mode,
+            session=session_id[:24],
+        )
         message = (
             f"this review has read at least {total} pages across {docs} "
             f"document(s) ({listing}), reaching the firm's authored review "
