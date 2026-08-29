@@ -77,6 +77,28 @@ def test_mcp_content_block_envelope_parses() -> None:
     assert _total() == 7
 
 
+def test_fenced_result_parses() -> None:
+    # THE ROUND-5 LIVE SHAPE. Hermes v0.20.4 fires transform_tool_result BEFORE
+    # post_tool_call (ss#2444), so this consumer receives the nonce-FENCED text.
+    # Built with shared.inbound's real wrap so the fixture cannot drift from the
+    # fence format the seat actually produces.
+    from shared import inbound
+
+    _mark()
+    inner = json.dumps(_read_result("f9", pages=21))
+    envelope = inbound.make_envelope(
+        content=inner,
+        source="smokeball",
+        surface="tool_result",
+        verification="verified",
+        trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
+    )
+    fenced = inbound.wrap_inbound(inner, envelope)
+    assert "<<<INBOUND_DATA_BEGIN" in fenced  # the fixture really is fenced
+    read_volume.note_read(SID, read_volume.COUNTED_TOOL, {}, fenced)
+    assert _total() == 21
+
+
 def test_docx_falls_back_to_char_estimate() -> None:
     _mark()
     read_volume.note_read(

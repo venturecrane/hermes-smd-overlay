@@ -289,6 +289,15 @@ def note_read(session_id: str, tool_name: str, args: Any, result: Any) -> None:
             return
         if tool_name != COUNTED_TOOL:
             return
+        # Strip the inbound quarantine fence FIRST. Hermes v0.20.4 inverted the
+        # hook order (ss#2444: transform_tool_result now fires BEFORE
+        # post_tool_call), so this consumer receives the FENCED text — round-5
+        # rehearsal trace: result_head "[UNTRUSTED INBOUND DATA…". unwrap is
+        # pass-through on unfenced input, so this is correct under both orders.
+        if isinstance(result, str):
+            from shared.inbound import unwrap_inbound
+
+            result = unwrap_inbound(result)
         payload = _as_payload(result)
         fields = _walk_read_fields(payload) if payload is not None else None
         if fields is None:
