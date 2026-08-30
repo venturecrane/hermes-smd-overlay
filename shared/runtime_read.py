@@ -64,6 +64,7 @@ SUPPORTED_KINDS: frozenset[str] = frozenset(
         "jobs",
         "entitlements",
         "usage_export",
+        "medchron_jobs",
     }
 )
 _REAL_KINDS: frozenset[str] = frozenset(
@@ -75,7 +76,26 @@ _REAL_KINDS: frozenset[str] = frozenset(
         "jobs",
         "entitlements",
         "usage_export",
+        "medchron_jobs",
     }
+)
+
+# Chronology-package jobs (ss-console #2614): the broker's projection of its
+# medchron_jobs ledger. States, counts, cents, the delivery folder id. Never
+# the envelope, never a document (ADR 0052: the console is a management
+# surface). The broker already projects to this set; the gate pins it again so
+# a widened ledger cannot widen the seam by accident.
+_MEDCHRON_JOBS_COLUMNS: tuple[str, ...] = (
+    "id",
+    "created_at",
+    "updated_at",
+    "state",
+    "matter_number",
+    "documents",
+    "pages",
+    "cents",
+    "reason",
+    "folder_id",
 )
 
 # config_export section allow-list (ADR 0048). Unlike ``config`` (a
@@ -278,6 +298,12 @@ def read_runtime(
         # posture as a missing audit DB), never a 500.
         return _read_jobs()
 
+    if kind == "medchron_jobs":
+        # Same posture as ``jobs``: broker-owned, read over the socket through
+        # the agent-uid-gated ``medchron_job_list`` verb (this gate process is
+        # the agent uid on a non-gateway PID), honest empty when unreachable.
+        return _read_medchron_jobs()
+
     if kind == "entitlements":
         # Live runtime exposure overrides (ss#2003 Q7 — the entitlement dial).
         # Serves the override store directly so the console and the live
@@ -369,6 +395,20 @@ def _read_jobs() -> dict[str, Any]:
     except JobLedgerError:
         return {"entries": [], "cursor": None}
     entries = [{col: row.get(col) for col in _JOBS_COLUMNS} for row in rows]
+    return {"entries": entries, "cursor": None}
+
+
+def _read_medchron_jobs() -> dict[str, Any]:
+    """The chronology-package ledger as the ``medchron_jobs`` kind (ss-console
+    #2614). One page, newest first as the broker orders it; an unreachable or
+    unconfigured broker is an honest empty page."""
+    from shared.medchron_client import MedchronBrokerClient, MedchronBrokerError
+
+    try:
+        rows = MedchronBrokerClient().list_all()
+    except MedchronBrokerError:
+        return {"entries": [], "cursor": None}
+    entries = [{col: row.get(col) for col in _MEDCHRON_JOBS_COLUMNS} for row in rows]
     return {"entries": entries, "cursor": None}
 
 

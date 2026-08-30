@@ -366,6 +366,11 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         "establish_pending",
         "escalation_state",
         "job_status",
+        # ss-console #2614: broker-authored counts and states of the chronology
+        # runner's jobs (documents read, pages, cents, a folder id). Not a
+        # record the agent could quote from; nothing here seeds a claim.
+        "medchron_job_status",
+        "medchron_allowance",
         "connector_get_status",
         "connector_list_bindings",
         # Credential / identity metadata, carrying no tenant content.

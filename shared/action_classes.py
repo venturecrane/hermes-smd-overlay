@@ -658,6 +658,18 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "job_status": ActionClass.READ,
     "job_cancel": ActionClass.INTERNAL_WRITE,
     "job_record_sideeffect": ActionClass.INTERNAL_WRITE,
+    # Chronology-package tools (hermes-smd-medchron, ss-console #2614). Submit
+    # queues a job on the Machine's own runner through the broker: the agent
+    # hands over a resolved matter and its clients, and the work that follows
+    # (reading the matter, calling the model, filing the folder) happens in a
+    # root-supervised process under the firm's cents cap and monthly allowance,
+    # with its own registered gates. INTERNAL_WRITE, not COMMITMENT: the act
+    # is a request to the firm's own system of record, the same class as the
+    # create_folder/add_file the runner ends with. The two reads return
+    # broker-authored counts and states only, never a page of a record.
+    "medchron_job_submit": ActionClass.INTERNAL_WRITE,
+    "medchron_job_status": ActionClass.READ,
+    "medchron_allowance": ActionClass.READ,
 }
 
 
