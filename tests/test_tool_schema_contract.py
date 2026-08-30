@@ -53,6 +53,7 @@ _PLUGINS = {
     "hermes-smd-workspace": 18,
     "hermes-smd-peer-memory": 1,
     "hermes-smd-jobs": None,  # count not pinned (preventive); just must be > 0
+    "hermes-smd-medchron": 3,  # ss-console #2614: submit / status / allowance
 }
 
 
