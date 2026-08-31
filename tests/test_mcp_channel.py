@@ -310,7 +310,13 @@ def test_materialize_omits_mcp_route_when_secret_unset(monkeypatch):
 def test_materialize_omits_mcp_route_when_disabled(monkeypatch):
     monkeypatch.setenv("WEBHOOK_SECRET_MCP", "mcp-secret")
     out = translate._materialize_webhook_platform({"mcp_connector": {"enabled": False}})
-    assert out == {}
+    routes = out["webhook"]["extra"]["routes"]
+    # ss-console #2616: the async handoff route rides on the same secret and is
+    # NOT gated on mcp_connector.enabled (the console's operator_handoff_task
+    # and the seat's runner daemon are wired at provision). The conversational
+    # mcp route itself stays absent when the connector is disabled.
+    assert "mcp" not in routes
+    assert set(routes) == {"handoff"}
 
 
 def test_mcp_trigger_populates_events_and_skills(monkeypatch):

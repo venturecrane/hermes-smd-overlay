@@ -1279,7 +1279,13 @@ class _Handler(BaseHTTPRequestHandler):
             conn.request("POST", f"/webhooks/{HANDOFF_ROUTE}", body=body, headers=headers)
             resp = conn.getresponse()
             resp.read()  # drain; we do not proxy the body
-            if resp.status >= 500:
+            # ss-console #2616: ANY non-2xx is a retryable failure, not just
+            # >=500. A 404 here means the handoff route is not materialized on
+            # this boot (the exact window between a config change and its
+            # reprovision), and swallowing it into a 202 made a lost wake
+            # indistinguishable from a delivered one — the caller marked the
+            # task handed off and nobody ever ran it.
+            if not (200 <= resp.status < 300):
                 logger.error("gate: handoff forward returned %d", resp.status)
                 self._json(503, {"error": "gateway error", "retry": True})
                 return
