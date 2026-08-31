@@ -128,6 +128,17 @@ _MATTER_ID_RE = re.compile(
 
 _MAX_CITED = 24
 
+# Per-compiled-alternation bound for the membership-anchored known-number
+# scan (ss#2458). This is a CHUNK SIZE, not a truncation: the scan walks the
+# full alias set in bounded chunks, so a session that read more than 64
+# matters (the alias map holds up to 512) still gets every number scanned. A
+# truncating version of this scan shipped first and was caught in review: a
+# body whose ONLY identifier was a dropped alias made cited_matters return
+# empty, evaluate fell to not_applicable, and the mismatch/withhold branch
+# never ran — a silently degraded safety gate on exactly the large dockets
+# where mixing is likeliest.
+_KNOWN_NUMBER_CHUNK = 64
+
 
 @dataclass(frozen=True)
 class MatterVerdict:
@@ -193,13 +204,50 @@ def body_from_args(args: dict | None) -> str:
     return "\n".join(parts)
 
 
-def cited_matters(body: str) -> set[str]:
-    """Matter identifiers physically present in the send body."""
+def cited_matters(body: str, known_numbers: Iterable[str] = ()) -> set[str]:
+    """Matter identifiers physically present in the send body.
+
+    ``known_numbers`` (ss#2458) is the membership's number-alias set
+    (``MatterMembership.known_numbers``): a second pass searches the body for
+    each membership-known number LITERALLY (escaped, word-anchored,
+    IGNORECASE — alias keys are case-folded text, and a body may spell the
+    number differently). The full alias set is scanned, in bounded chunks, so
+    a large docket cannot silently push a number out of coverage. The
+    length-desc sort is for determinism only: with ``\\b`` on both ends a
+    prefix token fails its trailing boundary and the engine backtracks to the
+    longer match, so ordering cannot change what is found. This pass is what
+    lets the gate see a firm's bare-digit matter numbers ("201537", "4853"),
+    which ``_MATTER_NUM_RE`` deliberately does not match — no shape can, at
+    acceptable precision. Same safety argument the module already states for
+    IGNORECASE: only tokens that resolve to a matter this session actually
+    READ contribute to a verdict, so this pass cannot manufacture a mismatch;
+    it can only let a real citation be checked. ``_MATTER_NUM_RE`` itself is
+    untouched.
+
+    Documented fairness gap, deliberate: the shaped pass runs first and both
+    passes share the ``_MAX_CITED`` budget, so a body citing 24+ shaped
+    matters leaves no room for known-number citations. Moot for the firms this
+    exists for (a real letter cites one or two matters; A&P's numbers are all
+    bare), and the cap exists to bound pathological bodies, not real ones.
+    """
     if not isinstance(body, str) or not body:
         return set()
     found: set[str] = set()
     for pattern in (_MATTER_NUM_RE, _MATTER_ID_RE):
         for match in pattern.finditer(body):
+            found.add(match.group(0).strip())
+            if len(found) >= _MAX_CITED:
+                return found
+    tokens = sorted(
+        {str(n).strip() for n in known_numbers if n and str(n).strip()},
+        key=lambda t: (-len(t), t),
+    )
+    for start in range(0, len(tokens), _KNOWN_NUMBER_CHUNK):
+        chunk = tokens[start : start + _KNOWN_NUMBER_CHUNK]
+        known_re = re.compile(
+            r"\b(?:" + "|".join(re.escape(t) for t in chunk) + r")\b", re.IGNORECASE
+        )
+        for match in known_re.finditer(body):
             found.add(match.group(0).strip())
             if len(found) >= _MAX_CITED:
                 return found
@@ -249,11 +297,13 @@ def evaluate(
             # gate adds nothing and must not double-withhold.
             return MatterVerdict("not_applicable", "no resolvable recipients")
 
-        cited = cited_matters(body)
+        # Membership first: its number aliases feed the citation extraction
+        # (ss#2458 — a bare-digit number is findable only by membership).
+        membership = matter_binding.membership_for(session_id)
+        cited = cited_matters(body, membership.known_numbers())
         if not cited:
             return MatterVerdict("not_applicable", "body cites no matter identifier")
 
-        membership = matter_binding.membership_for(session_id)
         resolved = _resolve_cited(membership, cited)
         if not resolved:
             return MatterVerdict(

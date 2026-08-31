@@ -207,6 +207,23 @@ _MAX_PAIRS_PER_LINE = 8
 # must not grow this without limit on a long-lived Machine.
 _MAX_REGISTERED_PAIRS = 4096
 
+# Bound the register-anchored known-number alternation (ss#2458). Registered
+# numbers come from code-resolved records (``add_record``), so the cap is a
+# scan-cost guard, not a precision knob; numbers past it simply do not scan —
+# the narrow direction (an unscanned number feeds no pair check, and the
+# punctuated shapes ``_CASE_RE`` sees are unaffected).
+_MAX_KNOWN_NUMBER_TOKENS = 64
+
+# Only a BARE digit run is admitted to the known-number register. A shaped
+# number's canonical form ("2026-PI-101" -> "2026PI101") strips the very
+# punctuation the body would carry, so it can never literally appear in text —
+# a shaped entry would occupy one of the 64 slots for zero scan benefit and,
+# on a mixed docket, starve the bare-digit numbers this register exists for.
+# Shaped numbers are already covered by ``_CASE_RE``. Three to ten digits: two
+# digits is an ordinal or a day, eleven-plus is a GUID fragment or an account
+# number, and neither is a matter number anywhere.
+_BARE_MATTER_NUMBER_RE = re.compile(r"\d{3,10}")
+
 _DATE_STRPTIME_FORMATS: tuple[str, ...] = (
     "%m/%d/%Y",
     "%m/%d/%y",
@@ -403,8 +420,34 @@ def pair_key(case_canonical: str, date_canonical: str) -> str:
     return f"{case_canonical}|{date_canonical}"
 
 
-def _extract_pairs(text: str) -> list[IdentifierHit]:
+def _known_number_re(tokens: Iterable[str]) -> re.Pattern[str] | None:
+    """A bounded alternation matching the REGISTERED matter numbers literally
+    (escaped, word-anchored). The length-desc sort is for DETERMINISM only —
+    with ``\\b`` on both ends, a shorter token that is a prefix of a longer one
+    fails its trailing boundary and the engine backtracks to the full match,
+    so ordering cannot change what is found (unlike the unanchored first-match
+    truncation of 2026-08-11). No IGNORECASE, deliberately: every admitted
+    token is a bare digit run (see ``_BARE_MATTER_NUMBER_RE``), where case does
+    not exist — ``matter_gate``'s mirror scans punctuated alias TEXT and does
+    need it. ``None`` when nothing is registered: an empty register scans
+    nothing, and a gate that cannot see must not claim to have seen."""
+    cleaned = sorted({t for t in tokens if t}, key=lambda t: (-len(t), t))
+    cleaned = cleaned[:_MAX_KNOWN_NUMBER_TOKENS]
+    if not cleaned:
+        return None
+    return re.compile(r"\b(?:" + "|".join(re.escape(t) for t in cleaned) + r")\b")
+
+
+def _extract_pairs(
+    text: str, known_number_re: re.Pattern[str] | None = None
+) -> list[IdentifierHit]:
     """Return the (case number, date) co-occurrences asserted **per line**.
+
+    ``known_number_re`` (ss#2458) merges per-line literal matches of the
+    REGISTER'S OWN matter numbers with the ``_CASE_RE`` matches, so a line
+    pairing a seeded bare-digit number with a date is judged against the
+    seeded ``(number, date)`` associations exactly like a shaped number.
+    ``_CASE_RE`` itself is untouched.
 
     Why this exists: atom-level provenance cannot see a *mispairing*. On
     2026-08-01 the Operator wrote "matter 2026-PI-105, deposition of plaintiff
@@ -426,6 +469,11 @@ def _extract_pairs(text: str) -> list[IdentifierHit]:
     offset = 0
     for line in text.splitlines(keepends=True):
         cases = [(m, _canon_digits(m.group(0))) for m in _CASE_RE.finditer(line)]
+        if known_number_re is not None:
+            seen_spans = {m.span() for m, _ in cases}
+            for m in known_number_re.finditer(line):
+                if m.span() not in seen_spans:
+                    cases.append((m, _canon_digits(m.group(0))))
         if cases:
             dates: list[tuple[re.Match[str], str]] = []
             for pat in _DATE_RES:
@@ -482,6 +530,12 @@ class ProvenanceRegister:
         self._pairs: set[str] = set()
         self._captions: set[str] = set()
         self._money: set[str] = set()
+        # Matter numbers seeded via add_record, in canonical digit form —
+        # the register-anchored extraction pass (ss#2458). Populated ONLY by
+        # add_record (never by bare add() or add_read_text), because only the
+        # record seam knows a token IS a matter number rather than a token
+        # that merely matched a shape.
+        self._matter_numbers: set[str] = set()
 
     def add_read_text(self, text: str) -> None:
         """Register the structured-shape identifiers found in a blob the agent
@@ -516,6 +570,15 @@ class ProvenanceRegister:
         case_canon = _canon_digits(case_number) if case_number else ""
         if case_canon:
             self._canon.add(case_canon)
+            # Bare digit runs only — a shaped number's canonical form cannot
+            # literally appear in body text (see _BARE_MATTER_NUMBER_RE), so
+            # admitting it would waste a bounded slot and starve the bare
+            # numbers on a mixed docket.
+            if (
+                _BARE_MATTER_NUMBER_RE.fullmatch(case_canon)
+                and len(self._matter_numbers) < _MAX_KNOWN_NUMBER_TOKENS
+            ):
+                self._matter_numbers.add(case_canon)
         for raw in dates:
             if not raw:
                 continue
@@ -537,6 +600,18 @@ class ProvenanceRegister:
         """Register one already-canonical association directly."""
         if case_canonical and date_canonical and len(self._pairs) < _MAX_REGISTERED_PAIRS:
             self._pairs.add(pair_key(case_canonical, date_canonical))
+
+    def matter_numbers(self) -> frozenset[str]:
+        """The BARE-DIGIT matter numbers seeded via :meth:`add_record`. Feeds
+        the register-anchored extraction pass in :func:`check` (ss#2458): a
+        firm whose matter numbers are bare digit runs ("201537", "4853") is
+        invisible to ``_CASE_RE`` — no shape can see a bare number at
+        acceptable precision (dates, amounts, zips and page counts all
+        collide) — so the scan is anchored to MEMBERSHIP in this set instead,
+        extending no pattern anywhere. Shaped numbers are NOT admitted (their
+        canonical form strips the punctuation a body would carry, so a literal
+        scan for it can never hit; ``_CASE_RE`` already covers them)."""
+        return frozenset(self._matter_numbers)
 
     @property
     def has_pairs(self) -> bool:
@@ -695,11 +770,29 @@ def check(body: str, register: ProvenanceRegister, mode: Mode = Mode.REPORT) -> 
     posture.
     """
     hits = _extract(body)
+    # Register-anchored matter numbers (ss#2458): scan the body for the numbers
+    # the register itself holds (seeded one record at a time by add_record) and
+    # emit CASE_NUMBER hits for exact matches. Verified by construction — they
+    # are in the register — so they can never flag; their purpose is to feed
+    # the pair check below, so a line pairing a seeded BARE-DIGIT number with a
+    # date is judged against the seeded associations. No shape pattern could do
+    # this: bare digit runs collide with dates, amounts, zips and page counts
+    # at any useful recall, and _MAX_CITED-style caps mean the false hits would
+    # crowd out real ones. DOCUMENTED RESIDUAL BLINDNESS: a *fabricated*
+    # bare-digit number that was never read stays invisible to this filter —
+    # the gate's claim shrinks to what it measures (see the enable-gate
+    # checklist's per-firm evidence slot).
+    known_re = _known_number_re(register.matter_numbers())
+    if known_re is not None and isinstance(body, str) and body:
+        for m in known_re.finditer(body):
+            canonical = _canon_digits(m.group(0))
+            if canonical:
+                hits.append(IdentifierHit(IdKind.CASE_NUMBER, m.group(0), canonical, m.span()))
     # Pairs only when the register carries associations to judge them against.
     # An unseeded register cannot distinguish a mispairing from a correct one, so
     # it reports neither — see ProvenanceRegister.has_pairs.
     if register.has_pairs:
-        hits.extend(_extract_pairs(body))
+        hits.extend(_extract_pairs(body, known_number_re=known_re))
     unverified = tuple(h for h in hits if not register.verifies(h))
     return IdentifierResult(
         mode=mode,

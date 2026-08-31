@@ -200,6 +200,19 @@ class MatterMembership:
             return matter_id
         return self._alias.get(folded, "")
 
+    def known_numbers(self) -> frozenset[str]:
+        """The matter NUMBERS this session read, as folded alias keys.
+
+        Shape-independent by construction (ss#2458): the alias map is
+        populated wherever a read carried a ``(number, id)`` join, so a firm
+        whose matter numbers are bare digit runs ("201537", "4853") — matched
+        by NO extraction pattern — is represented here exactly like one whose
+        numbers are shaped. Feeds ``matter_gate.cited_matters``'s
+        membership-anchored second pass. Ambiguity-withdrawn keys are absent
+        with the aliases themselves, so a collided number scans nothing.
+        """
+        return frozenset(self._alias)
+
     def parties(self, matter_id: str) -> set[str]:
         return set(self._by_matter.get(matter_id, ()))
 

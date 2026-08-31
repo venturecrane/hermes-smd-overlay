@@ -444,3 +444,95 @@ def test_pair_annotation_explains_the_distinction() -> None:
 def test_run_self_check_passes() -> None:
     ok, msg = run()
     assert ok, msg
+
+
+# ---------------------------------------------------------------------------
+# Register-anchored bare-digit matter numbers (ss#2458). A&P numbers matters
+# with plain digit runs ("201537", "4853") that _CASE_RE deliberately does not
+# match — no shape can, at acceptable precision. The scan is anchored to
+# MEMBERSHIP: only numbers seeded via add_record (code-resolved records) are
+# searched for, so an unseeded digit run contributes nothing anywhere.
+# ---------------------------------------------------------------------------
+
+
+def _bare_digit_register() -> ProvenanceRegister:
+    reg = ProvenanceRegister()
+    reg.add_record("201537", ["2026-08-29"])  # bare-digit matter, its real date
+    reg.add_record("4853", ["2026-09-02"])  # second matter, its own date
+    return reg
+
+
+def test_registered_bare_number_feeds_pair_extraction() -> None:
+    """The A&P shape of the 2026-08-01 mispairing: a line pairing matter
+    201537 with the OTHER matter's date. Both atoms were read; the pair was
+    not — and before ss#2458 the bare number was invisible, so the line passed
+    clean."""
+    reg = _bare_digit_register()
+    result = check("- matter 201537, response due 2026-09-02", reg)
+    kinds = {h.kind for h in result.unverified}
+    assert IdKind.PAIR in kinds, "the mispairing must surface"
+
+
+def test_correctly_paired_bare_number_line_passes() -> None:
+    # The control that makes the test above mean something.
+    reg = _bare_digit_register()
+    result = check("- matter 201537, response due 2026-08-29", reg)
+    assert not result.has_unverified
+
+
+def test_registered_bare_number_atom_is_verified_by_construction() -> None:
+    reg = _bare_digit_register()
+    result = check("update on matter 201537 today", reg)
+    assert not result.has_unverified  # in the register, so it can never flag
+
+
+def test_unregistered_bare_digits_produce_zero_hits() -> None:
+    """The collision guard: digit runs that are NOT registered matter numbers
+    (zips, page counts, amounts) must contribute nothing — no atom hits, no
+    pairs — even in a register that carries pair associations."""
+    reg = _bare_digit_register()
+    result = check("Phoenix AZ 85004, see page 1042, invoice 777777", reg)
+    assert not result.has_unverified
+
+
+def test_bare_number_inside_a_longer_digit_run_does_not_match() -> None:
+    reg = _bare_digit_register()
+    # 201537 is a substring of 92015378 but not a word-anchored token.
+    result = check("tracking id 92015378, due 2026-09-02", reg)
+    assert IdKind.PAIR not in {h.kind for h in result.unverified}
+
+
+def test_known_number_register_is_bounded() -> None:
+    reg = ProvenanceRegister()
+    for n in range(200):
+        reg.add_record(str(100000 + n), ["2026-08-29"])
+    assert len(reg.matter_numbers()) <= 64
+
+
+def test_shaped_numbers_are_excluded_because_their_canonical_never_appears_in_text() -> None:
+    """A shaped number's canonical form ("2026-PI-101" -> "2026PI101") strips
+    the punctuation a body would carry, so a literal scan for it can never hit
+    — the entry would waste a bounded slot for zero benefit. Shaped numbers
+    stay covered by _CASE_RE; the pair association still seeds normally."""
+    reg = ProvenanceRegister()
+    reg.add_record("2026-PI-101", ["2026-08-06"])
+    assert "2026PI101" not in reg.matter_numbers()
+    # ...and the shaped number's atoms + pair still verify via _CASE_RE.
+    assert not check("- matter 2026-PI-101, hearing 2026-08-06", reg).has_unverified
+
+
+def test_bare_digits_still_seed_on_a_mixed_docket() -> None:
+    """The starvation case the bare-digit admission rule exists for: a docket
+    that registers many SHAPED matters first must not exhaust the bounded
+    bare-digit register — shaped canonicals are not admitted, so the bare
+    numbers still seed and still feed the pair check."""
+    reg = ProvenanceRegister()
+    for n in range(100):  # 100 shaped matters, registered FIRST
+        reg.add_record(f"2026-PI-{n:03d}", ["2026-08-06"])
+    reg.add_record("201537", ["2026-08-29"])  # then the bare-digit matter
+    assert "201537" in reg.matter_numbers()
+    # The mispairing is still caught (bare number + a shaped matter's date).
+    result = check("- matter 201537, response due 2026-08-06", reg)
+    assert IdKind.PAIR in {h.kind for h in result.unverified}
+    # And the correct pairing still passes.
+    assert not check("- matter 201537, response due 2026-08-29", reg).has_unverified
