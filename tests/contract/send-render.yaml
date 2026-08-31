@@ -1,0 +1,110 @@
+# ============================================================================
+# Send-render contract -- per-skill declaration of HOW a routine's outbound
+# body is produced, and the machine-readable source for two instruments:
+#
+#   * the arming gate (tests/cron-send-arming-gate.test.ts +
+#     src/lib/operator/send-render.ts + scripts/validate-customer-yaml.ts):
+#     a cron-armed skill whose output-classes binding says `outbound: derived`
+#     must be DECLARED here. Declared `compositional` is a valid authored
+#     state, not a bypass -- the gate's job is to refuse the UNDECLARED, the
+#     state where a routine is armed to send with nobody having decided how
+#     its body comes to exist.
+#   * the body-verify phase of the daily send reconcile
+#     (operator/bin/lib/send_verify.py, riding reconcile-sends.py): skills
+#     declared `templated` / `slot-templated` get their sent bodies verified
+#     by hash against the wake/dispatch stamps below; skills declared
+#     `compositional` get the cross-run invariants instead
+#     (operator/bin/send-invariants.json).
+#
+# WHY (2026-08-24..31 review, 11 defects). Format drift across runs, unstable
+# ACK codes, recipient flapping, raw markdown in text/plain -- all of it is the
+# model re-composing what a template should render. The durable fix removes
+# the model from routine-email composition wherever the body is projectable;
+# this file is where that decision is AUTHORED per skill, so an instrument can
+# read it instead of inferring it.
+#
+# RENDER MODES:
+#   templated      -- the body is rendered deterministically in pre_run from an
+#                     authored template; the model composes nothing. `template`
+#                     names the authored artifact (repo-relative path) and MUST
+#                     exist on disk (the arming gate checks).
+#   slot-templated -- the body is an authored template with closed-enum slots
+#                     the model may fill under the rendered-body gate. The
+#                     template path requirement is the same as `templated`.
+#   compositional  -- the model composes the body. An honest authored state,
+#                     covered by the cross-run invariants (recipient set + ACK
+#                     stability) rather than by body-hash verification.
+#
+# STAMP SCHEMA (one hash function, one arbiter -- the cross-workstream
+# contract). `canonical_body_sha256` = sha256 over utf-8 of (CRLF -> LF,
+# per-line trailing SPACE/TAB stripped -- " \t" only, never every Unicode
+# whitespace -- trailing newlines stripped). The
+# arbiter fixture both repos' suites load is
+# operator/contracts/fixtures/body-canon-vectors.json. Stamp sites:
+#
+#   EMITTED_WAKE (skill pre_run, ss-console)  metadata:
+#     render_mode:  templated | slot-templated | compositional
+#     body_sha256:  [{ body_sha256_full, body_sha256_skeleton }]   # per dispatch entry
+#     items:        [{ item_key, ack_code }]                       # escalator; feeds ack_invariant
+#   CONFIRM_SEND_DISPATCHED (overlay _dispatch_internal_message, pre-mutation)
+#     rendered_body_sha256: <hex>
+#     body_variant:         full | skeleton
+#   console verifier (operator/bin/lib/send_verify.py) compares per entry;
+#     a skeleton match grades `degraded`, never `BODY_DIVERGED`.
+#
+# MIRRORED ARTIFACT. This file ships to the overlay (hermes-smd-overlay,
+# tests/contract/send-render.yaml) under the same mirrored-fixture discipline
+# as the seat/gate snapshot: copy in the same change. The mirror landed with
+# the render cluster's pair PR (WS-RENDER), which flipped
+# deadline-miss-escalator and client-verification-tracker to `templated` /
+# `slot-templated` and authored their renderers. Until wake hashes appear on
+# live rows, the console's body-verify phase HOLDs and files nothing -- the
+# designed interim state.
+#
+# WHAT IS DECLARED. Every skill armed on a cron row in any authored
+# operator/customers/*/customer.yaml whose output-classes binding is
+# `outbound: derived` (the cron x skill_bindings join; template dirs starting
+# with `_` excluded). The set below is derived mechanically from that join,
+# not curated. A skill leaving cron may leave this file; a derived-outbound
+# skill entering cron MUST enter it first or the arming gate refuses the PR.
+# ============================================================================
+
+schema_version: 1
+
+skills:
+  # ---- pilot-smokeball cron rows (customer.yaml personas[].cron) ----
+  deadline-miss-escalator:
+    render: templated
+    template: operator/skills/deadline-miss-escalator/render.py
+    note: >-
+      WS-RENDER: the triaged alert is rendered deterministically in pre_run
+      (render.py implements references/output-format.md literally) and
+      dispatched out of turn by the overlay's prerendered-dispatch hook; the
+      model composes nothing. Stamps: body_sha256 pairs on EMITTED_WAKE,
+      rendered_body_sha256 + body_variant on CONFIRM_SEND_DISPATCHED.
+  discovery-response-tracker:
+    render: compositional
+    note: Chase legs to the responsible attorney; wave-1 authored state.
+  client-verification-tracker:
+    render: slot-templated
+    template: operator/skills/client-verification-tracker/render.py
+    note: >-
+      WS-RENDER: hold surfaces, ceiling hand-offs, the config-missing note and
+      the degraded chase-due note render deterministically in pre_run and
+      dispatch out of turn. The client chase (Shape B) is fail-closed while
+      settings.return_link is unauthored; Shapes A/C (prepare-and-route,
+      signed-and-close) stay in-turn under SKILL.md's templates.
+  medical-records-chaser:
+    render: compositional
+    note: Vendor records chase; wave-1 authored state.
+  lien-ledger-tracker:
+    render: compositional
+    note: Payoff dunning chase; wave-1 authored state.
+  minors-compromise-packet:
+    render: compositional
+    note: Lien payoff chase leg (a reviewer sends); wave-1 authored state.
+
+  # ---- scott seat cron rows ----
+  status-report-assembler:
+    render: compositional
+    note: Per-client report drafts on the SMD-internal seat; wave-1 authored state.

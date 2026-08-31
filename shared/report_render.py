@@ -292,6 +292,58 @@ QUOTE = "quote"
 CONTINUATION = "continuation"
 
 
+def render_plain(text: str) -> str:
+    """The text/plain half of a report send — the SAME grammar, markers
+    subtracted (WS-RENDER; the 2026-08-24..31 review's raw-markdown-in-
+    text/plain defect).
+
+    A mail reader showing the ``text`` part saw the SOURCE: literal hash
+    marks, ``**bold**`` asterisks, backticks. This renders the report-markdown
+    subset to plain text a person reads: headings become their bare text with
+    one blank line above; list items keep their markers verbatim (a plain-text
+    list IS its markers); continuation lines keep their indent; inline bold
+    and code spans lose their markers; a horizontal rule becomes a blank
+    line; a blockquote keeps its text, indented two spaces.
+
+    STRICTLY MARKER-SUBTRACTIVE — the same purity invariant as the html half
+    (test_report_render's round-trip): the output carries no token of content
+    the source did not. That is what makes it safe to attach AFTER the trust
+    gates scanned ``text``; if this function ever ADDS content, its call site
+    must move ahead of the gates (the caveat ``_attach_html_body`` already
+    documents for html).
+    """
+    out: list[str] = []
+    for raw_line in text.replace("\r\n", "\n").split("\n"):
+        if not raw_line.strip():
+            out.append("")
+            continue
+        kind = block_kind(raw_line)
+        if kind == RULE:
+            out.append("")
+            continue
+        if kind == HEADING:
+            match = _RE_HEADING.match(raw_line)
+            if out and out[-1] != "":
+                out.append("")
+            out.append(_strip_inline(match.group(2)))
+            continue
+        if kind == QUOTE:
+            match = _RE_QUOTE.match(raw_line)
+            out.append("  " + _strip_inline(match.group(1)))
+            continue
+        # Ordered/unordered items and continuation lines keep their own shape;
+        # only the inline markers are subtracted.
+        out.append(_strip_inline(raw_line))
+    return "\n".join(out).rstrip("\n") + ("\n" if text.endswith("\n") else "")
+
+
+def _strip_inline(raw: str) -> str:
+    """Subtract the inline markers (``**bold**`` and backtick code spans) from
+    one line, leaving everything else byte-identical."""
+    out = _RE_BOLD.sub(r"\1", raw)
+    return _RE_CODE.sub(r"\1", out)
+
+
 def block_kind(line: str) -> str | None:
     """Name the block this line opens, or ``None`` when the line is prose.
 

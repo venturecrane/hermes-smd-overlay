@@ -170,10 +170,13 @@ def test_a_report_body_arrives_rendered_on_both_send_transports(monkeypatch, tmp
     # render would pass every assertion above and still be the drift this file
     # exists to catch.
     assert graph["html"] == mail["html"]
-    # The plain half still rides along on both. It is the fallback part, and the
-    # audit digest is taken over the words rather than the markup.
-    assert graph["text"] == REPORT
-    assert mail["text"] == REPORT
+    # The plain half still rides along on both — DOWN-RENDERED to the same
+    # plain text (WS-RENDER): one render, two transports, for both halves.
+    from shared import report_render
+
+    assert graph["text"] == report_render.render_plain(REPORT)
+    assert mail["text"] == report_render.render_plain(REPORT)
+    assert "## " not in graph["text"]
 
 
 def test_a_prose_send_stays_byte_identical_on_both_transports(monkeypatch, tmp_path):

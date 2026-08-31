@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from shared import report_render
+
 from .conftest import load_plugin
 
 REPORT_TEXT = """## Needs you today (1)
@@ -36,8 +38,11 @@ def test_report_send_gains_an_html_half(mod) -> None:
     mod._attach_html_body(SEND_TOOL, args)
     assert "<h2 " in args["html"]
     assert "<ol " in args["html"]
-    # The markdown stays put as the plaintext half of the multipart send.
-    assert args["text"] == REPORT_TEXT
+    # The plaintext half is DOWN-RENDERED (WS-RENDER): same words, markers
+    # subtracted — a reader on the text part no longer sees raw markdown.
+    assert args["text"] == report_render.render_plain(REPORT_TEXT)
+    assert "## " not in args["text"]
+    assert "Needs you today (1)" in args["text"]
 
 
 def test_prose_reply_is_left_byte_identical(mod) -> None:
@@ -129,4 +134,5 @@ def test_out_of_band_approved_send_also_attaches(mod, monkeypatch) -> None:
 
     mod._dispatch_approved_send("s1", "pilot-smokeball")
     assert "<h2 " in sent.get("html", ""), "approved report send dispatched without an html half"
-    assert sent["text"] == REPORT_TEXT
+    # Down-rendered plain half (WS-RENDER), same as the tool path.
+    assert sent["text"] == report_render.render_plain(REPORT_TEXT)
