@@ -3,8 +3,9 @@
     "Shared test vectors for canonical_body_sha256 -- the ONE hash function stamped at",
     "all three sites of the send-render conformance chain (skill pre_run envelope +",
     "EMITTED_WAKE, overlay CONFIRM_SEND_DISPATCHED, console verifier). Definition:",
-    "sha256 over utf-8 of (CRLF normalized to LF, per-line trailing whitespace",
-    "stripped, trailing newlines stripped). This fixture is the ARBITER: both repos'",
+    "sha256 over utf-8 of (CRLF normalized to LF, per-line trailing SPACE/TAB",
+    "stripped -- rstrip(\" \\t\") ONLY, never a bare rstrip() that eats every Unicode",
+    "whitespace -- trailing newlines stripped). This fixture is the ARBITER: both repos'",
     "test suites load it and assert their implementation maps every input to its",
     "sha256. It is copied VERBATIM into hermes-smd-overlay tests/fixtures/ in the",
     "same change whenever it moves (mirrored-artifact discipline, same as the",
@@ -43,6 +44,12 @@
       "note": "per-line trailing spaces and tabs strip",
       "input": "Hello  \nWorld\t\n",
       "sha256": "35c6b9f66dceb6cf8f733d08689564e420e18eb40250d9435352617c027f36d6"
+    },
+    {
+      "name": "nbsp_tail_survives",
+      "note": "ONLY space and tab strip: a trailing U+00A0 nbsp is CONTENT and survives, so this must NOT hash like a plain 'Hello'. Pins rstrip(\" \\t\") against the bare-rstrip drift caught in the ss#2664 render-pair review (a mail client converting a trailing nbsp would otherwise false-HOLD the channel check). The overlay mirror gains this same vector via the WS-RENDER pair (ss#2664 / overlay#337).",
+      "input": "Hello\u00a0\n",
+      "sha256": "1edb2c7dd30e16f5d5d7ed1e6c41b501dee1d9702a5052d63209aeffa1de4634"
     },
     {
       "name": "interior_blank_preserved",

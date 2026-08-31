@@ -32,6 +32,10 @@ def _trust():
 
 def _arm(monkeypatch, trust, captured):
     monkeypatch.setattr(trust.enforce, "evaluate_tool_call", lambda *a, **k: None)
+    # The outbound scans are wired on this path (the review fix below tests
+    # that); stubbed to allow here so the stamp tests exercise the stamp.
+    monkeypatch.setattr(trust.outbound, "check_outbound_draft", lambda **k: None)
+    monkeypatch.setattr(trust.outbound, "check_outbound_send", lambda **k: None)
     monkeypatch.setattr(trust, "get_secret", lambda k: "pilot-smokeball")
     monkeypatch.setattr(trust, "_seat_email_adapter", lambda: "agentmail")
 
@@ -40,6 +44,42 @@ def _arm(monkeypatch, trust, captured):
         return "msg-1"
 
     monkeypatch.setattr(trust.outbound_send, "send_message", fake_send)
+
+
+def test_outbound_scans_are_wired_on_the_out_of_turn_path(monkeypatch):
+    """'Through the full gate' as a control, not a sentence (review fix): the
+    fabrication/identifier scans (outbound.check_*) fire on this path and a
+    block from either refuses the dispatch before any transport call."""
+    trust = _trust()
+    captured: list[dict] = []
+    _arm(monkeypatch, trust, captured)
+    monkeypatch.setattr(
+        trust.outbound,
+        "check_outbound_send",
+        lambda **k: {"action": "block", "message": "Refused: unverified identifier"},
+    )
+    result = trust._dispatch_internal_message(
+        to=["ops@firm.example"], subject="s", text=REPORT_BODY, session_id="s1"
+    )
+    assert not result.sent
+    assert "unverified identifier" in result.reason
+    assert captured == []  # nothing reached the transport
+
+
+def test_a_raising_outbound_scan_fails_toward_not_sending(monkeypatch):
+    trust = _trust()
+    captured: list[dict] = []
+    _arm(monkeypatch, trust, captured)
+
+    def boom(**_k):
+        raise RuntimeError("scanner down")
+
+    monkeypatch.setattr(trust.outbound, "check_outbound_send", boom)
+    result = trust._dispatch_internal_message(
+        to=["ops@firm.example"], subject="s", text="plain body", session_id="s1"
+    )
+    assert not result.sent
+    assert captured == []
 
 
 def test_rendered_body_sha256_is_the_pre_mutation_canonical_hash(monkeypatch):

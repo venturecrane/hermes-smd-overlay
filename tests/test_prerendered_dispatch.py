@@ -282,6 +282,64 @@ def test_withheld_for_approval_is_a_disposition_not_a_failure(monkeypatch, tmp_p
     assert "held for the owner's approval" in note
     assert len(sender.calls) == 1  # NO skeleton attempt
     assert written == []
+    # ONE withheld set: no supersession caveat (the single-slot note is only
+    # honest when a later capture actually superseded an earlier one).
+    assert "superseded" not in note
+
+
+def test_draft_routed_is_its_own_disposition(monkeypatch, tmp_path):
+    """DRAFT_FOR_REVIEW is not the confirm round-trip: nothing is queued, the
+    reviewed draft IS the delivery. No skeleton, no failure note, no appends —
+    the note tells the turn to compose the one draft for review. Both real
+    reason texts (the ceiling's and the content floor's) take this branch."""
+    for reason in (
+        "external_send at authored draft_for_review ceiling; routing to draft",
+        "Refused: this message touches money; routing to draft for human "
+        "review instead of autonomous send (content-sensitivity floor, ADR 0031).",
+    ):
+        prerendered_dispatch._IN_TURN.clear()
+        _routine(monkeypatch)
+        _write_envelope(tmp_path)
+        written = _appends_recorder(monkeypatch)
+        sender = _Sender([DispatchResult(sent=False, reason=reason)])
+        send_dispatch.set_sender(sender)
+        note = prerendered_dispatch.dispatch_prerendered(SESSION)
+        assert "draft for review" in note, reason
+        assert "compose ONE draft" in note, reason
+        assert "could not be delivered" not in note, reason  # not the failure rung
+        assert len(sender.calls) == 1, reason  # NO skeleton attempt
+        assert written == [], reason
+        assert "held for the owner's approval" not in note, reason
+
+
+def test_multiple_withheld_sets_disclose_the_single_pending_slot(monkeypatch, tmp_path):
+    """PENDING_SEND keeps one send; of N withheld dispatches only the LAST is
+    queued. The note must say the earlier sets were superseded — never claim
+    all are held."""
+    _routine(monkeypatch)
+    withheld = "external_send at authored confirm ceiling; withheld pending current-turn approval"
+    _write_envelope(
+        tmp_path,
+        dispatches=[
+            _dispatch_entry(),
+            _dispatch_entry(
+                recipients=["amy@firm.example"], routing_leg="matter_staff_responsible"
+            ),
+        ],
+    )
+    _appends_recorder(monkeypatch)
+    send_dispatch.set_sender(
+        _Sender(
+            [
+                DispatchResult(sent=False, reason=withheld),
+                DispatchResult(sent=False, reason=withheld),
+            ]
+        )
+    )
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    assert note.count("held for the owner's approval") == 2
+    assert "superseded" in note
+    assert "surface again on the next run" in note
 
 
 def test_context_strings_name_no_gates_or_rules(monkeypatch, tmp_path):

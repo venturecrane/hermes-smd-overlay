@@ -969,10 +969,12 @@ def _dispatch_internal_message(
 
     IT DOES NOT BYPASS ANYTHING. The payload is authorized through the SAME
     ``evaluate_tool_call`` a model's own ``smd_send_message`` goes through, on
-    the SAME session, so the exposure ceiling, the taint gate, the content floor
-    and the fabrication scan all apply. A tainted turn refuses this send exactly
-    as it refuses a composed one, and the caller is required to say so rather
-    than claim the notification went.
+    the SAME session — exposure ceiling, taint gate, content floor — and then
+    through the SAME ``outbound.check_*`` scans (fabrication markers, the
+    identifier-provenance gate) the pre_tool_call hook runs, wired here because
+    an out-of-turn send never crosses that hook. A tainted turn refuses this
+    send exactly as it refuses a composed one, and the caller is required to
+    say so rather than claim the notification went.
 
     ``templated`` says the body is a FIXED template from this repo. It is passed
     down to the spec gate and skips exactly one branch there, the one that asks
@@ -1023,6 +1025,34 @@ def _dispatch_internal_message(
         reason = block.get("message", "withheld") if isinstance(block, dict) else "withheld"
         logger.info("hermes-smd-trust: out-of-turn send withheld by gate (%s)", reason)
         return DispatchResult(sent=False, reason=str(reason), recipients=recipients)
+    # The fabrication + identifier gates (WS-RENDER review fix). They live in
+    # ``outbound.check_*`` and fire from ``on_pre_tool_call`` — a hook an
+    # out-of-turn send never crosses — so until this call, "through the full
+    # gate" was a sentence, not a control. Wired HERE, at the one choke point
+    # every out-of-turn sender shares (the prerendered dispatcher, the
+    # rule-request loop, the establishment sweeper). An indeterminate scan
+    # fails toward not sending, same as the hook's own posture.
+    gate_session = _resolved_session({"session_id": session_id})
+    for outbound_check in (outbound.check_outbound_draft, outbound.check_outbound_send):
+        try:
+            scan_block = outbound_check(
+                tool_name=_SEND_TOOL_NAME, args=payload, session_id=gate_session
+            )
+        except Exception:  # noqa: BLE001 — an indeterminate scan must not send
+            logger.exception("hermes-smd-trust: out-of-turn outbound scan raised; NOT dispatching")
+            return DispatchResult(
+                sent=False,
+                reason="the seat could not scan the send",
+                recipients=recipients,
+            )
+        if scan_block is not None:
+            reason = (
+                scan_block.get("message", "withheld")
+                if isinstance(scan_block, dict)
+                else "withheld"
+            )
+            logger.info("hermes-smd-trust: out-of-turn send blocked by outbound scan (%s)", reason)
+            return DispatchResult(sent=False, reason=str(reason), recipients=recipients)
     # The gate may have rewritten the payload (it consumes approvals and stores
     # its own copy); everything below reads what the gate allowed.
     payload.pop(TEMPLATED_BODY_ARG, None)

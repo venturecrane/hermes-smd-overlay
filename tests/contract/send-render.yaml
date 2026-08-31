@@ -37,7 +37,8 @@
 #
 # STAMP SCHEMA (one hash function, one arbiter -- the cross-workstream
 # contract). `canonical_body_sha256` = sha256 over utf-8 of (CRLF -> LF,
-# per-line trailing whitespace stripped, trailing newlines stripped). The
+# per-line trailing SPACE/TAB stripped -- " \t" only, never every Unicode
+# whitespace -- trailing newlines stripped). The
 # arbiter fixture both repos' suites load is
 # operator/contracts/fixtures/body-canon-vectors.json. Stamp sites:
 #

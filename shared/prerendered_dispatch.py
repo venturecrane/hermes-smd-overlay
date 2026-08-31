@@ -32,9 +32,24 @@ gate). The fallback ladder per dispatch:
    note tells the turn to follow its skill's failure instruction, and the
    heartbeat's no-send pager is the backstop.
 
-Withheld-for-approval (a draft-for-review posture) is a legitimate
-disposition, not a failure: no skeleton, no appends, the note says the alert
-is held for the owner's approval.
+Two authored postures are DISPOSITIONS, not failures, and they are distinct:
+
+* **Confirm-withheld** ("withheld pending ..."): the send is captured pending
+  the owner's approval — no skeleton, no appends, the note says it is held.
+  Two posture-dependent gaps, stated rather than papered over (both dormant on
+  the pilot, whose internal sends are autonomous): the pending slot is SINGLE
+  (``PENDING_SEND.capture`` supersedes), so with several recipient sets only
+  the last stays queued and the note says so; and an approved-after-withhold
+  delivery goes down ``_dispatch_approved_send``, which knows nothing of this
+  envelope's append plan — the raise rows are NOT written for that delivery.
+  Recovery is the ledger's own re-fire property (the items surface again next
+  run and the next successful full dispatch records them); persisting the
+  append plan alongside the pending send is the structural fix if a seat ever
+  authors ``external_send_internal: confirm``.
+* **Draft-routed** ("routing to draft ..."): under a review posture the
+  reviewed DRAFT is the delivery — nothing sends and nothing is queued. No
+  skeleton, no failure note, no appends; the note tells the turn to compose
+  the one draft for review from its Script Output.
 
 APPENDS ARE POST-DISPATCH AND FULL-BODY ONLY. After a successful FULL send,
 this module writes the envelope's ``fired``/``chased``/``handed_off`` events
@@ -294,11 +309,29 @@ def _write_appends(skill: str, appends: list, session_id: str) -> tuple[int, int
 # ---------------------------------------------------------------------------
 
 
-def _looks_withheld(reason: str) -> bool:
-    """Whether a not-sent reason is the authored hold-for-approval posture
-    speaking (a legitimate disposition), as opposed to a refusal."""
-    lowered = (reason or "").lower()
-    return "withheld" in lowered or "routing to draft" in lowered
+# The two authored-posture dispositions, told apart from a refusal by the
+# ceiling's own reason phrases. Substrings because the decision object's
+# ``audit_action`` (await_approval vs draft) does not cross the block-dict
+# boundary — ``evaluate_tool_call`` returns only ``{"action", "message"}`` —
+# and these two phrases are the ceiling's stable vocabulary for exactly these
+# two decisions (enforce._await_approval / enforce._draft + the content
+# floor's draft routing). Tested against the real reason texts.
+_CONFIRM_WITHHELD_MARK = "withheld pending"
+_DRAFT_ROUTED_MARK = "routing to draft"
+
+
+def _looks_confirm_withheld(reason: str) -> bool:
+    """The CONFIRM ceiling: the send is captured pending the owner's approval —
+    a real round-trip. No skeleton, no appends; approval delivers it."""
+    return _CONFIRM_WITHHELD_MARK in (reason or "").lower()
+
+
+def _looks_draft_routed(reason: str) -> bool:
+    """The DRAFT_FOR_REVIEW posture (or a content-floor draft routing): under
+    this posture the reviewed DRAFT is the delivery — nothing is captured and
+    nothing sends autonomously. Its own disposition: no skeleton, no failure
+    note, no appends; the turn composes the one draft for review."""
+    return _DRAFT_ROUTED_MARK in (reason or "").lower()
 
 
 def _recipients_phrase(recipients) -> str:
@@ -334,6 +367,7 @@ def dispatch_prerendered(session_id: str) -> str | None:
 
         lines: list[str] = []
         appended_total = 0
+        confirm_withheld = 0
         for entry in envelope.get("dispatches") or []:
             recipients = [str(r) for r in entry["recipients"]]
             audit_base = {}
@@ -362,13 +396,30 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     note += f"; {written} of {attempted} item record(s) written"
                 lines.append(note + ". Do not send this alert and do not record these items again.")
                 continue
-            if _looks_withheld(result.reason):
+            if _looks_confirm_withheld(result.reason):
                 # Held for the owner's approval — a legitimate authored
                 # posture. No skeleton, no appends; the approval round-trip
-                # owns delivery from here.
+                # owns delivery from here. (Two honesty limits below the loop:
+                # the pending slot is single, and an approved delivery writes
+                # no item records — see the module docstring.)
+                confirm_withheld += 1
                 lines.append(
                     f"Your {routine.skill} alert to {who} is being held for the owner's "
                     "approval. Do not compose, resend, or record anything for it."
+                )
+                continue
+            if _looks_draft_routed(result.reason):
+                # This seat's review posture: the reviewed draft IS the
+                # delivery. Nothing was sent and nothing is queued — the turn
+                # composes the ONE draft for a person to review. No skeleton,
+                # no failure note, no item records (nothing reached a person;
+                # the items re-fire next run if the draft never sends).
+                lines.append(
+                    f"Your {routine.skill} alert to {who} was not sent and is to be "
+                    "routed to a draft for review instead: compose ONE draft of this "
+                    "alert from your Script Output's digest, following your skill's "
+                    "format reference exactly, for a person to review and send. Do "
+                    "not send it yourself and do not record any items."
                 )
                 continue
             skeleton = entry.get("skeleton_body")
@@ -396,6 +447,16 @@ def dispatch_prerendered(session_id: str) -> str | None:
                 f"Your {routine.skill} alert to {who} could not be delivered this run. "
                 "Follow your skill's failure instruction: report the failure in one "
                 "plain line, and send nothing else."
+            )
+        if confirm_withheld > 1:
+            # HONESTY (single pending slot): PENDING_SEND keeps ONE send — a
+            # later capture supersedes the earlier — so of N withheld alerts
+            # only the last is actually queued for approval. Say so; the
+            # superseded sets re-fire next run by the ledger's own property.
+            lines.append(
+                "Only the most recently held alert remains queued for approval; "
+                "the earlier held alerts were superseded and their items will "
+                "surface again on the next run."
             )
         memo_matters = [
             str(m) for m in (envelope.get("memo_matters") or []) if isinstance(m, str) and m
