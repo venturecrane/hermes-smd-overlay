@@ -60,6 +60,7 @@ def _call(
     *,
     session_id: str = "",
     matter_ref: str | None = None,
+    audit_extra: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not transmit_available():
         raise AgentMailBrokerUnavailable(
@@ -78,6 +79,12 @@ def _call(
         envelope["session_id"] = session_id
     if matter_ref:
         envelope["matter_ref"] = matter_ref
+    if audit_extra:
+        # WS-RENDER: the body-conformance stamps (routing_leg /
+        # rendered_body_sha256 / body_variant) ride the same seam as the two
+        # joins above and get the same deploy-order freedom — the broker
+        # filters them through its own closed allowlist.
+        envelope["audit_extra"] = audit_extra
     try:
         return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
     except OSError as exc:
@@ -90,7 +97,11 @@ def _call(
 
 
 def send_message(
-    payload: dict[str, Any], *, session_id: str = "", matter_ref: str | None = None
+    payload: dict[str, Any],
+    *,
+    session_id: str = "",
+    matter_ref: str | None = None,
+    audit_extra: dict[str, str] | None = None,
 ) -> str:
     """Transmit a fresh message; return the AgentMail message id.
 
@@ -100,9 +111,13 @@ def send_message(
     :class:`AgentMailBrokerUnavailable` when it could not be asked.
     """
     return str(
-        _call("agentmail_send", payload, session_id=session_id, matter_ref=matter_ref).get(
-            "message_id"
-        )
+        _call(
+            "agentmail_send",
+            payload,
+            session_id=session_id,
+            matter_ref=matter_ref,
+            audit_extra=audit_extra,
+        ).get("message_id")
         or ""
     )
 

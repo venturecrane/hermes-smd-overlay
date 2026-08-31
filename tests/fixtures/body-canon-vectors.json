@@ -1,0 +1,78 @@
+{
+  "_comment": [
+    "Shared test vectors for canonical_body_sha256 -- the ONE hash function stamped at",
+    "all three sites of the send-render conformance chain (skill pre_run envelope +",
+    "EMITTED_WAKE, overlay CONFIRM_SEND_DISPATCHED, console verifier). Definition:",
+    "sha256 over utf-8 of (CRLF normalized to LF, per-line trailing whitespace",
+    "stripped, trailing newlines stripped). This fixture is the ARBITER: both repos'",
+    "test suites load it and assert their implementation maps every input to its",
+    "sha256. It is copied VERBATIM into hermes-smd-overlay tests/fixtures/ in the",
+    "same change whenever it moves (mirrored-artifact discipline, same as the",
+    "seat/gate snapshot). Vectors are synthetic text only -- never a real body.",
+    "Consumers: operator/bin/lib/send_verify.py (console),",
+    "operator/bin/tests/test_send_verify.py, and the overlay's emitter suite",
+    "(lands with the render cluster's pair PR)."
+  ],
+  "vectors": [
+    {
+      "name": "plain_two_lines",
+      "note": "the identity case: already canonical",
+      "input": "Hello\nWorld",
+      "sha256": "35c6b9f66dceb6cf8f733d08689564e420e18eb40250d9435352617c027f36d6"
+    },
+    {
+      "name": "trailing_newline",
+      "note": "REQUIRED vector: one trailing newline strips; must hash identical to plain_two_lines",
+      "input": "Hello\nWorld\n",
+      "sha256": "35c6b9f66dceb6cf8f733d08689564e420e18eb40250d9435352617c027f36d6"
+    },
+    {
+      "name": "many_trailing_newlines",
+      "note": "all trailing newlines strip, not just one",
+      "input": "Hello\nWorld\n\n\n",
+      "sha256": "35c6b9f66dceb6cf8f733d08689564e420e18eb40250d9435352617c027f36d6"
+    },
+    {
+      "name": "crlf_line_endings",
+      "note": "CRLF normalizes to LF before hashing",
+      "input": "Hello\r\nWorld\r\n",
+      "sha256": "35c6b9f66dceb6cf8f733d08689564e420e18eb40250d9435352617c027f36d6"
+    },
+    {
+      "name": "trailing_whitespace",
+      "note": "per-line trailing spaces and tabs strip",
+      "input": "Hello  \nWorld\t\n",
+      "sha256": "35c6b9f66dceb6cf8f733d08689564e420e18eb40250d9435352617c027f36d6"
+    },
+    {
+      "name": "interior_blank_preserved",
+      "note": "an interior blank line is content and survives",
+      "input": "Alpha\n\nBeta",
+      "sha256": "611a167854cd6d1c92d7fbcc4ca9b3887ab9cec955ef0e11d4a8dfa3f0596cc4"
+    },
+    {
+      "name": "interior_vs_no_blank_differ",
+      "note": "control for interior_blank_preserved: must differ from it",
+      "input": "Alpha\nBeta",
+      "sha256": "c4457665fd3e62b0c9fc21865ea17bb837f9b86b2c2fa353f693eda8c9e97760"
+    },
+    {
+      "name": "unicode_body",
+      "note": "utf-8 encoding, not a byte-latin fallback",
+      "input": "Café status update ✓\n",
+      "sha256": "d634830cb89fc06026e90f730eeef721921acfc12533f965b828db9385fc74c1"
+    },
+    {
+      "name": "empty_string",
+      "note": "the empty body hashes the empty canonical form",
+      "input": "",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "only_newlines",
+      "note": "a body of nothing but newlines canonicalizes to empty; must hash identical to empty_string",
+      "input": "\n\n\n",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

@@ -77,6 +77,7 @@ def send_message(
     sender: Callable[..., Any] | None = None,
     session_id: str = "",
     matter_ref: str | None = None,
+    audit_extra: dict[str, str] | None = None,
 ) -> str:
     """Ask the broker to send a fresh message; return the new message id.
 
@@ -100,13 +101,22 @@ def send_message(
     come from is here. They are forwarded as kwargs so an injected ``sender``
     written before this change keeps working — a test double that takes only the
     body raises TypeError loudly rather than silently dropping the audit fields.
+    ``audit_extra`` (WS-RENDER) rides the same seam: the caller's
+    body-conformance stamps for the row (routing_leg / rendered_body_sha256 /
+    body_variant), filtered broker-side through a closed allowlist.
     """
     body = _send_body(payload)
     if not body.get("to"):
         raise AgentMailSendError("refusing to send: payload has no recipient")
     send = sender or agentmail_broker.send_message
+    kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
+    if audit_extra:
+        # Forwarded only when present, so a sender double predating the stamps
+        # keeps working on stamp-less sends; a caller that DOES stamp gets the
+        # loud TypeError contract the ss#2497 note above describes.
+        kwargs["audit_extra"] = audit_extra
     try:
-        message_id = send(body, session_id=session_id, matter_ref=matter_ref)
+        message_id = send(body, **kwargs)
     except agentmail_broker.BrokerError as exc:
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
@@ -146,6 +156,7 @@ def send_via_msgraph(
     sender: Callable[..., Any] | None = None,
     session_id: str = "",
     matter_ref: str | None = None,
+    audit_extra: dict[str, str] | None = None,
 ) -> str:
     """Ask the broker to send an approved message via Graph ``/sendMail``.
 
@@ -173,8 +184,12 @@ def send_via_msgraph(
     if not body.get("to"):
         raise MsGraphSendError("refusing to send: payload has no recipient")
     send = sender or msgraph_broker.send_message
+    kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
+    if audit_extra:
+        # Same conditional forward as the AgentMail twin, same rationale.
+        kwargs["audit_extra"] = audit_extra
     try:
-        message_id = send(body, session_id=session_id, matter_ref=matter_ref)
+        message_id = send(body, **kwargs)
     except msgraph_broker.BrokerError as exc:
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful

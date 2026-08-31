@@ -70,7 +70,10 @@ def test_send_takes_no_credential_and_no_inbox():
     import inspect
 
     params = set(inspect.signature(_load().send_message).parameters)
-    assert params == {"payload", "sender", "session_id", "matter_ref"}
+    # audit_extra (WS-RENDER) is attribution FOR the broker's row, filtered
+    # broker-side through a closed allowlist — not an identity or credential
+    # channel, so the control below still holds.
+    assert params == {"payload", "sender", "session_id", "matter_ref", "audit_extra"}
     # The control is what is ABSENT: no way to name the From or hand over a key.
     assert not params & {"from", "sender_address", "inbox_id", "api_key", "token"}
 

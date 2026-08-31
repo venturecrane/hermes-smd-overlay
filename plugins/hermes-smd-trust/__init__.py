@@ -26,8 +26,10 @@ from shared import (
     matter_binding,
     matter_gate,
     pre_run_handoff,
+    prerendered_dispatch,
     provenance,
     read_volume,
+    rendered_body_gate,
     report_render,
     spec_stamp,
 )
@@ -102,6 +104,11 @@ def _attach_html_body(tool_name: str, args: dict) -> None:
     if not report_render.looks_like_report(text):
         return  # prose reply, not a report — leave the send exactly as it was
     args["html"] = report_render.render_markdown(text)
+    # The text/plain half of the same fix (WS-RENDER): a reader whose client
+    # shows the text part must not see raw markdown. render_plain is strictly
+    # MARKER-SUBTRACTIVE (purity test), so the safety argument above covers it
+    # identically: it introduces no token the gates did not already scan.
+    args["text"] = report_render.render_plain(text)
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +396,21 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         )
         if send_block is not None:
             return send_block
+
+        # WS-RENDER: the in-turn rendered-body check, POST-ceiling. A cron
+        # session whose consumed dispatch envelope declared enforced in-turn
+        # templates may send only a body that IS one of those templates with
+        # its slots filled — the model selects, it does not write. Binds only
+        # gated send tools and only sessions with an enforcing declaration;
+        # everything else passes untouched (the module fails open internally).
+        if outbound._is_gated_send_tool(tool_name):
+            body_block = rendered_body_gate.check_body(
+                session_id,
+                args.get("text") or "",
+                prerendered_dispatch.in_turn_templates(session_id),
+            )
+            if body_block is not None:
+                return body_block
 
         if tool_name.startswith("workspace_"):
             broker_payload = {key: value for key, value in args.items() if key != GRANT_ARG}
@@ -739,6 +761,24 @@ def _resolved_session(kwargs: dict[str, Any]) -> str:
         return raw
 
 
+def _send_cited_matters(session_id: str, payload: dict[str, Any]) -> set[str]:
+    """The matters a send's body cites, extracted WITH the membership's
+    known-number aliases (ss#2458 pair, overlay#335): a firm whose matter
+    numbers are bare digit runs is findable only through what this session
+    actually read, so the matter_ref the CONFIRM row carries stops going
+    blank on exactly those firms. Never raises — matter_ref is attribution,
+    and an enrichment fault must not break a send."""
+    body = matter_gate.body_from_args(payload)
+    try:
+        known = matter_binding.membership_for(session_id).known_numbers()
+    except Exception:  # noqa: BLE001 — enrichment only; the plain extraction stands
+        known = frozenset()
+    try:
+        return matter_gate.cited_matters(body, known)
+    except Exception:  # noqa: BLE001
+        return matter_gate.cited_matters(body)
+
+
 def _smd_send_message(args: dict[str, Any], **kwargs: Any) -> str:
     """Execute a send the gate has already authorized.
 
@@ -789,7 +829,7 @@ def _smd_send_message(args: dict[str, Any], **kwargs: Any) -> str:
     # empty set and reports a send with no matter on a turn that had one.
     send_session_id = _resolved_session(kwargs)
     send_matter_ref = matter_gate.matter_ref_for(
-        send_session_id, matter_gate.cited_matters(matter_gate.body_from_args(payload))
+        send_session_id, _send_cited_matters(send_session_id, payload)
     )
     try:
         if _seat_email_adapter() == _ADAPTER_MSGRAPH:
@@ -870,9 +910,9 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     # session READ and from the identifiers in the approved body, never declared
     # by the model — the same rule the matter gate is built on. Both resolve to
     # nothing on an ambiguous turn, and nothing is what the row then says.
+    approved_session = _resolved_session({"session_id": session_id})
     send_matter_ref = matter_gate.matter_ref_for(
-        _resolved_session({"session_id": session_id}),
-        matter_gate.cited_matters(matter_gate.body_from_args(payload)),
+        approved_session, _send_cited_matters(approved_session, payload)
     )
     try:
         if is_msgraph:
@@ -916,6 +956,7 @@ def _dispatch_internal_message(
     session_id: str = "",
     cc: list[str] | None = None,
     templated: bool = True,
+    audit_extra: dict[str, str] | None = None,
 ) -> DispatchResult:
     """Send one seat-authored message OUT OF TURN, through the full gate.
 
@@ -938,6 +979,13 @@ def _dispatch_internal_message(
     whether the MODEL consulted the firm's voice spec, which is a meaningless
     question about bytes the model did not write. Every format assertion still
     runs. See ``shared.spec_gate.check_spec_gate``.
+
+    ``audit_extra`` (WS-RENDER) is the caller's contribution to the broker's
+    CONFIRM row (``routing_leg``, ``body_variant``); this function ALWAYS adds
+    ``rendered_body_sha256`` — the canonical hash of the text the gate
+    ALLOWED, computed BEFORE ``_attach_html_body`` mutates the payload, so the
+    console's wake<->confirm hash join compares the same bytes the pre_run
+    stamped, not the down-rendered plain half.
     """
     recipients = tuple(a for a in (to or ()) if isinstance(a, str) and a.strip())
     if not recipients:
@@ -978,19 +1026,34 @@ def _dispatch_internal_message(
     # The gate may have rewritten the payload (it consumes approvals and stores
     # its own copy); everything below reads what the gate allowed.
     payload.pop(TEMPLATED_BODY_ARG, None)
+    # The CONFIRM row's body stamp (WS-RENDER): the canonical hash of the text
+    # the gate just allowed, taken BEFORE the html/plain attach mutates it —
+    # the console verifier joins this against the pre_run's EMITTED_WAKE stamp.
+    send_audit_extra = dict(audit_extra or {})
+    allowed_text = payload.get("text")
+    if isinstance(allowed_text, str) and allowed_text:
+        send_audit_extra["rendered_body_sha256"] = prerendered_dispatch.canonical_body_sha256(
+            allowed_text
+        )
     _attach_html_body(_SEND_TOOL_NAME, payload)
     send_session_id = _resolved_session({"session_id": session_id})
     send_matter_ref = matter_gate.matter_ref_for(
-        send_session_id, matter_gate.cited_matters(matter_gate.body_from_args(payload))
+        send_session_id, _send_cited_matters(send_session_id, payload)
     )
     try:
         if _seat_email_adapter() == _ADAPTER_MSGRAPH:
             message_id = outbound_send.send_via_msgraph(
-                payload, session_id=send_session_id, matter_ref=send_matter_ref
+                payload,
+                session_id=send_session_id,
+                matter_ref=send_matter_ref,
+                audit_extra=send_audit_extra,
             )
         else:
             message_id = outbound_send.send_message(
-                payload=payload, session_id=send_session_id, matter_ref=send_matter_ref
+                payload=payload,
+                session_id=send_session_id,
+                matter_ref=send_matter_ref,
+                audit_extra=send_audit_extra,
             )
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: out-of-turn send failed (%s)", exc)
@@ -1113,6 +1176,7 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
        message never presents an allowlisted telegram sender_id.
     """
     session_id = kwargs.get("session_id") or ""
+    context_notes: list[str] = []
     try:
         provenance.note_session(session_id)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
@@ -1126,6 +1190,19 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         _seed_from_pre_run_handoff(session_id)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: pre-run handoff seeding failed", exc_info=True)
+    try:
+        # 4. Dispatch this cron session's PRE-RENDERED outbound (WS-RENDER),
+        # AFTER the handoff seeding so the provenance register already holds
+        # the dates and matter numbers the rendered body carries. Out of turn,
+        # templated, through the full gate; the module writes the ledger
+        # appends post-dispatch and returns one context note. A failure here
+        # costs the dispatch (the skill's failure-note instruction + the
+        # heartbeat pager cover it), never the turn.
+        dispatch_note = prerendered_dispatch.dispatch_prerendered(session_id)
+        if dispatch_note:
+            context_notes.append(dispatch_note)
+    except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
+        logger.debug("hermes-smd-trust: prerendered dispatch failed", exc_info=True)
     try:
         # Clear the authored-spec read marks at the start of every turn (ss ADR
         # 0083 #2084). A spec read three turns ago must not certify THIS turn's
@@ -1187,9 +1264,11 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
                     customer_slug = ""
             context = _dispatch_approved_send(session_id, customer_slug)
             if context:
-                return {"context": context}
+                context_notes.append(context)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe
         logger.debug("hermes-smd-trust: approval capture/dispatch failed", exc_info=True)
+    if context_notes:
+        return {"context": " ".join(context_notes)}
     return None
 
 

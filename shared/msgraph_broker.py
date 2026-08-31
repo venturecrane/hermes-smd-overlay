@@ -54,6 +54,7 @@ def _call(
     *,
     session_id: str = "",
     matter_ref: str | None = None,
+    audit_extra: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not transmit_available():
         raise MsGraphBrokerUnavailable(
@@ -61,12 +62,15 @@ def _call(
         )
     # ss-console#2497 — see the twin note in ``agentmail_broker``. Beside the
     # payload, not inside it, and optional on the wire so the broker and the
-    # overlay can be deployed in either order.
+    # overlay can be deployed in either order. ``audit_extra`` (WS-RENDER)
+    # rides the same seam with the same freedom.
     envelope: dict[str, Any] = {"action": action, "payload": payload}
     if session_id:
         envelope["session_id"] = session_id
     if matter_ref:
         envelope["matter_ref"] = matter_ref
+    if audit_extra:
+        envelope["audit_extra"] = audit_extra
     try:
         return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
     except OSError as exc:
@@ -80,7 +84,11 @@ def _call(
 
 
 def send_message(
-    payload: dict[str, Any], *, session_id: str = "", matter_ref: str | None = None
+    payload: dict[str, Any],
+    *,
+    session_id: str = "",
+    matter_ref: str | None = None,
+    audit_extra: dict[str, str] | None = None,
 ) -> str:
     """Transmit a fresh message via Graph ``/sendMail``.
 
@@ -98,7 +106,15 @@ def send_message(
     Preferred, with ``message_id`` behind it, so this reads the same against a
     broker on either side of that change and needs no deployment ordering.
     """
-    return _vendor_id(_call("msgraph_send", payload, session_id=session_id, matter_ref=matter_ref))
+    return _vendor_id(
+        _call(
+            "msgraph_send",
+            payload,
+            session_id=session_id,
+            matter_ref=matter_ref,
+            audit_extra=audit_extra,
+        )
+    )
 
 
 def send_reply(
