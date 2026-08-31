@@ -80,6 +80,11 @@ def _medchron_job_submit(args: dict[str, Any], **_: Any) -> str:
     for key in ("injuries", "requested_by", "request_ref"):
         if args.get(key):
             envelope[key] = str(args[key])
+    selection = args.get("selection")
+    if isinstance(selection, dict) and selection.get("include_file_ids"):
+        envelope["selection"] = {
+            "include_file_ids": [str(f) for f in selection["include_file_ids"]]
+        }
     resp = MedchronBrokerClient().submit(envelope)
     if not resp.get("accepted"):
         return json.dumps({"accepted": False, "reason": resp.get("reason")}, ensure_ascii=False)
@@ -155,6 +160,20 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
                 "request_ref": {
                     "type": "string",
                     "description": "The thread or message this request came from.",
+                },
+                "selection": {
+                    "type": "object",
+                    "properties": {
+                        "include_file_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Append runs only: the new document ids; the "
+                                "runner pulls nothing else."
+                            ),
+                        }
+                    },
+                    "additionalProperties": False,
                 },
             },
             ["matter_id", "matter_number", "units", "incident_date", "incident_source"],
