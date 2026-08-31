@@ -47,9 +47,14 @@ _COPY = _REPO_ROOT / "shared" / "escalation_ledger.py"
 # act: restamp the file from the canonical (never hand-edit it), then paste the
 # new digest here and reference the paired ss-console PR in the commit message.
 #
-# 2026-08-11 (ss #2289 / this PR): item-key components are normalized before
+# 2026-08-11 (ss #2289 / overlay#254): item-key components are normalized before
 # hashing and has_stable_identity takes (source_id, matter_id).
-CANONICAL_SHA256 = "d1fe74f99326633814a6230ed086df71ccb7ea9b4d35c9cd7d1c0a3ba4b35307"
+# 2026-08-31 (ledger-integrity pair): derive_state resets acked+resolved+
+# handed_off symmetrically on a raise (a fresh raise re-opens the item);
+# validate_append refuses a resolved/handed_off with no prior raise on the same
+# item_key (RELEASE_EVENTS), and validates the optional `determination` payload
+# a hold release carries on its resolved event.
+CANONICAL_SHA256 = "912bac290f05d44cbd8b5b27dd0c837006bdedc02c782ca1398b30db8f88fbce"
 
 CANONICAL_PATH = "operator/workspace_broker/escalation_ledger.py"
 CANONICAL_REPO = "venturecrane/ss-console"

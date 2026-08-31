@@ -774,5 +774,278 @@ def test_vendored_ledger_twin_matches_reference_shapes():
         "make_event",
         "SCHEMA_VERSION",
         "DEFAULT_LEDGER_PATH",
+        "RELEASE_EVENTS",
     ):
         assert hasattr(escalation_ledger, name)
+
+
+# ---------------------------------------------------------------------------
+# The hold-release determination (ss #2402 Part 3): a resolved append whose
+# derive named the chase-hold sentinel MUST carry the determination; every
+# other append refuses the fields. The plugin is the enforcement seam because
+# the broker sees only the hashed item_key and cannot know an item is a hold.
+# ---------------------------------------------------------------------------
+
+_HOLD_COMPONENTS = {
+    "skill": "client-verification-tracker",
+    "matter_id": "m-1",
+    "source_id": "__hold__",
+    "label": "chase-hold",
+    "authored_date": None,
+    "event": "resolved",
+    "attempt": 0,
+}
+
+_DETERMINATION_FIELDS = {
+    "resolution_note": (
+        "plaintiff is a single adult; Minor/Deceased tags are layout artifacts, "
+        "verified against live roles 2026-08-31"
+    ),
+    "role_snapshot_sha256": "ab" * 32,
+    "confirmed_via": "matter_record",
+}
+
+
+def test_hold_source_id_literal_is_pinned():
+    """Import-free mirror of ss-console pre_run.py's HOLD_SOURCE_ID — the
+    cross-repo contract. A drifted literal silently exempts every hold."""
+    plugin = load_plugin("hermes-smd-escalation")
+    assert plugin.HOLD_SOURCE_ID == "__hold__"
+
+
+def test_a_bare_hold_release_is_refused(escalation):
+    plugin, requests = escalation
+    derived = json.loads(plugin._escalation_append({**_HOLD_COMPONENTS, "derive_only": True}))
+    with pytest.raises(ValueError, match="determination that justifies"):
+        plugin._escalation_append(
+            {
+                "skill": "client-verification-tracker",
+                "event": "resolved",
+                "attempt": 0,
+                "append_handle": derived["append_handle"],
+            }
+        )
+    assert requests == []  # nothing reached the broker
+
+
+def test_a_partially_determined_hold_release_names_the_missing_fields(escalation):
+    plugin, requests = escalation
+    derived = json.loads(plugin._escalation_append({**_HOLD_COMPONENTS, "derive_only": True}))
+    with pytest.raises(ValueError, match="role_snapshot_sha256"):
+        plugin._escalation_append(
+            {
+                "skill": "client-verification-tracker",
+                "event": "resolved",
+                "attempt": 0,
+                "append_handle": derived["append_handle"],
+                "resolution_note": _DETERMINATION_FIELDS["resolution_note"],
+                "confirmed_via": "matter_record",
+            }
+        )
+    assert requests == []
+
+
+def test_a_determined_hold_release_carries_the_payload_to_the_broker(escalation):
+    plugin, requests = escalation
+    derived = json.loads(plugin._escalation_append({**_HOLD_COMPONENTS, "derive_only": True}))
+    out = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "client-verification-tracker",
+                "event": "resolved",
+                "attempt": 0,
+                "append_handle": derived["append_handle"],
+                **_DETERMINATION_FIELDS,
+            }
+        )
+    )
+    assert out["ok"] is True
+    assert len(requests) == 1
+    event = requests[0]["event"]
+    assert event["event"] == "resolved"
+    assert event["determination"] == {
+        "note": _DETERMINATION_FIELDS["resolution_note"],
+        "role_snapshot_sha256": _DETERMINATION_FIELDS["role_snapshot_sha256"],
+        "confirmed_via": "matter_record",
+    }
+    # The payload must pass the broker's own validator, or the seam would mint
+    # a shape the broker refuses (parser tests use the runtime shape).
+    escalation_ledger.validate_append(
+        [
+            escalation_ledger.make_event(
+                skill="client-verification-tracker",
+                matter_id="m-1",
+                item_key=event["item_key"],
+                event="fired",
+                attempt=1,
+                ts="2026-08-24T14:00:00.000Z",
+            )
+        ],
+        event,
+        send_witness=lambda _e: False,  # resolved never consults the witness
+    )
+
+
+def test_a_non_hold_resolved_refuses_determination_fields(escalation):
+    plugin, requests = escalation
+    derived = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "client-verification-tracker",
+                "matter_id": "m-1",
+                "source_id": "task-1",
+                "label": "client-verification",
+                "authored_date": None,
+                "event": "resolved",
+                "attempt": 0,
+                "derive_only": True,
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="releases a chase hold"):
+        plugin._escalation_append(
+            {
+                "skill": "client-verification-tracker",
+                "event": "resolved",
+                "attempt": 0,
+                "append_handle": derived["append_handle"],
+                **_DETERMINATION_FIELDS,
+            }
+        )
+    assert requests == []
+
+
+def test_a_non_hold_resolved_without_fields_still_writes(escalation):
+    """The requirement is scoped to holds: an ordinary resolved (e.g. a
+    records-chaser item close) writes exactly as before."""
+    plugin, requests = escalation
+    derived = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "medical-records-chaser",
+                "matter_id": "m-1",
+                "source_id": "task-7",
+                "label": "records-chase",
+                "authored_date": None,
+                "event": "resolved",
+                "attempt": 0,
+                "derive_only": True,
+            }
+        )
+    )
+    out = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "medical-records-chaser",
+                "event": "resolved",
+                "attempt": 0,
+                "append_handle": derived["append_handle"],
+            }
+        )
+    )
+    assert out["ok"] is True
+    assert "determination" not in requests[0]["event"]
+
+
+def test_mrc_hold_release_is_not_determination_gated(escalation):
+    """medical-records-chaser's hold sentinel is __mrc_hold__ and is
+    deliberately NOT gated: its pre_run computes no role snapshot, so a
+    required 64-hex hash would make its holds unreleasable."""
+    plugin, requests = escalation
+    derived = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "medical-records-chaser",
+                "matter_id": "m-1",
+                "source_id": "__mrc_hold__",
+                "label": "mrc-chase-hold",
+                "authored_date": None,
+                "event": "resolved",
+                "attempt": 0,
+                "derive_only": True,
+            }
+        )
+    )
+    out = json.loads(
+        plugin._escalation_append(
+            {
+                "skill": "medical-records-chaser",
+                "event": "resolved",
+                "attempt": 0,
+                "append_handle": derived["append_handle"],
+            }
+        )
+    )
+    assert out["ok"] is True
+
+
+def test_determination_fields_on_a_derive_are_refused(escalation):
+    plugin, _ = escalation
+    with pytest.raises(ValueError, match="authored on the resolved append"):
+        plugin._escalation_append(
+            {**_HOLD_COMPONENTS, "derive_only": True, **_DETERMINATION_FIELDS}
+        )
+
+
+def test_determination_fields_on_an_ack_are_refused(escalation, tmp_path, monkeypatch):
+    plugin, _ = escalation
+    ledger_file = tmp_path / "ledger.jsonl"
+    row = escalation_ledger.make_event(
+        skill="deadline-miss-escalator",
+        matter_id="m-1",
+        item_key="k1",
+        event="fired",
+        attempt=1,
+        token="ACK-ABCDEF",
+        ts="2026-08-24T14:00:00.000Z",
+    )
+    ledger_file.write_text(escalation_ledger.serialize_event(row) + "\n", encoding="utf-8")
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
+    with pytest.raises(ValueError, match="drop"):
+        plugin._escalation_append(
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "acked",
+                "attempt": 0,
+                "ack_token": "ACK-ABCDEF",
+                **_DETERMINATION_FIELDS,
+            }
+        )
+
+
+def test_state_exposes_the_recorded_determination(escalation, tmp_path, monkeypatch):
+    plugin, _ = escalation
+    key = escalation_ledger.item_key("m-1", "__hold__", "chase-hold", None)
+    determination = {
+        "note": "single adult; layout artifacts",
+        "role_snapshot_sha256": "cd" * 32,
+        "confirmed_via": "person",
+    }
+    rows = [
+        escalation_ledger.make_event(
+            skill="client-verification-tracker",
+            matter_id="m-1",
+            item_key=key,
+            event="fired",
+            attempt=1,
+            ts="2026-08-24T14:00:00.000Z",
+        ),
+        escalation_ledger.make_event(
+            skill="client-verification-tracker",
+            matter_id="m-1",
+            item_key=key,
+            event="resolved",
+            attempt=0,
+            ts="2026-08-27T14:00:00.000Z",
+            determination=determination,
+        ),
+    ]
+    ledger_file = tmp_path / "ledger.jsonl"
+    ledger_file.write_text(
+        "".join(escalation_ledger.serialize_event(r) + "\n" for r in rows), encoding="utf-8"
+    )
+    monkeypatch.setenv("SMD_ESCALATION_LEDGER_PATH", str(ledger_file))
+    out = json.loads(plugin._escalation_state({}))
+    item = out["items"][key]
+    assert item["resolved"] is True
+    assert item["determination"] == determination

@@ -47,6 +47,13 @@ The rule was already doctrine in the skills (``algorithm.md``: "if the send did
 not happen, write nothing"); it was prose addressed to the model, which is not a
 control.
 
+A ``resolved``/``handed_off`` is the third door: either one releases an item
+from autonomous re-firing, so ``validate_append`` REJECTS a release whose
+item_key has no prior raise — you cannot release an alarm that never rang
+(see ``RELEASE_EVENTS``). A ``resolved`` may carry an optional structured
+``determination`` payload (hold releases record why — ss #2402 Part 3); the
+shape is validated whenever present and refused on any other event kind.
+
 Pure stdlib. No imports from other ``workspace_broker`` modules, so the vendored
 copy is safe to load standalone inside a skill.
 """
@@ -56,6 +63,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -85,7 +93,23 @@ IDENTITY_EPOCH = 2
 # will be refused forever and re-raise daily with nothing in the ledger.
 EVENTS: tuple[str, ...] = ("fired", "chased", "acked", "handed_off", "resolved")
 RAISING_EVENTS: tuple[str, ...] = ("fired", "chased")
+# The two events that RELEASE an item from autonomous re-firing. Like an
+# ``acked``, either one silences an alarm, so ``validate_append`` demands a
+# prior raise on the same item_key before writing one: you cannot release an
+# alarm that never rang. (Live shape this closes: on pilot-smokeball the turn
+# wrote ``resolved`` rows for items the ledger had never raised — redundant at
+# best, and a mis-keyed one silences a DIFFERENT item forever.)
+RELEASE_EVENTS: tuple[str, ...] = ("resolved", "handed_off")
 _REQUIRED_KEYS: tuple[str, ...] = ("ts", "skill", "item_key", "event")
+
+# ``determination`` payload validation (hold releases, ss #2402 Part 3). The
+# shape is enforced whenever the field is present; the OVERLAY's escalation
+# plugin is what REQUIRES it on a hold-sentinel release (the broker sees only
+# the hashed item_key and cannot know an item is a hold).
+_DETERMINATION_KEYS: frozenset[str] = frozenset({"note", "role_snapshot_sha256", "confirmed_via"})
+_DETERMINATION_NOTE_MAX_CHARS = 500
+_DETERMINATION_CONFIRMED_VIA: tuple[str, ...] = ("matter_record", "person")
+_SNAPSHOT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Agent read path (broker writes the same inode via the /run/smd-audit bind).
 # Override with SMD_ESCALATION_LEDGER_PATH (tests, and the broker's write side).
@@ -273,9 +297,12 @@ def make_event(
     attempt: int,
     token: str | None = None,
     ts: str | None = None,
+    determination: dict | None = None,
 ) -> dict:
     """Build a well-formed event dict. ``ts`` is normally left None so the broker
-    stamps it server-side (the agent cannot backdate)."""
+    stamps it server-side (the agent cannot backdate). ``determination`` is the
+    optional hold-release payload — additive, so ``v`` stays 2 (readers tolerate
+    unknown keys); shape and kind are enforced by ``validate_append``."""
     if event not in EVENTS:
         raise ValueError(f"unknown escalation event {event!r}; expected one of {EVENTS}")
     row: dict = {
@@ -288,6 +315,8 @@ def make_event(
         "attempt": int(attempt),
         "token": None if token is None else str(token),
     }
+    if determination is not None:
+        row["determination"] = determination
     return row
 
 
@@ -343,8 +372,20 @@ def read_ledger(path: str | None = None) -> list[dict]:
 @dataclass
 class ItemState:
     """Ledger-derived state for one item_key. ``attempts`` counts raises
-    (fired + chased). ``acked`` is reset by any raise that follows an ack, so a
-    re-surfaced item is awaiting a fresh ack, not still silenced by the old one.
+    (fired + chased). ``acked``, ``resolved`` and ``handed_off`` are ALL reset
+    by any raise that follows them: a fresh raise re-opens the item — the alarm
+    is ringing again, and no prior silencer survives it. Terminal states are
+    terminal *until the alarm rings again* (an asymmetric reset was the live
+    2026-08-24..31 defect: a hold sentinel resolved on 08-27 and re-raised on
+    08-31 stayed ``resolved`` forever, and a hold that ever passed through
+    ``handed_off`` would have been a silent black hole — blocking chases while
+    ``decide()``'s handed_off guard suppressed every re-surface).
+
+    ``determination`` is the structured payload the latest ``resolved`` event
+    carried (hold releases record why the hold was released — ss #2402 Part 3).
+    It is STICKY: a later raise re-opens the item but never erases the
+    determination; whether a consult may trust it is governed by its
+    ``role_snapshot_sha256`` against the current roles, not by hold state.
     """
 
     item_key: str
@@ -357,6 +398,7 @@ class ItemState:
     last_acked_date: date | None = None
     handed_off: bool = False
     resolved: bool = False
+    determination: dict | None = None
 
 
 def _parse_ts_date(ts) -> date | None:
@@ -369,8 +411,12 @@ def _parse_ts_date(ts) -> date | None:
 
 
 def derive_state(events) -> dict[str, ItemState]:
-    """Fold events (any order) into per-item_key state. Events are sorted by
-    ``ts`` so ack-then-refire vs refire-then-ack resolve deterministically."""
+    """Fold events into per-item_key state, in ``(ts, file order)`` order.
+
+    ``sorted`` is stable, so two events with the SAME ``ts`` keep their input
+    (file) order — the append-only file's own order breaks the tie, which makes
+    the fold deterministic for a raise and a release stamped in the same
+    millisecond. Pinned by ``test_same_ts_ties_break_by_file_order``."""
     ordered = sorted(events, key=lambda e: str(e.get("ts") or ""))
     states: dict[str, ItemState] = {}
     for event in ordered:
@@ -393,8 +439,18 @@ def derive_state(events) -> dict[str, ItemState]:
             parsed = _parse_ts_date(ts)
             if parsed is not None:
                 state.last_raised_date = parsed
-            # A fresh raise supersedes any prior ack: the item is loud again.
+            # A fresh raise re-opens the item: the alarm is ringing again, so no
+            # prior silencer — ack, resolution, or hand-off — survives it. The
+            # reset is SYMMETRIC across all three on purpose: resetting only
+            # ``acked`` (the shape this replaced) left ``resolved`` sticky, so
+            # the live 08-24 fired -> 08-27 resolved -> 08-31 fired sequence
+            # folded to a permanently-released hold; resetting ``resolved``
+            # without ``handed_off`` would make a re-raised handed-off hold a
+            # silent black hole instead (blocked, and never re-surfaced).
+            # ``determination`` is deliberately NOT reset — see ItemState.
             state.acked = False
+            state.resolved = False
+            state.handed_off = False
         elif kind == "acked":
             state.acked = True
             parsed = _parse_ts_date(ts)
@@ -404,6 +460,9 @@ def derive_state(events) -> dict[str, ItemState]:
             state.handed_off = True
         elif kind == "resolved":
             state.resolved = True
+            determination = event.get("determination")
+            if isinstance(determination, dict):
+                state.determination = determination
     return states
 
 
@@ -422,7 +481,12 @@ def should_fire(
     """Should this in-range item raise an alarm on today's tick?
 
     - never raised            -> fire (attempt 1)
-    - resolved / handed_off   -> never (terminal; a person owns it)
+    - resolved / handed_off   -> never — terminal, but only ABSENT a later
+                                 raise: ``derive_state`` clears both the moment
+                                 a fresh ``fired``/``chased`` folds in after
+                                 them, so a re-raised item fires on the normal
+                                 re-fire window rather than staying silenced by
+                                 a release it superseded
     - acked, still unresolved -> re-surface only after ``ack_snooze_days``
                                  (ack is a snooze, not a tombstone)
     - raised, not acked       -> re-fire only after ``refire_days``
@@ -463,14 +527,52 @@ def is_pre_identity_epoch(event) -> bool:
         return True
 
 
+def _validate_determination(determination) -> None:
+    """Shape check for a ``resolved`` event's determination payload. Corrective:
+    each refusal names the malformed field and what a well-formed one holds."""
+    if not isinstance(determination, dict):
+        raise ValueError(
+            "determination must be an object with note, role_snapshot_sha256 and confirmed_via"
+        )
+    unknown = sorted(set(determination) - _DETERMINATION_KEYS)
+    if unknown:
+        raise ValueError(
+            f"determination carries unknown fields {unknown}; it holds exactly "
+            "note, role_snapshot_sha256 and confirmed_via"
+        )
+    note = determination.get("note")
+    if not isinstance(note, str) or not note.strip() or len(note) > _DETERMINATION_NOTE_MAX_CHARS:
+        raise ValueError(
+            "determination.note must be 1..500 characters stating what was "
+            "determined and how it was verified"
+        )
+    snapshot = determination.get("role_snapshot_sha256")
+    if not isinstance(snapshot, str) or not _SNAPSHOT_SHA256_RE.fullmatch(snapshot):
+        raise ValueError(
+            "determination.role_snapshot_sha256 must be 64 lowercase hex chars, "
+            "copied verbatim from the wake line's current_role_snapshot_sha256 "
+            "(never computed or retyped by hand: a mis-copied hash fails safe, "
+            "a hand-built one does not)"
+        )
+    confirmed_via = determination.get("confirmed_via")
+    if confirmed_via not in _DETERMINATION_CONFIRMED_VIA:
+        raise ValueError(
+            f"determination.confirmed_via must be one of {_DETERMINATION_CONFIRMED_VIA}"
+        )
+
+
 def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
     """Raise ValueError unless ``new_event`` is a well-formed event that may be
-    appended. Two load-bearing rules, one per door into silence:
+    appended. Three load-bearing rules, one per door into silence:
 
     * an ``acked`` MUST reference a prior ``fired``/``chased`` with the same
       token (or item_key) — you cannot ack an alarm that never rang;
     * a ``fired``/``chased`` MUST be witnessed — you cannot record that an alarm
-      rang when it did not.
+      rang when it did not;
+    * a ``resolved``/``handed_off`` MUST reference a prior ``fired``/``chased``
+      with the same item_key — you cannot release an alarm that never rang.
+      (A mis-keyed release otherwise lands on a phantom key today and on a REAL
+      key the day the caller's derivation drifts, silencing a different item.)
 
     ``send_witness`` is a callable taking ``new_event`` and returning True iff
     the broker itself dispatched a message to a non-probe recipient for that
@@ -487,6 +589,15 @@ def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
         raise ValueError("escalation event requires a non-empty item_key")
     if not str(new_event.get("skill") or "").strip():
         raise ValueError("escalation event requires a skill")
+    determination = new_event.get("determination")
+    if determination is not None:
+        if kind != "resolved":
+            raise ValueError(
+                f"a determination may only be recorded on the resolved event that "
+                f"releases a hold, never on a {kind}; drop the determination from "
+                "this append"
+            )
+        _validate_determination(determination)
     if kind in RAISING_EVENTS:
         if not callable(send_witness):
             raise ValueError(
@@ -535,6 +646,44 @@ def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
                     "Do not report it as acknowledged"
                 )
             raise ValueError("acked event has no prior fired/chased raise for its token/item_key")
+    if kind in RELEASE_EVENTS:
+        # Same scan the acked branch runs, minus the token path: release events
+        # normally carry token None, so the match is by item_key only. The
+        # refusal is corrective AND terminal: it says what the world must look
+        # like, and deliberately does not teach a mis-keyed caller how to forge
+        # the missing raise — the fix for a mis-keyed release is deriving the
+        # same identity the raise used, which the derive-handle flow already
+        # forces (ss #2304).
+        key = str(new_event.get("item_key") or "")
+        released = False
+        stale_only = False
+        for prior in existing_events:
+            if prior.get("event") not in RAISING_EVENTS:
+                continue
+            if prior.get("item_key") != key:
+                continue
+            if is_pre_identity_epoch(prior):
+                stale_only = True
+                continue
+            released = True
+            break
+        if not released:
+            if stale_only:
+                raise ValueError(
+                    f"refusing to record a {kind} for this item: it was raised only "
+                    "before the item-identity fix (ss #2151), so the raise on file "
+                    "names no live item and there is no open alarm to release. Do "
+                    "not report it as released. Write nothing; retrying this append "
+                    "will fail identically."
+                )
+            raise ValueError(
+                f"refusing to record a {kind} for this item: the ledger holds no "
+                "prior fired/chased raise for this item_key, so there is no open "
+                "alarm to release. If the underlying task is closed in the firm's "
+                "record, no ledger row is needed: the item leaves the gate's view "
+                "when the task completes. Write nothing. Retrying this append will "
+                "fail identically."
+            )
 
 
 def _ulid() -> str:
