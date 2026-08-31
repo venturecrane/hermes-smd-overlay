@@ -105,6 +105,25 @@ _MAX_OPEN_HANDLES = 256
 _HANDLE_TTL_SECONDS = 3600
 _IDENTITY_ARGS = ("matter_id", "source_id", "label", "authored_date")
 
+# The verification chase's per-matter HOLD sentinel source id. Import-free
+# mirror of ``HOLD_SOURCE_ID`` in ss-console
+# ``operator/skills/client-verification-tracker/pre_run.py`` — the cross-side
+# contract: the turn derives a hold with ``source_id="__hold__"``, and THIS
+# literal is how the plugin knows a ``resolved`` append releases a hold and
+# must carry the determination that justifies it (ss #2402 Part 3). A test on
+# each side pins the literal. (medical-records-chaser's hold sentinel is
+# ``__mrc_hold__`` and is deliberately NOT listed: its holds are roster and
+# receipt ambiguities, its pre_run computes no role snapshot, so a required
+# 64-hex snapshot hash would make its holds unreleasable.)
+HOLD_SOURCE_ID = "__hold__"
+
+# The determination fields a hold release carries (validated structurally by
+# the broker's ``validate_append``; REQUIRED here, at the door the model uses,
+# because the broker sees only the hashed item_key and cannot know an item is
+# a hold). Accepted residual: a direct-socket agent-uid caller could resolve a
+# hold bare; the agent's tool path cannot.
+_DETERMINATION_ARGS = ("resolution_note", "role_snapshot_sha256", "confirmed_via")
+
 _handles: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _handles_lock = threading.Lock()
 
@@ -238,6 +257,35 @@ _APPEND_SCHEMA = {
                 "passing identity components alongside it is refused."
             ),
         },
+        "resolution_note": {
+            **NULLABLE_STRING,
+            "description": (
+                "Resolved-on-a-hold only (REQUIRED when releasing a chase hold: "
+                "a resolved append whose derive named source_id __hold__): the "
+                "determination text, 1..500 chars — what was determined and how "
+                "it was verified. When confirmed_via is person, name who "
+                "confirmed and when."
+            ),
+        },
+        "role_snapshot_sha256": {
+            **NULLABLE_STRING,
+            "description": (
+                "Resolved-on-a-hold only: the current role-snapshot hash, "
+                "COPIED VERBATIM from the wake-line plan's "
+                "current_role_snapshot_sha256 (64 lowercase hex). Never compute "
+                "or retype it: a mis-copied hash fails safe (the next wake "
+                "escalates the mismatch); a hand-built one does not."
+            ),
+        },
+        "confirmed_via": {
+            **NULLABLE_STRING,
+            "description": (
+                "Resolved-on-a-hold only: how the releasing fact was confirmed — "
+                "exactly 'matter_record' (the live roles resolve cleanly) or "
+                "'person' (a person named the answer; the note says who and "
+                "when)."
+            ),
+        },
     },
     "required": ["skill", "event", "attempt"],
     "additionalProperties": False,
@@ -313,6 +361,9 @@ def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
     # derive time (the verification chase's identity convention), so an append
     # that names the argument at all is retyping identity even when it is null.
     supplied_identity = [name for name in _IDENTITY_ARGS if name in args]
+    supplied_determination = [
+        name for name in _DETERMINATION_ARGS if args.get(name) not in (None, "")
+    ]
     if derive_only and ack_token:
         raise ValueError(
             "derive_only resolves identity for a raise you have not written yet; "
@@ -324,6 +375,7 @@ def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
             "one; drop it to derive this item's identity, or drop derive_only to "
             "write the row the handle already names"
         )
+    determination: dict[str, str] | None = None
     if ack_token:
         if kind != "acked":
             raise ValueError("ack_token is only valid for acked events")
@@ -332,6 +384,11 @@ def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
             raise ValueError(
                 "an acked event takes its identity from the quoted ACK code and "
                 f"nothing else; drop {extra}"
+            )
+        if supplied_determination:
+            raise ValueError(
+                "a determination is recorded only on the resolved append that "
+                f"releases a chase hold; drop {sorted(supplied_determination)}"
             )
         key, matter_id = _resolve_token_identity(str(ack_token))
         token: str | None = str(ack_token)
@@ -363,11 +420,48 @@ def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
         key = str(record["item_key"])
         token = record["token"]
         matter_id = record["matter_id"]
+        # THE HOLD-RELEASE SEAM (ss #2402 Part 3). A resolved append whose
+        # derive named the chase-hold sentinel releases a hold, and releasing a
+        # hold RECORDS the determination that justifies it — a control in code
+        # at the door the model uses, not prose. The broker validates the
+        # payload's shape; only this seam can see that the item IS a hold
+        # (the broker receives the hashed item_key alone).
+        if record.get("source_id") == HOLD_SOURCE_ID and kind == "resolved":
+            missing = [name for name in _DETERMINATION_ARGS if not args.get(name)]
+            if missing:
+                raise ValueError(
+                    "releasing a hold records the determination that justifies "
+                    f"it; this append is missing {missing}. Supply "
+                    "resolution_note (what was determined and how it was "
+                    "verified), role_snapshot_sha256 (copied verbatim from the "
+                    "wake-line plan's current_role_snapshot_sha256; if that "
+                    "value was null this run, the snapshot pull failed and the "
+                    "release waits for a run where it succeeds — re-surface the "
+                    "hold instead), and confirmed_via (matter_record or person)"
+                )
+            determination = {
+                "note": str(args["resolution_note"]),
+                "role_snapshot_sha256": str(args["role_snapshot_sha256"]),
+                "confirmed_via": str(args["confirmed_via"]),
+            }
+        elif supplied_determination:
+            raise ValueError(
+                "a determination is recorded only on the resolved append that "
+                "releases a chase hold (a derive whose source_id is the hold "
+                f"sentinel); drop {sorted(supplied_determination)}"
+            )
     elif derive_only:
         # Derived, never model-authored: the sha256 identity key and its ACK
         # token come from the same vendored helpers the pre_run gates use, so
         # the join can never fork on a hand-typed key (the first live probe's
         # failure mode: a colon-joined composite the sha256 join never matched).
+        if supplied_determination:
+            raise ValueError(
+                "a determination is authored on the resolved append that "
+                "releases the hold, not on the derive; drop "
+                f"{sorted(supplied_determination)} here and supply them with "
+                "the append_handle"
+            )
         label = args.get("label")
         if not label:
             raise ValueError("label is required (with matter_id/source_id) unless acking by token")
@@ -419,6 +513,11 @@ def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
                         "matter_id": matter_id,
                         "skill": str(args["skill"]),
                         "event": kind,
+                        # Kept so the append can recognize a hold release
+                        # (source_id == HOLD_SOURCE_ID) and demand the
+                        # determination — the identity is still supplied once;
+                        # this is the derive's own record, not a retype.
+                        "source_id": source_id,
                     }
                 ),
             },
@@ -446,6 +545,11 @@ def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
         # and refuse a raise whose send is sitting right there.
         "session_id": _resolved_session(kwargs),
     }
+    if determination is not None:
+        # The broker's validate_append enforces the payload's shape (note
+        # length, 64-hex snapshot, confirmed_via enum) and refuses it on any
+        # non-resolved kind; this seam supplied the requirement.
+        event["determination"] = determination
     response = _broker_request({"action": "escalation_event_append", "event": event})
     # The broker's verdict (ok/id or a validation error) goes back verbatim —
     # a rejected acked-with-no-prior-raise must stay visible to the turn. Echo
@@ -510,13 +614,17 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         "derive_only=true with the identity components returns item_key + ACK token "
         "+ a single-use append_handle and writes NOTHING; the write then presents "
         "append_handle and NO components, so the code quoted to a human is the code "
-        "of the row written. acked events identify by ack_token instead.",
+        "of the row written. acked events identify by ack_token instead. Releasing "
+        "a chase hold (a resolved whose derive named source_id __hold__) REQUIRES "
+        "the determination fields (resolution_note, role_snapshot_sha256, "
+        "confirmed_via); a bare hold release is refused.",
         _APPEND_SCHEMA,
         _escalation_append,
     ),
     "escalation_state": (
         "Read the escalation ledger and return per-item state (attempts, last raise, "
-        "acked/handed_off/resolved, ACK token), optionally filtered by skill.",
+        "acked/handed_off/resolved, ACK token, and any recorded hold-release "
+        "determination), optionally filtered by skill.",
         _STATE_SCHEMA,
         _escalation_state,
     ),
