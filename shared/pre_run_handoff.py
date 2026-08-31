@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
@@ -87,6 +88,15 @@ _MAX_ATOM_CHARS = 64
 #: Cap on structured records one handoff may carry. A digest names tens of
 #: matters, not hundreds; past this the file is a bug or a probe.
 _MAX_RECORDS = 100
+
+#: A bare-digit matter number (ss#2458). Some firms number matters with plain
+#: digit runs ("201537", "4853") that no identifier-gate pattern matches — and
+#: before this branch existed, :func:`_record_entries` dropped every such
+#: record AT SEEDING, so the handoff's pair seeding delivered nothing for that
+#: firm and the digest gate refused numbers the script had just read. Three to
+#: ten digits: two digits is an ordinal or a day, eleven-plus is a GUID
+#: fragment or an account number, and neither is a matter number anywhere.
+_BARE_MATTER_NUMBER_RE = re.compile(r"\d{3,10}")
 
 #: How far in the FUTURE a file's ``started_at`` may sit and still bind.
 #: Recency binding compares the writer's stamp against the reader's clock;
@@ -233,7 +243,17 @@ def _record_entries(values: object) -> list[dict]:
         except Exception:  # noqa: BLE001 — an unscannable value is not a number
             continue
         if not hits or not all(hit.kind is IdKind.CASE_NUMBER for hit in hits):
-            continue
+            # Second acceptance branch (ss#2458): a bare digit run. Safe at
+            # THIS seam and no other, because both sides of it are code: the
+            # value was produced by the gate's own connector pull (the writer
+            # projects `matterNumber` off resolved records) and is consumed by
+            # structured add_record seeding, so the shape check here guards
+            # against junk, not collision — and an exact code-read value is
+            # not junk. This widens no extraction pattern: a bare number still
+            # extracts from nothing; it only stops being DROPPED when the
+            # firm's own record spells it that way.
+            if not _BARE_MATTER_NUMBER_RE.fullmatch(number):
+                continue
         dates = _date_atoms(entry.get("dates"))
         if not dates:
             continue

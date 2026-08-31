@@ -336,3 +336,47 @@ def test_atoms_are_bounded_and_deduplicated(tmp_path):
         hermes_home=str(tmp_path),
     )
     assert json.loads(path.read_text(encoding="utf-8"))["dates"] == ["2026-08-29"]
+
+
+# ---------------------------------------------------------------------------
+# Bare-digit matter numbers (ss#2458). A&P's numbers are plain digit runs
+# ("201537", "4853"); before the second acceptance branch, _record_entries
+# dropped every such record AT SEEDING and the handoff delivered nothing for
+# that firm. The branch is safe at this seam only: the value was produced by
+# the writer's own connector pull and is consumed by structured add_record
+# seeding — the shape check guards junk, not collision.
+# ---------------------------------------------------------------------------
+
+
+def test_a_bare_digit_record_is_accepted(tmp_path):
+    _write(
+        tmp_path,
+        records=[
+            {"matterNumber": "201537", "dates": ["2026-08-29"]},
+            {"matterNumber": "4853", "dates": ["2026-09-02"]},
+        ],
+    )
+    assert _take(tmp_path)["records"] == [
+        {"matterNumber": "201537", "dates": ["2026-08-29"]},
+        {"matterNumber": "4853", "dates": ["2026-09-02"]},
+    ]
+
+
+def test_junk_digit_runs_are_still_dropped(tmp_path):
+    _write(
+        tmp_path,
+        records=[
+            {"matterNumber": "12", "dates": ["2026-08-29"]},  # two digits: a day
+            {"matterNumber": "123456789012", "dates": ["2026-08-29"]},  # 12 digits: never a matter
+            {"matterNumber": "20-15", "dates": ["2026-08-29"]},  # punctuated junk
+            {"matterNumber": "call the paralegal", "dates": ["2026-08-29"]},
+        ],
+    )
+    assert _take(tmp_path)["records"] == []
+
+
+def test_a_date_shaped_number_is_still_dropped(tmp_path):
+    # "2026-08-29" extracts as a DATE, not a case number, and its digits do not
+    # fullmatch the bare form — a date must never seed as a matter number.
+    _write(tmp_path, records=[{"matterNumber": "2026-08-29", "dates": ["2026-08-29"]}])
+    assert _take(tmp_path)["records"] == []

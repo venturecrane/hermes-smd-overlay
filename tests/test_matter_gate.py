@@ -656,3 +656,72 @@ def test_roles_seeding_addresses_are_normalized() -> None:
     )
     v = matter_gate.evaluate(session_id=SID, body=f"Re: {M_A}", recipients={COUNSEL})
     assert v.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Membership-anchored bare-digit citations (ss#2458). _MATTER_NUM_RE matches
+# zero of A&P's bare-digit numbers, so the gate could not see the citation
+# form that firm's real correspondence uses. cited_matters gains a second
+# pass over the membership's own number aliases — shape-independent, and it
+# cannot manufacture a mismatch (only a number that resolves to a READ matter
+# contributes to any verdict).
+# ---------------------------------------------------------------------------
+
+BARE_NUM_A = "201537"
+
+
+def test_known_bare_number_is_cited() -> None:
+    found = matter_gate.cited_matters(
+        f"Regarding matter {BARE_NUM_A}, records enclosed.", known_numbers={BARE_NUM_A}
+    )
+    assert BARE_NUM_A in found
+
+
+def test_unknown_bare_digits_contribute_nothing() -> None:
+    found = matter_gate.cited_matters(
+        "Phoenix AZ 85004, page 1042, invoice 777777.", known_numbers={BARE_NUM_A}
+    )
+    assert found == set()
+
+
+def test_bare_number_citation_to_the_wrong_client_is_a_mismatch() -> None:
+    _closed(M_A, CLIENT_A)
+    _closed(M_B, CLIENT_B)
+    matter_binding.membership_for(SID).add_alias(BARE_NUM_A, M_A)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body=f"Regarding matter {BARE_NUM_A}, please find the deposition summary attached.",
+        recipients={CLIENT_B},
+    )
+    assert v.is_mismatch and v.should_withhold
+
+
+def test_control_bare_number_correct_pairing_passes() -> None:
+    _closed(M_A, CLIENT_A)
+    matter_binding.membership_for(SID).add_alias(BARE_NUM_A, M_A)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body=f"Regarding matter {BARE_NUM_A}, please find the deposition summary attached.",
+        recipients={CLIENT_A},
+    )
+    assert v.status == "ok"
+
+
+def test_bare_number_inside_a_longer_digit_run_is_not_cited() -> None:
+    found = matter_gate.cited_matters(
+        f"tracking id 9{BARE_NUM_A}8 attached.", known_numbers={BARE_NUM_A}
+    )
+    assert found == set()
+
+
+def test_unknown_bare_number_body_stays_not_applicable() -> None:
+    """A session that never read the bare-number matter: its citation is not
+    even extractable (membership holds no alias), so the verdict must stay
+    not_applicable rather than inventing an unresolved."""
+    _closed(M_A, CLIENT_A)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body="Regarding matter 999444, please advise.",
+        recipients={CLIENT_A},
+    )
+    assert v.status == "not_applicable"

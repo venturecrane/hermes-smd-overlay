@@ -128,6 +128,12 @@ _MATTER_ID_RE = re.compile(
 
 _MAX_CITED = 24
 
+# Bound the membership-anchored known-number alternation (ss#2458); mirrors
+# identifier_filter's cap. Known numbers come from code-resolved reads, so the
+# cap is a scan-cost guard; numbers past it simply do not scan (the narrow
+# direction — an unscanned citation stays *unresolved*, never a mismatch).
+_MAX_KNOWN_NUMBERS = 64
+
 
 @dataclass(frozen=True)
 class MatterVerdict:
@@ -193,13 +199,37 @@ def body_from_args(args: dict | None) -> str:
     return "\n".join(parts)
 
 
-def cited_matters(body: str) -> set[str]:
-    """Matter identifiers physically present in the send body."""
+def cited_matters(body: str, known_numbers: Iterable[str] = ()) -> set[str]:
+    """Matter identifiers physically present in the send body.
+
+    ``known_numbers`` (ss#2458) is the membership's number-alias set
+    (``MatterMembership.known_numbers``): a second pass searches the body for
+    each membership-known number LITERALLY (escaped, word-anchored, longest
+    alternative first, IGNORECASE). This is what lets the gate see a firm's
+    bare-digit matter numbers ("201537", "4853"), which ``_MATTER_NUM_RE``
+    deliberately does not match — no shape can, at acceptable precision. Same
+    safety argument the module already states for IGNORECASE: only tokens that
+    resolve to a matter this session actually READ contribute to a verdict, so
+    this pass cannot manufacture a mismatch; it can only let a real citation be
+    checked. ``_MATTER_NUM_RE`` itself is untouched.
+    """
     if not isinstance(body, str) or not body:
         return set()
     found: set[str] = set()
     for pattern in (_MATTER_NUM_RE, _MATTER_ID_RE):
         for match in pattern.finditer(body):
+            found.add(match.group(0).strip())
+            if len(found) >= _MAX_CITED:
+                return found
+    tokens = sorted(
+        {str(n).strip() for n in known_numbers if n and str(n).strip()},
+        key=lambda t: (-len(t), t),
+    )[:_MAX_KNOWN_NUMBERS]
+    if tokens:
+        known_re = re.compile(
+            r"\b(?:" + "|".join(re.escape(t) for t in tokens) + r")\b", re.IGNORECASE
+        )
+        for match in known_re.finditer(body):
             found.add(match.group(0).strip())
             if len(found) >= _MAX_CITED:
                 return found
@@ -249,11 +279,13 @@ def evaluate(
             # gate adds nothing and must not double-withhold.
             return MatterVerdict("not_applicable", "no resolvable recipients")
 
-        cited = cited_matters(body)
+        # Membership first: its number aliases feed the citation extraction
+        # (ss#2458 — a bare-digit number is findable only by membership).
+        membership = matter_binding.membership_for(session_id)
+        cited = cited_matters(body, membership.known_numbers())
         if not cited:
             return MatterVerdict("not_applicable", "body cites no matter identifier")
 
-        membership = matter_binding.membership_for(session_id)
         resolved = _resolve_cited(membership, cited)
         if not resolved:
             return MatterVerdict(
