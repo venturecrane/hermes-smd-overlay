@@ -714,6 +714,39 @@ def test_bare_number_inside_a_longer_digit_run_is_not_cited() -> None:
     assert found == set()
 
 
+def test_every_alias_is_scanned_past_the_chunk_size() -> None:
+    """The starvation case review caught in the first version: a truncating
+    scan dropped aliases past 64 by sort order, so a body whose ONLY
+    identifier was a dropped number fell to not_applicable and the withhold
+    branch never ran. The chunked scan covers the FULL alias set: "999" is
+    3 digits, so the length-desc sort puts it dead last among 200 six-digit
+    aliases — beyond every truncation boundary."""
+    aliases = {str(700000 + n) for n in range(200)} | {"999"}
+    found = matter_gate.cited_matters("regarding matter 999, see attached.", known_numbers=aliases)
+    assert "999" in found
+    # A mid-sort alias is found too, and an unknown digit run still is not.
+    found2 = matter_gate.cited_matters("update on matter 700123.", known_numbers=aliases)
+    assert "700123" in found2
+    assert matter_gate.cited_matters("invoice 555555.", known_numbers=aliases) == set()
+
+
+def test_last_sorted_alias_still_reaches_a_mismatch_verdict() -> None:
+    """End to end: the alias the old truncation would have dropped must still
+    drive the withhold, not fall to not_applicable."""
+    _closed(M_A, CLIENT_A)
+    _closed(M_B, CLIENT_B)
+    membership = matter_binding.membership_for(SID)
+    for n in range(200):
+        membership.add_alias(str(700000 + n), M_B)
+    membership.add_alias("999", M_A)
+    v = matter_gate.evaluate(
+        session_id=SID,
+        body="Regarding matter 999, please find the deposition summary attached.",
+        recipients={CLIENT_B},
+    )
+    assert v.is_mismatch and v.should_withhold
+
+
 def test_unknown_bare_number_body_stays_not_applicable() -> None:
     """A session that never read the bare-number matter: its citation is not
     even extractable (membership holds no alias), so the verdict must stay

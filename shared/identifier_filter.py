@@ -214,6 +214,16 @@ _MAX_REGISTERED_PAIRS = 4096
 # punctuated shapes ``_CASE_RE`` sees are unaffected).
 _MAX_KNOWN_NUMBER_TOKENS = 64
 
+# Only a BARE digit run is admitted to the known-number register. A shaped
+# number's canonical form ("2026-PI-101" -> "2026PI101") strips the very
+# punctuation the body would carry, so it can never literally appear in text —
+# a shaped entry would occupy one of the 64 slots for zero scan benefit and,
+# on a mixed docket, starve the bare-digit numbers this register exists for.
+# Shaped numbers are already covered by ``_CASE_RE``. Three to ten digits: two
+# digits is an ordinal or a day, eleven-plus is a GUID fragment or an account
+# number, and neither is a matter number anywhere.
+_BARE_MATTER_NUMBER_RE = re.compile(r"\d{3,10}")
+
 _DATE_STRPTIME_FORMATS: tuple[str, ...] = (
     "%m/%d/%Y",
     "%m/%d/%y",
@@ -412,10 +422,15 @@ def pair_key(case_canonical: str, date_canonical: str) -> str:
 
 def _known_number_re(tokens: Iterable[str]) -> re.Pattern[str] | None:
     """A bounded alternation matching the REGISTERED matter numbers literally
-    (escaped, word-anchored, longest alternative first — alternation is
-    first-match-wins, the matter_gate lesson of 2026-08-11). ``None`` when
-    nothing is registered: an empty register scans nothing, and a gate that
-    cannot see must not claim to have seen."""
+    (escaped, word-anchored). The length-desc sort is for DETERMINISM only —
+    with ``\\b`` on both ends, a shorter token that is a prefix of a longer one
+    fails its trailing boundary and the engine backtracks to the full match,
+    so ordering cannot change what is found (unlike the unanchored first-match
+    truncation of 2026-08-11). No IGNORECASE, deliberately: every admitted
+    token is a bare digit run (see ``_BARE_MATTER_NUMBER_RE``), where case does
+    not exist — ``matter_gate``'s mirror scans punctuated alias TEXT and does
+    need it. ``None`` when nothing is registered: an empty register scans
+    nothing, and a gate that cannot see must not claim to have seen."""
     cleaned = sorted({t for t in tokens if t}, key=lambda t: (-len(t), t))
     cleaned = cleaned[:_MAX_KNOWN_NUMBER_TOKENS]
     if not cleaned:
@@ -555,7 +570,14 @@ class ProvenanceRegister:
         case_canon = _canon_digits(case_number) if case_number else ""
         if case_canon:
             self._canon.add(case_canon)
-            if len(self._matter_numbers) < _MAX_KNOWN_NUMBER_TOKENS:
+            # Bare digit runs only — a shaped number's canonical form cannot
+            # literally appear in body text (see _BARE_MATTER_NUMBER_RE), so
+            # admitting it would waste a bounded slot and starve the bare
+            # numbers on a mixed docket.
+            if (
+                _BARE_MATTER_NUMBER_RE.fullmatch(case_canon)
+                and len(self._matter_numbers) < _MAX_KNOWN_NUMBER_TOKENS
+            ):
                 self._matter_numbers.add(case_canon)
         for raw in dates:
             if not raw:
@@ -580,13 +602,15 @@ class ProvenanceRegister:
             self._pairs.add(pair_key(case_canonical, date_canonical))
 
     def matter_numbers(self) -> frozenset[str]:
-        """The matter numbers seeded via :meth:`add_record`, canonical digit
-        forms. Feeds the register-anchored extraction pass in :func:`check`
-        (ss#2458): a firm whose matter numbers are bare digit runs ("201537",
-        "4853") is invisible to ``_CASE_RE`` — no shape can see a bare number
-        at acceptable precision (dates, amounts, zips and page counts all
+        """The BARE-DIGIT matter numbers seeded via :meth:`add_record`. Feeds
+        the register-anchored extraction pass in :func:`check` (ss#2458): a
+        firm whose matter numbers are bare digit runs ("201537", "4853") is
+        invisible to ``_CASE_RE`` — no shape can see a bare number at
+        acceptable precision (dates, amounts, zips and page counts all
         collide) — so the scan is anchored to MEMBERSHIP in this set instead,
-        extending no pattern anywhere."""
+        extending no pattern anywhere. Shaped numbers are NOT admitted (their
+        canonical form strips the punctuation a body would carry, so a literal
+        scan for it can never hit; ``_CASE_RE`` already covers them)."""
         return frozenset(self._matter_numbers)
 
     @property

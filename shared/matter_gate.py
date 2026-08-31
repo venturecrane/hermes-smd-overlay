@@ -128,11 +128,16 @@ _MATTER_ID_RE = re.compile(
 
 _MAX_CITED = 24
 
-# Bound the membership-anchored known-number alternation (ss#2458); mirrors
-# identifier_filter's cap. Known numbers come from code-resolved reads, so the
-# cap is a scan-cost guard; numbers past it simply do not scan (the narrow
-# direction — an unscanned citation stays *unresolved*, never a mismatch).
-_MAX_KNOWN_NUMBERS = 64
+# Per-compiled-alternation bound for the membership-anchored known-number
+# scan (ss#2458). This is a CHUNK SIZE, not a truncation: the scan walks the
+# full alias set in bounded chunks, so a session that read more than 64
+# matters (the alias map holds up to 512) still gets every number scanned. A
+# truncating version of this scan shipped first and was caught in review: a
+# body whose ONLY identifier was a dropped alias made cited_matters return
+# empty, evaluate fell to not_applicable, and the mismatch/withhold branch
+# never ran — a silently degraded safety gate on exactly the large dockets
+# where mixing is likeliest.
+_KNOWN_NUMBER_CHUNK = 64
 
 
 @dataclass(frozen=True)
@@ -204,14 +209,26 @@ def cited_matters(body: str, known_numbers: Iterable[str] = ()) -> set[str]:
 
     ``known_numbers`` (ss#2458) is the membership's number-alias set
     (``MatterMembership.known_numbers``): a second pass searches the body for
-    each membership-known number LITERALLY (escaped, word-anchored, longest
-    alternative first, IGNORECASE). This is what lets the gate see a firm's
-    bare-digit matter numbers ("201537", "4853"), which ``_MATTER_NUM_RE``
-    deliberately does not match — no shape can, at acceptable precision. Same
-    safety argument the module already states for IGNORECASE: only tokens that
-    resolve to a matter this session actually READ contribute to a verdict, so
-    this pass cannot manufacture a mismatch; it can only let a real citation be
-    checked. ``_MATTER_NUM_RE`` itself is untouched.
+    each membership-known number LITERALLY (escaped, word-anchored,
+    IGNORECASE — alias keys are case-folded text, and a body may spell the
+    number differently). The full alias set is scanned, in bounded chunks, so
+    a large docket cannot silently push a number out of coverage. The
+    length-desc sort is for determinism only: with ``\\b`` on both ends a
+    prefix token fails its trailing boundary and the engine backtracks to the
+    longer match, so ordering cannot change what is found. This pass is what
+    lets the gate see a firm's bare-digit matter numbers ("201537", "4853"),
+    which ``_MATTER_NUM_RE`` deliberately does not match — no shape can, at
+    acceptable precision. Same safety argument the module already states for
+    IGNORECASE: only tokens that resolve to a matter this session actually
+    READ contribute to a verdict, so this pass cannot manufacture a mismatch;
+    it can only let a real citation be checked. ``_MATTER_NUM_RE`` itself is
+    untouched.
+
+    Documented fairness gap, deliberate: the shaped pass runs first and both
+    passes share the ``_MAX_CITED`` budget, so a body citing 24+ shaped
+    matters leaves no room for known-number citations. Moot for the firms this
+    exists for (a real letter cites one or two matters; A&P's numbers are all
+    bare), and the cap exists to bound pathological bodies, not real ones.
     """
     if not isinstance(body, str) or not body:
         return set()
@@ -224,10 +241,11 @@ def cited_matters(body: str, known_numbers: Iterable[str] = ()) -> set[str]:
     tokens = sorted(
         {str(n).strip() for n in known_numbers if n and str(n).strip()},
         key=lambda t: (-len(t), t),
-    )[:_MAX_KNOWN_NUMBERS]
-    if tokens:
+    )
+    for start in range(0, len(tokens), _KNOWN_NUMBER_CHUNK):
+        chunk = tokens[start : start + _KNOWN_NUMBER_CHUNK]
         known_re = re.compile(
-            r"\b(?:" + "|".join(re.escape(t) for t in tokens) + r")\b", re.IGNORECASE
+            r"\b(?:" + "|".join(re.escape(t) for t in chunk) + r")\b", re.IGNORECASE
         )
         for match in known_re.finditer(body):
             found.add(match.group(0).strip())

@@ -509,10 +509,30 @@ def test_known_number_register_is_bounded() -> None:
     assert len(reg.matter_numbers()) <= 64
 
 
-def test_shaped_numbers_also_enter_the_matter_number_register() -> None:
-    """add_record is shape-independent: a shaped number's canonical form rides
-    the same register (its literal body form is still caught by _CASE_RE; the
-    register entry is additive, never a replacement)."""
+def test_shaped_numbers_are_excluded_because_their_canonical_never_appears_in_text() -> None:
+    """A shaped number's canonical form ("2026-PI-101" -> "2026PI101") strips
+    the punctuation a body would carry, so a literal scan for it can never hit
+    — the entry would waste a bounded slot for zero benefit. Shaped numbers
+    stay covered by _CASE_RE; the pair association still seeds normally."""
     reg = ProvenanceRegister()
     reg.add_record("2026-PI-101", ["2026-08-06"])
-    assert "2026PI101" in reg.matter_numbers()
+    assert "2026PI101" not in reg.matter_numbers()
+    # ...and the shaped number's atoms + pair still verify via _CASE_RE.
+    assert not check("- matter 2026-PI-101, hearing 2026-08-06", reg).has_unverified
+
+
+def test_bare_digits_still_seed_on_a_mixed_docket() -> None:
+    """The starvation case the bare-digit admission rule exists for: a docket
+    that registers many SHAPED matters first must not exhaust the bounded
+    bare-digit register — shaped canonicals are not admitted, so the bare
+    numbers still seed and still feed the pair check."""
+    reg = ProvenanceRegister()
+    for n in range(100):  # 100 shaped matters, registered FIRST
+        reg.add_record(f"2026-PI-{n:03d}", ["2026-08-06"])
+    reg.add_record("201537", ["2026-08-29"])  # then the bare-digit matter
+    assert "201537" in reg.matter_numbers()
+    # The mispairing is still caught (bare number + a shaped matter's date).
+    result = check("- matter 201537, response due 2026-08-06", reg)
+    assert IdKind.PAIR in {h.kind for h in result.unverified}
+    # And the correct pairing still passes.
+    assert not check("- matter 201537, response due 2026-08-29", reg).has_unverified
