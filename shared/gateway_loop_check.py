@@ -26,9 +26,11 @@ What this module ships, four fields, all tri-state by construction:
 ``gateway_loop_age_seconds``   seconds since the loop last beat. The wedge
                                signal. Absent while the arming latch below is
                                closed, and on a pin with no heartbeat at all.
-``gateway_supervisor_state``   the supervisor's word: armed / not-armed / inert /
-                               not-watching / refusing. Absent on a pin without
-                               the supervisor.
+``gateway_supervisor_state``   the supervisor's word: armed / not-armed /
+                               starting / inert / not-watching / never-healthy /
+                               refusing. Absent on a pin without the supervisor,
+                               and also absent for any word this module does not
+                               recognise -- see ``SUPERVISOR_STATES``.
 ``gateway_restarts_last_hour`` kill-ledger lines inside the last 3600s. Absent
                                without a ledger. The one field a restart cannot
                                race: the line is on the volume before the
@@ -74,7 +76,38 @@ LEDGER_WINDOW_SECONDS = 3600
 # refactor there cannot break this module's import.
 _FALLBACK_BOOT_SUPPRESS_SECONDS = 900
 
-SUPERVISOR_STATES = frozenset({"armed", "not-armed", "inert", "not-watching", "refusing"})
+# A CLOSED vocabulary, and the closure is load-bearing: `_read_supervisor_state`
+# forwards nothing it does not recognise, so a word the entrypoint writes and
+# this set does not carry is dropped to None -- a NULL, which the console holds
+# rather than pages on. That is the right default for an unknown writer and the
+# wrong outcome for a new state we meant to ship, so this set and the entrypoint's
+# `gateway_liveness_state` calls move together, in the same change.
+#
+# `starting` and `never-healthy` were added 2026-09-01 after the pilot-smokeball
+# crash loop (ss-console docs/runbooks/operator/incidents/
+# 2026-09-01-gateway-startup-watchdog-collision.md), which the supervisor could
+# describe only as `inert` (a page, emitted on every healthy boot's first minutes)
+# or `not-armed` (no page at all, including for a gateway that wedged during
+# startup and would never come up).
+#
+#   starting       argv does not name hermes yet -- entrypoint has exec'd
+#                  bootstrap.sh and bootstrap has not yet exec'd the gateway.
+#                  Normal, bounded by the seat's startup grace, NOT a page.
+#   never-healthy  no fresh loop beat in the whole startup grace. The gateway is
+#                  wedged during startup. This one IS a page: the supervisor
+#                  deliberately does not kill a slow-starting gateway, so a human
+#                  is the only recovery path.
+SUPERVISOR_STATES = frozenset(
+    {
+        "armed",
+        "not-armed",
+        "starting",
+        "inert",
+        "not-watching",
+        "never-healthy",
+        "refusing",
+    }
+)
 
 
 @dataclass(frozen=True)
