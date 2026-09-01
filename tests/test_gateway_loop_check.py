@@ -16,6 +16,7 @@ import pytest
 
 from shared.gateway_loop_check import (
     LEDGER_WINDOW_SECONDS,
+    SUPERVISOR_STATES,
     GatewayLoopChecker,
     heartbeat_path,
 )
@@ -170,6 +171,24 @@ def test_supervisor_state_is_read_and_vocabulary_is_closed(world):
     assert world.checker().check(uptime_seconds=10_000).supervisor_state == "refusing"
     (world.run / "state").write_text("banana\n")
     assert world.checker().check(uptime_seconds=10_000).supervisor_state is None
+
+
+@pytest.mark.parametrize("word", sorted(SUPERVISOR_STATES))
+def test_every_word_the_entrypoint_can_write_is_forwarded(world, word):
+    """The closed vocabulary is only safe while it is COMPLETE.
+
+    ``_read_supervisor_state`` drops anything it does not recognise, and a drop
+    is a NULL, and a NULL is a hold -- so a state the seat writes and this set
+    omits is not a loud failure, it is silence. That is the failure mode the
+    2026-09-01 crash loop produced from the other direction, so the parity is
+    asserted per word rather than by eyeballing a frozenset.
+
+    The other half of the parity lives in ss-console: the entrypoint's
+    ``gateway_liveness_state`` calls and this set move in the same change.
+    """
+    world.beat(age=5)
+    (world.run / "state").write_text(f"{word}\n")
+    assert world.checker().check(uptime_seconds=10_000).supervisor_state == word
 
 
 def test_no_supervisor_artefacts_report_none(world):
