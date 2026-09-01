@@ -579,6 +579,8 @@ def build_payload(
     uptime_seconds: int | None,
     version: str | None,
     sticky_stop_level: str | None = None,
+    sticky_stop_reason: str | None = None,
+    sticky_stop_condition: str | None = None,
     scheduler_ok: bool | None = None,
     scheduler_job_count: int | None = None,
     scheduler_max_overdue_seconds: int | None = None,
@@ -623,6 +625,12 @@ def build_payload(
         payload["version"] = version
     if sticky_stop_level:
         payload["sticky_stop_level"] = sticky_stop_level
+    # The cause travels with the level or not at all: a reason paired with an
+    # absent level would let the console render "why" beside a stale "what".
+    if sticky_stop_level and sticky_stop_reason:
+        payload["sticky_stop_reason"] = sticky_stop_reason
+    if sticky_stop_level and sticky_stop_condition:
+        payload["sticky_stop_condition"] = sticky_stop_condition
     if scheduler_ok is not None:
         payload["scheduler_ok"] = 1 if scheduler_ok else 0
     if scheduler_job_count is not None:
@@ -1048,16 +1056,24 @@ class HeartbeatEmitter:
             audit_write_failures = read_audit_write_failures()
         except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
             logger.debug("heartbeat: audit-write-failure tally read failed: %s", exc)
-        # ADR 0062: surface the cost-breaker ladder level so the fleet view
-        # can escalate a tripped seat. Read-only; any failure omits the field
-        # (the receiver treats absence as unknown, never as OK).
+        # ADR 0062: surface the sticky-stop ladder level so the fleet view can
+        # escalate a tripped seat, AND the cause that tripped it. Four meters
+        # drive this ladder (tool failures, refusals, runtime, cost) and they
+        # need four different investigations, so a level without its reason
+        # sends the reader looking in the wrong place. Read-only; any failure
+        # omits the fields (the receiver treats absence as unknown, never OK).
         level: str | None = None
+        stop_reason: str | None = None
+        stop_condition: str | None = None
         try:
-            from shared.cost_breaker import read_level
+            from shared.cost_breaker import read_stop_state
 
-            level = read_level()
+            stop_state = read_stop_state()
+            level = stop_state.level
+            stop_reason = stop_state.reason
+            stop_condition = stop_state.condition
         except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
-            logger.debug("heartbeat: sticky_stop level read failed: %s", exc)
+            logger.debug("heartbeat: sticky_stop state read failed: %s", exc)
         sched = self._read_scheduler_check()
         conn = self._read_connector_check()
         spec = self._read_spec_control_check()
@@ -1077,6 +1093,8 @@ class HeartbeatEmitter:
             uptime_seconds=read_uptime_seconds(),
             version=self._version,
             sticky_stop_level=level,
+            sticky_stop_reason=stop_reason,
+            sticky_stop_condition=stop_condition,
             scheduler_ok=sched.ok if sched is not None else None,
             scheduler_job_count=sched.job_count if sched is not None else None,
             scheduler_max_overdue_seconds=(

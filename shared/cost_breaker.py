@@ -30,6 +30,7 @@ root-owned gate opens it read-only). Overridable via
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 import sqlite3
@@ -382,17 +383,42 @@ def pin_hard_stops(
         conn.close()
 
 
-def read_level(path: str | None = None) -> str | None:
-    """Read the worst (max) persisted level across personas, read-only.
+# Longest reason string the observer will carry off the box. Real reasons are
+# structured counters (~80 chars); the cap only bounds a pathological write.
+_REASON_MAX_CHARS = 300
 
-    Used by the webhook gate (root) and the heartbeat payload. Returns None
-    when the state file does not exist yet (fresh Machine — treated as OK by
-    callers) or on any read error (fail toward 'unknown', never toward a
-    fabricated OK when the file exists but cannot be read).
+
+@dataclasses.dataclass(frozen=True)
+class StopStateView:
+    """What an off-box observer can learn about the ladder, read-only.
+
+    ``reason`` and ``condition`` belong to the SAME row that produced
+    ``level`` — the worst row, tie-broken by most-recent ``updated_at`` — so a
+    reader never pairs one persona's level with another's cause.
+    """
+
+    level: str | None
+    reason: str | None = None
+    condition: str | None = None
+
+
+def read_stop_state(path: str | None = None) -> StopStateView:
+    """Read the worst persisted level across personas WITH its cause.
+
+    Used by the webhook gate (root) and the heartbeat payload. The level alone
+    tells an operator that a seat stopped; it cannot tell them why, and the
+    four meters that drive the ladder (tool failures, refusals, runtime,
+    cost) produce very different investigations. The store already records
+    ``reason`` and ``condition`` on the transition — this carries them out.
+
+    Failure modes, in the fail-toward-unknown direction:
+      * state file absent (fresh Machine)  -> level None, callers read OK
+      * read error                         -> level "unknown", no cause
+      * pre-cause schema on an old seat    -> level only, no cause
     """
     resolved = path or db_path()
     if not os.path.exists(resolved):
-        return None
+        return StopStateView(level=None)
     order = [
         StickyStopLevel.OK.value,
         StickyStopLevel.WARN.value,
@@ -402,19 +428,54 @@ def read_level(path: str | None = None) -> str | None:
     try:
         conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
         try:
-            rows = conn.execute("SELECT level FROM sticky_stop_state").fetchall()
+            try:
+                rows = conn.execute(
+                    "SELECT level, reason, condition, updated_at FROM sticky_stop_state"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # A seat still running a pre-cause schema. The level is the
+                # contract; the cause is the enhancement. Degrade, never fail.
+                rows = [
+                    (level, None, None, None)
+                    for (level,) in conn.execute("SELECT level FROM sticky_stop_state").fetchall()
+                ]
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 — read-only observer
-        logger.warning("cost_breaker: read_level failed: %s", exc)
-        return "unknown"
+        logger.warning("cost_breaker: read_stop_state failed: %s", exc)
+        return StopStateView(level="unknown")
     if not rows:
-        return StickyStopLevel.OK.value
-    worst = StickyStopLevel.OK.value
-    for (level,) in rows:
-        if level in order and order.index(level) > order.index(worst):
-            worst = level
+        return StopStateView(level=StickyStopLevel.OK.value)
+    worst = StopStateView(level=StickyStopLevel.OK.value)
+    worst_rank = 0
+    worst_updated = ""
+    for level, reason, condition, updated_at in rows:
+        if level not in order:
+            continue
+        rank = order.index(level)
+        stamp = updated_at or ""
+        # Strictly-worse wins; an equal level wins only on a later stamp, so
+        # the cause always belongs to the row whose level we are reporting.
+        if rank < worst_rank or (rank == worst_rank and stamp <= worst_updated):
+            continue
+        text = str(reason)[:_REASON_MAX_CHARS] if reason else None
+        worst = StopStateView(
+            level=level,
+            reason=text,
+            condition=str(condition) if condition else None,
+        )
+        worst_rank = rank
+        worst_updated = stamp
     return worst
+
+
+def read_level(path: str | None = None) -> str | None:
+    """Read the worst (max) persisted level across personas, read-only.
+
+    Thin wrapper over :func:`read_stop_state` for callers that only gate on
+    the level. See that function for the failure modes.
+    """
+    return read_stop_state(path).level
 
 
 async def run_boot_probe() -> tuple[bool, str]:
@@ -495,11 +556,13 @@ __all__ = [
     "CostBreaker",
     "DEFAULT_DB_PATH",
     "StickyStopError",
+    "StopStateView",
     "build_breaker",
     "clear_hard_stops",
     "pin_hard_stops",
     "db_path",
     "read_level",
+    "read_stop_state",
     "run_boot_probe",
     "thresholds_from_config",
 ]
