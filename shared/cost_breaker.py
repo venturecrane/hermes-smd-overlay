@@ -364,16 +364,22 @@ def pin_hard_stops(
         for customer, persona, level in rows:
             if persona == "_machine":
                 seen_machine = True
+            # `condition` is nulled with the reason it belonged to. Leaving it
+            # would pair an operator pause with whichever meter last tripped,
+            # and the console renders condition beside reason -- so the page
+            # would name a meter that had nothing to do with this stop. clear()
+            # nulls both for the same reason (shared/sticky_stop.py).
             conn.execute(
-                "UPDATE sticky_stop_state SET level = ?, reason = ?, updated_at = ? "
-                "WHERE customer = ? AND persona = ?",
+                "UPDATE sticky_stop_state SET level = ?, reason = ?, condition = NULL, "
+                "updated_at = ? WHERE customer = ? AND persona = ?",
                 (StickyStopLevel.HARD_STOP.value, stamped_reason, now, customer, persona),
             )
             pinned.append({"customer": customer, "persona": persona, "prior_level": level})
         if not seen_machine:
             conn.execute(
-                "INSERT INTO sticky_stop_state (customer, persona, level, reason, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO sticky_stop_state "
+                "(customer, persona, level, reason, condition, updated_at) "
+                "VALUES (?, ?, ?, ?, NULL, ?)",
                 (slug, "_machine", StickyStopLevel.HARD_STOP.value, stamped_reason, now),
             )
             pinned.append({"customer": slug, "persona": "_machine", "prior_level": "OK"})
@@ -394,7 +400,9 @@ class StopStateView:
 
     ``reason`` and ``condition`` belong to the SAME row that produced
     ``level`` — the worst row, tie-broken by most-recent ``updated_at`` — so a
-    reader never pairs one persona's level with another's cause.
+    reader never pairs one persona's level with another's cause. Rows sharing a
+    stamp keep the first seen; ``updated_at`` is NOT NULL in the schema, so a
+    tie there takes an empty-string write to reach.
     """
 
     level: str | None
@@ -446,16 +454,20 @@ def read_stop_state(path: str | None = None) -> StopStateView:
         return StopStateView(level="unknown")
     if not rows:
         return StopStateView(level=StickyStopLevel.OK.value)
-    worst = StopStateView(level=StickyStopLevel.OK.value)
-    worst_rank = 0
+    worst: StopStateView | None = None
+    # -1, not 0: OK is itself rank 0, so a 0 sentinel would make a real OK row
+    # tie with "nothing seen yet" and never claim the slot -- leaving an OK
+    # level paired with a cause it did not produce.
+    worst_rank = -1
     worst_updated = ""
     for level, reason, condition, updated_at in rows:
         if level not in order:
             continue
         rank = order.index(level)
         stamp = updated_at or ""
-        # Strictly-worse wins; an equal level wins only on a later stamp, so
-        # the cause always belongs to the row whose level we are reporting.
+        # Strictly-worse wins; an equal level wins only on a strictly later
+        # stamp, so the cause always belongs to the row whose level we report.
+        # Rows sharing a stamp keep the first seen.
         if rank < worst_rank or (rank == worst_rank and stamp <= worst_updated):
             continue
         text = str(reason)[:_REASON_MAX_CHARS] if reason else None
@@ -466,6 +478,19 @@ def read_stop_state(path: str | None = None) -> StopStateView:
         )
         worst_rank = rank
         worst_updated = stamp
+    if worst is None:
+        # Rows exist but NONE carried a level from the ladder's vocabulary --
+        # a writer we do not understand. Fail toward unknown, which the console
+        # holds on, never toward a fabricated OK. (The docstring above promised
+        # this; the pre-split read_level quietly returned OK here.)
+        logger.warning("cost_breaker: no recognised level in %d sticky_stop row(s)", len(rows))
+        return StopStateView(level="unknown")
+    if worst.level == StickyStopLevel.OK.value:
+        # A cause explains a STOP. At OK there is nothing to explain, and a
+        # healthy seat holding a condition would store one in D1 and pollute
+        # any grouping or routing built on that column later. clear() already
+        # nulls both; this makes a stale pair unrepresentable off the box.
+        return StopStateView(level=worst.level)
     return worst
 
 
