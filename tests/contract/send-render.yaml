@@ -46,11 +46,23 @@
 #     render_mode:  templated | slot-templated | compositional
 #     body_sha256:  [{ body_sha256_full, body_sha256_skeleton }]   # per dispatch entry
 #     items:        [{ item_key, ack_code }]                       # escalator; feeds ack_invariant
-#   CONFIRM_SEND_DISPATCHED (overlay _dispatch_internal_message, pre-mutation)
-#     rendered_body_sha256: <hex>
+#   CONFIRM_SEND_DISPATCHED (overlay _dispatch_internal_message)
+#     rendered_body_sha256: <hex>   # PRE-mutation: the body pre_run authored
+#     plain_body_sha256:    <hex>   # POST-attach: the text/plain the channel
+#                                   # stores. OMITTED when no plain part was
+#                                   # attached (prose reply, composer-supplied
+#                                   # html) -- absence means "text is still the
+#                                   # authored bytes", not "unknown".
 #     body_variant:         full | skeleton
 #   console verifier (operator/bin/lib/send_verify.py) compares per entry;
-#     a skeleton match grades `degraded`, never `BODY_DIVERGED`.
+#     a skeleton match grades `degraded`, never `BODY_DIVERGED`. The two hashes
+#     answer two different questions and neither substitutes for the other:
+#     rendered joins wake<->confirm (did the authored body reach dispatch),
+#     plain joins confirm<->channel (did the dispatched body reach the reader).
+#     Fetching the SENT body back from AgentMail yields the render_plain text,
+#     so grading it against `rendered_body_sha256` HOLDs every conformant
+#     templated send -- proven byte-for-byte in rehearsal (crane_verify
+#     vfy_01M1ERB6DD7G8Q2XSQ2MAVQ68Z, vfy_01M1ERF2TSW86GSAZT2YY16X7S).
 #
 # MIRRORED ARTIFACT. This file ships to the overlay (hermes-smd-overlay,
 # tests/contract/send-render.yaml) under the same mirrored-fixture discipline
