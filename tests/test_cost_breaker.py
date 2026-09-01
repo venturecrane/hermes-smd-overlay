@@ -7,6 +7,8 @@ Covers:
   - assert_allowed raises StickyStopError at HARD_STOP
   - thresholds_from_config: authored cap, absent block, malformed value
   - read_level: missing file → None, rows → worst level, unreadable → unknown
+  - read_stop_state: the cause travels with the worst row's level, degrades on
+    a pre-cause schema, caps a pathological reason, never fabricates a cause
   - job_segment wiring: cost_capped outcome pre-fire; record after spend
   - job_worker: cost_capped dead-letters to needs_review
 """
@@ -19,9 +21,11 @@ import pytest
 
 from shared.audit_contract import INSERT_SQL
 from shared.cost_breaker import (
+    _CREATE_TABLE_SQL,
     StickyStopError,
     build_breaker,
     read_level,
+    read_stop_state,
     thresholds_from_config,
 )
 from shared.sticky_stop import DEFAULT_THRESHOLDS
@@ -109,6 +113,232 @@ def test_read_level(tmp_path):
     assert read_level(path) == "OK"
     b.record_cost_cents(10_000)
     assert read_level(path) == "HARD_STOP"
+
+
+# ---------------------------------------------------------------------------
+# read_stop_state: the level AND the cause that produced it
+# ---------------------------------------------------------------------------
+
+
+def _seed(path: str, rows, *, with_cause_columns: bool = True) -> None:
+    """Write sticky_stop rows directly, so a reader test controls every field.
+
+    ``with_cause_columns=False`` reproduces a seat still running the schema
+    from before reason/condition existed.
+
+    Stamps here MUST use the millisecond-Z shape the seat actually writes
+    (``sticky_stop._iso``: ``%Y-%m-%dT%H:%M:%S.mmmZ``). The tie-break compares
+    ``updated_at`` lexically, which is only sound because every writer emits
+    one fixed-width format -- so a fixture in a different shape would prove the
+    ordering on input production never produces. Second-precision "…:00Z" and
+    millisecond "…:00.123Z" invert the compare outright ('Z' > '.').
+    """
+    import sqlite3
+
+    ddl = (
+        _CREATE_TABLE_SQL
+        if with_cause_columns
+        else """
+        CREATE TABLE sticky_stop_state (
+          customer TEXT NOT NULL, persona TEXT NOT NULL,
+          level TEXT NOT NULL DEFAULT 'OK', updated_at TEXT NOT NULL,
+          PRIMARY KEY (customer, persona)
+        )
+        """
+    )
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(ddl)
+        for persona, level, reason, condition, updated_at in rows:
+            if with_cause_columns:
+                conn.execute(
+                    "INSERT INTO sticky_stop_state "
+                    "(customer, persona, level, updated_at, reason, condition) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    ("acme", persona, level, updated_at, reason, condition),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO sticky_stop_state "
+                    "(customer, persona, level, updated_at) VALUES (?, ?, ?, ?)",
+                    ("acme", persona, level, updated_at),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_read_stop_state_carries_the_cause(tmp_path):
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(
+        path,
+        [
+            (
+                "_machine",
+                "HARD_STOP",
+                "consecutive_tool_failures=8 (window=600s, skill=mcp_smokeball_list_matters)",
+                "consecutive_tool_failures",
+                "2026-09-01T18:32:00.000Z",
+            )
+        ],
+    )
+    state = read_stop_state(path)
+    assert state.level == "HARD_STOP"
+    assert state.condition == "consecutive_tool_failures"
+    assert "skill=mcp_smokeball_list_matters" in (state.reason or "")
+
+
+def test_read_stop_state_cause_belongs_to_the_worst_row(tmp_path):
+    """The whole point: a level paired with another persona's reason would
+    send an operator to investigate the wrong meter.
+
+    The winning row sits in the MIDDLE deliberately. A reader that takes the
+    first row, or the last, returns a WARN cause here — so both naive
+    implementations fail this, which a two-row fixture could not do.
+    """
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(
+        path,
+        [
+            (
+                "first",
+                "WARN",
+                "cost_threshold=900c / cap=1000c",
+                "cost_threshold",
+                "2026-09-01T19:00:00.000Z",
+            ),
+            (
+                "worst",
+                "HARD_STOP",
+                "refusal_cascade=5",
+                "refusal_cascade",
+                "2026-09-01T18:32:00.000Z",
+            ),
+            (
+                "last",
+                "WARN",
+                "cost_threshold=910c / cap=1000c",
+                "cost_threshold",
+                "2026-09-01T19:30:00.000Z",
+            ),
+        ],
+    )
+    state = read_stop_state(path)
+    assert state.level == "HARD_STOP"
+    assert state.reason == "refusal_cascade=5"
+    assert state.condition == "refusal_cascade"
+
+
+def test_read_stop_state_ties_break_on_the_later_stamp(tmp_path):
+    """Same middle-row construction: neither row order nor insertion order
+    picks the winner, only the stamp does."""
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(
+        path,
+        [
+            ("a", "HARD_STOP", "older", "cost_threshold", "2026-09-01T10:00:00.000Z"),
+            ("b", "HARD_STOP", "newest", "refusal_cascade", "2026-09-01T20:00:00.000Z"),
+            ("c", "HARD_STOP", "middling", "cost_threshold", "2026-09-01T15:00:00.000Z"),
+        ],
+    )
+    assert read_stop_state(path).reason == "newest"
+
+
+def test_read_stop_state_degrades_on_a_pre_cause_schema(tmp_path):
+    """An un-reprovisioned seat still reports its level; only the cause is
+    absent. Without the fallback this raises OperationalError and the level —
+    the field the fleet actually gates on — is lost."""
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(
+        path,
+        [("_machine", "HARD_STOP", None, None, "2026-09-01T18:32:00.000Z")],
+        with_cause_columns=False,
+    )
+    state = read_stop_state(path)
+    assert state.level == "HARD_STOP"
+    assert state.reason is None
+    assert state.condition is None
+
+
+def test_read_stop_state_caps_a_pathological_reason(tmp_path):
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(
+        path, [("_machine", "HARD_STOP", "x" * 5000, "cost_threshold", "2026-09-01T18:32:00.000Z")]
+    )
+    assert len(read_stop_state(path).reason or "") == 300
+
+
+def test_read_stop_state_failure_modes(tmp_path):
+    path = str(tmp_path / "sticky_stop.db")
+    # Absent file: fresh Machine.
+    assert read_stop_state(path).level is None
+    # Unreadable file: unknown, and never a fabricated cause.
+    Path(path).write_text("not a database", encoding="utf-8")
+    state = read_stop_state(path)
+    assert state.level == "unknown"
+    assert state.reason is None
+    # Empty table: OK.
+    Path(path).unlink()
+    _seed(path, [])
+    assert read_stop_state(path).level == "OK"
+
+
+def test_read_stop_state_never_pairs_an_ok_level_with_a_cause(tmp_path):
+    """An OK row must not carry a cause off the box. It would store a non-null
+    condition against a healthy seat in D1 and defeat any later grouping."""
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(path, [("_machine", "OK", "cleared", "captain_clear", "2026-09-01T10:00:00.000Z")])
+    state = read_stop_state(path)
+    assert state.level == "OK"
+    assert state.reason is None
+    assert state.condition is None
+
+
+def test_read_stop_state_fails_toward_unknown_on_an_unrecognised_level(tmp_path):
+    """Rows exist but none carry a ladder word: a writer we do not understand.
+    OK here would be a FABRICATED healthy seat -- the same widening that burned
+    the supervisor-state vocabulary at overlay#339."""
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(path, [("_machine", "PANIC_STOP", "boom", "cost_threshold", "2026-09-01T10:00:00.000Z")])
+    assert read_stop_state(path).level == "unknown"
+    # An empty table is still a genuine OK -- absence of rows is not a
+    # misunderstanding, and this must not regress into unknown.
+    path2 = str(tmp_path / "empty.db")
+    _seed(path2, [])
+    assert read_stop_state(path2).level == "OK"
+
+
+def test_pin_hard_stops_clears_the_condition_with_the_reason(tmp_path):
+    """An operator pause overwrites the reason; leaving the prior meter's
+    condition beside it makes the page name a meter unrelated to this stop."""
+    from shared.cost_breaker import pin_hard_stops
+
+    path = str(tmp_path / "sticky_stop.db")
+    _seed(
+        path,
+        [
+            (
+                "_machine",
+                "WARN",
+                "cost_threshold=900c / cap=1000c",
+                "cost_threshold",
+                "2026-09-01T10:00:00.000Z",
+            )
+        ],
+    )
+    pin_hard_stops(actor_id="captain", reason="maintenance window", path=path)
+    state = read_stop_state(path)
+    assert state.level == "HARD_STOP"
+    assert "operator_pause by captain" in (state.reason or "")
+    assert state.condition is None
+
+
+def test_read_level_still_agrees_with_read_stop_state(tmp_path):
+    """read_level is now a wrapper; prove the delegation did not change it."""
+    path = str(tmp_path / "sticky_stop.db")
+    assert read_level(path) is None
+    _seed(path, [("_machine", "SOFT_STOP", "r", "cost_threshold", "2026-09-01T18:00:00.000Z")])
+    assert read_level(path) == read_stop_state(path).level == "SOFT_STOP"
 
 
 # ---------------------------------------------------------------------------

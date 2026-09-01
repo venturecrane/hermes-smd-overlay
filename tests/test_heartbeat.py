@@ -354,6 +354,79 @@ def test_payload_carries_sticky_stop_level_when_present():
     assert "sticky_stop_level" not in p2
 
 
+def test_payload_carries_the_stop_cause_beside_the_level():
+    """A level alone cannot tell an operator which of the four meters tripped,
+    and the four need four different investigations."""
+    p = hb.build_payload(
+        heartbeat_ts="2026-07-03T00:00:00Z",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        sticky_stop_level="HARD_STOP",
+        sticky_stop_reason="consecutive_tool_failures=8 (window=600s, skill=mcp_x)",
+        sticky_stop_condition="consecutive_tool_failures",
+    )
+    assert p["sticky_stop_level"] == "HARD_STOP"
+    assert p["sticky_stop_condition"] == "consecutive_tool_failures"
+    assert "skill=mcp_x" in p["sticky_stop_reason"]
+
+
+def test_payload_never_sends_a_cause_without_its_level():
+    """A cause beside an absent level would let the console render "why"
+    against whatever level it already held — a stale pairing. The seat sends
+    both or neither."""
+    p = hb.build_payload(
+        heartbeat_ts="2026-07-03T00:00:00Z",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        sticky_stop_reason="orphaned reason",
+        sticky_stop_condition="cost_threshold",
+    )
+    assert "sticky_stop_reason" not in p
+    assert "sticky_stop_condition" not in p
+    # And a level with no recorded cause still ships the level.
+    p2 = hb.build_payload(
+        heartbeat_ts="2026-07-03T00:00:00Z",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        sticky_stop_level="OK",
+    )
+    assert p2["sticky_stop_level"] == "OK"
+    assert "sticky_stop_reason" not in p2
+
+
+def test_tick_carries_the_stop_cause_onto_the_wire(monkeypatch):
+    """The seam that build_payload's own tests cannot see: the emitter must
+    actually PASS what it read. Reading the cause and then dropping it before
+    the call is silent, and it is the failure mode this whole change exists to
+    close — so it gets a test at the wire, not at the helper."""
+    import json
+
+    import shared.cost_breaker as cb
+
+    monkeypatch.setattr(
+        cb,
+        "read_stop_state",
+        lambda *a, **k: cb.StopStateView(
+            level="HARD_STOP",
+            reason="consecutive_tool_failures=8 (window=600s, skill=mcp_smokeball_list_matters)",
+            condition="consecutive_tool_failures",
+        ),
+    )
+    em, calls = _emitter()
+    em._tick()
+    _url, _headers, body = calls["posts"][0]
+    sent = json.loads(body)
+    assert sent["sticky_stop_level"] == "HARD_STOP"
+    assert sent["sticky_stop_condition"] == "consecutive_tool_failures"
+    assert "skill=mcp_smokeball_list_matters" in sent["sticky_stop_reason"]
+
+
 # ---------------------------------------------------------------------------
 # scheduler self-check wiring (ss work-liveness fix)
 # ---------------------------------------------------------------------------
