@@ -17,10 +17,26 @@ from __future__ import annotations
 
 import pytest
 
-# CONTRACT TEST: shared/identifier_filter.py is a vendored copy of
-# ss-console/operator/safety-substrate/identifier_filter.py. These behavioral
-# cases are the same as ss-console's; passing here asserts the vendored copy is
-# in parity (not a byte hash — code, per shared/inbound.py rationale).
+# BEHAVIOURAL SUITE for the vendored copy. It is NOT a parity check, and it used
+# to say it was (ss#2125).
+#
+# shared/identifier_filter.py is a vendored copy of
+# ss-console/operator/safety-substrate/identifier_filter.py. The old header here
+# read "passing here asserts the vendored copy is in parity" -- it cannot. This
+# file imports shared.identifier_filter, its OWN copy, and lives in this repo
+# with no access to the ss-console file it claimed parity with. It asserted that
+# the copy agrees with itself.
+#
+# That is not hypothetical: overlay#208 added the matter-number alternation to
+# _CASE_RE in the vendored copy only, this suite stayed green, and the divergence
+# was found by a person reading the two files.
+#
+# PARITY IS ENFORCED ELSEWHERE, by hash, in ss-console:
+# operator/contracts/overlay-pairs.json registers this file as a tracked pair and
+# operator/bin/verify-overlay-pairs.py fetches this repo at the pinned overlayRef
+# and compares sha256. A change to either copy that is not recorded in that
+# manifest fails CI. What this file is for is the behaviour itself -- the cases
+# below are shared with ss-console's suite by convention, and both must pass.
 from shared.identifier_filter import (
     _CASE_RE,
     IdKind,
