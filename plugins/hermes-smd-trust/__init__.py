@@ -71,7 +71,7 @@ _ADAPTER_MSGRAPH = "msgraph"
 _ADAPTER_AGENTMAIL = "agentmail"
 
 
-def _attach_html_body(tool_name: str, args: dict) -> None:
+def _attach_html_body(tool_name: str, args: dict) -> bool:
     """Give a report send an html half, rendered from the markdown it already wrote.
 
     **Call this ONLY after every gate has returned allow.** The ordering is the
@@ -92,23 +92,35 @@ def _attach_html_body(tool_name: str, args: dict) -> None:
 
     Idempotent and non-destructive: a model-authored html body is never
     clobbered, and a send with no markdown block structure is left untouched.
+
+    RETURNS whether the html+plain pair was attached — i.e. whether ``text``
+    now holds the ``render_plain`` down-render rather than the bytes the caller
+    passed in. Every early return below is a case where it does NOT, and the
+    two mutations are inseparable (one statement apart, no branch between), so
+    one boolean answers honestly for both halves. The dispatch site reads it to
+    decide whether a ``plain_body_sha256`` stamp would be a fact or a lie; it is
+    a return value rather than a predicate re-derived at the call site because a
+    copy of this function's trigger conditions would be free to drift away from
+    them (and would do so silently, in a stamp nobody reads until a reconciler
+    disagrees).
     """
     if not outbound._is_gated_send_tool(tool_name):
-        return
+        return False
     text = args.get("text")
     if not isinstance(text, str) or not text.strip():
-        return
+        return False
     existing = args.get("html")
     if isinstance(existing, str) and existing.strip():
-        return  # the composer supplied its own html; it wins
+        return False  # the composer supplied its own html; it wins
     if not report_render.looks_like_report(text):
-        return  # prose reply, not a report — leave the send exactly as it was
+        return False  # prose reply, not a report — leave the send exactly as it was
     args["html"] = report_render.render_markdown(text)
     # The text/plain half of the same fix (WS-RENDER): a reader whose client
     # shows the text part must not see raw markdown. render_plain is strictly
     # MARKER-SUBTRACTIVE (purity test), so the safety argument above covers it
     # identically: it introduces no token the gates did not already scan.
     args["text"] = report_render.render_plain(text)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -987,7 +999,20 @@ def _dispatch_internal_message(
     ``rendered_body_sha256`` — the canonical hash of the text the gate
     ALLOWED, computed BEFORE ``_attach_html_body`` mutates the payload, so the
     console's wake<->confirm hash join compares the same bytes the pre_run
-    stamped, not the down-rendered plain half.
+    stamped, not the down-rendered plain half. It ALSO adds
+    ``plain_body_sha256``, the canonical hash of the exact text/plain string
+    handed to the channel, computed AFTER the attach, because that is the
+    body the channel STORES (rehearsal-proven: AgentMail returns the
+    render_plain text, not the authored markdown), so it is the only hash the
+    console's channel check can verify a stored body against. Two hashes,
+    two questions: rendered answers "is this the body the pre_run authored",
+    plain answers "is this the body the channel delivered".
+
+    ``plain_body_sha256`` is OMITTED, never duplicated, when no down-render
+    happened — a stamp that claims to observe the transmitted body must not be
+    a copy of the stamp that observed the authored one. Both are absent on a
+    body-less send; both variants (full and skeleton) get the same treatment
+    because both reach the channel through this one function.
     """
     recipients = tuple(a for a in (to or ()) if isinstance(a, str) and a.strip())
     if not recipients:
@@ -1065,7 +1090,26 @@ def _dispatch_internal_message(
         send_audit_extra["rendered_body_sha256"] = prerendered_dispatch.canonical_body_sha256(
             allowed_text
         )
-    _attach_html_body(_SEND_TOOL_NAME, payload)
+    attached_plain = _attach_html_body(_SEND_TOOL_NAME, payload)
+    # The SECOND stamp, and the reason the first one alone loud-HOLDs every
+    # templated send: the channel does not store the bytes the gate allowed, it
+    # stores the down-render. ``_attach_html_body`` just replaced ``text`` with
+    # ``render_plain(text)``, and THAT is what AgentMail returns when the
+    # console's reconciler fetches the sent body back. Hashing it here — the one
+    # moment both bodies exist in the same process — is what lets the reconciler
+    # grade a conformant send conformant.
+    #
+    # Stamped ONLY when the pair was actually attached. On every other path
+    # (prose reply, composer-supplied html, non-send tool) no down-render
+    # happened, ``text`` is still the allowed bytes, and rendered_body_sha256
+    # already answers the channel's question — so the key is OMITTED rather than
+    # set to a duplicate that would read as an independent observation.
+    if attached_plain:
+        plain_text = payload.get("text")
+        if isinstance(plain_text, str) and plain_text:
+            send_audit_extra["plain_body_sha256"] = prerendered_dispatch.canonical_body_sha256(
+                plain_text
+            )
     send_session_id = _resolved_session({"session_id": session_id})
     send_matter_ref = matter_gate.matter_ref_for(
         send_session_id, _send_cited_matters(send_session_id, payload)

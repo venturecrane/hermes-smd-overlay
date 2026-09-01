@@ -8,6 +8,11 @@ stamp against the pre_run's EMITTED_WAKE stamp; a post-mutation hash would
 compare the down-rendered plain text against the authored body and grade
 every conformant send BODY_DIVERGED.
 
+It ALSO stamps ``plain_body_sha256`` — the canonical hash of the text/plain the
+channel actually stores, taken AFTER the attach — because the read-back a
+console reconciler performs returns the down-render, not the authored markdown.
+One hash cannot answer both questions, which is why there are two.
+
 Also pins the plain down-render wiring itself and the mirror artifacts.
 """
 
@@ -16,7 +21,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from shared import prerendered_dispatch
+from shared import prerendered_dispatch, report_render
 from tests.conftest import load_plugin
 
 REPORT_BODY = (
@@ -124,6 +129,146 @@ def test_stamp_present_without_caller_extra_too(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# plain_body_sha256 — the SECOND stamp
+#
+# rendered_body_sha256 answers "is this the body pre_run authored". It cannot
+# answer "is this the body the channel delivered", because the channel does not
+# store that body: _attach_html_body replaces text with render_plain(text)
+# before the payload leaves this process, and AgentMail returns THAT on a
+# read-back. Grading the stored body against the rendered hash therefore HOLDs
+# every conformant templated send. These tests pin the second hash, and — the
+# load-bearing half — pin that it is ABSENT rather than duplicated when no
+# down-render happened.
+# ---------------------------------------------------------------------------
+
+
+def test_plain_stamp_differs_from_rendered_when_markers_subtract(monkeypatch):
+    """The whole reason the second stamp exists. REPORT_BODY carries `##` and
+    `**`; render_plain subtracts them, so the two hashes MUST diverge. If they
+    ever match here the down-render silently stopped happening and the console
+    would be grading a body nobody transmitted."""
+    trust = _trust()
+    captured: list[dict] = []
+    _arm(monkeypatch, trust, captured)
+    result = trust._dispatch_internal_message(
+        to=["ops@firm.example"],
+        subject="[Deadlines] 1 need you, 2026-08-31",
+        text=REPORT_BODY,
+        session_id="s1",
+        audit_extra={"routing_leg": "central", "body_variant": "full"},
+    )
+    assert result.sent
+    [call] = captured
+    rendered = call["audit_extra"]["rendered_body_sha256"]
+    plain = call["audit_extra"]["plain_body_sha256"]
+    assert rendered == prerendered_dispatch.canonical_body_sha256(REPORT_BODY)
+    assert plain != rendered, "markers subtracted but the two stamps agree"
+    # And the plain stamp names the bytes actually on the payload, not a
+    # recomputation from the source that happens to look right.
+    assert plain == prerendered_dispatch.canonical_body_sha256(call["payload"]["text"])
+
+
+def test_plain_stamp_is_the_canonical_hash_of_the_render_plain_output(monkeypatch):
+    """Hand-computed against the renderer and the canon function independently,
+    so a bug in the stamp site cannot hide behind the stamp site's own math."""
+    trust = _trust()
+    captured: list[dict] = []
+    _arm(monkeypatch, trust, captured)
+    trust._dispatch_internal_message(
+        to=["ops@firm.example"], subject="s", text=REPORT_BODY, session_id="s1"
+    )
+    [call] = captured
+    expected = prerendered_dispatch.canonical_body_sha256(report_render.render_plain(REPORT_BODY))
+    assert call["audit_extra"]["plain_body_sha256"] == expected
+
+
+def test_both_stamps_present_on_each_body_variant(monkeypatch):
+    """Full and skeleton reach the channel through this one function, so the
+    pair rides both. The variants differ only in the caller's body_variant tag;
+    nothing in the stamp path branches on it, and this pins that."""
+    trust = _trust()
+    for variant in ("full", "skeleton"):
+        captured: list[dict] = []
+        _arm(monkeypatch, trust, captured)
+        trust._dispatch_internal_message(
+            to=["ops@firm.example"],
+            subject="s",
+            text=REPORT_BODY,
+            session_id="s1",
+            audit_extra={"routing_leg": "central", "body_variant": variant},
+        )
+        [call] = captured
+        extra = call["audit_extra"]
+        assert extra["body_variant"] == variant
+        assert extra["rendered_body_sha256"]
+        assert extra["plain_body_sha256"]
+        assert extra["plain_body_sha256"] != extra["rendered_body_sha256"]
+
+
+def test_plain_stamp_is_omitted_when_no_plain_part_is_attached(monkeypatch):
+    """Never stamp a lie. A prose reply gets no html half and no down-render —
+    text reaches the channel as the gate allowed it — so a plain stamp would be
+    a duplicate of the rendered one wearing a different name, i.e. a second
+    observation that never happened."""
+    trust = _trust()
+    captured: list[dict] = []
+    _arm(monkeypatch, trust, captured)
+    trust._dispatch_internal_message(
+        to=["client@example.com"],
+        subject="Re: Quick favor",
+        text="Hi Scott,\n\nMoved to Wednesday.\n\nThanks,\nOperator\n",
+        session_id="s1",
+    )
+    [call] = captured
+    assert "html" not in call["payload"]
+    assert "rendered_body_sha256" in call["audit_extra"]
+    assert "plain_body_sha256" not in call["audit_extra"]
+
+
+def test_plain_stamp_is_omitted_when_the_composer_supplied_its_own_html(monkeypatch):
+    """The other no-down-render path. _attach_html_body returns early to leave
+    a model-authored html body alone, and leaves ``text`` alone with it.
+
+    The html arrives the one way it can on this path: the gate rewrites the
+    payload it allows (``evaluate_tool_call`` consumes approvals and stores its
+    own copy), which the dispatch site already documents and reads back.
+    """
+    trust = _trust()
+    captured: list[dict] = []
+    _arm(monkeypatch, trust, captured)
+
+    def _gate_supplies_html(_tool, args, *_a, **_k):
+        args["html"] = "<p>mine</p>"
+        return None
+
+    monkeypatch.setattr(trust.enforce, "evaluate_tool_call", _gate_supplies_html)
+    trust._dispatch_internal_message(
+        to=["ops@firm.example"], subject="s", text=REPORT_BODY, session_id="s1"
+    )
+    [call] = captured
+    assert call["payload"]["html"] == "<p>mine</p>"
+    assert call["payload"]["text"] == REPORT_BODY  # untouched, so no plain part
+    assert "plain_body_sha256" not in call["audit_extra"]
+
+
+def test_attach_reports_whether_it_attached(monkeypatch):
+    """The boolean the stamp site trusts. Pinned directly so the stamp tests
+    above cannot both pass by agreeing on the same wrong answer."""
+    trust = _trust()
+    report = {"to": ["x@y.z"], "text": REPORT_BODY}
+    assert trust._attach_html_body("mcp_agentmail_send_message", report) is True
+    assert report["text"] == report_render.render_plain(REPORT_BODY)
+    for tool, args in (
+        ("workspace_read_file", {"text": REPORT_BODY}),
+        ("mcp_agentmail_send_message", {"text": "prose reply, no blocks"}),
+        ("mcp_agentmail_send_message", {"text": "   "}),
+        ("mcp_agentmail_send_message", {}),
+        ("mcp_agentmail_send_message", {"text": REPORT_BODY, "html": "<p>mine</p>"}),
+    ):
+        assert trust._attach_html_body(tool, args) is False
+
+
+# ---------------------------------------------------------------------------
 # Mirrored artifacts (the same-change discipline)
 # ---------------------------------------------------------------------------
 
@@ -138,6 +283,10 @@ def test_send_render_mirror_declares_the_flipped_modes():
     assert "render: templated" in text
     assert "client-verification-tracker:" in text
     assert "render: slot-templated" in text
+    # The stamp schema is the cross-repo contract; the second hash must be
+    # declared there or the console side has no authority to expect it.
+    assert "plain_body_sha256:" in text
+    assert "rendered_body_sha256:" in text
 
 
 def test_canon_vectors_mirror_is_wellformed_and_arbitrated():
