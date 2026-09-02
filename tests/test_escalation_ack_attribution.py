@@ -84,8 +84,12 @@ def _authored(monkeypatch, plugin, users: list[dict]) -> None:
 def _ack(plugin) -> dict:
     return json.loads(
         plugin._escalation_append(
-            {"skill": "deadline-miss-escalator", "event": "acked", "attempt": 0,
-             "ack_token": "ACK-ABC123"}
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "acked",
+                "attempt": 0,
+                "ack_token": "ACK-ABC123",
+            }
         )
     )
 
@@ -184,15 +188,26 @@ def test_only_acks_carry_a_confirmer(escalation, monkeypatch):
 
     derived = json.loads(
         plugin._escalation_append(
-            {"skill": "deadline-miss-escalator", "event": "fired", "attempt": 1,
-             "matter_id": "m-1", "source_id": "task-1", "label": "task-deadline",
-             "authored_date": "2026-09-02", "derive_only": True}
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "fired",
+                "attempt": 1,
+                "matter_id": "m-1",
+                "source_id": "task-1",
+                "label": "task-deadline",
+                "authored_date": "2026-09-02",
+                "derive_only": True,
+            }
         )
     )
     json.loads(
         plugin._escalation_append(
-            {"skill": "deadline-miss-escalator", "event": "fired", "attempt": 1,
-             "append_handle": derived["append_handle"]}
+            {
+                "skill": "deadline-miss-escalator",
+                "event": "fired",
+                "attempt": 1,
+                "append_handle": derived["append_handle"],
+            }
         )
     )
     assert "acked_by" not in _written(requests)
@@ -221,9 +236,7 @@ def _prior_raise() -> dict:
 
 
 def _validate(event: dict) -> None:
-    escalation_ledger.validate_append(
-        [_prior_raise()], event, send_witness=lambda _e: True
-    )
+    escalation_ledger.validate_append([_prior_raise()], event, send_witness=lambda _e: True)
 
 
 def test_the_broker_accepts_a_well_formed_confirmer():
@@ -234,8 +247,12 @@ def test_the_broker_refuses_a_confirmer_on_a_non_ack():
     with pytest.raises(ValueError, match="no such person"):
         escalation_ledger.validate_append(
             [],
-            {**_base_ack(), "event": "fired", "attempt": 1,
-             "acked_by": {"name": NAME, "key": "a" * 64}},
+            {
+                **_base_ack(),
+                "event": "fired",
+                "attempt": 1,
+                "acked_by": {"name": NAME, "key": "a" * 64},
+            },
             send_witness=lambda _e: True,
         )
 
@@ -254,9 +271,7 @@ def test_the_broker_refuses_a_key_with_no_name():
 
 def test_the_broker_refuses_unknown_fields():
     with pytest.raises(ValueError, match="unknown fields"):
-        _validate(
-            {**_base_ack(), "acked_by": {"name": NAME, "key": "a" * 64, "role": "principal"}}
-        )
+        _validate({**_base_ack(), "acked_by": {"name": NAME, "key": "a" * 64, "role": "principal"}})
 
 
 def test_the_broker_refuses_a_key_that_is_not_a_sha256():
