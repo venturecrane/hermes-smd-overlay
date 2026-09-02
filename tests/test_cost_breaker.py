@@ -63,12 +63,16 @@ def _breaker(tmp_path: Path, audit: FakeAuditClient, config=None):
 def test_records_and_trips_hard_stop_with_agent_stopped_audit(tmp_path):
     audit = FakeAuditClient()
     b = _breaker(tmp_path, audit)
-    # Default ladder: cap 5000; hard stop at 200% = 10000 cents.
-    state = b.record_cost_cents(4000)  # 80% -> WARN
-    assert state.level.value == "WARN"
-    state = b.record_cost_cents(1000)  # 100% -> SOFT_STOP
-    assert state.level.value == "SOFT_STOP"
-    state = b.record_cost_cents(5000)  # 200% -> HARD_STOP
+    # Two states since 2026-09-02: cap 5000, hard stop at 200% = 10000 cents,
+    # and nothing in between. The 80% / 100% rungs this test used to assert
+    # restricted nothing and paged nobody -- see StickyStopLevel.
+    state = b.record_cost_cents(4000)  # 80% of cap
+    assert state.level.value == "OK"
+    state = b.record_cost_cents(1000)  # 100% of cap: still not a stop
+    assert state.level.value == "OK"
+    state = b.record_cost_cents(4999)  # 199.98%: one cent short
+    assert state.level.value == "OK"
+    state = b.record_cost_cents(1)  # 200% -> HARD_STOP
     assert state.level.value == "HARD_STOP"
     assert "AGENT_STOPPED" in audit.action_types()
     # All sink rows go through the shared INSERT contract.
@@ -334,11 +338,45 @@ def test_pin_hard_stops_clears_the_condition_with_the_reason(tmp_path):
 
 
 def test_read_level_still_agrees_with_read_stop_state(tmp_path):
-    """read_level is now a wrapper; prove the delegation did not change it."""
+    """read_level is a wrapper; prove the delegation did not change it."""
     path = str(tmp_path / "sticky_stop.db")
     assert read_level(path) is None
-    _seed(path, [("_machine", "SOFT_STOP", "r", "cost_threshold", "2026-09-01T18:00:00.000Z")])
-    assert read_level(path) == read_stop_state(path).level == "SOFT_STOP"
+    _seed(path, [("_machine", "HARD_STOP", "r", "cost_threshold", "2026-09-01T18:00:00.000Z")])
+    assert read_level(path) == read_stop_state(path).level == "HARD_STOP"
+
+
+def test_a_seat_latched_at_a_removed_level_reads_ok(tmp_path):
+    """The upgrade path, and the reason pilot-smokeball needed no clear.
+
+    That seat latched SOFT_STOP on 2026-08-31 and sat there five days
+    restricting nothing. Once the level ceases to exist there is nothing to
+    clear: it reads OK, and its stale reason/condition go with it rather than
+    hanging off a healthy seat.
+    """
+    for legacy in ("WARN", "SOFT_STOP"):
+        path = str(tmp_path / f"{legacy}.db")
+        _seed(
+            path,
+            [
+                (
+                    "_machine",
+                    legacy,
+                    "refusal_cascade=10",
+                    "refusal_cascade",
+                    "2026-08-31T13:30:51.823Z",
+                )
+            ],
+        )
+        state = read_stop_state(path)
+        assert state.level == "OK", legacy
+        assert state.reason is None, legacy
+        assert state.condition is None, legacy
+
+    # NEGATIVE CONTROL: a word from neither vocabulary is still not silently
+    # accepted as a level -- it must not ride through as if it were known.
+    junk = str(tmp_path / "junk.db")
+    _seed(junk, [("_machine", "PANIC_STOP", "boom", "cost_threshold", "2026-09-01T10:00:00.000Z")])
+    assert read_stop_state(junk).level == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -560,3 +598,88 @@ def test_pin_hard_stops_requires_actor_and_reason(tmp_path):
         pin_hard_stops(actor_id="", reason="r", path=path)
     with _pytest.raises(ValueError):
         pin_hard_stops(actor_id="a", reason="", path=path)
+
+
+# ---------------------------------------------------------------------------
+# The two-state collapse (2026-09-02): what must NOT have changed
+# ---------------------------------------------------------------------------
+
+
+def test_the_hard_stop_thresholds_did_not_move():
+    """The load-bearing claim of the collapse, pinned.
+
+    Removing WARN and SOFT_STOP was meant to delete two states that did
+    nothing -- NOT to make seats stop more or less easily. These numbers are
+    where a seat stopped before the collapse; a change to any of them is a
+    change to when a client's Operator halts, and must be deliberate rather
+    than a side effect of tidying the ladder.
+    """
+    t = DEFAULT_THRESHOLDS
+    assert t.tool_failure_hard_stop == 8
+    assert t.tool_failure_window_seconds == 600
+    assert t.refusal_hard_stop == 20
+    assert t.refusal_window_seconds == 1800
+    assert t.cost_daily_cents == 5_000
+    assert t.cost_hard_stop_pct == 200
+    # And the removed rungs are actually gone, not merely unused: a stale
+    # attribute would let a reader think the middle of the ladder still exists.
+    for dead in (
+        "tool_failure_warn",
+        "tool_failure_soft_stop",
+        "refusal_warn",
+        "refusal_soft_stop",
+        "cost_warn_pct",
+        "cost_soft_stop_pct",
+    ):
+        assert not hasattr(t, dead), dead
+
+
+def test_a_time_budget_overrun_is_recorded_and_stops_nothing(tmp_path):
+    """The one meter the collapse forced a choice on.
+
+    Its only outcome was SOFT_STOP and it has no hard threshold, so it either
+    stops nothing or starts halting seats. It stops nothing -- exactly what it
+    did before, since SOFT_STOP restricted nothing -- but the overrun must
+    still leave an audit row, because that row is the evidence a later
+    decision to enforce the budget would rest on.
+    """
+    import asyncio
+
+    from shared.sticky_stop import DEFAULT_THRESHOLDS as T
+    from shared.sticky_stop import SqliteStickyStopStore, StickyStopMachine
+
+    written: list = []
+
+    class _Sink:
+        async def write(self, record):
+            written.append(record)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(tmp_path / "s.db"))
+    conn.execute(_CREATE_TABLE_SQL)
+    store = SqliteStickyStopStore(conn)
+    machine = StickyStopMachine(store=store, audit_writer=_Sink())
+
+    state = asyncio.run(
+        machine.record_runtime_seconds(
+            customer="acme", persona="_machine", seconds=T.time_budget_seconds + 1
+        )
+    )
+    assert state.level.value == "OK"  # stops nothing
+    assert state.condition is None  # and leaves no cause on a healthy seat
+    assert len(written) == 1, "the overrun must still be recorded"
+    row = written[0]
+    assert row.action_type == "INVARIANT_VIOLATION"
+    assert row.metadata["condition_triggered"] == "time_budget_exceeded"
+    assert row.metadata["sticky_stop_transition"] is False
+    assert row.metadata["level_unchanged_by_design"] is True
+
+    # Under budget: nothing recorded at all.
+    written.clear()
+    asyncio.run(
+        machine.record_runtime_seconds(
+            customer="acme", persona="_machine", seconds=T.time_budget_seconds - 1
+        )
+    )
+    assert written == []

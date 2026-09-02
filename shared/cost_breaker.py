@@ -43,6 +43,7 @@ from shared.audit_contract import INSERT_SQL, build_audit_params
 from shared.ids import iso_utc, ulid
 from shared.sticky_stop import (
     DEFAULT_THRESHOLDS,
+    LEGACY_LEVELS,
     SqliteStickyStopStore,
     StickyStopAuditRecord,
     StickyStopError,
@@ -115,9 +116,9 @@ def thresholds_from_config(config: Any) -> StickyStopThresholds:
     """Build thresholds from a CustomerConfig, defaulting when unauthored.
 
     Only ``cost_cap_daily_cents`` is customer-authorable in v1 (ADR 0062 §5);
-    the ladder percentages (warn 80 / soft 100 / hard 200) are platform
-    semantics. A malformed value fails toward the platform default rather
-    than fail-open.
+    the hard-stop percentage (200) is platform semantics. A malformed value
+    fails toward the platform default rather than fail-open. The warn/soft
+    percentages went with the states they named (2026-09-02).
     """
     authored: int | None = None
     try:
@@ -427,12 +428,7 @@ def read_stop_state(path: str | None = None) -> StopStateView:
     resolved = path or db_path()
     if not os.path.exists(resolved):
         return StopStateView(level=None)
-    order = [
-        StickyStopLevel.OK.value,
-        StickyStopLevel.WARN.value,
-        StickyStopLevel.SOFT_STOP.value,
-        StickyStopLevel.HARD_STOP.value,
-    ]
+    order = [StickyStopLevel.OK.value, StickyStopLevel.HARD_STOP.value]
     try:
         conn = sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
         try:
@@ -461,6 +457,13 @@ def read_stop_state(path: str | None = None) -> StopStateView:
     worst_rank = -1
     worst_updated = ""
     for level, reason, condition, updated_at in rows:
+        # A row written by a pre-collapse overlay can be latched at WARN or
+        # SOFT_STOP. Those restricted nothing, so they read as OK -- which is
+        # also what releases such a seat with no Captain clear. Normalised
+        # BEFORE the vocabulary check so they are never mistaken for a word
+        # from an unknown writer (which does fail toward "unknown" below).
+        if level in LEGACY_LEVELS:
+            level, reason, condition = StickyStopLevel.OK.value, None, None
         if level not in order:
             continue
         rank = order.index(level)
@@ -553,9 +556,8 @@ async def run_boot_probe() -> tuple[bool, str]:
                 f"cost_cents_today={state.cost_cents_today} cost_date={state.cost_date!r}; "
                 f"record_cost_cents returned level={recorded.level.value} "
                 f"cost_cents_today={recorded.cost_cents_today}; "
-                f"cap={thresholds.cost_daily_cents}c rungs warn/soft/hard="
-                f"{thresholds.cost_warn_pct}/{thresholds.cost_soft_stop_pct}/"
-                f"{thresholds.cost_hard_stop_pct}%)"
+                f"cap={thresholds.cost_daily_cents}c "
+                f"hard_stop_at={thresholds.cost_hard_stop_pct}%)"
             )
         try:
             await machine.assert_allowed(customer="_probe", persona="_probe")
