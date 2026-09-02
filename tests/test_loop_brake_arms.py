@@ -84,16 +84,27 @@ def test_consecutive_tool_failures_climb_to_hard_stop(tmp_path: Path) -> None:
     assert state.level.value == "HARD_STOP"
 
 
-def test_soft_stop_arrives_before_hard_stop(tmp_path: Path) -> None:
-    # The intermediate rung matters: SOFT_STOP pins every skill to
-    # draft_for_review rather than refusing outright, so a wobbling seat
-    # degrades to "needs a human" before it degrades to "does nothing".
+def test_the_ladder_does_not_stop_below_the_hard_threshold(tmp_path: Path) -> None:
+    """The replaced test asserted the opposite and was wrong about the system.
+
+    It read: "The intermediate rung matters: SOFT_STOP pins every skill to
+    draft_for_review rather than refusing outright." Nothing ever pinned
+    anything -- no reader in either repo compared against SOFT_STOP, so a
+    green test was certifying a behaviour that did not exist. The rung was
+    removed 2026-09-02 (Captain decision).
+
+    What is worth guarding is the other direction: the seat keeps working
+    right up to the hard threshold, so lowering where a stop fires cannot slip
+    in unnoticed.
+    """
     breaker = _breaker(tmp_path)
     state = None
-    for _ in range(DEFAULT_THRESHOLDS.tool_failure_soft_stop):
+    for _ in range(DEFAULT_THRESHOLDS.tool_failure_hard_stop - 1):
         state = breaker.record_tool_failure()
     assert state is not None
-    assert state.level.value == "SOFT_STOP"
+    assert state.level.value == "OK"
+    # ...and the very next failure is the one that stops it.
+    assert breaker.record_tool_failure().level.value == "HARD_STOP"
 
 
 def test_success_resets_the_failure_streak(tmp_path: Path) -> None:

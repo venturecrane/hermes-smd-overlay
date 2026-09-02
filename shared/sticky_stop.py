@@ -22,20 +22,17 @@ human; system stops clear via Captain investigation).
 
 Design rules:
 
-* States are forward-only by default. WARN < SOFT_STOP < HARD_STOP. The
-  state machine never DECREASES state autonomously. Only Captain-initiated
-  clear() resets to OK.
+* TWO states, forward-only: OK < HARD_STOP. The machine never DECREASES
+  state autonomously; only Captain-initiated clear() resets to OK. WARN and
+  SOFT_STOP were removed 2026-09-02 (Captain decision) after five days of a
+  pilot seat sitting latched at SOFT_STOP while it restricted nothing and
+  paged nobody. See StickyStopLevel for the full reasoning. The HARD_STOP
+  thresholds did not move.
 
 * Conditions are read from customer.yaml `safety.sticky_stop` if present;
   module-level DEFAULT_CONDITIONS apply otherwise. The defaults are
   intentionally conservative — easier to loosen via customer.yaml than to
   recover from a tighter-than-needed loop that ran for hours unnoticed.
-
-* SOFT_STOP semantics: the dispatch path still calls skills, but the
-  trust_ceiling for every skill is pinned to draft_for_review for the
-  duration. No autonomous escalation. The UI shows a banner. The dashboard
-  surface is filed separately — this module only persists the state and
-  exposes a read API.
 
 * HARD_STOP semantics: dispatch refuses every skill invocation. The caller
   receives a StickyStopError it must propagate, NOT swallow. Same invariant
@@ -59,9 +56,11 @@ Design rules:
   overlay: the broker-owned ledger emit path). Action type re-uses the
   existing closed-set vocabulary (ACCEPTED_ACTION_TYPES):
 
-    - HARD_STOP entry          -> action_type=AGENT_STOPPED
-    - WARN / SOFT_STOP entries -> action_type=INVARIANT_VIOLATION
-    - clear()                  -> action_type=AGENT_RESUMED
+    - HARD_STOP entry     -> action_type=AGENT_STOPPED
+    - a recorded overrun  -> action_type=INVARIANT_VIOLATION (no state change;
+                             today only the time budget, which has no
+                             HARD_STOP threshold of its own)
+    - clear()             -> action_type=AGENT_RESUMED
 
   The transition detail (from_state, to_state, condition_triggered,
   sampled metric values) lives in the metadata column. This keeps the
@@ -156,20 +155,63 @@ class StickyStopAuditSink(Protocol):
 
 
 class StickyStopLevel(str, enum.Enum):
-    """Forward-only sticky-stop state. clear() is the only path back to OK."""
+    """Forward-only sticky-stop state. clear() is the only path back to OK.
+
+    TWO STATES, not four (Captain decision 2026-09-02). WARN and SOFT_STOP
+    were removed because they did nothing. SOFT_STOP was specified here to pin
+    every skill's trust_ceiling to draft_for_review, and ``assert_allowed``
+    still returned state "so the caller can pin trust_ceiling" -- but no
+    caller ever did, and no reader anywhere compared against anything but
+    HARD_STOP. The console painted a yellow dot and the alerter never paged.
+
+    The cost of the pretence, measured: pilot-smokeball latched SOFT_STOP on
+    2026-08-31 and sat there for five days restricting nothing, notifying
+    nobody, and reading as a real safety state to anyone who looked. A rung
+    the machine can climb to that changes nothing is worse than no rung,
+    because it looks like protection.
+
+    THE HARD_STOP THRESHOLDS DID NOT MOVE. This removes two inert states; it
+    does not make seats stop more or less easily. See ``StickyStopThresholds``
+    for the one meter where the collapse forced a real choice.
+    """
 
     OK = "OK"
-    WARN = "WARN"
-    SOFT_STOP = "SOFT_STOP"
     HARD_STOP = "HARD_STOP"
 
 
 _LEVEL_ORDER = {
     StickyStopLevel.OK: 0,
-    StickyStopLevel.WARN: 1,
-    StickyStopLevel.SOFT_STOP: 2,
-    StickyStopLevel.HARD_STOP: 3,
+    StickyStopLevel.HARD_STOP: 1,
 }
+
+#: Levels this module used to emit. A seat still running a pre-collapse
+#: overlay reports them, and a persisted row can be latched at one, so every
+#: reader maps them to OK rather than choking: they never restricted anything,
+#: so OK is what they always meant. This is also what un-latches a seat parked
+#: at SOFT_STOP without a Captain clear -- there is nothing to clear.
+LEGACY_LEVELS = frozenset({"WARN", "SOFT_STOP"})
+
+
+def _level_from_stored(raw: str) -> StickyStopLevel:
+    """Parse a persisted level, mapping the removed rungs onto OK.
+
+    A row written by a pre-collapse overlay can be latched at WARN or
+    SOFT_STOP. Those never restricted anything, so OK is what they always
+    meant, and this is also what un-latches such a seat with no Captain clear
+    -- there is nothing to clear. ``StickyStopLevel(raw)`` would raise instead,
+    and a raise on the read path is how a seat stops metering entirely.
+    """
+    if raw in LEGACY_LEVELS:
+        return StickyStopLevel.OK
+    try:
+        return StickyStopLevel(raw)
+    except ValueError:
+        # A word from neither vocabulary: a writer we do not understand. OK is
+        # NOT the safe guess here, but neither is inventing a stop -- log it and
+        # take OK, matching what the HARD_STOP readers already do with any
+        # value that is not exactly "HARD_STOP".
+        log.warning("sticky_stop: unrecognised persisted level %r; reading as OK", raw)
+        return StickyStopLevel.OK
 
 
 class StickyStopCondition(str, enum.Enum):
@@ -191,26 +233,35 @@ class StickyStopThresholds:
     """
 
     # Consecutive tool-failure counts within tool_failure_window_seconds.
-    tool_failure_warn: int = 3
-    tool_failure_soft_stop: int = 5
+    # The _warn / _soft_stop rungs are gone with the states they named; the
+    # HARD_STOP counts below are UNCHANGED, so a seat stops exactly where it
+    # stopped before.
     tool_failure_hard_stop: int = 8
     tool_failure_window_seconds: int = 600  # 10 minutes
 
     # Refusal-cascade counts within refusal_window_seconds.
-    refusal_warn: int = 5
-    refusal_soft_stop: int = 10
     refusal_hard_stop: int = 20
     refusal_window_seconds: int = 1800  # 30 minutes
 
-    # Wall-clock seconds for a single run. Single-step transition to
-    # SOFT_STOP; the agent has already exceeded its envelope.
+    # Wall-clock seconds for a single run.
+    #
+    # THE ONE METER THE COLLAPSE FORCED A CHOICE ON. Its only outcome was
+    # SOFT_STOP -- it had no hard threshold -- so with SOFT_STOP gone it either
+    # stops nothing or starts halting seats. It stops nothing, which is
+    # PRECISELY what it did before: SOFT_STOP restricted nothing, so a run over
+    # budget has never once been interrupted. Promoting it to HARD_STOP would
+    # be a silent tightening that could halt a client mid-run (a medical
+    # chronology legitimately runs past an hour), and that is a risk-posture
+    # change for the Captain to make deliberately, not a side effect of
+    # deleting two unused words.
+    #
+    # The overrun is still RECORDED (reason + condition + an audit row); it
+    # simply no longer pretends to be a state. Captain decision 2026-09-02.
     time_budget_seconds: int = 3600  # 1 hour
 
-    # Daily $ cap on LLM costs. cost_warn_pct / cost_soft_stop_pct /
-    # cost_hard_stop_pct are percentages of cost_daily_cents.
+    # Daily $ cap on LLM costs. cost_hard_stop_pct is a percentage of
+    # cost_daily_cents; the warn/soft percentages went with their states.
     cost_daily_cents: int = 5_000  # $50/day default
-    cost_warn_pct: int = 80
-    cost_soft_stop_pct: int = 100
     cost_hard_stop_pct: int = 200
 
 
@@ -338,7 +389,7 @@ class SqliteStickyStopStore:
         return StickyStopState(
             customer=cust,
             persona=pers,
-            level=StickyStopLevel(level),
+            level=_level_from_stored(level),
             updated_at=updated_at,
             reason=reason,
             condition=StickyStopCondition(condition) if condition else None,
@@ -511,8 +562,6 @@ class StickyStopMachine:
                 "consecutive_tool_failures": new_count,
                 "window_seconds": self._thresholds.tool_failure_window_seconds,
                 "thresholds": {
-                    "warn": self._thresholds.tool_failure_warn,
-                    "soft_stop": self._thresholds.tool_failure_soft_stop,
                     "hard_stop": self._thresholds.tool_failure_hard_stop,
                 },
             },
@@ -586,8 +635,6 @@ class StickyStopMachine:
                 "refusal_count": new_count,
                 "window_seconds": self._thresholds.refusal_window_seconds,
                 "thresholds": {
-                    "warn": self._thresholds.refusal_warn,
-                    "soft_stop": self._thresholds.refusal_soft_stop,
                     "hard_stop": self._thresholds.refusal_hard_stop,
                 },
             },
@@ -602,37 +649,43 @@ class StickyStopMachine:
     ) -> StickyStopState:
         """Record observed wall-clock runtime for a single agent run.
 
-        If the value exceeds the configured budget, the machine transitions
-        directly to SOFT_STOP. Forward-only: if the machine is already in
-        HARD_STOP, the level is unchanged.
+        An overrun is RECORDED and changes no state. This is the one meter the
+        two-state collapse forced a choice on: SOFT_STOP was its only outcome
+        and it had no HARD_STOP threshold, so with SOFT_STOP gone it either
+        stops nothing or starts halting seats.
+
+        It stops nothing, which is exactly what it did before -- SOFT_STOP
+        restricted nothing, so no over-budget run has ever been interrupted.
+        Promoting it would be a silent tightening that could halt a client
+        mid-run (a medical chronology legitimately passes an hour), and that is
+        a deliberate Captain call, not a side effect of deleting two unused
+        words. What changes is honesty: the overrun is now visibly an
+        observation instead of a state that looked like protection.
+
+        The audit row still lands (INVARIANT_VIOLATION with the observed and
+        budgeted seconds), so the evidence a future decision would need is
+        being collected either way.
         """
         state = await self.get_state(customer, persona)
         if seconds <= self._thresholds.time_budget_seconds:
             return state
-        now = self._clock()
-        next_level = self._forward_only(state.level, StickyStopLevel.SOFT_STOP)
         return await self._commit_transition(
             current=state,
-            next_state=replace(
-                state,
-                level=next_level,
-                updated_at=_iso(now),
-                reason=(
-                    f"time_budget_exceeded={seconds:.1f}s "
-                    f"(budget={self._thresholds.time_budget_seconds}s)"
-                )
-                if next_level != state.level
-                else state.reason,
-                condition=StickyStopCondition.TIME_BUDGET_EXCEEDED
-                if next_level != state.level
-                else state.condition,
-            ),
+            # No `replace(...)`: the row is unchanged. Writing `reason` and
+            # `condition` here would leave a time-budget cause sitting beside
+            # whatever level the seat is actually at -- the exact stale pairing
+            # the cause fields were added to prevent.
+            next_state=state,
             condition=StickyStopCondition.TIME_BUDGET_EXCEEDED,
-            transitioned=next_level != state.level,
+            transitioned=False,
+            observation=True,
             skill_name=None,
             extra_metadata={
                 "observed_seconds": seconds,
                 "budget_seconds": self._thresholds.time_budget_seconds,
+                # Named in the row so a reader is not left inferring why a
+                # recorded overrun did not move the level.
+                "level_unchanged_by_design": True,
             },
         )
 
@@ -683,8 +736,6 @@ class StickyStopMachine:
             extra_metadata={
                 "cost_cents_today": new_total,
                 "cost_daily_cents_cap": self._thresholds.cost_daily_cents,
-                "warn_pct": self._thresholds.cost_warn_pct,
-                "soft_stop_pct": self._thresholds.cost_soft_stop_pct,
                 "hard_stop_pct": self._thresholds.cost_hard_stop_pct,
             },
         )
@@ -699,9 +750,14 @@ class StickyStopMachine:
     ) -> StickyStopState:
         """Call from the dispatch path before invoking any skill.
 
-        Raises StickyStopError if the current level is HARD_STOP. Returns
-        the current state otherwise so the caller can pin trust_ceiling to
-        draft_for_review when SOFT_STOP is active.
+        Raises StickyStopError if the current level is HARD_STOP; returns the
+        current state otherwise.
+
+        It used to say the caller could "pin trust_ceiling to draft_for_review
+        when SOFT_STOP is active". No caller ever did, which is exactly why
+        SOFT_STOP was removed: a state whose enforcement lives only in a
+        docstring is not a safety state. Per-call restriction is the trust
+        ceiling's job (plugins/hermes-smd-trust), authored per skill.
         """
         state = await self.get_state(customer, persona)
         if state.level == StickyStopLevel.HARD_STOP:
@@ -775,20 +831,12 @@ class StickyStopMachine:
         t = self._thresholds
         if count >= t.tool_failure_hard_stop:
             return StickyStopLevel.HARD_STOP
-        if count >= t.tool_failure_soft_stop:
-            return StickyStopLevel.SOFT_STOP
-        if count >= t.tool_failure_warn:
-            return StickyStopLevel.WARN
         return StickyStopLevel.OK
 
     def _level_for_refusals(self, count: int) -> StickyStopLevel:
         t = self._thresholds
         if count >= t.refusal_hard_stop:
             return StickyStopLevel.HARD_STOP
-        if count >= t.refusal_soft_stop:
-            return StickyStopLevel.SOFT_STOP
-        if count >= t.refusal_warn:
-            return StickyStopLevel.WARN
         return StickyStopLevel.OK
 
     def _level_for_cost(self, cents: int) -> StickyStopLevel:
@@ -798,10 +846,6 @@ class StickyStopMachine:
         pct = (cents * 100) // t.cost_daily_cents
         if pct >= t.cost_hard_stop_pct:
             return StickyStopLevel.HARD_STOP
-        if pct >= t.cost_soft_stop_pct:
-            return StickyStopLevel.SOFT_STOP
-        if pct >= t.cost_warn_pct:
-            return StickyStopLevel.WARN
         return StickyStopLevel.OK
 
     def _forward_only(
@@ -809,7 +853,11 @@ class StickyStopMachine:
         current: StickyStopLevel,
         proposed: StickyStopLevel,
     ) -> StickyStopLevel:
-        return proposed if _LEVEL_ORDER[proposed] > _LEVEL_ORDER[current] else current
+        # `.get(current, 0)` rather than `[current]`: a row written by a
+        # pre-collapse overlay can be latched at WARN or SOFT_STOP, and those
+        # never restricted anything, so they rank as OK. Indexing would raise
+        # here and a raise on the metering path is how a seat stops metering.
+        return proposed if _LEVEL_ORDER[proposed] > _LEVEL_ORDER.get(current, 0) else current
 
     def _tick_window(
         self,
@@ -842,22 +890,32 @@ class StickyStopMachine:
         transitioned: bool,
         skill_name: str | None,
         extra_metadata: dict,
+        observation: bool = False,
     ) -> StickyStopState:
         await self._store.put(next_state)
-        if not transitioned:
+        if not transitioned and not observation:
             return next_state
 
+        # `observation` is a meter firing WITHOUT a state change: the substrate
+        # noticed something worth recording that it has deliberately chosen not
+        # to act on (today, only a time-budget overrun -- see
+        # record_runtime_seconds). Before the two-state collapse this evidence
+        # arrived as a real OK -> SOFT_STOP transition; dropping the row with
+        # the state would have deleted the only proof the budget was ever
+        # exceeded, which is exactly the evidence a later decision to enforce
+        # it would need.
+        #
         # Pick the action_type that best fits the audit-log closed-set
         # vocabulary (ACCEPTED_ACTION_TYPES). HARD_STOP -> AGENT_STOPPED;
-        # WARN / SOFT_STOP -> INVARIANT_VIOLATION (the substrate noticed
+        # everything else -> INVARIANT_VIOLATION (the substrate noticed
         # something wrong before it became unsafe).
-        if next_state.level == StickyStopLevel.HARD_STOP:
+        if next_state.level == StickyStopLevel.HARD_STOP and not observation:
             action_type = "AGENT_STOPPED"
         else:
             action_type = "INVARIANT_VIOLATION"
 
         metadata: dict = {
-            "sticky_stop_transition": True,
+            "sticky_stop_transition": transitioned,
             "customer": next_state.customer,
             "persona": next_state.persona,
             "from_state": current.level.value,
