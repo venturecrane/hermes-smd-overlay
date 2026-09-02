@@ -63,13 +63,22 @@ class FabricationMarkersError(RuntimeError):
 class MarkerHit:
     """One matched banned marker inside a scanned body.
 
-    ``marker_id`` and ``reason`` come from the registry; ``match`` is the
-    literal substring that hit (used in the audit row — NOT the full body).
+    ``marker_id``, ``reason`` and ``remedy`` come from the registry; ``match``
+    is the literal substring that hit (used in the audit row — NOT the full
+    body).
+
+    ``remedy`` is the narrowest instruction that clears the refusal, and it is
+    load-bearing rather than decorative. Refusals carrying only a reason
+    STRAND work: the em-dash marker lost a daily-needs-you-digest memo on
+    2026-08-19 and again on 2026-09-02, each on a single attempt with no
+    retry, while the identifier gate's remedy-bearing refusal recovers ~88% of
+    the time. Empty string when the registry authored none.
     """
 
     marker_id: str
     reason: str
     match: str
+    remedy: str = ""
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,7 @@ class _CompiledMarker:
     marker_id: str
     reason: str
     pattern: re.Pattern[str]
+    remedy: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,6 +119,7 @@ class MarkerRegistry:
                         marker_id=marker.marker_id,
                         reason=marker.reason,
                         match=matched,
+                        remedy=marker.remedy,
                     )
                 )
         return hits
@@ -143,6 +154,8 @@ def _compile_marker(entry: dict) -> _CompiledMarker | None:
     kind = (entry.get("kind") or "literal_ci").lower()
     # Canonical key is ``note``; fall back to legacy ``reason`` then id.
     reason = entry.get("note") or entry.get("reason") or marker_id or "fabrication marker"
+    remedy_raw = entry.get("remedy")
+    remedy = remedy_raw if isinstance(remedy_raw, str) else ""
     if not isinstance(marker_id, str) or not marker_id:
         logger.warning("fabrication_markers: entry missing 'id'; dropping entry")
         return None
@@ -167,7 +180,7 @@ def _compile_marker(entry: dict) -> _CompiledMarker | None:
             exc,
         )
         return None
-    return _CompiledMarker(marker_id=marker_id, reason=str(reason), pattern=compiled)
+    return _CompiledMarker(marker_id=marker_id, reason=str(reason), pattern=compiled, remedy=remedy)
 
 
 def _load_registry(path: Path) -> MarkerRegistry:

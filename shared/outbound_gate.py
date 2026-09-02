@@ -289,7 +289,19 @@ def evaluate(
     if marker_hits:
         hit_ids = tuple(h.marker_id for h in marker_hits)
         first = marker_hits[0]
+        # Reason THEN remedy. A refusal that says only why the rule exists
+        # strands the work: the em-dash marker lost a daily-needs-you-digest
+        # memo on 2026-08-19 and again on 2026-09-02, each on a single attempt
+        # with no retry, while the identifier gate -- whose refusal ends with
+        # "Re-read the source record ... or remove the unverified value" --
+        # recovers ~88% of refused writes in the same session.
+        #
+        # Remedies are authored narrow and never restate the rule: on
+        # 2026-08-24 a refusal that named its rule taught the model to strip 38
+        # matter numbers out of a digest.
         detail = first.reason
+        if first.remedy:
+            detail = f"{detail} {first.remedy}"
         if first.marker_id == _PROVENANCE_EXEMPT_MARKER:
             missing = _unverified_money(body, allowed_money)
             detail = (
