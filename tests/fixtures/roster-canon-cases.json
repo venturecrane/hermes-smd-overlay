@@ -1,0 +1,121 @@
+{
+  "_comment": [
+    "Shared test vectors for roster-address canonicalization -- the ONE notion of",
+    "\"the same address\" used by BOTH the console validator",
+    "(src/lib/operator/customer-yaml/sections-scope.ts::canonRosterAddress) and the",
+    "runtime classifier (operator/adapter/recipient_classifier.py::",
+    "_canonicalize_roster_entry). This fixture is the ARBITER: both suites load it",
+    "and assert their own real implementation maps every input to its expected",
+    "canonical form (null = refused).",
+    "",
+    "WHY IT EXISTS (ss#2284). The two disagreed. The validator did a bare",
+    "trim().toLowerCase() while the runtime NFC-normalized, so NFD and NFC",
+    "spellings of one accented address passed the validator's collision rules as",
+    "two addresses and resolved at runtime to one -- one human holding two silent",
+    "exposure classes. They also used different whitespace sets: JavaScript's",
+    "\\s covers NBSP, the ideographic space and the BOM; the Python list did not.",
+    "Measured on both real implementations before the fix: 4 of 10 probe cases",
+    "diverged.",
+    "",
+    "Adding a case here is how the rule changes. Both suites fail until both",
+    "languages follow, which is the whole point -- neither copy can drift alone.",
+    "Inputs are synthetic; no real roster address appears."
+  ],
+  "cases": [
+    {
+      "name": "plain address, mixed case",
+      "input": "Scott@SMD.Services",
+      "expected": "scott@smd.services"
+    },
+    {
+      "name": "whole-domain grant",
+      "input": "@Firm.Example",
+      "expected": "@firm.example"
+    },
+    {
+      "name": "surrounding whitespace is trimmed",
+      "input": "  scott@smd.services  ",
+      "expected": "scott@smd.services"
+    },
+    {
+      "name": "NFC precomposed accent",
+      "input": "jos\u00e9@firm.example",
+      "expected": "jos\u00e9@firm.example"
+    },
+    {
+      "name": "NFD decomposed accent normalizes to the SAME address as its NFC twin (the ss#2284 defect: two spellings, one human, two exposure classes)",
+      "input": "jose\u0301@firm.example",
+      "expected": "jos\u00e9@firm.example"
+    },
+    {
+      "name": "non-breaking space inside the local part",
+      "input": "scott\u00a0doe@smd.services",
+      "expected": null
+    },
+    {
+      "name": "ideographic space inside the local part",
+      "input": "scott\u3000doe@smd.services",
+      "expected": null
+    },
+    {
+      "name": "byte-order mark inside the local part",
+      "input": "scott\ufeffdoe@smd.services",
+      "expected": null
+    },
+    {
+      "name": "NEL (C1 control) inside the local part",
+      "input": "scott\u0085doe@smd.services",
+      "expected": null
+    },
+    {
+      "name": "unit separator (C0 control) inside the local part",
+      "input": "scott\u001fdoe@smd.services",
+      "expected": null
+    },
+    {
+      "name": "whole-domain grant with a non-breaking space -- the ONLY path the roster-entry check guards alone, since an @domain entry returns before _canonicalize_address ever sees it",
+      "input": "@firm\u00a0.example",
+      "expected": null
+    },
+    {
+      "name": "whole-domain grant with a BOM",
+      "input": "@firm\ufeff.example",
+      "expected": null
+    },
+    {
+      "name": "display-name form",
+      "input": "\"Scott Durgan\" <scott@smd.services>",
+      "expected": null
+    },
+    {
+      "name": "comma-separated list",
+      "input": "a@smd.services,b@smd.services",
+      "expected": null
+    },
+    {
+      "name": "two at-signs",
+      "input": "a@b@smd.services",
+      "expected": null
+    },
+    {
+      "name": "no dot in the domain",
+      "input": "scott@localhost",
+      "expected": null
+    },
+    {
+      "name": "empty domain label",
+      "input": "scott@smd..services",
+      "expected": null
+    },
+    {
+      "name": "plus tag is NOT stripped",
+      "input": "scott+ap@smd.services",
+      "expected": "scott+ap@smd.services"
+    },
+    {
+      "name": "empty string",
+      "input": "",
+      "expected": null
+    }
+  ]
+}

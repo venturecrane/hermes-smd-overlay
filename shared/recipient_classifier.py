@@ -85,6 +85,7 @@ typed variant.
 from __future__ import annotations
 
 import enum
+import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 
@@ -146,6 +147,34 @@ _RESTRICTIVENESS: dict[RecipientClass, int] = {
 }
 
 
+# Characters that disqualify a roster entry or an address outright (ss#2284).
+#
+# THIS SET IS A CROSS-LANGUAGE CONTRACT. The console's validator
+# (`src/lib/operator/customer-yaml/sections-scope.ts::canonRosterAddress`)
+# decides whether two authored spellings are "the same address" for its
+# collision rules; this module decides the same thing at classify time. When the
+# two disagree, one human address can hold two silent exposure classes — which
+# is exactly what they did until 2026-09-01: the TS side used JavaScript's `\s`,
+# which covers NBSP, the ideographic space and the BOM, while this list did not.
+#
+# The set below is the UNION of both sides' historical rules, enumerated rather
+# than expressed as `str.isspace()` because the two languages' whitespace
+# classes are not the same set (`﻿` is whitespace to JS and not to Python;
+# `\x1c`-`\x1f` and `\x85` are the reverse). C0/C1 controls are rejected on both
+# sides now: neither belongs in an address, and both used to survive
+# canonicalization intact.
+#
+# Arbiter fixture: operator/contracts/fixtures/roster-canon-cases.json, loaded
+# by BOTH test suites. Change the rule in one language only by changing that
+# fixture, and both suites fail until the other follows.
+_DISQUALIFYING_RE = re.compile(
+    '[<>",;'
+    "\x00-\x20\x7f-\xa0"  # C0 controls + space, DEL + C1 controls (incl. NEL, NBSP)
+    "\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"  # Unicode spaces + BOM
+    "]"
+)
+
+
 def _canonicalize_address(raw: str) -> str | None:
     """Return the canonical ``local@domain`` for a bare address, or ``None``.
 
@@ -169,7 +198,7 @@ def _canonicalize_address(raw: str) -> str | None:
     if not s:
         return None
     # No display names, bracketed addresses, quoting, whitespace, or lists.
-    if any(ch in s for ch in ("<", ">", '"', " ", "\t", ",", ";", "\n", "\r")):
+    if _DISQUALIFYING_RE.search(s):
         return None
     if s.count("@") != 1:
         return None
@@ -192,7 +221,7 @@ def _canonicalize_roster_entry(entry: str) -> str | None:
     if entry is None:
         return None
     s = unicodedata.normalize("NFC", entry).strip().lower()
-    if not s or any(ch in s for ch in ("<", ">", '"', " ", "\t", ",", ";", "\n", "\r")):
+    if not s or _DISQUALIFYING_RE.search(s):
         return None
     if s.startswith("@"):
         domain = s[1:]
