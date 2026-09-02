@@ -37,6 +37,7 @@ package free of bootstrap imports.
 
 import logging
 import os
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -569,6 +570,58 @@ class CustomerConfig:
         if not addr:
             return False
         return addr in self.admins
+
+    def authored_person_name(self, address: object) -> str | None:
+        """The firm's OWN authored name for ``address``, or ``None`` (ss#2152).
+
+        The only sanctioned source of a person's name on a seat. Reads
+        ``users[].full_name``, which is authored per engagement and reviewed by
+        a human, and matches on ``users[].email``.
+
+        WHY THIS EXISTS AND WHY IT IS THE ONLY SOURCE. The commitment made to the
+        firm is that every confirmation is logged on the matter with the
+        attorney's NAME. There are three other places a name could come from and
+        each is wrong:
+
+        * the model — a name it composed is a fabricated fact on a legal matter;
+        * Smokeball ``createdBy`` — under ``auth_mode: authorization_code`` that
+          is whoever clicked Allow during setup, which is the wrong human for
+          every multi-attorney firm;
+        * the email display name — attacker-controlled on any inbound.
+
+        FAIL CLOSED, LOUDLY. An address with no authored user returns ``None``,
+        and the caller records no attribution rather than a guess. "Dana
+        confirmed" written when Chris replied is worse than "a rostered person
+        confirmed", because only one of the two is a false record.
+
+        Matching is exact after NFC-normalize + strip + lowercase, the same
+        canonical form the runtime recipient classifier uses (ss#2284) — a name
+        looked up under one notion of "same address" while a reply was
+        authorized under another is the divergence that issue was filed for.
+        """
+        if not isinstance(address, str):
+            return None
+        wanted = unicodedata.normalize("NFC", address).strip().lower()
+        if not wanted:
+            return None
+        raw = self._data.get("users")
+        if not isinstance(raw, list):
+            return None
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            email = entry.get("email")
+            if not isinstance(email, str):
+                continue
+            if unicodedata.normalize("NFC", email).strip().lower() != wanted:
+                continue
+            name = entry.get("full_name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+            # An authored user with no authored name is still not a licence to
+            # invent one.
+            return None
+        return None
 
     # ------------------------------------------------------------------
     # Live-read config blocks (ADR 0044 — read fresh per use, no restart)
