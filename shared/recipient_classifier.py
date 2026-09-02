@@ -168,7 +168,7 @@ _RESTRICTIVENESS: dict[RecipientClass, int] = {
 # by BOTH test suites. Change the rule in one language only by changing that
 # fixture, and both suites fail until the other follows.
 _DISQUALIFYING_RE = re.compile(
-    "[<>\",;"
+    '[<>",;'
     "\x00-\x20\x7f-\xa0"  # C0 controls + space, DEL + C1 controls (incl. NEL, NBSP)
     "\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"  # Unicode spaces + BOM
     "]"

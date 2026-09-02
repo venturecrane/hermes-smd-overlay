@@ -32,9 +32,9 @@ import pytest
 
 from shared.recipient_classifier import _canonicalize_roster_entry
 
-_CASES = json.loads(
-    (Path(__file__).parent / "fixtures" / "roster-canon-cases.json").read_text()
-)["cases"]
+_CASES = json.loads((Path(__file__).parent / "fixtures" / "roster-canon-cases.json").read_text())[
+    "cases"
+]
 
 # One code point, spelled out. This file is about characters that render as
 # nothing; an invisible literal in a test is a defect waiting to be "cleaned up"
@@ -54,8 +54,9 @@ def test_fixture_carries_the_cases_that_caught_the_divergence() -> None:
     # The @domain grant is the only path the roster-entry check guards alone:
     # it returns before _canonicalize_address is ever reached. Without a case
     # here, reverting that check leaves the suite green.
-    assert any(i.startswith("@") and c["expected"] is None for i, c in
-               ((c["input"], c) for c in _CASES)), "no refused @domain grant case"
+    assert any(
+        i.startswith("@") and c["expected"] is None for i, c in ((c["input"], c) for c in _CASES)
+    ), "no refused @domain grant case"
     assert any(c["expected"] is not None for c in _CASES), "no acceptance case"
 
 
