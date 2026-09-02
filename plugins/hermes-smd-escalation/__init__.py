@@ -40,10 +40,63 @@ from collections import OrderedDict
 from dataclasses import asdict
 from typing import Any
 
-from shared import escalation_ledger, provenance
+from shared import escalation_ledger, inbound, provenance
+from shared.audit_contract import sender_key
+from shared.customer_config import CustomerConfig
 from shared.tool_registration import register_wrapped_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _verified_acker(session_id: str) -> dict[str, str] | None:
+    """Who actually sent the reply that is acking, or ``None`` (ss#2152).
+
+    The commitment to the firm is that a confirmation is logged with the
+    attorney's NAME. Today the ack records that somebody confirmed; this is the
+    half that records WHO, and it is deliberately not an argument the model can
+    pass.
+
+    THREE SOURCES ARE REFUSED, each for its own reason. The model's own account
+    of who replied is a fabricated fact on a legal matter. Smokeball
+    ``createdBy`` is whoever clicked Allow at setup under
+    ``auth_mode: authorization_code`` — wrong for every multi-attorney firm, and
+    the exact trap #2152 was filed to avoid. An email display name is
+    attacker-controlled on any inbound.
+
+    The one source that is neither guessable nor spoofable is
+    :data:`shared.inbound.SESSION_INBOUND_ORIGIN`, whose entries come only from
+    Svix-verified From headers, bound to this turn. The NAME then comes from the
+    firm's own authored ``users[]`` — never from the wire.
+
+    SESSION-KEYED ONLY, on purpose. The relay has two recovery paths for a
+    missing session binding (``find_for_recipient``, ``claim_unbound``) because a
+    reply has to go somewhere. Attribution has the opposite failure economics: a
+    reply sent to the right person's older thread is a nuisance, while "Dana
+    confirmed" written when Chris replied is a false record on a legal matter. So
+    a session with no bound origin attributes NOBODY.
+
+    Returns ``{"name": ..., "key": ...}`` only when the sender is verified AND
+    the firm authored a name for them. A verified sender the firm never authored
+    yields ``None``: they may well be entitled to reply, but this seat has no
+    sanctioned name for them and must not invent one.
+    """
+    if not session_id:
+        return None
+    origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id)
+    address = getattr(origin, "sender_address", "") if origin is not None else ""
+    if not address:
+        return None
+    try:
+        name = CustomerConfig.from_volume().authored_person_name(address)
+    except Exception:  # noqa: BLE001 — an unreadable config attributes nobody
+        logger.warning("hermes-smd-escalation: could not read authored users for attribution")
+        return None
+    if not name:
+        return None
+    key = sender_key(address)
+    if not key:
+        return None
+    return {"name": name, "key": key}
 
 
 def _resolved_session(kwargs: dict[str, Any]) -> str:
@@ -545,6 +598,22 @@ def _escalation_append(args: dict[str, Any], **kwargs: Any) -> str:
         # and refuse a raise whose send is sitting right there.
         "session_id": _resolved_session(kwargs),
     }
+    if kind == "acked":
+        # WHO confirmed (ss#2152). Same posture as `session_id` directly above
+        # and for the same reason: `_APPEND_SCHEMA` sets
+        # `additionalProperties: false`, so the model cannot name this field, and
+        # the value is resolved from the turn's Svix-verified inbound origin plus
+        # the firm's own authored users[] — never from anything the model or the
+        # wire said.
+        #
+        # ABSENT MEANS UNATTRIBUTED, and that is a state the record is allowed to
+        # be in. `acked_by` present says a named person confirmed; absent says
+        # somebody quoting a valid code did, and the seat could not verify who.
+        # Writing a plausible name into the second case is the whole failure this
+        # issue exists to prevent, so there is no default and no fallback.
+        acker = _verified_acker(event["session_id"])
+        if acker is not None:
+            event["acked_by"] = acker
     if determination is not None:
         # The broker's validate_append enforces the payload's shape (note
         # length, 64-hex snapshot, confirmed_via enum) and refuses it on any

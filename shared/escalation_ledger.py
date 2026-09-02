@@ -527,6 +527,53 @@ def is_pre_identity_epoch(event) -> bool:
         return True
 
 
+#: The exact fields an ``acked_by`` payload holds (ss#2152).
+_ACKED_BY_KEYS = frozenset({"name", "key"})
+
+#: How long an authored person name may be. Generous for a name, short enough
+#: that a body, a note, or a paragraph of model prose cannot arrive in this field.
+_ACKED_BY_NAME_MAX_CHARS = 120
+
+
+def _validate_acked_by(acked_by) -> None:
+    """Shape check for an ``acked`` event's confirmer payload (ss#2152).
+
+    ``name`` is the firm's OWN authored name for the verified replying sender
+    (``users[].full_name``); ``key`` is the sha256 of that sender's canonical
+    address, the same key ``INBOUND_RECEIVED`` and ``REPLY_SENT`` rows carry, so
+    the confirmation joins to the message that carried it.
+
+    Both are required together. A name with no key is an unjoinable assertion
+    about a person, and a key with no name cannot be written into a memo a human
+    reads — and the whole point of this field is a record that names somebody.
+
+    The broker validates rather than trusts because this field is the evidence
+    behind a client-facing commitment. The overlay resolves it from a
+    Svix-verified origin, but the broker is the thing that would still refuse a
+    malformed payload from any other caller.
+    """
+    if not isinstance(acked_by, dict):
+        raise ValueError("acked_by must be an object with name and key")
+    unknown = sorted(set(acked_by) - _ACKED_BY_KEYS)
+    if unknown:
+        raise ValueError(
+            f"acked_by carries unknown fields {unknown}; it holds exactly name and key"
+        )
+    name = acked_by.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name) > _ACKED_BY_NAME_MAX_CHARS:
+        raise ValueError(
+            f"acked_by.name must be 1..{_ACKED_BY_NAME_MAX_CHARS} characters, copied from the "
+            "firm's authored users[].full_name — never composed, never taken from an email "
+            "display name, never from Smokeball createdBy"
+        )
+    key = acked_by.get("key")
+    if not isinstance(key, str) or not _SNAPSHOT_SHA256_RE.fullmatch(key):
+        raise ValueError(
+            "acked_by.key must be 64 lowercase hex chars: the sha256 of the verified "
+            "sender's canonical address, as computed by shared.audit_contract.sender_key"
+        )
+
+
 def _validate_determination(determination) -> None:
     """Shape check for a ``resolved`` event's determination payload. Corrective:
     each refusal names the malformed field and what a well-formed one holds."""
@@ -598,6 +645,14 @@ def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
                 "this append"
             )
         _validate_determination(determination)
+    acked_by = new_event.get("acked_by")
+    if acked_by is not None:
+        if kind != "acked":
+            raise ValueError(
+                f"acked_by names the person whose reply confirmed an item; there is no "
+                f"such person on a {kind}. Drop it from this append."
+            )
+        _validate_acked_by(acked_by)
     if kind in RAISING_EVENTS:
         if not callable(send_witness):
             raise ValueError(
