@@ -1,96 +1,111 @@
 {
-  "version": "2026-08-22.1",
-  "description": "Canonical high-risk fabrication / uncontracted-commitment markers for the outbound provenance gate (ADR 0028 Tier-1, universal across verticals). This file is the SINGLE source of truth: the hermes-smd-overlay vendors a copy and a CI hash-check asserts the bytes match this artifact at its pinned SHA, so the two repos cannot drift. Derived from the CLAUDE.md 'No fabricated client-facing content' Pattern A/B rule and the Tone & Positioning style markers. Match `literal_ci` and `regex` case-insensitively; `literal` exactly.",
+  "version": "2026-09-02.1",
+  "description": "Canonical high-risk fabrication / uncontracted-commitment markers for the outbound provenance gate (ADR 0028 Tier-1, universal across verticals). This file is the SINGLE source of truth: the hermes-smd-overlay vendors a copy and a CI hash-check asserts the bytes match this artifact at its pinned SHA, so the two repos cannot drift. Derived from the CLAUDE.md 'No fabricated client-facing content' Pattern A/B rule and the Tone & Positioning style markers. Match `literal_ci` and `regex` case-insensitively; `literal` exactly. Every marker carries a `remedy`: the narrowest instruction that clears the refusal, appended to the refusal text the model receives. Reason alone strands work -- the em-dash marker stranded a daily-needs-you-digest memo on 2026-08-19 and again on 2026-09-02, each on a single attempt with no retry, while the identifier gate's remedy-bearing refusal recovers ~88% of the time. Remedies state what to DO and never restate the rule: on 2026-08-24 a refusal that named its rule taught the model to strip 38 matter numbers from a digest.",
   "markers": [
     {
       "id": "em-dash",
       "kind": "literal",
-      "value": "—",
-      "note": "Banned typographic marker on shipped user-facing copy (tone rules)."
+      "value": "\u2014",
+      "note": "Banned typographic marker on shipped user-facing copy (tone rules).",
+      "remedy": "Replace it with a comma, a semicolon, or a full stop. Change nothing else."
     },
     {
       "id": "coming-soon",
       "kind": "literal_ci",
       "value": "coming soon",
-      "note": "Placeholder copy banned on prospect/client surfaces."
+      "note": "Placeholder copy banned on prospect/client surfaces.",
+      "remedy": "Delete the phrase. Say what is true now, or say nothing about timing."
     },
     {
       "id": "well-reach-out",
       "kind": "regex",
       "value": "we(?:'ll| ?ll| will) reach out",
-      "note": "Pattern A: implies an uncontracted scheduling commitment (states.ts:138). Covers we'll / well / we will."
+      "note": "Pattern A: implies an uncontracted scheduling commitment (states.ts:138). Covers we'll / well / we will.",
+      "remedy": "Delete the sentence. Do not replace it with another commitment about contact."
     },
     {
       "id": "work-begins-within",
       "kind": "literal_ci",
       "value": "work begins within",
-      "note": "Pattern A: post-signing timeline promise (quotes/[id].astro:72)."
+      "note": "Pattern A: post-signing timeline promise (quotes/[id].astro:72).",
+      "remedy": "Delete the timing clause. State only what the signed document states."
     },
     {
       "id": "within-two-weeks-of-signing",
       "kind": "literal_ci",
       "value": "within two weeks of signing",
-      "note": "Pattern A: uncontracted start-date promise."
+      "note": "Pattern A: uncontracted start-date promise.",
+      "remedy": "Delete the timing clause. State only what the signed document states."
     },
     {
       "id": "replies-within-n-business-day",
       "kind": "regex",
       "value": "repl(?:y|ies) within \\d+ business day",
-      "note": "Pattern A: SLA promise the engagement has not contracted (ConsultantBlock.astro:136)."
+      "note": "Pattern A: SLA promise the engagement has not contracted (ConsultantBlock.astro:136).",
+      "remedy": "Delete the response-time promise. Say nothing about reply speed."
     },
     {
       "id": "stabilization-period",
       "kind": "literal_ci",
       "value": "stabilization period",
-      "note": "Pattern A: post-handoff support promise (sow-template.tsx:529)."
+      "note": "Pattern A: post-handoff support promise (sow-template.tsx:529).",
+      "remedy": "Delete the support-period clause. State only what the signed document states."
     },
     {
       "id": "guarantee",
       "kind": "regex",
       "value": "\\bguarantee(?:d|s)?\\b",
-      "note": "Outcome guarantee — an uncontracted promise."
+      "note": "Outcome guarantee \u2014 an uncontracted promise.",
+      "remedy": "Delete the guarantee. Describe what will be done, never what will result."
     },
     {
       "id": "specific-dollar-amount",
       "kind": "regex",
       "value": "\\$\\s?\\d",
-      "note": "A specific dollar figure in client-facing copy must come from authored engagement data, never an agent draft."
+      "note": "A specific dollar figure in client-facing copy must come from authored engagement data, never an agent draft.",
+      "remedy": "Re-read the record that carries the figure and quote it exactly as printed, or remove the figure and say it needs confirmation."
     },
     {
       "id": "by-next-week",
       "kind": "literal_ci",
       "value": "by next week",
-      "note": "Future-date commitment phrase."
+      "note": "Future-date commitment phrase.",
+      "remedy": "Delete the date phrase. Give no completion date you were not given."
     },
     {
       "id": "by-end-of",
       "kind": "literal_ci",
       "value": "by end of",
-      "note": "Future-date commitment phrase (by end of week/month/quarter)."
+      "note": "Future-date commitment phrase (by end of week/month/quarter).",
+      "remedy": "Delete the date phrase. Give no completion date you were not given."
     },
     {
       "id": "we-shadow-and-observe",
       "kind": "literal_ci",
       "value": "we shadow and observe",
-      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83, stripped by hotfix #378)."
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83, stripped by hotfix #378).",
+      "remedy": "Delete the sentence. Describe only work the engagement authored."
     },
     {
       "id": "we-redesign-together",
       "kind": "literal_ci",
       "value": "we redesign together",
-      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83)."
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83).",
+      "remedy": "Delete the sentence. Describe only work the engagement authored."
     },
     {
       "id": "training-and-handoff",
       "kind": "literal_ci",
       "value": "training and handoff",
-      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83)."
+      "note": "Pattern B: the fabricated 3-week schedule constant (quotes/[id].astro:79-83).",
+      "remedy": "Delete the sentence. Describe only work the engagement authored."
     },
     {
       "id": "record-narration-about-a-person",
       "kind": "regex",
       "value": "(?:\\b(?:record|log|sav|stor|add|updat|not|keep|kept|writ|put)\\w*\\b[^.\\n]{0,40}\\byour\\s+(?:profile|preferences)\\b|\\byour\\s+(?:profile|preferences)\\b[^.\\n]{0,40}\\b(?:record|log|sav|stor|updat)\\w*\\b|\\bprofile\\s+(?:on|about)\\s+you\\b)",
-      "note": "Conduct floor (ss-console#2552): the Operator speaks about what it will do, never about what it holds on you. It must not volunteer that a preference was recorded, where it lives, or that a profile exists. Triggered by a live confirm email reading 'That preference is recorded to your profile'. Storage itself is trust-contracted (ADR 0048); narrating it is the defect. Nouns are scoped to profile/preferences deliberately: 'your file' and 'your record' carry heavy legitimate legal usage ('We have added your medical records to your file') and matching them false-positives on attributed firm prose. Asked directly what is known about them, the Operator answers in full: this bans volunteering, not disclosure."
+      "note": "Conduct floor (ss-console#2552): the Operator speaks about what it will do, never about what it holds on you. It must not volunteer that a preference was recorded, where it lives, or that a profile exists. Triggered by a live confirm email reading 'That preference is recorded to your profile'. Storage itself is trust-contracted (ADR 0048); narrating it is the defect. Nouns are scoped to profile/preferences deliberately: 'your file' and 'your record' carry heavy legitimate legal usage ('We have added your medical records to your file') and matching them false-positives on attributed firm prose. Asked directly what is known about them, the Operator answers in full: this bans volunteering, not disclosure.",
+      "remedy": "Rewrite in terms of what you will do. Say nothing about what a person did, failed to do, or intended."
     }
   ]
 }

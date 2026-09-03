@@ -44,7 +44,7 @@ from tests.conftest import load_plugin
 # that forgot to update the pin, and it does NOT catch the canonical artifact and
 # the vendored copy drifting apart. Updating both repos in the same change is a
 # discipline requirement, not something CI enforces.
-_CANONICAL_MARKERS_SHA256 = "0a432b844a38e37521126309ca9143358a010f1bb886d907859580de6c902b4e"
+_CANONICAL_MARKERS_SHA256 = "18230fbb712afe6279913af65864102b6b8e18939ea96b59cf16da9ffe0c2746"
 
 _VENDORED_MARKERS_PATH = (
     Path(__file__).resolve().parent.parent / "shared" / "fabrication_markers.json"
@@ -1382,3 +1382,73 @@ def test_a_write_elsewhere_is_not_fenced(
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Every refusal tells the model what to DO (2026-09-02)
+#
+# Scoped to tools that write client work product, 88% of refused attempts
+# recover in the same session. The ones that STRAND cluster on markers whose
+# refusal carried only a reason:
+#
+#   identifier gate  "... or remove the unverified value and state that it
+#                     needs confirmation."                        -> recovers
+#   em-dash marker   "Banned typographic marker on shipped
+#                     user-facing copy (tone rules)."             -> stranded a
+#                        daily-needs-you-digest memo on 2026-08-19 and again on
+#                        2026-09-02, each on ONE attempt with no retry.
+# ---------------------------------------------------------------------------
+
+
+def test_every_marker_authors_a_remedy() -> None:
+    """A marker without a remedy is a refusal that says only why the rule
+    exists, which is the shape that strands work."""
+    reg = load_markers()
+    missing = [m.marker_id for m in reg.markers if not m.remedy.strip()]
+    assert missing == [], (
+        "these markers refuse without telling the model what to do, which is "
+        f"how a write gets abandoned on the first attempt: {missing}"
+    )
+
+
+def test_a_refusal_carries_the_remedy_to_the_model() -> None:
+    """The reason alone is not the deliverable; the remedy has to reach the
+    refusal text the model actually reads."""
+    decision = outbound_gate.evaluate(
+        "This sentence has an em dash — right here.", cohort=None, vertical="law-firm"
+    )
+    assert decision.allowed is False
+    assert "em-dash" in decision.reason
+    # The remedy, verbatim from the registry.
+    assert "Replace it with a comma, a semicolon, or a full stop" in decision.reason
+
+
+def test_remedies_say_what_to_do_and_never_restate_the_rule() -> None:
+    """The 2026-08-24 lesson, kept mechanical.
+
+    A refusal that named its rule taught the model to strip 38 matter numbers
+    out of a digest. Remedies are instructions, so they must not carry
+    rule-language ("must", "never", "banned", "not allowed", "policy") -- that
+    is what the reason field is for, and mixing them is what over-corrects.
+    """
+    reg = load_markers()
+    offenders = []
+    for m in reg.markers:
+        low = m.remedy.lower()
+        for word in (" must ", "banned", "not allowed", "policy", "prohibited"):
+            if word in low:
+                offenders.append((m.marker_id, word.strip()))
+    assert offenders == [], (
+        f"a remedy is an instruction, not a restatement of the rule: {offenders}"
+    )
+    # And a remedy that said nothing would pass the two checks above while
+    # teaching nothing: require an imperative verb.
+    verbless = [
+        m.marker_id
+        for m in reg.markers
+        if not any(
+            m.remedy.lstrip().lower().startswith(v)
+            for v in ("replace", "delete", "remove", "re-read", "rewrite", "state", "give")
+        )
+    ]
+    assert verbless == [], f"these remedies do not open with an instruction: {verbless}"
