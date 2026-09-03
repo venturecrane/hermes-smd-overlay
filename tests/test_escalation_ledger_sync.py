@@ -54,7 +54,14 @@ _COPY = _REPO_ROOT / "shared" / "escalation_ledger.py"
 # validate_append refuses a resolved/handed_off with no prior raise on the same
 # item_key (RELEASE_EVENTS), and validates the optional `determination` payload
 # a hold release carries on its resolved event.
-CANONICAL_SHA256 = "912bac290f05d44cbd8b5b27dd0c837006bdedc02c782ca1398b30db8f88fbce"
+# 2026-09-02 (ss#2152 / this PR): validate_append accepts an optional `acked_by`
+# on an `acked` event and refuses it on every other kind. It carries the verified
+# confirmer -- the firm's OWN authored users[].full_name plus the sha256 of that
+# person's canonical address -- so the commitment "every confirmation is logged
+# with the attorney's name" has a field to be true in. Both halves are required
+# together: a name with no key is unjoinable, a key with no name cannot be
+# written into a memo a human reads.
+CANONICAL_SHA256 = "4f99f46510d67ee5522226e0631252d6849b8fa21eb09e96507ae7afe6b6bf9e"
 
 CANONICAL_PATH = "operator/workspace_broker/escalation_ledger.py"
 CANONICAL_REPO = "venturecrane/ss-console"
