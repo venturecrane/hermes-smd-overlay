@@ -46,7 +46,18 @@
 #     render_mode:  templated | slot-templated | compositional
 #     body_sha256:  [{ body_sha256_full, body_sha256_skeleton }]   # per dispatch entry
 #     items:        [{ item_key, ack_code }]                       # escalator; feeds ack_invariant
-#   CONFIRM_SEND_DISPATCHED (overlay _dispatch_internal_message)
+#   CONFIRM_SEND_DISPATCHED (overlay _dispatch_internal_message, via the
+#   workspace broker's _dispatch_transmit, which WRITES the row)
+#     skill_name:           <slug>  # COLUMN, not metadata. The routine that
+#                                   # authored the body, resolved by the overlay
+#                                   # from the CRON SESSION ID at emission
+#                                   # (cron_attribution.resolve_routine) in
+#                                   # shared/prerendered_dispatch.py and carried
+#                                   # on audit_extra; the broker moves it to the
+#                                   # column (server.py _append_send_row). A
+#                                   # scheduler fact, not an agent assertion.
+#                                   # NULL on every row written before the pair
+#                                   # PRs (claims review 2026-09-04, B3).
 #     rendered_body_sha256: <hex>   # PRE-mutation: the body pre_run authored
 #     plain_body_sha256:    <hex>   # POST-attach: the text/plain the channel
 #                                   # stores. OMITTED when no plain part was
@@ -54,6 +65,10 @@
 #                                   # html) -- absence means "text is still the
 #                                   # authored bytes", not "unknown".
 #     body_variant:         full | skeleton
+#     message_id / audit_row_token  # the broker's own join keys: the vendor id
+#                                   # and the ULID it stamped on the message as
+#                                   # X-SMD-Audit-Row (ss#2499). The identity
+#                                   # join below reads them (B7).
 #   console verifier (operator/bin/lib/send_verify.py) compares per entry;
 #     a skeleton match grades `degraded`, never `BODY_DIVERGED`. The two hashes
 #     answer two different questions and neither substitutes for the other:
@@ -64,14 +79,79 @@
 #     templated send -- proven byte-for-byte in rehearsal (crane_verify
 #     vfy_01M1ERB6DD7G8Q2XSQ2MAVQ68Z, vfy_01M1ERF2TSW86GSAZT2YY16X7S).
 #
+# HOW THE CONSOLE PAIRS A DISPATCH WITH ITS WAKE (send_attribution.claim_wake).
+# SKILL-FIRST: a dispatch whose `skill_name` column names a hash-verified skill
+# claims the oldest same-skill wake in the window with capacity left; none in
+# window is `no_wake_hash` (a hold). HASH-SECOND: a dispatch with a NULL column
+# (a seat whose pinned overlay predates the stamp) whose `rendered_body_sha256`
+# sits in a hash-verified wake's full/skeleton stamps IS that wake's send and
+# grades MATCH/DEGRADED with `detail: attributed by hash`. A NULL-column
+# dispatch no wake recognises gets NO verdict -- an establishment ops note is
+# exactly that shape and must not redden every run. Both paths are COUNTED per
+# inbox (`attributed_by_skill`, `attributed_by_hash`, in the report and --json)
+# so the expected trajectory on a seat is a number moving: by_hash > 0 before
+# the overlay pin lands, by_skill > 0 and by_hash == 0 after it.
+#
+# HOW THE CONSOLE GRADES THE CHANNEL BODY (send_verify.verify_channel_bodies).
+# IDENTITY, NOT PROXIMITY (B7). Each mailbox message is first attributed by its
+# own id (AgentMail `message_id`; msgraph `audit_row_token` off the header)
+# against the dispatch rows' join keys -- tri-state: the joined row names a
+# skill (column, or hash-attributed) -> claimable by THAT skill's wake only;
+# the joined row names no skill (an in-turn send, an ops note) -> never
+# claimable by any wake; no row joins it -> the window claim as before, graded
+# HOLD-ONLY. Then: wake stamp match -> `match`; skeleton match -> `degraded`.
+# Otherwise the dispatch stamp to grade against is the message's OWN row when
+# one joins it, else the oldest unconsumed stamp in the window the wake could
+# have authored (one row vouches for one message), compared against:
+#   * `plain_body_sha256` when present -- the down-render actually transmitted;
+#   * `rendered_body_sha256` when absent AND the overlay is known to stamp --
+#     absence is deliberate, so the channel text IS the allowed bytes;
+#   * nothing, when NO dispatch row on the inbox carries a plain stamp at all.
+# That last case is the pre-deploy window: a seat pinned to an OVERLAY_REF older
+# than the stamp still down-renders templated sends with nothing recording it,
+# so grading against the raw markdown would file a false BODY_DIVERGED on every
+# run. It keeps `channel_mismatch_hold`. The "any row on the inbox" probe is the
+# discriminator because the overlay version is a property of the SEAT, not of
+# the hour. Mismatch in the other two cases is a FINDING when a row IDENTIFIED
+# the message -- with a same-representation counterpart in hand a divergence
+# can no longer be explained away as an uncalibrated channel transform -- and
+# `channel_mismatch_hold` when none did: a finding accuses a routine, and a
+# message nobody can tie to one is a guess. `body_unavailable` stays a hold
+# throughout. Net invariant: no false findings before the pin lands, no
+# permanent holds after it, and no finding filed by proximity.
+#
+# NOT EVERY SEND CARRIES STAMPS, BY DESIGN. Three paths are ungraded on purpose
+# and the verifier must not expect stamps there:
+#   * `_dispatch_approved_send` (plugins/hermes-smd-trust) -- the model-composed
+#     approved sends: neither hash, no skill_name. Covered by the cross-run
+#     invariants (operator/bin/send-invariants.json), not by body hash.
+#   * `_smd_send_message` (same plugin) -- the in-turn send tool: no audit_extra
+#     at all. Its rows carry a NULL skill_name and no hashes; the identity join
+#     reads that row as "identified, nobody's" so its message is never claimed
+#     by a routine's wake (the motion-calendar case).
+#   * establishment out-of-turn notes (plugins/hermes-smd-establishment, the
+#     ops-request pass-on and the unparsed-ask note) -- they go through the
+#     published sender, so `rendered_body_sha256` IS stamped, but with no
+#     audit_extra: NULL skill_name, no body_variant. No wake stamps their hash,
+#     so they get no verdict; they must not redden a run.
+#   Only shared/prerendered_dispatch.py (full and skeleton) stamps the complete
+#   set: skill_name + routing_leg + body_variant on audit_extra, the two hashes
+#   added by `_dispatch_internal_message`.
+#
 # MIRRORED ARTIFACT. This file ships to the overlay (hermes-smd-overlay,
 # tests/contract/send-render.yaml) under the same mirrored-fixture discipline
-# as the seat/gate snapshot: copy in the same change. The mirror landed with
-# the render cluster's pair PR (WS-RENDER), which flipped
-# deadline-miss-escalator and client-verification-tracker to `templated` /
-# `slot-templated` and authored their renderers. Until wake hashes appear on
-# live rows, the console's body-verify phase HOLDs and files nothing -- the
-# designed interim state.
+# as the seat/gate snapshot: copy in the same change. The `plain_body_sha256`
+# addition above is mirrored by the overlay's own pair PR (branch
+# feat/confirm-dispatch-plain-body-sha), which is where the stamp is WRITTEN;
+# this side only teaches the verifier to read it. The `skill_name` stamp pairs
+# with the overlay's fix/prerendered-dispatch-skill-name PR the same way, and
+# is deploy-order asymmetric: the broker's allowlist is a SILENT closed list,
+# so ss-console lands first, the overlay second, one pin bump carries both to
+# the seat. The mirror landed with the render cluster's pair PR (WS-RENDER),
+# which flipped deadline-miss-escalator and client-verification-tracker to
+# `templated` / `slot-templated` and authored their renderers. Until wake hashes
+# appear on live rows, the console's body-verify phase HOLDs and files nothing
+# -- the designed interim state.
 #
 # WHAT IS DECLARED. Every skill armed on a cron row in any authored
 # operator/customers/*/customer.yaml whose output-classes binding is

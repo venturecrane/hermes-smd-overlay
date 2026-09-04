@@ -224,8 +224,32 @@ def test_full_send_carries_body_variant_and_routing_leg(monkeypatch, tmp_path):
     prerendered_dispatch.dispatch_prerendered(SESSION)
     [call] = sender.calls
     assert call["templated"] is True
-    assert call["audit_extra"] == {"routing_leg": "central", "body_variant": "full"}
+    # Exact equality on purpose: audit_extra is the broker's closed allowlist
+    # seen from this side, and a key added here without its broker twin
+    # vanishes silently between the repos. `skill_name` (ss-console claims
+    # review 2026-09-04, B3) is the cron-resolved routine, not an agent claim.
+    assert call["audit_extra"] == {
+        "skill_name": SKILL,
+        "routing_leg": "central",
+        "body_variant": "full",
+    }
     assert call["to"] == ["ops@firm.example"]
+
+
+def test_the_skill_stamp_is_the_cron_resolved_routine_not_the_envelope(monkeypatch, tmp_path):
+    """The stamp names the routine the SESSION is, which is what the console's
+    wake<->confirm join keys on. A routine resolved as the tracker stamps the
+    tracker even though the envelope on disk was written under the escalator's
+    name -- FALSIFIER: read the skill off the envelope instead and this passes
+    the escalator through."""
+    _routine(monkeypatch, skill="client-verification-tracker")
+    _write_envelope(tmp_path, skill="client-verification-tracker")
+    _appends_recorder(monkeypatch)
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    prerendered_dispatch.dispatch_prerendered("cron_client-verification-tracker_20260831_070026")
+    [call] = sender.calls
+    assert call["audit_extra"]["skill_name"] == "client-verification-tracker"
 
 
 def test_refused_full_falls_back_to_skeleton_with_no_appends(monkeypatch, tmp_path):
@@ -243,7 +267,12 @@ def test_refused_full_falls_back_to_skeleton_with_no_appends(monkeypatch, tmp_pa
     assert "reduced" in note
     assert "retried on the next run" in note
     assert written == []  # per-item codes never reached a person
-    assert sender.calls[1]["audit_extra"]["body_variant"] == "skeleton"
+    # The skeleton is still this routine's send: same column, same join.
+    assert sender.calls[1]["audit_extra"] == {
+        "skill_name": SKILL,
+        "routing_leg": "central",
+        "body_variant": "skeleton",
+    }
     assert sender.calls[1]["text"].startswith("## Deadline digest")
 
 
