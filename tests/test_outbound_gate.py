@@ -1278,12 +1278,16 @@ def test_an_empty_register_refusal_offers_no_removal_hatch(
     "or remove the unverified value and state that it needs confirmation",
     fifteen items at a time, register empty. When nothing was read, the refusal
     must offer reading or stopping — never a send with the values stripped."""
+    # Relative, not hardcoded: the same time bomb the handoff test above
+    # documents. This literal was 2026-09-04 and stopped being a fabrication
+    # the day the calendar reached it (the gate correctly let it through).
+    due = (datetime.now(timezone.utc).date() + timedelta(days=45)).isoformat()
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     provenance._reset_for_tests()
     _wire_fake_audit(trust_plugin.outbound)
     blocked = trust_plugin.outbound.check_outbound_send(
         tool_name="smd_send_message",
-        args={"to": [_STAFF], "text": "Deadline 2026-09-04 is approaching."},
+        args={"to": [_STAFF], "text": f"Deadline {due} is approaching."},
         session_id="sess-empty-reg",
         tool_call_id="c",
     )
@@ -1300,13 +1304,14 @@ def test_a_populated_register_refusal_keeps_the_single_value_hatch(
     """Removing ONE stray unverified value from an otherwise-sourced draft is a
     legitimate path and stays offered — the hatch closes only when the register
     is empty and there is nothing sourced to fall back on."""
+    due = (datetime.now(timezone.utc).date() + timedelta(days=45)).isoformat()
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     provenance._reset_for_tests()
     _wire_fake_audit(trust_plugin.outbound)
     _seed_unrelated_read(trust_plugin, "sess-populated")
     blocked = trust_plugin.outbound.check_outbound_send(
         tool_name="smd_send_message",
-        args={"to": [_STAFF], "text": "Deadline 2026-09-04 is approaching."},
+        args={"to": [_STAFF], "text": f"Deadline {due} is approaching."},
         session_id="sess-populated",
         tool_call_id="c",
     )
