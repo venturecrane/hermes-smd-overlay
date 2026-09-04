@@ -104,15 +104,19 @@
 # one joins it, else the oldest unconsumed stamp in the window the wake could
 # have authored (one row vouches for one message), compared against:
 #   * `plain_body_sha256` when present -- the down-render actually transmitted;
-#   * `rendered_body_sha256` when absent AND the overlay is known to stamp --
-#     absence is deliberate, so the channel text IS the allowed bytes;
-#   * nothing, when NO dispatch row on the inbox carries a plain stamp at all.
-# That last case is the pre-deploy window: a seat pinned to an OVERLAY_REF older
+#   * `rendered_body_sha256` when absent AND the row is at or after the inbox's
+#     DEPLOY EDGE (the earliest dispatch row carrying a plain stamp) -- absence
+#     is deliberate, so the channel text IS the allowed bytes;
+#   * nothing, when the row is BEFORE the edge, or no row on the inbox carries
+#     a plain stamp at all.
+# That last case is the pre-deploy row: a seat pinned to an OVERLAY_REF older
 # than the stamp still down-renders templated sends with nothing recording it,
-# so grading against the raw markdown would file a false BODY_DIVERGED on every
-# run. It keeps `channel_mismatch_hold`. The "any row on the inbox" probe is the
-# discriminator because the overlay version is a property of the SEAT, not of
-# the hour. Mismatch in the other two cases is a FINDING when a row IDENTIFIED
+# so grading against the raw markdown would file a false BODY_DIVERGED. It keeps
+# `channel_mismatch_hold`. The edge is per ROW, not per inbox: the overlay
+# version is a property of the seat, but the seat's version CHANGES, and a
+# window spanning the reprovision holds rows from both sides (live 2026-09-04,
+# pilot-smokeball --days 7: a per-inbox probe misgraded the 09-01 send as a
+# deliberate omission). Mismatch in the other two cases is a FINDING when a row IDENTIFIED
 # the message -- with a same-representation counterpart in hand a divergence
 # can no longer be explained away as an uncalibrated channel transform -- and
 # `channel_mismatch_hold` when none did: a finding accuses a routine, and a
