@@ -287,6 +287,10 @@ def test_send_render_mirror_declares_the_flipped_modes():
     # declared there or the console side has no authority to expect it.
     assert "plain_body_sha256:" in text
     assert "rendered_body_sha256:" in text
+    # And the routine column (ss-console claims review 2026-09-04, B3): the
+    # stamp prerendered_dispatch writes must be declared where the console's
+    # verifier reads its schema from, or the two sides drift silently.
+    assert "skill_name:" in text
 
 
 def test_canon_vectors_mirror_is_wellformed_and_arbitrated():

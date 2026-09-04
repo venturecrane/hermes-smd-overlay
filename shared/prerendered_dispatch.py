@@ -370,7 +370,19 @@ def dispatch_prerendered(session_id: str) -> str | None:
         confirm_withheld = 0
         for entry in envelope.get("dispatches") or []:
             recipients = [str(r) for r in entry["recipients"]]
-            audit_base = {}
+            # ``skill_name`` (ss-console claims review 2026-09-04, B3): the
+            # routine this session IS, resolved above from the cron session id
+            # -- a scheduler fact, not something the agent asserted. It rides
+            # audit_extra through the broker's closed allowlist and lands on the
+            # CONFIRM row's skill_name COLUMN (the broker moves it there), which
+            # is the half of the console's wake<->confirm join that was NULL on
+            # every live row: EMITTED_WAKE carried the column, the dispatch did
+            # not, and `declares.get("")` graded nothing. Stamped on the full
+            # send and the skeleton fallback alike -- both are this routine's.
+            # Deploy order: the broker's allowlist is a SILENT closed list, so
+            # the ss-console half lands first; on an older broker this key is
+            # dropped without error and the row is what it was.
+            audit_base = {"skill_name": routine.skill}
             if isinstance(entry.get("routing_leg"), str) and entry["routing_leg"]:
                 audit_base["routing_leg"] = entry["routing_leg"]
             result = send_dispatch.dispatch(
