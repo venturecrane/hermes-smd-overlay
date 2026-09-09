@@ -272,6 +272,7 @@ from typing import Any
 from shared import (
     act_broker,
     admin_possession,
+    matter_gate,
     provenance,
     read_capture,
     rule_confirm,
@@ -4287,6 +4288,15 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         _ADMIN_STASH[session_id] = {"sender": str(sender_id), "is_admin": is_admin}
         lines: list[str] = []
         if is_admin:
+            # Firm-voice establishment reads the firm's own letters ACROSS
+            # matters by design (ADR 0085). Exempt this admin session from the
+            # READ-time matter-mixing fence (shared/matter_gate.py) so the survey
+            # can run; the SEND-time fence is untouched and establishment never
+            # sends. Set at turn start (pre_llm_call), so it is in place before
+            # the survey's first cross-matter read. Marked only after the seat
+            # classified the sender as a firm admin — the same allow-list that
+            # gates the establishment tools.
+            matter_gate.mark_establishment_read_exempt(session_id)
             lines.append(_ADMIN_DOCUMENTS_LINE)
             if _maybe_confirm_possession(cfg, sender_id, kwargs.get("user_message")):
                 lines.append(_POSSESSION_CONFIRMED_NOTE.format(sender=str(sender_id)))

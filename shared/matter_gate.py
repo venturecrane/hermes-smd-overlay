@@ -385,6 +385,63 @@ def evaluate(
 # Phase 1 only records and cannot withhold.
 
 
+# ---------------------------------------------------------------------------
+# The establishment read-exemption (voice/shape establishment, ss ADR 0085)
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. Firm-voice establishment is, by product design (ADR 0085),
+# an Operator ADMIN instructing the seat to characterize how the FIRM writes by
+# reading the firm's OWN letters ACROSS many matters. That cross-matter read is
+# the job, not a mistake — and the read-time mixing fence below
+# (:func:`content_read_refusal`) refused exactly it, so the product motion could
+# never run (the 2026-09-01 A&P establishment HARD_STOP was preceded by this
+# refusal on the survey's second matter).
+#
+# WHY IT IS SAFE, precisely. The mixing control has TWO enforcement points and
+# this lifts only the FIRST:
+#
+#   * READ time — :func:`content_read_refusal`, a hard block, exempted here for a
+#     marked establishment session.
+#   * SEND time — :func:`multi_matter_session`, which DOWNGRADES any cross-matter
+#     outbound to a human draft. UNTOUCHED, and it fires regardless of who is
+#     attributed.
+#
+# Establishment never sends (the skill's whole ceiling is "never sends"), so
+# nothing outbound loses a control. And the send-time downgrade remains the
+# backstop for the impossible case where an exempted session did try to send:
+# the mixed draft would still route to human review. The harm the read fence
+# guards — one CLIENT's facts reaching ANOTHER client — is an outbound event, and
+# the outbound layer is intact.
+#
+# WHO MAY MARK. Only :func:`mark_establishment_read_exempt`, called from the
+# establishment plugin AFTER the seat has classified the turn's sender as a firm
+# admin against the authored allow list. A non-admin turn is never marked, so
+# this cannot become a route around the fence for ordinary work: the mark is
+# gated on the same admin allow-list that gates the establishment tools
+# themselves.
+_read_exempt_sessions: set[str] = set()
+
+
+def mark_establishment_read_exempt(session_id: str) -> None:
+    """Mark a session exempt from the read-time mixing fence.
+
+    Called by the establishment plugin once the seat has classified the sender
+    as a firm admin. Idempotent; a falsy id is ignored (an unkeyed session shares
+    one bucket and must never carry an exemption for another)."""
+    if isinstance(session_id, str) and session_id:
+        _read_exempt_sessions.add(session_id)
+
+
+def is_establishment_read_exempt(session_id: str) -> bool:
+    """True when this session was marked an admin establishment session."""
+    return bool(session_id) and session_id in _read_exempt_sessions
+
+
+def clear_establishment_read_exempt(session_id: str) -> None:
+    """Drop a session's exemption (session teardown / test hygiene)."""
+    _read_exempt_sessions.discard(session_id)
+
+
 def multi_matter_mode() -> str:
     """``off`` | ``report`` | ``block``. Default ``block``, fail-closed.
 
@@ -468,6 +525,13 @@ def content_read_refusal(session_id: str, tool_name: str, args: Any) -> str | No
             return None
         if not session_id or not matter_binding.is_content_read(tool_name):
             return None
+        # An admin establishment session reads the firm's own letters across
+        # matters BY DESIGN (ADR 0085); the read fence is not for it. Only the
+        # read block is lifted — the send-time downgrade above is untouched, and
+        # establishment never sends. The mark is set only after the seat
+        # classified the sender as a firm admin.
+        if is_establishment_read_exempt(session_id):
+            return None
         matter_id = matter_binding.content_matter_id(args)
         if not matter_id:
             return None
@@ -550,4 +614,7 @@ __all__ = [
     "multi_matter_mode",
     "multi_matter_session",
     "content_read_refusal",
+    "mark_establishment_read_exempt",
+    "is_establishment_read_exempt",
+    "clear_establishment_read_exempt",
 ]
