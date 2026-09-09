@@ -34,8 +34,10 @@ LIST_MATTERS = "mcp_smokeball_list_matters"
 @pytest.fixture(autouse=True)
 def _clean():
     matter_binding._reset_for_tests()
+    matter_gate.clear_establishment_read_exempt(SID)
     yield
     matter_binding._reset_for_tests()
+    matter_gate.clear_establishment_read_exempt(SID)
 
 
 def _read(tool: str, matter_id: str, result="{}", session: str = SID) -> None:
@@ -225,3 +227,55 @@ def test_unresolvable_session_does_not_fence() -> None:
 def test_missing_matter_id_does_not_fence() -> None:
     _read(MEMOS, M_A)
     assert matter_gate.content_read_refusal(SID, MEMOS, {}) is None
+
+
+# ---- the establishment read-exemption (ADR 0085) ----------------------------
+#
+# Every positive below is paired with the negative that would have made it
+# false: the exemption must lift the READ fence for a marked session AND leave
+# it in force for an unmarked one, or it has measured nothing.
+
+
+def test_marked_establishment_session_may_read_a_second_matter() -> None:
+    """An admin establishment survey reads the firm's letters across matters by
+    design; a marked session is not refused the second matter's content read."""
+    _read(MEMOS, M_A)
+    # baseline: without the mark, the second read IS refused
+    assert matter_gate.content_read_refusal(SID, DOC, {"matter_id": M_B}) is not None
+    matter_gate.mark_establishment_read_exempt(SID)
+    assert matter_gate.content_read_refusal(SID, DOC, {"matter_id": M_B}) is None
+
+
+def test_exemption_is_per_session_and_does_not_leak() -> None:
+    """Marking one session must not exempt another that happens to be mixing."""
+    other = "s-other"
+    matter_gate.mark_establishment_read_exempt(SID)
+    matter_binding.record_from_read(other, "{}", tool_name=MEMOS, args={"matter_id": M_A})
+    try:
+        assert matter_gate.content_read_refusal(other, DOC, {"matter_id": M_B}) is not None
+    finally:
+        matter_gate.clear_establishment_read_exempt(other)
+
+
+def test_a_falsy_session_id_is_never_marked() -> None:
+    """An unkeyed session shares one bucket; it must never carry an exemption."""
+    matter_gate.mark_establishment_read_exempt("")
+    assert matter_gate.is_establishment_read_exempt("") is False
+
+
+def test_clearing_the_mark_restores_the_fence() -> None:
+    _read(MEMOS, M_A)
+    matter_gate.mark_establishment_read_exempt(SID)
+    assert matter_gate.content_read_refusal(SID, DOC, {"matter_id": M_B}) is None
+    matter_gate.clear_establishment_read_exempt(SID)
+    assert matter_gate.content_read_refusal(SID, DOC, {"matter_id": M_B}) is not None
+
+
+def test_exemption_does_not_touch_the_send_time_signal() -> None:
+    """The exemption lifts the READ fence only. A marked session that read two
+    matters still reports the multi-matter send signal, so the send-time
+    downgrade is untouched — establishment never sends, but the backstop stays."""
+    matter_gate.mark_establishment_read_exempt(SID)
+    _read(DOC, M_A)
+    _read(DOC, M_B)
+    assert matter_gate.multi_matter_session(SID) == tuple(sorted((M_A, M_B)))
