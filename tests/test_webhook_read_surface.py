@@ -275,10 +275,27 @@ def _offer_expected_tools(toolsets_state, config):
     return config
 
 
-def test_expected_tier_is_exactly_the_seat_facts_tool():
+def test_expected_tier_is_exactly_the_three_email_channel_tools():
     """The warn tier is deliberately small. Widening it silently converts a
-    "this class of answer degrades" signal into noise."""
-    assert WEBHOOK_EXPECTED_TOOLS == ("operator_seat_facts",)
+    "this class of answer degrades" signal into noise.
+
+    It was widened once, on purpose, and the original argument is the reason the
+    entries qualify rather than a reason against them. The tier's definition is
+    "tools whose absence degrades ONE class of answer rather than the seat", and
+    the medchron pair is exactly that: without them an administrator's emailed
+    chronology request degrades and nothing else on the seat does. They also
+    carry a ``requires_env`` that ``operator_seat_facts`` deliberately does not,
+    so they are the entries in this tier that CAN be dropped by a failing check
+    -- silently, because gateway callers pass ``quiet_mode=True``.
+
+    A fourth entry needs the same two sentences: which single class of answer
+    dies without it, and why its absence would otherwise be invisible.
+    """
+    assert WEBHOOK_EXPECTED_TOOLS == (
+        "operator_seat_facts",
+        "medchron_allowance",
+        "medchron_job_submit",
+    )
     assert set(WEBHOOK_EXPECTED_TOOLS).isdisjoint(WEBHOOK_READ_TOOLS)
 
 
@@ -302,7 +319,7 @@ def test_expected_tools_report_carries_both_sides(hermes):
     register_webhook_read_toolset()
     config = _offer_expected_tools(hermes, _config(webhook=True, fixed=True))
     assert expected_tool_report(config) == {
-        "operator_seat_facts": {"expected": True, "offered": True}
+        t: {"expected": True, "offered": True} for t in WEBHOOK_EXPECTED_TOOLS
     }
     assert missing_expected_tools(config) == []
 
@@ -316,9 +333,9 @@ def test_expected_tools_missing_when_the_plugin_did_not_register(hermes):
     config = _config(webhook=True, fixed=True)
     config["platform_toolsets"]["webhook"] = [*webhook_platform_toolsets(), "initiation"]
     # "initiation" resolves to [] — never registered.
-    assert missing_expected_tools(config) == ["operator_seat_facts"]
+    assert missing_expected_tools(config) == sorted(WEBHOOK_EXPECTED_TOOLS)
     assert expected_tool_report(config) == {
-        "operator_seat_facts": {"expected": True, "offered": False}
+        t: {"expected": True, "offered": False} for t in WEBHOOK_EXPECTED_TOOLS
     }
 
 
@@ -333,7 +350,7 @@ def test_the_fatal_tier_is_unchanged_by_the_warn_tier(hermes):
 
     read_only = _config(webhook=True, fixed=True)
     assert_read_file_on_webhook(read_only)  # warn tier NOT satisfied, still fine
-    assert missing_expected_tools(read_only) == ["operator_seat_facts"]
+    assert missing_expected_tools(read_only) == sorted(WEBHOOK_EXPECTED_TOOLS)
 
     # The warn tier satisfied and the fatal one NOT: the surface offers
     # operator_seat_facts and no read_file. Still fatal, exactly as before.

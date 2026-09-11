@@ -100,7 +100,24 @@ WEBHOOK_READ_TOOLS: tuple[str, ...] = ("read_file",)
 #: hermes-smd-initiation plugin with no ``requires_env`` and no ``check_fn``
 #: precisely so it cannot be dropped by a failing check — this entry is the
 #: assertion that it was not dropped anyway.
-WEBHOOK_EXPECTED_TOOLS: tuple[str, ...] = ("operator_seat_facts",)
+#:
+#: ``medchron_allowance`` / ``medchron_job_submit`` (ss-console#2616): the pair
+#: an administrator's emailed chronology-package request runs on. Unlike
+#: ``operator_seat_facts`` these DO carry a ``requires_env``
+#: (``SMD_WORKSPACE_BROKER_SOCKET``), and ``registry.get_definitions`` drops a
+#: tool whose check fails SILENTLY, because gateway callers pass
+#: ``quiet_mode=True``. A silently absent pair is indistinguishable, from the
+#: outside, from a model that read the mail and chose not to act: the
+#: administrator gets a fluent reply about pre-flighting an allowance that was
+#: never pre-flighted, and no job. The entries are what make that state say so.
+#: The seat is not expected to reach it — ``bootstrap.sh`` dies when that socket
+#: is unset or is not a socket — which is the argument for the warn tier rather
+#: than the fatal one.
+WEBHOOK_EXPECTED_TOOLS: tuple[str, ...] = (
+    "operator_seat_facts",
+    "medchron_allowance",
+    "medchron_job_submit",
+)
 
 #: Sentinel schema + location. Relative to HERMES_HOME, written by the agent
 #: process, read by the gate. Mirrors ``shared.audit_status`` deliberately: an

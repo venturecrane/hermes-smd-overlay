@@ -5,11 +5,13 @@ Three thin verbs over the capability broker's ``medchron_*`` surface
 
 * ``medchron_job_submit``: hand a resolved matter and its clients to the
   runner on this Machine. The broker validates the envelope, checks the
-  firm's monthly document allowance, writes the ledger row and the queue file,
+  firm's page allowance for the current billing cycle, checks that a Named
+  Administrator asked and that the same package is not already running, writes
+  the ledger row and the queue file,
   and answers with a job id, or with a prose reason it was not accepted. The
   agent relays that sentence; it never sees a path or a file.
 * ``medchron_job_status``: one job's state and counts, or the last twenty.
-* ``medchron_allowance``: the month's allowance, what is used, what remains.
+* ``medchron_allowance``: the cycle's page allowance, what is used, what remains.
 
 The runner itself is a root daemon the agent cannot reach; every transition it
 reports is a broker-written audit row. Nothing here returns document content:
@@ -124,9 +126,14 @@ def _medchron_allowance(args: dict[str, Any], **_: Any) -> str:
 
 TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "medchron_job_submit": (
-        "Queue a medical chronology package for a matter on this Machine's runner. "
-        "The matter and its clients must already be resolved from the practice-management system; "
-        "the broker checks the firm's monthly allowance and answers with a job id or a reason.",
+        "Queue a medical chronology package for a matter on this Machine's runner, for a Named "
+        'Administrator who asked for one ("build the chronology for matter 12345", "build the '
+        'chronology package on that matter", "package the new records"). Call medchron_allowance '
+        "first. The matter and its clients must already be resolved from the practice-management "
+        "system, and requested_by must carry the requesting administrator's own email address: the "
+        "broker refuses a package it cannot attribute, refuses one from someone who is not a Named "
+        "Administrator, and refuses a second copy of a package already running. It answers with a job "
+        "id, or with a prose reason to relay as it comes back.",
         _schema(
             {
                 "matter_id": {
@@ -187,7 +194,9 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         _medchron_job_status,
     ),
     "medchron_allowance": (
-        "The firm's monthly chronology document allowance: authored, used this month, remaining.",
+        "The firm's chronology page allowance for the current billing cycle: authored, used so far "
+        "in the cycle, remaining. Pages, not documents, and the cycle is the firm's billing period "
+        "rather than the calendar month.",
         _schema(
             {
                 "include_recent_jobs": {
