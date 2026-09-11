@@ -127,8 +127,8 @@ def _medchron_allowance(args: dict[str, Any], **_: Any) -> str:
 TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "medchron_job_submit": (
         "Queue a medical chronology package for a matter on this Machine's runner, for a Named "
-        "Administrator who asked for one (\"build the chronology for matter 12345\", \"build the "
-        "chronology package on that matter\", \"package the new records\"). Call medchron_allowance "
+        'Administrator who asked for one ("build the chronology for matter 12345", "build the '
+        'chronology package on that matter", "package the new records"). Call medchron_allowance '
         "first. The matter and its clients must already be resolved from the practice-management "
         "system, and requested_by must carry the requesting administrator's own email address: the "
         "broker refuses a package it cannot attribute, refuses one from someone who is not a Named "
