@@ -238,3 +238,42 @@ def test_env_is_only_the_broker_socket():
         )
     ).read()
     assert "os.environ" not in src
+
+
+# -- what the model is told about these tools ----------------------------------
+
+
+def _descriptions() -> dict[str, str]:
+    plugin = load_plugin("hermes-smd-medchron")
+    return {name: spec[0] for name, spec in plugin.TOOLS.items()}
+
+
+def test_the_descriptions_speak_pages_and_the_cycle():
+    """The description is the ONE surface always in front of the model. On the
+    mail channel the skill body is not loaded until ``read_file`` runs, so until
+    then this text is all the model knows about the tool -- and for two days it
+    said "monthly document allowance" while the skill body said "pages, in the
+    cycle". The unit moved to pages 2026-09-08 (ss-console#2723) and the window
+    moved to the billing cycle 2026-09-11 (ss-console#2747); ss-console's
+    medchron-skill-allowance-unit.test.ts guards the SKILL BODY against exactly
+    this wording and cannot reach here.
+    """
+    for name, text in _descriptions().items():
+        low = text.lower()
+        assert "document allowance" not in low, f"{name} still describes a document allowance"
+        assert "monthly" not in low, f"{name} still calls the window monthly"
+        assert "this month" not in low, f"{name} still calls the window a month"
+    assert "page allowance" in _descriptions()["medchron_allowance"].lower()
+    assert "billing cycle" in _descriptions()["medchron_allowance"].lower()
+
+
+def test_the_submit_description_carries_the_ask_and_the_reservation():
+    """On the mail channel this text is the trigger phrasing and the guard rail,
+    because the skill body arrives only if the model already decided to fetch
+    it. Both the recognized ask and the two refusals the broker will actually
+    perform belong where the model always sees them."""
+    text = _descriptions()["medchron_job_submit"].lower()
+    assert "build the chronology" in text
+    assert "named administrator" in text
+    assert "requested_by" in text
+    assert "medchron_allowance" in text
