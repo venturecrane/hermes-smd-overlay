@@ -453,7 +453,7 @@ def _with_scope_extra(extra: str) -> str:
 
 _OUTBOUND_ROSTER_SCOPE = (
     "  inbound_allow_from:\n"
-    "    - '@ashtonandprice.com'\n"
+    "    - '@firm.example'\n"
     "  outbound_roster:\n"
     "    - address: jane@gmail.com\n"
     "      class: client\n"
