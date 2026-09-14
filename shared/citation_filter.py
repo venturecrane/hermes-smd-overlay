@@ -1,6 +1,6 @@
 """Citation detector — PI-vertical safety invariant #6.
 
-VENDORED from ``ss-console/operator/safety-substrate/citation_filter.py``,
+VENDORED from ``ss-console/operator/safety_substrate/citation_filter.py``,
 which is the source-of-truth primitive. This is a pure-python copy carried in
 the overlay so the outbound gate (ADR 0028) can run the law-vertical Tier-2
 citation scan inside the trust plugin without a cross-repo runtime dependency.
@@ -205,7 +205,7 @@ def canonical_caption(text: str) -> str:
     s = re.sub(r"\s+", " ", s).strip().casefold()
     # Alternation ordered so "ersus" is tried before "s", and the optional dot
     # sits outside the group so "versus." folds too. Kept character-identical to
-    # the ss-console twin (operator/safety-substrate/citation_filter.py): the two
+    # the ss-console twin (operator/safety_substrate/citation_filter.py): the two
     # copies must agree on canonical form or an allowlist entry registered by one
     # will not match a hit canonicalized by the other.
     return re.sub(r"\bv(?:ersus|s)?\.?\s", "v. ", s)

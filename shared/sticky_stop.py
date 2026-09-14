@@ -1,4 +1,4 @@
-# VENDORED from ss-console operator/safety-substrate/sticky_stop.py (ADR 0062,
+# VENDORED from ss-console operator/safety_substrate/sticky_stop.py (ADR 0062,
 # ss-console #1661). Changes land there first, then re-vendor byte-identically
 # below this header. The module is self-contained by design (StickyStopAuditRecord
 # + StickyStopAuditSink Protocol) so no adapter imports are needed here; the

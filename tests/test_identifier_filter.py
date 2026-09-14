@@ -21,7 +21,7 @@ import pytest
 # to say it was (ss#2125).
 #
 # shared/identifier_filter.py is a vendored copy of
-# ss-console/operator/safety-substrate/identifier_filter.py. The old header here
+# ss-console/operator/safety_substrate/identifier_filter.py. The old header here
 # read "passing here asserts the vendored copy is in parity" -- it cannot. This
 # file imports shared.identifier_filter, its OWN copy, and lives in this repo
 # with no access to the ss-console file it claimed parity with. It asserted that

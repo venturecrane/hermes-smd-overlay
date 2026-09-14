@@ -84,7 +84,7 @@ class NamespaceAssertionError(RuntimeError):
     """Raised when a D1 query targets a foreign customer namespace.
 
     The caller MUST NOT swallow this. An attempted cross-customer access
-    is a safety-substrate alarm and the action that triggered it must
+    is a safety_substrate alarm and the action that triggered it must
     abort. The exception carries structured attributes so the audit
     plugin can record the violation as an ``INVARIANT_VIOLATION`` row.
 

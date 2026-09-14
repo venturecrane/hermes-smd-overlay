@@ -104,7 +104,7 @@ def manifest_state(directory: Path | None = None) -> str:
     send proceed when a declared spec was never installed; if a process that
     simply cannot SEE the spec tree reported the same state, a lost
     ``SMD_SPEC_DIR`` would silently unlock autonomous sends. That failure would
-    be invisible: ``operator/safety-substrate/invariants/spec_dir_ownership.py``
+    be invisible: ``operator/safety_substrate/invariants/spec_dir_ownership.py``
     documents that an ABSENT directory PASSES the boot gate, and the heartbeat
     that reports seat health runs in the gateway process while this gate runs in
     the agent process — so the two can disagree about the env with every health

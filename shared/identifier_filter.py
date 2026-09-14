@@ -1,6 +1,6 @@
 """Identifier-integrity filter — provenance discipline for asserted identifiers.
 
-SOURCE OF TRUTH: ``ss-console/operator/safety-substrate/identifier_filter.py``.
+SOURCE OF TRUTH: ``ss-console/operator/safety_substrate/identifier_filter.py``.
 This is a VENDORED copy carried in the overlay so the trust plugin can run the
 gate at runtime without a cross-repo import (the overlay cannot runtime-import
 ss-console). Keep aligned with ss-console; the shape changes there first.

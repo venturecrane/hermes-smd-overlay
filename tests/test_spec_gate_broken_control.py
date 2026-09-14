@@ -223,7 +223,7 @@ def test_staff_send_blocks_when_the_spec_dir_cannot_be_resolved(monkeypatch):
 
     ``SMD_SPEC_DIR`` unset is not evidence that nothing is installed — it is
     evidence this process cannot look. An ABSENT spec dir PASSES the boot gate
-    (operator/safety-substrate/invariants/spec_dir_ownership.py), and the
+    (operator/safety_substrate/invariants/spec_dir_ownership.py), and the
     heartbeat that reports seat health runs in the gateway process while this
     gate runs in the agent process, so the two can disagree about the env while
     every health signal reads green. If this returned None, a lost env var would
