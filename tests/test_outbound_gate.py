@@ -32,7 +32,7 @@ from tests.conftest import load_plugin
 
 # Canonical artifact provenance. The vendored shared/fabrication_markers.json is
 # a byte-exact copy of the ss-console source of truth
-# (operator/safety-substrate/fabrication_markers.json). This sha256 pins the
+# (operator/safety_substrate/fabrication_markers.json). This sha256 pins the
 # vendored bytes so the two repos cannot silently drift.
 #
 # Pinned to version 2026-08-22.1 (ss-console#2552 added the

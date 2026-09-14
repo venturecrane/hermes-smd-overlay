@@ -93,7 +93,7 @@ CHAIN_COLUMN_ALTERS: tuple[str, ...] = (
 # is the same class of drift COLUMNS exists to prevent.
 #
 # ``trace_id`` is NOT a synonym: the safety substrate documents it as an opaque
-# request/turn id (ss-console operator/safety-substrate/trust_ceiling_log.py),
+# request/turn id (ss-console operator/safety_substrate/trust_ceiling_log.py),
 # and a turn contains many tool calls. It survives on the per-tool path as a
 # deprecated alias only so queries still reach rows written before the fix.
 CANONICAL_TOOL_CALL_KEY = "tool_call_id"

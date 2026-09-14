@@ -3,7 +3,7 @@
 The handler is the AUTHORITATIVE live boot gate (ss-console#1285): it force-loads
 the overlay into the gateway's live PluginManager singleton and drives a REAL
 pre_tool_call dispatch self-check, failing closed (``os._exit(1)``) if the overlay
-does not govern the live turn-path. The pre-gateway safety-substrate invariant
+does not govern the live turn-path. The pre-gateway safety_substrate invariant
 cannot assert this (wrong process); this handler can, because it runs in the
 gateway process.
 

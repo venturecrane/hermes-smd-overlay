@@ -19,8 +19,8 @@ imports resolve), then calling its ``register(ctx)`` with the SAME context. The
 result is identical to Hermes loading each sub-plugin directly, and is
 order-independent (each sub-plugin only registers its own hooks).
 
-Activation is asserted as a HARD boot gate by the safety-substrate invariant
-``invariant_8_overlay_activation`` (ss-console operator/safety-substrate), so a
+Activation is asserted as a HARD boot gate by the safety_substrate invariant
+``invariant_8_overlay_activation`` (ss-console operator/safety_substrate), so a
 future Hermes re-pin that breaks this contract fails loudly at boot instead of
 silently shipping an ungoverned operator.
 """

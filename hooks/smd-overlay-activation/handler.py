@@ -59,8 +59,8 @@ NOT a core file — is the overlay using Hermes' public API:
      from ever serving ungoverned. Better visibly down (crash-loop; Fly restarts) than
      silently ungoverned.
 
-This handler IS the authoritative live boot gate. The pre-gateway safety-substrate
-invariant (operator/safety-substrate) runs in a DIFFERENT process and can only assert
+This handler IS the authoritative live boot gate. The pre-gateway safety_substrate
+invariant (operator/safety_substrate) runs in a DIFFERENT process and can only assert
 the gate is WIRED (handler installed) + the registration LOGIC is sound — it
 structurally cannot assert the live-turn property. The two are complementary.
 """
