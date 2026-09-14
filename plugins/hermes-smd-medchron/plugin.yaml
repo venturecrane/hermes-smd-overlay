@@ -1,0 +1,5 @@
+name: hermes-smd-medchron
+version: "0.1.0"
+description: "Chronology-package tools (routine 11, ss-console#2614): agent-facing medchron_job_submit / medchron_job_status / medchron_allowance over the capability broker's medchron_* verbs. The runner itself is a root daemon the agent cannot reach; these three are the whole of its surface. Registers tools only; wires no gateway hooks."
+requires_env:
+  - SMD_WORKSPACE_BROKER_SOCKET

@@ -51,6 +51,14 @@ _VENDORED_MARKERS_PATH = (
 )
 
 
+# Dates the gate must treat as FUTURE. Hardcoded calendar dates rot: these were
+# written as 2026-09-14/15, and on 2026-09-14 the "an unread future date is
+# blocked" assertion silently stopped exercising its own property -- the suite
+# went red with no code change and main's last green run three days earlier.
+_FUTURE_DAY = (datetime.now(timezone.utc) + timedelta(days=45)).strftime("%Y-%m-%d")
+_OTHER_FUTURE_DAY = (datetime.now(timezone.utc) + timedelta(days=46)).strftime("%Y-%m-%d")
+
+
 def test_markers_registry_non_empty_and_versioned() -> None:
     """The vendored registry must load, be non-empty, and carry a version.
 
@@ -781,10 +789,6 @@ def test_names_alone_do_not_report(trust_plugin, env_autonomous, monkeypatch) ->
 # ---------------------------------------------------------------------------
 
 
-# Fixture dates in these gate tests sit far from the live calendar on purpose.
-# `_ambient_dates` (outbound.py) treats UTC today and yesterday as clock-verified,
-# so a fixture dated near "now" stops being an unread date on that day and the
-# block assertions fail. The 2026-09-14 fixtures did exactly that on 2026-09-14.
 def test_create_event_structured_args_block_unread_date(
     trust_plugin, env_autonomous, monkeypatch
 ) -> None:
@@ -799,8 +803,8 @@ def test_create_event_structured_args_block_unread_date(
         tool_name="mcp_smokeball_create_event",
         args={
             "subject": "Hearing",
-            "start_time": "2031-03-11T09:00:00",
-            "end_time": "2031-03-11T10:00:00",
+            "start_time": f"{_FUTURE_DAY}T09:00:00",
+            "end_time": f"{_FUTURE_DAY}T10:00:00",
             "attendees": ["s-1"],
             "time_zone": "America/Los_Angeles",
         },
@@ -815,7 +819,7 @@ def test_create_event_structured_args_block_unread_date(
     assert "date" in metadata_json
     assert '"blocked":true' in metadata_json
     # redaction: the raw date value must not appear in the audit row
-    assert "2031-03-11" not in metadata_json
+    assert _FUTURE_DAY not in metadata_json
 
 
 def test_create_task_due_date_blocks_past_note(trust_plugin, env_autonomous, monkeypatch) -> None:
@@ -831,7 +835,7 @@ def test_create_task_due_date_blocks_past_note(trust_plugin, env_autonomous, mon
             "staff_id": "s-1",
             "subject": "Serve responses",
             "note": "No identifiers here.",
-            "due_date": "2031-04-02",
+            "due_date": "2026-10-02",
         },
         task_id="t",
         session_id="sess-2132-task",
@@ -852,7 +856,7 @@ def test_structured_args_all_read_do_not_report(trust_plugin, env_autonomous, mo
     fake = _wire_fake_audit(trust_plugin.outbound)
     trust_plugin.on_post_tool_call(
         tool_name="email_list_messages",
-        result="Hearing scheduled 2031-03-11T09:00:00 per the court notice.",
+        result=f"Hearing scheduled {_FUTURE_DAY}T09:00:00 per the court notice.",
         session_id="sess-2132-read",
         tool_call_id="r",
     )
@@ -860,8 +864,8 @@ def test_structured_args_all_read_do_not_report(trust_plugin, env_autonomous, mo
         tool_name="mcp_smokeball_create_event",
         args={
             "subject": "Hearing",
-            "start_time": "2031-03-11T09:00:00",
-            "end_time": "2031-03-11T10:00:00",
+            "start_time": f"{_FUTURE_DAY}T09:00:00",
+            "end_time": f"{_FUTURE_DAY}T10:00:00",
             "attendees": ["s-1"],
             "time_zone": "America/Los_Angeles",
         },
@@ -883,7 +887,7 @@ def test_structured_args_read_mismatch_blocks(trust_plugin, env_autonomous, monk
     _wire_fake_audit(trust_plugin.outbound)
     trust_plugin.on_post_tool_call(
         tool_name="email_list_messages",
-        result="Hearing scheduled 2031-03-12T09:00:00 per the court notice.",
+        result=f"Hearing scheduled {_OTHER_FUTURE_DAY}T09:00:00 per the court notice.",
         session_id="sess-2132-mut",
         tool_call_id="r",
     )
@@ -891,8 +895,8 @@ def test_structured_args_read_mismatch_blocks(trust_plugin, env_autonomous, monk
         tool_name="mcp_smokeball_create_event",
         args={
             "subject": "Hearing",
-            "start_time": "2031-03-11T09:00:00",
-            "end_time": "2031-03-11T10:00:00",
+            "start_time": f"{_FUTURE_DAY}T09:00:00",
+            "end_time": f"{_FUTURE_DAY}T10:00:00",
             "attendees": ["s-1"],
             "time_zone": "America/Los_Angeles",
         },
