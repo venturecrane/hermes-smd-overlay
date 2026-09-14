@@ -17,7 +17,7 @@ from __future__ import annotations
 from shared.outbound_recipient import CLASSIFIED_SEND_TOOLS, DRAFT_RECORD_TOOLS, send_recipients
 from tests.conftest import load_plugin
 
-ROSTER = ["@ashtonandprice.com", "scott@smd.services"]
+ROSTER = ["@firm.example", "scott@smd.services"]
 
 _MSGRAPH_SEND = "mcp_msgraph_mail_send_message"
 _MSGRAPH_DRAFT = "mcp_msgraph_mail_create_draft"

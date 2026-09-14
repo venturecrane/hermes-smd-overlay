@@ -20,7 +20,7 @@ from shared.outbound_recipient import (
 )
 from tests.conftest import load_plugin
 
-ROSTER = ["@ashtonandprice.com", "scott@smd.services"]
+ROSTER = ["@firm.example", "scott@smd.services"]
 
 
 def _load_enforce():
