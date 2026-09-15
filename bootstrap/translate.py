@@ -1098,11 +1098,52 @@ def _persona_config(
     #   the raw profile config with default=False (gateway/run.py:9335-9341 @
     #   v2026.8.18; display_config.py defaults False per platform); the 8.18
     #   flip to True is CLI/TUI-only. Written so the seat's intent is on disk.
+    # gateway.loop_watchdog_*: the event-loop liveness watchdog's budget, sized
+    # to the seat. Hermes arms the watchdog BEFORE the startup plugin crawl and
+    # kills the gateway (exit 75) after max_strikes missed probes; at the
+    # shipped defaults (30s interval, 10s timeout, 3 strikes) that is roughly
+    # two minutes, and a 1 GB seat's synchronous plugin imports take about four
+    # (ss-console docs/runbooks/operator/incidents/2026-09-01-gateway-startup-
+    # watchdog-collision.md: pilot-smokeball crash-looped for two and a half
+    # hours with no load at all). The knobs exist from Hermes v2026.9.14
+    # (gateway/config.py GatewayConfig; bounds interval 1..3600s, timeout
+    # 1..600s, strikes 1..1000); an older pin reads only gateway.loop_watchdog
+    # and ignores the rest, so writing them is inert until the seat is promoted.
+    # Small seats get a budget that clears a cold start with margin; larger
+    # seats keep detection tighter, still above the shipped default.
+    config["gateway"] = _loop_watchdog_knobs(customer)
     config["tools"] = {"tool_search": {"enabled": "off"}}
     config["approvals"] = {"mode": "manual"}
     config["display"] = {"show_reasoning": False}
 
     return config
+
+
+_SMALL_SEAT_MEMORY_MB = 1024
+
+
+def _loop_watchdog_knobs(customer: dict[str, Any]) -> dict[str, Any]:
+    """The loop-watchdog budget for this seat, from ``machine.memory_mb``.
+
+    A seat at or under 1 GB (or one that authors no size, the template default)
+    gets 30s x 12 strikes (about six minutes of missed probes before the kill),
+    which clears the ~4 minute cold crawl the 2026-09-01 incident measured;
+    a bigger seat gets 30s x 6 (about three minutes). The probe timeout is
+    15s on the small seat because a 1 vCPU box under import load answers late,
+    not never.
+    """
+    machine = customer.get("machine") or {}
+    try:
+        memory_mb = int(machine.get("memory_mb") or 0)
+    except (TypeError, ValueError):
+        memory_mb = 0
+    small = memory_mb <= _SMALL_SEAT_MEMORY_MB
+    return {
+        "loop_watchdog": True,
+        "loop_watchdog_probe_interval_s": 30,
+        "loop_watchdog_probe_timeout_s": 15 if small else 10,
+        "loop_watchdog_max_strikes": 12 if small else 6,
+    }
 
 
 # Ceiling value -> the actionable SOUL.md phrasing. Values match the ADR 0035 /

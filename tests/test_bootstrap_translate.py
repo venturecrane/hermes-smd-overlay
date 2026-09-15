@@ -393,6 +393,43 @@ def test_translate_pins_upstream_defaults_that_flipped_in_v0_20(tmp_path):
     assert list(config)[-3:] == ["tools", "approvals", "display"]
 
 
+def test_translate_sizes_the_loop_watchdog_budget_to_the_seat(tmp_path):
+    """The 2026-09-01 crash loop: Hermes' loop watchdog killed a 1 GB seat mid
+    plugin crawl (exit 75) on a ~2 minute budget the pin could not raise. From
+    v2026.9.14 the budget is config; translate writes it sized to
+    machine.memory_mb. A seat with no authored size is treated as small, since
+    that is the template default and the failure mode is a crash loop, not a
+    slow kill. The keys ride under `gateway`, which an older pin reads only for
+    the boolean, so they are inert until promotion."""
+    from bootstrap.translate import _loop_watchdog_knobs
+
+    small = _loop_watchdog_knobs({"machine": {"size": "shared-cpu-1x", "memory_mb": 1024}})
+    assert small == {
+        "loop_watchdog": True,
+        "loop_watchdog_probe_interval_s": 30,
+        "loop_watchdog_probe_timeout_s": 15,
+        "loop_watchdog_max_strikes": 12,
+    }
+    # Six minutes of missed probes before the kill clears a four minute cold crawl.
+    assert small["loop_watchdog_probe_interval_s"] * small["loop_watchdog_max_strikes"] >= 300
+    big = _loop_watchdog_knobs({"machine": {"size": "shared-cpu-1x", "memory_mb": 2048}})
+    assert big["loop_watchdog_max_strikes"] == 6 and big["loop_watchdog_probe_timeout_s"] == 10
+    assert _loop_watchdog_knobs({}) == small
+    assert _loop_watchdog_knobs({"machine": {"memory_mb": "not-a-number"}}) == small
+
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert config["gateway"]["loop_watchdog"] is True
+    assert config["gateway"]["loop_watchdog_max_strikes"] in (6, 12)
+    # Still appended before the three pin-only keys.
+    assert list(config)[-4:] == ["gateway", "tools", "approvals", "display"]
+
+
 def test_translate_emits_disabled_toolsets_fleet_default(tmp_path):
     """Tool-surface trim (2026-07-15): every profile config disables the
     toolsets no Operator seat uses — their schemas otherwise ride every API
