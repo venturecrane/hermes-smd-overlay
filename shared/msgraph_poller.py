@@ -37,7 +37,6 @@ Durability + safety:
 from __future__ import annotations
 
 import hashlib
-import hmac
 import http.client
 import json
 import logging
@@ -48,7 +47,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from shared import msgraph_client
+from shared import forward_signature, msgraph_client
 from shared.customer_config import CustomerConfig, CustomerConfigError
 
 logger = logging.getLogger("hermes-smd-msgraph-poller")
@@ -56,7 +55,7 @@ logger = logging.getLogger("hermes-smd-msgraph-poller")
 # Loopback target: the Hermes webhook adapter on this same Machine (same
 # constants the gate's other forwards use). host:port are fixed — not an SSRF
 # surface. translate.py materializes the ``msgraph`` route so the adapter accepts
-# POST /webhooks/msgraph and re-verifies the X-Webhook-Signature.
+# POST /webhooks/msgraph and re-verifies the forward hop's HMAC V2 headers.
 _GATEWAY_HOST = os.environ.get("WEBHOOK_GATEWAY_HOST", "127.0.0.1")
 _GATEWAY_PORT = int(os.environ.get("WEBHOOK_GATEWAY_PORT", "8644"))
 
@@ -86,10 +85,6 @@ _MAX_SEEN_IDS = 10000
 _MAX_POISON_FAILURES = 5
 _EMAIL_CAPABILITY = "Email"
 _FORWARD_TIMEOUT_S = 30.0
-
-
-def _hex_hmac_sha256(body: bytes, secret: str) -> str:
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -276,13 +271,14 @@ def _default_state_path() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _default_forward(*, body: bytes, signature: str, request_id: str) -> int:
+def _default_forward(*, body: bytes, signature: str, timestamp: str, request_id: str) -> int:
     """POST a stamped webhook to the Hermes adapter loopback; return the status.
 
     Mirrors the gate's own forward (``_drive_agent_turn`` / ``_handle_handoff``):
-    ``X-Webhook-Signature`` = hex HMAC over the exact bytes with the route secret,
-    ``X-Request-ID`` = the Graph message id (the adapter's idempotency key). Raises
-    on a transport failure; the caller is exception-safe."""
+    the adapter's generic HMAC V2 over ``"<timestamp>.<bytes>"`` with the route
+    secret (``shared/forward_signature.py``), ``X-Request-ID`` = the Graph message
+    id (the adapter's idempotency key). Raises on a transport failure; the caller
+    is exception-safe."""
     conn = http.client.HTTPConnection(_GATEWAY_HOST, _GATEWAY_PORT, timeout=_FORWARD_TIMEOUT_S)
     try:
         conn.request(
@@ -291,8 +287,9 @@ def _default_forward(*, body: bytes, signature: str, request_id: str) -> int:
             body=body,
             headers={
                 "Content-Type": "application/json",
-                "X-Webhook-Signature": signature,
-                "X-Request-ID": request_id,
+                forward_signature.SIGNATURE_HEADER: signature,
+                forward_signature.TIMESTAMP_HEADER: timestamp,
+                forward_signature.REQUEST_ID_HEADER: request_id,
             },
         )
         resp = conn.getresponse()
@@ -616,14 +613,16 @@ class MsGraphPoller:
             },
             separators=(",", ":"),
         ).encode("utf-8")
-        signature = _hex_hmac_sha256(body, self._signing_secret or "")
+        timestamp, signature = forward_signature.sign_forward(body, self._signing_secret or "")
         # X-Request-ID is the adapter's idempotency key. Hash rather than truncate:
         # Graph message ids are long base64 whose VARYING bytes are at the end, so
         # a [:64] prefix can collide across messages in one mailbox — and a
         # colliding key would dedupe a fresh message as a replay (silent loss, the
         # overlay#275 class). sha256 hex is exactly 64 chars and collision-free.
         request_id = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
-        status = self._forward_fn(body=body, signature=signature, request_id=request_id)
+        status = self._forward_fn(
+            body=body, signature=signature, timestamp=timestamp, request_id=request_id
+        )
         if not 200 <= status < 300:
             # A rejected forward is the same loss class as a raised one: the adapter
             # did NOT accept the message, so marking it seen + advancing the cursor

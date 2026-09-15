@@ -77,7 +77,8 @@ _REPLAY = verify.ReplayCache()
 
 # Inbound header names carrying the provider signature material. Lower-cased
 # for case-insensitive lookup. Provider-specific; defaults are generic.
-_SIGNATURE_HEADER = "x-webhook-signature"
+_SIGNATURE_HEADER = "x-webhook-signature"  # legacy V1 (body-only), tests and older callers
+_SIGNATURE_V2_HEADER = "x-webhook-signature-v2"  # what the gate and the poller send
 _TIMESTAMP_HEADER = "x-webhook-timestamp"
 _EVENT_ID_HEADER = "x-webhook-id"
 
@@ -358,14 +359,14 @@ def _verification_failure(kwargs: dict[str, Any], payload: Any) -> str | None:
     headers = kwargs.get("headers")
     # Header-bearing invocation (legacy / tests): do the full signature check.
     # Header-less invocation is the real Hermes hook contract — the SMD gate
-    # (Svix) and Hermes' webhook adapter (X-Webhook-Signature) BOTH verified the
+    # (Svix) and Hermes' webhook adapter (HMAC V2 on the forward hop) BOTH verified the
     # delivery upstream before the MessageEvent was built, and the hook carries
     # no headers to re-verify. Trust that upstream verification and fall through
     # to replay-protection (which the payload's event_id still anchors). An
     # attacker cannot reach this hook without first clearing both upstream
     # verifiers, so this is not a bypass.
     if headers is not None:
-        signature = _header(headers, _SIGNATURE_HEADER)
+        signature = _header(headers, _SIGNATURE_V2_HEADER) or _header(headers, _SIGNATURE_HEADER)
         timestamp = _header(headers, _TIMESTAMP_HEADER)
         raw_body = _raw_body_for(kwargs, payload)
         try:
@@ -461,7 +462,7 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     and ``session_store`` — NOT a ``payload``/``headers``/``raw_body`` kwarg set.
     The parsed webhook body is read from ``event.raw_message`` via
     ``_webhook_payload``. The SMD gate (Svix) and Hermes' webhook adapter
-    (``X-Webhook-Signature``) verify the delivery UPSTREAM before the
+    (HMAC V2 on the forward hop) verify the delivery UPSTREAM before the
     ``MessageEvent`` is built, so when the hook carries no ``headers`` the router
     trusts that upstream verification and applies replay-protection only (a
     header-bearing invocation still gets the full signature check).

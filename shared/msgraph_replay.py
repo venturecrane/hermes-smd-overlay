@@ -29,12 +29,11 @@ import os
 import sys
 from collections.abc import Callable
 
-from shared import msgraph_client
+from shared import forward_signature, msgraph_client
 from shared.msgraph_poller import (
     EVENT_TYPE,
     SOURCE,
     _default_forward,
-    _hex_hmac_sha256,
 )
 from shared.secrets import get_secret
 
@@ -91,11 +90,11 @@ def replay(
         )
         return 2
     body, message_id = built
-    signature = _hex_hmac_sha256(body, signing_secret)
+    timestamp, signature = forward_signature.sign_forward(body, signing_secret)
     request_id = hashlib.sha256(message_id.encode("utf-8")).hexdigest()
     forward = forward_fn or _default_forward
     try:
-        status = forward(body=body, signature=signature, request_id=request_id)
+        status = forward(body=body, signature=signature, timestamp=timestamp, request_id=request_id)
     except Exception as exc:  # noqa: BLE001 — report, don't traceback, on a seat console
         logger.error("replay: forward failed (%s)", exc)
         return 1
