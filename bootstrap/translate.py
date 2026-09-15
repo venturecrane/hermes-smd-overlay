@@ -637,9 +637,9 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
     * ``prompt`` — :data:`_INBOUND_EMAIL_PROMPT` (the inbound email as untrusted data).
 
     A trusted front-door (overlay ``webhook_gate``) verifies the vendor's own
-    signature header and forwards to Hermes' adapter on localhost with the
-    Generic ``X-Webhook-Signature`` header set, so the adapter re-verifies with
-    this same secret. Returns ``{}`` when there are no routable connectors so
+    signature header and forwards to Hermes' adapter on localhost signed with
+    the adapter's generic HMAC V2 (``shared/forward_signature.py``), so the
+    adapter re-verifies with this same secret. Returns ``{}`` when there are no routable connectors so
     configs for customers without inbound webhooks stay byte-identical.
     """
     connectors = customer.get("connectors") or {}

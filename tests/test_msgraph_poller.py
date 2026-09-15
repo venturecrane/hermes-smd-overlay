@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 
 from shared.msgraph_poller import DeltaState, MsGraphPoller
 
@@ -51,8 +52,10 @@ class _Forwarder:
         self.status = status
         self.posts: list[dict] = []
 
-    def __call__(self, *, body: bytes, signature: str, request_id: str):
-        self.posts.append({"body": body, "signature": signature, "request_id": request_id})
+    def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
+        self.posts.append(
+            {"body": body, "signature": signature, "timestamp": timestamp, "request_id": request_id}
+        )
         return self.status
 
 
@@ -156,9 +159,14 @@ def test_new_message_forwarded_as_stamped_signed_webhook(tmp_path):
     assert payload["event_id"] == "m1"
     dto = payload["inbound_message"]
     assert dto["provider"] == "msgraph" and dto["from_addr"] == "greg@wf.example"
-    # Signed with the route secret so the Hermes adapter re-verifies (the fence path).
-    expected = hmac.new(_SECRET.encode(), post["body"], hashlib.sha256).hexdigest()
+    # Signed with the route secret in the adapter's HMAC V2 form (timestamp bound)
+    # so the adapter re-verifies inside its replay window (the fence path).
+    assert abs(int(post["timestamp"]) - int(time.time())) <= 5
+    signed_input = post["timestamp"].encode() + b"." + post["body"]
+    expected = hmac.new(_SECRET.encode(), signed_input, hashlib.sha256).hexdigest()
     assert post["signature"] == expected
+    # And NOT the legacy body-only form the adapter warns about.
+    assert post["signature"] != hmac.new(_SECRET.encode(), post["body"], hashlib.sha256).hexdigest()
     # The idempotency key is a HASH of the message id, never a prefix truncation —
     # Graph ids vary at the END, so a [:64] prefix can collide across messages.
     assert post["request_id"] == _rid("m1")
@@ -273,14 +281,16 @@ class _FlakyForwarder(_Forwarder):
         self._failures_left = fail_first
         self._reject_status = reject_status
 
-    def __call__(self, *, body: bytes, signature: str, request_id: str):
+    def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
         if self._failures_left > 0:
             self._failures_left -= 1
             if self._reject_status is not None:
                 self.posts.append({"body": body, "signature": signature, "request_id": request_id})
                 return self._reject_status
             raise ConnectionRefusedError("gate not up yet")
-        return super().__call__(body=body, signature=signature, request_id=request_id)
+        return super().__call__(
+            body=body, signature=signature, timestamp=timestamp, request_id=request_id
+        )
 
 
 def test_failed_item_holds_cursor_and_is_forwarded_exactly_once_next_cycle(tmp_path):
@@ -317,11 +327,13 @@ def test_partial_batch_failure_persists_handled_items_but_holds_cursor(tmp_path)
     class _FailSecond(_Forwarder):
         m2_failures = 1
 
-        def __call__(self, *, body: bytes, signature: str, request_id: str):
+        def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
             if json.loads(body)["event_id"] == "m2" and self.m2_failures > 0:
                 self.m2_failures -= 1
                 raise ConnectionRefusedError("blip on m2 only")
-            return super().__call__(body=body, signature=signature, request_id=request_id)
+            return super().__call__(
+                body=body, signature=signature, timestamp=timestamp, request_id=request_id
+            )
 
     client = _FakeClient(
         "op@client.example",
@@ -373,10 +385,12 @@ class _PoisonForwarder(_Forwarder):
         super().__init__()
         self.poison_ids = set(poison_ids)
 
-    def __call__(self, *, body: bytes, signature: str, request_id: str):
+    def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
         if json.loads(body)["event_id"] in self.poison_ids:
             raise ConnectionRefusedError("poison item")
-        return super().__call__(body=body, signature=signature, request_id=request_id)
+        return super().__call__(
+            body=body, signature=signature, timestamp=timestamp, request_id=request_id
+        )
 
 
 def test_poison_item_dead_letters_at_the_poison_bound(tmp_path):
@@ -449,13 +463,15 @@ def test_recovery_burst_does_not_dead_letter_backlog(tmp_path):
     class _OutageThenBlip(_Forwarder):
         outage_cycles = 2 * 5  # 5 all-fail cycles, both items attempted each
 
-        def __call__(self, *, body: bytes, signature: str, request_id: str):
+        def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
             if self.outage_cycles > 0:
                 self.outage_cycles -= 1
                 raise ConnectionRefusedError("outage")
             if json.loads(body)["event_id"] == "m1":
                 raise ConnectionRefusedError("m1 still failing post-recovery")
-            return super().__call__(body=body, signature=signature, request_id=request_id)
+            return super().__call__(
+                body=body, signature=signature, timestamp=timestamp, request_id=request_id
+            )
 
     fwd = _OutageThenBlip()
     poller = _poller(tmp_path, client, fwd, max_item_failures=2)
@@ -509,10 +525,12 @@ def test_incremental_persist_after_each_accepted_forward(tmp_path):
     seen_at_m2_time: list[list[str]] = []
 
     class _Spy(_Forwarder):
-        def __call__(self, *, body: bytes, signature: str, request_id: str):
+        def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
             if json.loads(body)["event_id"] == "m2":
                 seen_at_m2_time.append(json.loads(state_file.read_text())["seen_ids"])
-            return super().__call__(body=body, signature=signature, request_id=request_id)
+            return super().__call__(
+                body=body, signature=signature, timestamp=timestamp, request_id=request_id
+            )
 
     client = _FakeClient(
         "op@client.example",
@@ -586,11 +604,13 @@ def test_cursor_reset_never_skips_held_items(tmp_path):
     class _FailHeldOnce(_Forwarder):
         failures_left = 1
 
-        def __call__(self, *, body: bytes, signature: str, request_id: str):
+        def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
             if json.loads(body)["event_id"] == "held-1" and self.failures_left > 0:
                 self.failures_left -= 1
                 raise ConnectionRefusedError("blip")
-            return super().__call__(body=body, signature=signature, request_id=request_id)
+            return super().__call__(
+                body=body, signature=signature, timestamp=timestamp, request_id=request_id
+            )
 
     fwd = _FailHeldOnce()
     poller = _poller(tmp_path, client, fwd)

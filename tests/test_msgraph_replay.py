@@ -1,7 +1,7 @@
 """Tests for the dead-letter replay tool (shared/msgraph_replay.py, overlay#275).
 
 Pins the two load-bearing properties: byte-parity with the poller's own forward
-(same envelope bytes, same HMAC, same idempotency key — the replay enters the
+(same envelope bytes, the same HMAC V2 scheme under the route secret, same idempotency key — the replay enters the
 model through the SAME fenced door as live mail), and file-lifecycle honesty
 (rename only on acceptance; anything else leaves the dead letter in place)."""
 
@@ -42,8 +42,10 @@ class _Recorder:
         self.status = status
         self.posts: list[dict] = []
 
-    def __call__(self, *, body: bytes, signature: str, request_id: str):
-        self.posts.append({"body": body, "signature": signature, "request_id": request_id})
+    def __call__(self, *, body: bytes, signature: str, timestamp: str, request_id: str):
+        self.posts.append(
+            {"body": body, "signature": signature, "timestamp": timestamp, "request_id": request_id}
+        )
         return self.status
 
 
@@ -91,12 +93,16 @@ def test_envelope_byte_parity_with_the_pollers_forward(tmp_path):
         == 0
     )
     assert replay_fwd.posts[0]["body"] == poller_fwd.posts[0]["body"]
-    assert replay_fwd.posts[0]["signature"] == poller_fwd.posts[0]["signature"]
     assert replay_fwd.posts[0]["request_id"] == poller_fwd.posts[0]["request_id"]
+    # The signature is the adapter's HMAC V2 over "<timestamp>.<bytes>", so it is
+    # bound to each POST's own timestamp rather than byte-equal across the two
+    # forwards; parity is the body and the idempotency key, and the replay's own
+    # signature must verify for the timestamp it sent.
+    replayed = replay_fwd.posts[0]
     expected_sig = hmac.new(
-        _SECRET.encode(), replay_fwd.posts[0]["body"], hashlib.sha256
+        _SECRET.encode(), replayed["timestamp"].encode() + b"." + replayed["body"], hashlib.sha256
     ).hexdigest()
-    assert replay_fwd.posts[0]["signature"] == expected_sig
+    assert replayed["signature"] == expected_sig
 
 
 def test_replay_renames_on_acceptance(tmp_path):

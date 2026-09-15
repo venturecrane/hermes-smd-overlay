@@ -12,10 +12,11 @@ scheme bridge, dispatching per route slug (``_VERIFIERS``):
   public POST (vendor scheme)  ->  this gate (per-vendor verify)
                                ->  localhost:8644 (Hermes adapter, Generic verify)
 
-On the forward hop the gate sets ``X-Webhook-Signature`` (hex HMAC-SHA256 over the
-exact forwarded bytes, same secret string) so the adapter re-verifies, and sets
-``X-Request-ID`` to the Svix delivery id so the adapter's idempotency cache dedupes
-vendor retries. Only the gate is exposed publicly (Fly ``http_service`` points at
+On the forward hop the gate signs the exact forwarded bytes with the adapter's
+generic HMAC V2 (``X-Webhook-Signature-V2`` over ``"<timestamp>.<body>"`` plus
+``X-Webhook-Timestamp``, same secret string; ``shared/forward_signature.py``) so
+the adapter re-verifies inside its replay window, and sets ``X-Request-ID`` to
+the Svix delivery id so the adapter's idempotency cache dedupes vendor retries. Only the gate is exposed publicly (Fly ``http_service`` points at
 ``GATE_PORT``); the gateway's 8644 stays loopback-reachable.
 
 Security posture: the gate is the deterministic auth boundary. A forged POST
@@ -47,6 +48,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from shared import (
+    forward_signature,
     gate_envelope_capture,
     gate_inbound_cap,
     gate_trigger_exclusions,
@@ -72,10 +74,6 @@ DEFAULT_GATE_PORT = 8643
 GATEWAY_HOST = os.environ.get("WEBHOOK_GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.environ.get("WEBHOOK_GATEWAY_PORT", "8644"))
 _MAX_BODY_BYTES = 1_048_576  # 1 MB, matches the Hermes adapter cap
-
-
-def _hex_hmac_sha256(body: bytes, secret: str) -> str:
-    return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
 # Svix's documented webhook tolerance: deliveries whose signed timestamp is
@@ -713,11 +711,7 @@ def _drive_agent_turn(
         },
         separators=(",", ":"),
     ).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "X-Webhook-Signature": _hex_hmac_sha256(body, secret),
-        "X-Request-ID": correlation_id,
-    }
+    headers = forward_signature.forward_headers(body, secret, request_id=correlation_id)
     conn = http.client.HTTPConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=30)
     try:
         conn.request("POST", f"/webhooks/{MCP_ROUTE}", body=body, headers=headers)
@@ -1214,8 +1208,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         Body: HandoffEnvelope JSON (see ss-console/src/lib/operator/mcp/webhook-transport.ts).
         Dispatches to the Hermes agent loop via the same internal loopback the Svix routes
-        use (X-Webhook-Signature = hex-HMAC(body, WEBHOOK_SECRET_MCP) so the adapter
-        re-verifies). WEBHOOK_SECRET_HANDOFF == WEBHOOK_SECRET_MCP so the adapter
+        use (HMAC V2 over the forwarded bytes with WEBHOOK_SECRET_MCP, so the adapter
+        re-verifies; ``shared/forward_signature.py``). WEBHOOK_SECRET_HANDOFF == WEBHOOK_SECRET_MCP so the adapter
         satisfies its secret lookup. Returns 202 + {accepted, handoff_id} synchronously;
         the agent works the task async and reports via its authored output channels.
         """
@@ -1268,12 +1262,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Stamp provenance (source = handoff) and forward to Hermes adapter.
         body = _stamp_source(raw, HANDOFF_ROUTE)
-        fwd_sig = _hex_hmac_sha256(body, secret)
-        headers = {
-            "Content-Type": "application/json",
-            "X-Webhook-Signature": fwd_sig,
-            "X-Request-ID": handoff_id[:64],
-        }
+        headers = forward_signature.forward_headers(body, secret, request_id=handoff_id[:64])
         conn = http.client.HTTPConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=30)
         try:
             conn.request("POST", f"/webhooks/{HANDOFF_ROUTE}", body=body, headers=headers)
@@ -1432,15 +1421,15 @@ class _Handler(BaseHTTPRequestHandler):
         # forwarded bytes.
         body = _stamp_source(body, route, event_id=request_id)
 
-        # Forward to the Hermes adapter with the Generic header it understands
-        # (hex HMAC over the exact bytes, same secret) + the Svix delivery id as
-        # the idempotency key so adapter dedupes vendor retries.
-        fwd_sig = _hex_hmac_sha256(body, secret)
-        headers = {
-            "Content-Type": self.headers.get("Content-Type", "application/json"),
-            "X-Webhook-Signature": fwd_sig,
-            "X-Request-ID": request_id,
-        }
+        # Forward to the Hermes adapter with the generic V2 headers it verifies
+        # (hex HMAC over "<timestamp>.<bytes>", same secret) + the Svix delivery
+        # id as the idempotency key so the adapter dedupes vendor retries.
+        headers = forward_signature.forward_headers(
+            body,
+            secret,
+            request_id=request_id,
+            content_type=self.headers.get("Content-Type", "application/json"),
+        )
         # Forward over a fixed loopback host:port (http.client, not a dynamic
         # URL) — route is charset-validated above and only forms the path.
         conn = http.client.HTTPConnection(GATEWAY_HOST, GATEWAY_PORT, timeout=30)

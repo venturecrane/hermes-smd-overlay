@@ -61,12 +61,18 @@ class _FakeResponse:
 
 class _FakeConnection:
     status = 200
+    last_request: dict = {}
 
     def __init__(self, *args, **kwargs) -> None:
         pass
 
-    def request(self, *args, **kwargs) -> None:
-        pass
+    def request(self, method, path, body=None, headers=None) -> None:
+        _FakeConnection.last_request = {
+            "method": method,
+            "path": path,
+            "body": body,
+            "headers": dict(headers or {}),
+        }
 
     def getresponse(self) -> _FakeResponse:
         return _FakeResponse(_FakeConnection.status)
@@ -109,6 +115,26 @@ def _handoff(gate_mod, status: int) -> tuple[int, dict]:
 def test_a_2xx_forward_is_accepted(gate):
     code, payload = _handoff(gate, 200)
     assert code == 202 and payload["accepted"] is True
+
+
+def test_the_forward_hop_is_signed_with_the_adapters_hmac_v2(gate):
+    # The adapter at v0.21 warns that body-only X-Webhook-Signature "is vulnerable
+    # to replay attacks"; the gate signs "<timestamp>.<body>" and sends the
+    # timestamp, and sends nothing the adapter could fall back to.
+    import hashlib
+    import hmac
+    import time
+
+    _handoff(gate, 200)
+    sent = _FakeConnection.last_request
+    assert sent["path"] == "/webhooks/handoff"
+    headers = sent["headers"]
+    assert "X-Webhook-Signature" not in headers
+    ts = headers["X-Webhook-Timestamp"]
+    assert abs(int(ts) - int(time.time())) <= 5
+    expected = hmac.new(b"shh-mcp", ts.encode() + b"." + sent["body"], hashlib.sha256).hexdigest()
+    assert headers["X-Webhook-Signature-V2"] == expected
+    assert headers["X-Request-ID"] == "medchron-01A"
 
 
 def test_a_404_forward_is_a_retryable_failure_not_a_silent_202(gate):
