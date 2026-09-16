@@ -210,6 +210,10 @@ def test_medchron_jobs_runtime_read_projects_rows(broker):
     assert [e["id"] for e in result["entries"]] == ["B", "A"] and result["cursor"] is None
     first = result["entries"][0]
     assert set(first) == set(runtime_read._MEDCHRON_JOBS_COLUMNS) and "secret" not in first
+    # 2026-09-16: the console groups attempts of one chronology by the broker's
+    # work key. Dropping the column would silently return the console to
+    # counting every launch as its own debit.
+    assert "work_digest" in runtime_read._MEDCHRON_JOBS_COLUMNS
     assert broker.requests[-1]["action"] == "medchron_job_list"
 
 
