@@ -96,6 +96,12 @@ _MEDCHRON_JOBS_COLUMNS: tuple[str, ...] = (
     "cents",
     "reason",
     "folder_id",
+    # 2026-09-16 (ss-console ADR 0087 amendment): the broker's work key, a
+    # sha256 over the envelope's matter, units, incident, injuries and
+    # selection. Never the envelope itself. The console groups attempts of one
+    # chronology by it the way the seat's debit does, so a package relaunched
+    # three times reads as one debit of its pages on both surfaces.
+    "work_digest",
 )
 
 # config_export section allow-list (ADR 0048). Unlike ``config`` (a
