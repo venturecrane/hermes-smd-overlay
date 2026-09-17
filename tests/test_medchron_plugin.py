@@ -205,7 +205,9 @@ def test_status_by_matter_asks_for_the_matter_and_never_smuggles_a_job_id(broker
     """
     tools = _tools()
     out = json.loads(
-        tools["medchron_job_status"]["handler"]({"matter_id": "00268f88-f469-4f24-8d50-92fd4e732f4e"})
+        tools["medchron_job_status"]["handler"](
+            {"matter_id": "00268f88-f469-4f24-8d50-92fd4e732f4e"}
+        )
     )
     assert out["matter"]["covered_document_ids"] == ["a", "b"]
     assert broker.requests[-1] == {
