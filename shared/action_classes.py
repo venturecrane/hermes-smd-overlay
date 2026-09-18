@@ -407,6 +407,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_get_matter_billing_config": ActionClass.READ,
     "mcp_smokeball_get_fees": ActionClass.READ,
     "mcp_smokeball_get_expenses": ActionClass.READ,
+    # ss#2842: resolves an invoice's matter and returns a CLOSED verdict --
+    # unique / ambiguous / none / search_failed. A firm-record read: it reads
+    # the tenant's own matters and contacts, so it is not inbound-fenced. The
+    # staging write refuses without the resolution this mints, so leaving it
+    # unclassified fails the whole intake path closed rather than open.
+    "mcp_smokeball_resolve_invoice_matter": ActionClass.READ,
     "mcp_smokeball_get_webhook_subscriptions": ActionClass.READ,
     "mcp_smokeball_get_event_types": ActionClass.READ,
     "mcp_smokeball_list_events": ActionClass.READ,

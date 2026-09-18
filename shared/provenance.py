@@ -161,6 +161,10 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_smokeball_get_matter_billing_config",
         "mcp_smokeball_get_fees",
         "mcp_smokeball_get_expenses",
+        # ss#2842: reads the tenant's own matters and contacts to resolve an
+        # invoice's matter, and the reply quotes the matter numbers it returned
+        # (including both candidates when the answer is ambiguous).
+        "mcp_smokeball_resolve_invoice_matter",
         "mcp_smokeball_get_webhook_subscriptions",
         "mcp_smokeball_get_event_types",
         "mcp_smokeball_list_events",
