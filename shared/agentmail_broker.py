@@ -232,7 +232,46 @@ def _get(path: str, *, accept: str) -> tuple[bytes, str]:
     return body, ctype
 
 
-def list_attachments(inbox_id: str, message_id: str) -> list[dict[str, Any]]:
+#: The seat's own inbox, resolved from its own inbox-scoped key and cached for
+#: the process. THE MODEL MUST NOT NAME AN INBOX. On 2026-09-18 the first live
+#: run asked for the SENDER's inbox (the address it could see on the event) and
+#: the vendor answered 404, which the turn then reported to that sender as an
+#: unreadable file. A message exists only in the mailbox that holds it, and this
+#: seat has exactly one, so the id is ours to know rather than the model's to
+#: supply.
+_own_inbox_cache: str | None = None
+
+
+def own_inbox() -> str:
+    """The one inbox this seat's read key covers.
+
+    Asks the vendor which inboxes the key can see. Exactly one is the authored
+    shape (provisioning gives a seat one inbox and an inbox-scoped key); zero or
+    several is a configuration fault and refuses loudly rather than guessing.
+    """
+    global _own_inbox_cache
+    if _own_inbox_cache:
+        return _own_inbox_cache
+    body, _ = _get("/inboxes?limit=10", accept="application/json")
+    try:
+        parsed = json.loads(body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AgentMailReadError("agentmail returned an inbox list that is not JSON") from exc
+    raw = parsed.get("inboxes") if isinstance(parsed, dict) else None
+    ids = [
+        str(entry.get("inbox_id"))
+        for entry in (raw if isinstance(raw, list) else [])
+        if isinstance(entry, dict) and entry.get("inbox_id")
+    ]
+    if len(ids) != 1:
+        raise AgentMailReadError(
+            f"this seat's mail key covers {len(ids)} inboxes; exactly one is required to read its own mail"
+        )
+    _own_inbox_cache = ids[0]
+    return _own_inbox_cache
+
+
+def list_attachments(message_id: str) -> list[dict[str, Any]]:
     """Every attachment the vendor holds for one message.
 
     THE EVENT DOES NOT CARRY THEM. A ``message.received`` webhook payload has no
@@ -245,10 +284,9 @@ def list_attachments(inbox_id: str, message_id: str) -> list[dict[str, Any]]:
     filename is chosen by whoever sent the mail — so this tool's result is
     fenced and taints, exactly like reading the body would.
     """
-    for label, value in (("inbox_id", inbox_id), ("message_id", message_id)):
-        if not isinstance(value, str) or not value.strip():
-            raise AgentMailReadError(f"{label} is required")
-    body, _ = _get(_message_path(inbox_id.strip(), message_id.strip()), accept="application/json")
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise AgentMailReadError("message_id is required")
+    body, _ = _get(_message_path(own_inbox(), message_id.strip()), accept="application/json")
     try:
         parsed = json.loads(body.decode("utf-8") or "{}")
     except (UnicodeDecodeError, ValueError) as exc:
@@ -273,7 +311,7 @@ def list_attachments(inbox_id: str, message_id: str) -> list[dict[str, Any]]:
     return found
 
 
-def spool_attachment(inbox_id: str, message_id: str, attachment_id: str) -> dict[str, Any]:
+def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
     """Fetch one attachment's bytes and leave them in the seat-local spool.
 
     The vendor returns raw bytes to an authenticated caller; it mints no
@@ -283,20 +321,16 @@ def spool_attachment(inbox_id: str, message_id: str, attachment_id: str) -> dict
     the same machine. The model never sees the attachment's content and never
     sees a credential.
     """
-    for label, value in (
-        ("inbox_id", inbox_id),
-        ("message_id", message_id),
-        ("attachment_id", attachment_id),
-    ):
+    for label, value in (("message_id", message_id), ("attachment_id", attachment_id)):
         if not isinstance(value, str) or not value.strip():
             raise AgentMailReadError(f"{label} is required")
-    path = _message_path(inbox_id.strip(), message_id.strip(), "attachments", attachment_id.strip())
+    path = _message_path(own_inbox(), message_id.strip(), "attachments", attachment_id.strip())
     blob, ctype = _get(path, accept="application/octet-stream")
     if len(blob) > attachment_spool.MAX_SPOOL_BYTES:
         raise AgentMailReadError(
             f"attachment is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; it is not spooled"
         )
-    meta = {a["attachment_id"]: a for a in list_attachments(inbox_id, message_id)}.get(
+    meta = {a["attachment_id"]: a for a in list_attachments(message_id)}.get(
         attachment_id.strip(), {}
     )
     return attachment_spool.write(
@@ -308,6 +342,7 @@ def spool_attachment(inbox_id: str, message_id: str, attachment_id: str) -> dict
 
 __all__ = [
     "AgentMailBrokerUnavailable",
+    "own_inbox",
     "AgentMailReadError",
     "BrokerError",
     "list_attachments",
