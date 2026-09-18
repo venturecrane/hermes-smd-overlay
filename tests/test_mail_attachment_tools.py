@@ -47,6 +47,18 @@ PDF = b"%PDF-1.7 vendor invoice body"
 
 SEAT_INBOX = "pilot@seat.example"
 
+DOWNLOAD_URL = "https://cdn.agentmail.to/attachments/att_1?Expires=1&Signature=x"
+
+ATTACHMENT_RECORD = {
+    "attachment_id": "att_1",
+    "filename": "invoice-1001.pdf",
+    "content_type": "application/pdf",
+    "size": len(PDF),
+    "download_url": DOWNLOAD_URL,
+    "text_url": "https://cdn.agentmail.to/extracted/att_1?Expires=1&Signature=x",
+    "expires_at": "2026-09-18T20:46:23.890Z",
+}
+
 
 class _Response(io.BytesIO):
     def __init__(self, body: bytes, content_type: str = "application/json") -> None:
@@ -72,11 +84,15 @@ def seat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     def fake_urlopen(request: Any, timeout: float | None = None) -> _Response:
         urls.append(request.full_url)
-        assert request.headers.get("Authorization") == "Bearer am_read_key"
+        if "agentmail.to/v0" in request.full_url or "api.agentmail.to" in request.full_url:
+            assert request.headers.get("Authorization") == "Bearer am_read_key"
         if "/inboxes?" in request.full_url:
             return _Response(json.dumps({"inboxes": [{"inbox_id": SEAT_INBOX}]}).encode())
-        if request.full_url.endswith("/attachments/att_1"):
+        if request.full_url == DOWNLOAD_URL:
+            assert request.headers.get("Authorization") is None, "the signed link IS the credential"
             return _Response(PDF, "application/pdf")
+        if request.full_url.endswith("/attachments/att_1"):
+            return _Response(json.dumps(ATTACHMENT_RECORD).encode())
         return _Response(json.dumps(MESSAGE).encode())
 
     monkeypatch.setattr(broker.urllib.request, "urlopen", fake_urlopen)
@@ -198,8 +214,10 @@ def test_an_oversized_attachment_is_refused_and_nothing_is_spooled(
     def fake_urlopen(request: Any, timeout: float | None = None) -> _Response:
         if "/inboxes?" in request.full_url:
             return _Response(json.dumps({"inboxes": [{"inbox_id": SEAT_INBOX}]}).encode())
-        if request.full_url.endswith("/attachments/att_1"):
+        if request.full_url == DOWNLOAD_URL:
             return _Response(big, "application/pdf")
+        if request.full_url.endswith("/attachments/att_1"):
+            return _Response(json.dumps({**ATTACHMENT_RECORD, "size": len(big)}).encode())
         return _Response(json.dumps(MESSAGE).encode())
 
     monkeypatch.setattr(broker.urllib.request, "urlopen", fake_urlopen)
@@ -251,3 +269,62 @@ def test_the_spool_handler_returns_the_receipt_as_json(seat: list[str], fake_ctx
     assert spool.TOKEN_RE.match(receipt["spool_token"])
     listed = json.loads(fake_ctx.tools["mail_list_attachments"]["handler"]({"message_id": "m"}))
     assert listed["count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# The 2026-09-18 live defect: the record was spooled in place of the document
+# ---------------------------------------------------------------------------
+
+
+def test_the_bytes_come_from_the_link_not_the_record(seat: list[str]) -> None:
+    """The vendor answers the attachment endpoint with a RECORD carrying a
+    signed link. The first live run wrote that record to the spool -- 1187
+    bytes of JSON where a 1983-byte PDF belonged -- and every later step called
+    the invoice unreadable."""
+    receipt = broker.spool_attachment("msg_123", "att_1")
+    blob = (spool.spool_dir() / f"{receipt['spool_token']}.bin").read_bytes()
+    assert blob == PDF
+    assert blob.startswith(b"%PDF")
+    assert receipt["size"] == len(PDF)
+    assert DOWNLOAD_URL in seat
+
+
+def test_a_length_that_disagrees_with_the_vendor_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cheapest proof that what landed is not the document."""
+    monkeypatch.setenv(broker.READ_KEY_ENV, "am_read_key")
+    monkeypatch.setenv(spool.SPOOL_DIR_ENV, str(tmp_path / "spool"))
+    monkeypatch.setattr(broker, "_own_inbox_cache", None)
+
+    def fake_urlopen(request: Any, timeout: float | None = None) -> _Response:
+        if "/inboxes?" in request.full_url:
+            return _Response(json.dumps({"inboxes": [{"inbox_id": SEAT_INBOX}]}).encode())
+        if request.full_url == DOWNLOAD_URL:
+            return _Response(b"short", "application/pdf")
+        return _Response(json.dumps(ATTACHMENT_RECORD).encode())
+
+    monkeypatch.setattr(broker.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(broker.AgentMailReadError, match="bytes and"):
+        broker.spool_attachment("msg_123", "att_1")
+    assert not (tmp_path / "spool").exists() or list((tmp_path / "spool").iterdir()) == []
+
+
+def test_a_link_off_the_vendors_hosts_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The link arrives inside vendor-authored JSON, so its host is checked."""
+    monkeypatch.setenv(broker.READ_KEY_ENV, "am_read_key")
+    monkeypatch.setenv(spool.SPOOL_DIR_ENV, str(tmp_path / "spool"))
+    monkeypatch.setattr(broker, "_own_inbox_cache", None)
+
+    def fake_urlopen(request: Any, timeout: float | None = None) -> _Response:
+        if "/inboxes?" in request.full_url:
+            return _Response(json.dumps({"inboxes": [{"inbox_id": SEAT_INBOX}]}).encode())
+        return _Response(
+            json.dumps({**ATTACHMENT_RECORD, "download_url": "https://evil.example/x"}).encode()
+        )
+
+    monkeypatch.setattr(broker.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(broker.AgentMailReadError, match="not one the vendor serves"):
+        broker.spool_attachment("msg_123", "att_1")

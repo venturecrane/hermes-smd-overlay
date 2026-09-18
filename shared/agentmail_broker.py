@@ -311,6 +311,40 @@ def list_attachments(message_id: str) -> list[dict[str, Any]]:
     return found
 
 
+#: Hosts the vendor's own attachment links live on. The signed URL is the
+#: credential, so no Authorization header is sent and no redirect is followed.
+DOWNLOAD_HOSTS = ("cdn.agentmail.to", "download.agentmail.to")
+
+
+def _download(url: str) -> bytes:
+    """Fetch the bytes behind one vendor-minted, time-limited attachment link.
+
+    The link comes back inside the attachment record, so it is vendor-authored:
+    the host is checked against a closed list before anything is fetched, and
+    the read stops one byte past the spool ceiling so an oversized file never
+    lands in memory whole.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in DOWNLOAD_HOSTS:
+        raise AgentMailReadError(
+            f"attachment link host {parsed.hostname!r} is not one the vendor serves attachments from"
+        )
+    req = urllib.request.Request(url, method="GET")  # noqa: S310 - host checked above
+    try:
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        with urllib.request.urlopen(req, timeout=READ_TIMEOUT_SECONDS) as response:  # noqa: S310
+            blob = response.read(attachment_spool.MAX_SPOOL_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        raise AgentMailReadError(f"attachment download failed: HTTP {exc.code}") from exc
+    except Exception as exc:  # noqa: BLE001 - the reason is reported, never a credential
+        raise AgentMailReadError(f"attachment download failed: {exc.__class__.__name__}") from exc
+    if len(blob) > attachment_spool.MAX_SPOOL_BYTES:
+        raise AgentMailReadError(
+            f"attachment is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; it is not spooled"
+        )
+    return blob
+
+
 def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
     """Fetch one attachment's bytes and leave them in the seat-local spool.
 
@@ -325,23 +359,41 @@ def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
         if not isinstance(value, str) or not value.strip():
             raise AgentMailReadError(f"{label} is required")
     path = _message_path(own_inbox(), message_id.strip(), "attachments", attachment_id.strip())
-    blob, ctype = _get(path, accept="application/octet-stream")
-    if len(blob) > attachment_spool.MAX_SPOOL_BYTES:
+    receipt_body, _ = _get(path, accept="application/json")
+    try:
+        receipt = json.loads(receipt_body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, ValueError) as exc:
         raise AgentMailReadError(
-            f"attachment is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; it is not spooled"
+            "agentmail returned an attachment record that is not JSON"
+        ) from exc
+    if not isinstance(receipt, dict):
+        raise AgentMailReadError("agentmail returned an attachment record that is not an object")
+    url = receipt.get("download_url")
+    if not isinstance(url, str) or not url.strip():
+        raise AgentMailReadError(
+            "agentmail's attachment record carries no download_url; the bytes cannot be fetched"
         )
-    meta = {a["attachment_id"]: a for a in list_attachments(message_id)}.get(
-        attachment_id.strip(), {}
-    )
+    blob = _download(url.strip())
+    stated = receipt.get("size")
+    if isinstance(stated, int) and stated != len(blob):
+        # 2026-09-18: the first live spool wrote this JSON record itself, 1187
+        # bytes of it, in place of the 1983-byte PDF, and every downstream step
+        # reported "unsupported format" about a file that was never fetched. A
+        # length that disagrees with the vendor's own number is the cheapest
+        # possible proof that what landed is not the document.
+        raise AgentMailReadError(
+            f"agentmail said the attachment is {stated} bytes and {len(blob)} arrived; it is not spooled"
+        )
     return attachment_spool.write(
         blob,
-        filename=meta.get("filename"),
-        content_type=meta.get("content_type") or ctype.split(";")[0],
+        filename=receipt.get("filename"),
+        content_type=str(receipt.get("content_type") or ""),
     )
 
 
 __all__ = [
     "AgentMailBrokerUnavailable",
+    "DOWNLOAD_HOSTS",
     "own_inbox",
     "AgentMailReadError",
     "BrokerError",
