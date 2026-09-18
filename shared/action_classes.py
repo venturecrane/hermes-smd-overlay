@@ -381,6 +381,13 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # around it. Added 2026-07-05 (L2 DISC-1: get_download_url minted URLs no
     # tool could fetch).
     "mcp_smokeball_read_document": ActionClass.READ,
+    # Server-side fetch + text extraction of an EMAIL ATTACHMENT from a
+    # host-allowlisted vendor download URL (never vision). Content-bearing like
+    # read_document, and the content is vendor-authored (an invoice PDF), so it
+    # is fenced+tainting in hermes-smd-inbound._FENCED_READ_TOOLS. It is NOT a
+    # tenant-source read (shared.provenance): an invoice is not the firm's
+    # record, so a figure read from it never counts as tenant-sourced.
+    "mcp_smokeball_read_attachment_text": ActionClass.READ,
     "mcp_smokeball_get_memos_on_matter": ActionClass.READ,
     "mcp_smokeball_get_bank_accounts": ActionClass.READ,
     "mcp_smokeball_get_matter_balances": ActionClass.READ,
@@ -404,6 +411,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # NOT a fenced read — the filed copy is read later via read_document,
     # which fences and taints.
     "mcp_smokeball_file_attachment_to_matter": ActionClass.INTERNAL_WRITE,
+    # Vendor invoice intake: creates an UNFINALIZED expense on a matter (the
+    # connector hard-codes finalized=false; no parameter can change it) and
+    # files the invoice PDF beside it. A draft entry in the firm's own record
+    # that a human finalizes; it moves no money, touches no trust account, and
+    # sends nothing outside, so it is an internal write, not a commitment.
+    "mcp_smokeball_stage_vendor_invoice": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches

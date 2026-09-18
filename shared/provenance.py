@@ -133,7 +133,10 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         # Smokeball — the law wedge's system of record. ``auth_status`` is
         # excluded (credential metadata, no tenant content). ``get_memos_on_
         # matter`` IS included: a committed memo is part of the matter the firm
-        # can see, unlike a draft.
+        # can see, unlike a draft. ``read_attachment_text`` is EXCLUDED: it
+        # reads a vendor's emailed invoice, which is not the firm's record, so
+        # a figure in a reply must come from the staged entry read back with
+        # ``get_expenses`` (which seeds), never from the vendor's PDF.
         "mcp_smokeball_list_matters",
         "mcp_smokeball_get_matter",
         "mcp_smokeball_list_matter_types",

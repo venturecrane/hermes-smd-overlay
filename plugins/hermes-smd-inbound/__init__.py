@@ -261,6 +261,13 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         # reads return firm-side metadata and stay unfenced; this one returns
         # externally-authored body text and must taint like an inbound email.
         "mcp_smokeball_read_document",
+        # Smokeball attachment text (read_attachment_text, vendor invoice
+        # intake) — the same reason read_document is fenced: it returns
+        # externally-authored body text, here a vendor's invoice PDF fetched
+        # from an email attachment URL. A vendor controls every word of it, so
+        # text such as "apply to matter X" or "also pay" must reach the model
+        # fenced and taint the session like an inbound email.
+        "mcp_smokeball_read_attachment_text",
         # Calendar reads — external invites carry third-party content (titles,
         # descriptions, locations are attacker-controllable text). Captain call
         # 2026-06-12: fence both, closing the code-review fence-candidate note.
