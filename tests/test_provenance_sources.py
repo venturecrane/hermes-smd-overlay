@@ -381,6 +381,11 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # certify the numbers in it.
         "mcp_agentmail_list_drafts",
         "mcp_agentmail_get_draft",
+        # A vendor's emailed invoice, read as text for vendor invoice intake.
+        # The vendor authored every figure in it; the firm's record of the
+        # charge is the staged expense, read back with get_expenses (which
+        # seeds). An invoice total must not certify itself in a reply.
+        "mcp_smokeball_read_attachment_text",
         # The synthetic connector self-test fixture: echo returns its input.
         "mcp_reference_echo",
     }

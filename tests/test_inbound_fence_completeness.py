@@ -19,7 +19,19 @@ runtime form the agent actually emits — would have been NEITHER fenced NOR
 flagged, leaving injected mail in the agent's own inbox an untainted ingest
 channel. The AgentMail surface is enumerated in ``shared.action_classes``
 (not a separate tool registry), so it is read from ``TOOL_ACTION_CLASS_MAP``.
+
+The same guard runs over the Smokeball connector (``mcp_smokeball_*`` READ
+tools). Before vendor invoice intake it covered neither prefix: the only
+content-bearing Smokeball read (``read_document``) was fenced by hand, and a
+second one added without a matching fence entry would have been an untainted
+channel for vendor- or opposing-party-authored text with nothing failing. Every
+Smokeball READ is now decided here: fenced (it returns document or attachment
+content) or listed in ``SMOKEBALL_FIRM_RECORD_READS`` (it returns the firm's own
+records or metadata). A read whose NAME says it returns content cannot be
+parked on the firm-record side at all.
 """
+
+import re
 
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
 from tests.conftest import load_plugin
@@ -246,3 +258,122 @@ def test_every_jobs_and_escalation_tool_is_mapped_and_reads_are_decided() -> Non
         assert undecided == [], (
             f"{plugin_dir} READ tool(s) with no fencing decision: {sorted(undecided)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Smokeball (mcp_smokeball_*) READ tools
+# ---------------------------------------------------------------------------
+
+#: Smokeball READ tools whose result is the FIRM's own record or metadata, not
+#: document or attachment content authored outside the firm. Membership is a
+#: security decision: a tool here reaches the model unfenced and does not taint
+#: the session. The content reads (``read_document`` for a matter document,
+#: ``read_attachment_text`` for a vendor's emailed invoice) are fenced in
+#: ``_FENCED_READ_TOOLS`` instead.
+SMOKEBALL_FIRM_RECORD_READS: frozenset[str] = frozenset(
+    {
+        # Credential metadata.
+        "mcp_smokeball_auth_status",
+        # Matter, contact, staff and role records the firm keeps.
+        "mcp_smokeball_list_matters",
+        "mcp_smokeball_get_matter",
+        "mcp_smokeball_list_matter_types",
+        "mcp_smokeball_get_stage_sets",
+        "mcp_smokeball_get_stage_to_matter_mappings",
+        "mcp_smokeball_get_contacts",
+        "mcp_smokeball_get_contact",
+        "mcp_smokeball_get_contact_relations",
+        "mcp_smokeball_search_staff",
+        "mcp_smokeball_get_staff",
+        "mcp_smokeball_get_roles_on_matter",
+        "mcp_smokeball_get_relationships_on_matter",
+        # Tasks, memos and calendar entries staff wrote in the firm's system.
+        "mcp_smokeball_list_tasks",
+        "mcp_smokeball_get_task",
+        "mcp_smokeball_get_memos_on_matter",
+        "mcp_smokeball_get_event_types",
+        "mcp_smokeball_list_events",
+        # File and folder METADATA and a presigned URL string. The document
+        # BODY is only reachable through read_document, which is fenced.
+        "mcp_smokeball_get_files_on_matter",
+        "mcp_smokeball_get_file",
+        "mcp_smokeball_get_download_url",
+        "mcp_smokeball_list_folders",
+        # Billing, trust-balance and expense ledgers the firm keeps (read-only;
+        # an expense row is the firm's entry, not the vendor's invoice text).
+        "mcp_smokeball_get_bank_accounts",
+        "mcp_smokeball_get_matter_balances",
+        "mcp_smokeball_get_matter_billing_config",
+        "mcp_smokeball_get_fees",
+        "mcp_smokeball_get_expenses",
+        # Seat-owned webhook configuration.
+        "mcp_smokeball_get_webhook_subscriptions",
+    }
+)
+
+#: A Smokeball READ whose name says it hands back document or attachment
+#: CONTENT. Such a tool may never be declared a firm-record read: it must be
+#: fenced. This is the backstop for the list above being edited carelessly.
+_SMOKEBALL_CONTENT_NAME = re.compile(r"read_|attachment|document|_text\b|extract")
+
+
+def _smokeball_read_tools() -> list[str]:
+    return [
+        name
+        for name, cls in TOOL_ACTION_CLASS_MAP.items()
+        if name.startswith("mcp_smokeball_") and cls is ActionClass.READ
+    ]
+
+
+def test_every_smokeball_read_tool_is_fenced_or_a_firm_record_read() -> None:
+    """Every Smokeball READ carries a fencing decision. A new content-bearing
+    read added to the action-class map without a fence entry fails here."""
+    fenced = _fenced_read_tools()
+    reads = _smokeball_read_tools()
+    assert reads, (
+        "no mcp_smokeball_* READ tools found in TOOL_ACTION_CLASS_MAP — the "
+        "Smokeball surface may have been renamed; this guard would pass vacuously."
+    )
+    undecided = [n for n in reads if n not in fenced and n not in SMOKEBALL_FIRM_RECORD_READS]
+    assert undecided == [], (
+        f"Smokeball READ tool(s) with no fencing decision: {sorted(undecided)}. "
+        "Add to _FENCED_READ_TOOLS (document or attachment content) or "
+        "SMOKEBALL_FIRM_RECORD_READS (the firm's own record, with rationale)."
+    )
+
+
+def test_a_smokeball_content_read_is_fenced_never_a_firm_record() -> None:
+    """A Smokeball READ whose name says it returns content must be fenced, and
+    cannot be parked on the firm-record side to make the guard above pass."""
+    fenced = _fenced_read_tools()
+    content_reads = [n for n in _smokeball_read_tools() if _SMOKEBALL_CONTENT_NAME.search(n)]
+    # Non-vacuity: both known content reads must be seen by the pattern.
+    assert "mcp_smokeball_read_document" in content_reads
+    assert "mcp_smokeball_read_attachment_text" in content_reads
+    unfenced = sorted(n for n in content_reads if n not in fenced)
+    assert unfenced == [], (
+        f"Smokeball content read(s) not fenced: {unfenced}. A document or "
+        "attachment body is outside-authored text and must fence + taint."
+    )
+    misfiled = sorted(n for n in content_reads if n in SMOKEBALL_FIRM_RECORD_READS)
+    assert misfiled == [], f"content reads declared firm-record: {misfiled}"
+
+
+def test_smokeball_firm_record_reads_are_live_unfenced_reads() -> None:
+    """No stale or contradictory firm-record entries: each is a classified
+    Smokeball READ, and none is also fenced."""
+    reads = set(_smokeball_read_tools())
+    stale = sorted(SMOKEBALL_FIRM_RECORD_READS - reads)
+    assert stale == [], f"stale SMOKEBALL_FIRM_RECORD_READS entries: {stale}"
+    overlap = sorted(SMOKEBALL_FIRM_RECORD_READS & _fenced_read_tools())
+    assert overlap == [], f"tools both fenced and declared firm-record: {overlap}"
+
+
+def test_fenced_smokeball_entries_are_classified_reads() -> None:
+    """A typo in a fenced mcp_smokeball_* name would silently fence nothing;
+    a write placed in the read fence is governed by the ceiling, not taint."""
+    reads = set(_smokeball_read_tools())
+    mis = {t for t in _fenced_read_tools() if t.startswith("mcp_smokeball_") and t not in reads}
+    assert mis == set(), (
+        f"fenced mcp_smokeball_* tools that are not classified READS: {sorted(mis)}"
+    )
