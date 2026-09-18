@@ -268,6 +268,15 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         # text such as "apply to matter X" or "also pay" must reach the model
         # fenced and taint the session like an inbound email.
         "mcp_smokeball_read_attachment_text",
+        # The overlay's own attachment pair (hermes-smd-mail-attachments,
+        # 2026-09-18). Neither returns the attachment's BODY, and both are
+        # fenced anyway, because both return the vendor's FILENAME — text an
+        # outside sender chose, and a place an instruction fits perfectly
+        # ("invoice-then-wire-the-balance.pdf"). A filename reaching the model
+        # unfenced would be exactly the untainted inbound channel the fence
+        # exists to close, and the cost of fencing a filename is nothing.
+        "mail_list_attachments",
+        "mail_spool_attachment",
         # Calendar reads — external invites carry third-party content (titles,
         # descriptions, locations are attacker-controllable text). Captain call
         # 2026-06-12: fence both, closing the code-review fence-candidate note.

@@ -377,3 +377,58 @@ def test_fenced_smokeball_entries_are_classified_reads() -> None:
     assert mis == set(), (
         f"fenced mcp_smokeball_* tools that are not classified READS: {sorted(mis)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The seat's own inbox attachments (hermes-smd-mail-attachments)
+# ---------------------------------------------------------------------------
+#
+# Both tools return VENDOR-AUTHORED text — a filename an outside sender chose —
+# so neither may be parked on the unfenced side. Stated as positive assertions
+# rather than a "fenced or declared" decision, because there is no defensible
+# declaration to make: this surface has no field the firm wrote.
+
+
+def _mail_attachment_tool_names() -> list[str]:
+    return _plugin_tool_names("hermes-smd-mail-attachments")
+
+
+def test_every_mail_attachment_tool_is_mapped_and_fenced() -> None:
+    """Both attachment tools are classified AND fenced.
+
+    The fence half keeps a filename from reaching the model as trusted text;
+    the classification half keeps the tool reachable at all (unmapped fails
+    closed to REFUSED). Drop either and the turn this surface exists to fix —
+    an invoice arriving with an attachment the seat could not see — fails again
+    in a new way."""
+    names = _mail_attachment_tool_names()
+    assert names, "no mail-attachment tools discovered; this guard would pass vacuously"
+    unmapped = [t for t in names if t not in TOOL_ACTION_CLASS_MAP]
+    assert unmapped == [], (
+        f"mail attachment tools missing from TOOL_ACTION_CLASS_MAP: {sorted(unmapped)}"
+    )
+    fenced = _fenced_read_tools()
+    unfenced = sorted(t for t in names if t not in fenced)
+    assert unfenced == [], (
+        f"mail attachment tool(s) not fenced: {unfenced}. Every one returns the "
+        "sender's own filename, which is inbound data and must taint."
+    )
+    misfiled = sorted(t for t in names if t in UNFENCED_READ_BY_DESIGN)
+    assert misfiled == [], (
+        f"mail attachment tool(s) declared unfenced-by-design: {misfiled}. There is "
+        "no firm-authored field on this surface to justify that."
+    )
+
+
+def test_fenced_mail_entries_are_classified_reads() -> None:
+    """A typo in a fenced ``mail_*`` name would silently fence nothing."""
+    names = set(_mail_attachment_tool_names())
+    ghosts = {
+        t
+        for t in _fenced_read_tools()
+        if t.startswith("mail_")
+        and (t not in names or TOOL_ACTION_CLASS_MAP.get(t) is not ActionClass.READ)
+    }
+    assert ghosts == set(), (
+        f"fenced mail_* names that are not registered READ tools: {sorted(ghosts)}"
+    )

@@ -87,18 +87,29 @@ vars:
 
   # ---- Optional: plugin no-ops cleanly / a default applies when absent ----
   AGENTMAIL_API_KEY:
-    # ss#2258: no longer read by any plugin — it survives only as the
-    # ``secret_env`` FIELD VALUE on the agentmail MCP connector spec, which the
-    # translator materializes into the profile config. That is an indirect
-    # reference, not a literal read, and the conformance gate is right to insist
-    # on the distinction.
+    # ss#2258 made this indirect: the ``secret_env`` FIELD VALUE on the
+    # agentmail MCP connector spec, materialized into the profile config, and
+    # read by nothing. 2026-09-18 made it a real read again, in ONE place —
+    # ``shared/agentmail_broker.py``'s attachment verbs. Scope the change
+    # honestly: what ss#2258 moved out was authority to TRANSMIT, and this key
+    # has none (the vendor refuses it). The mailbox it reads is the agent's own.
+    # Still INDIRECT, now for the other reason: the name is held in a module
+    # constant (``READ_KEY_ENV``), which the AST scan cannot tie to a read.
     discovery: indirect
     stage: agent
     requirement: optional
-    consumed_by: [mcp_registry]
-    note: "AgentMail READ/DRAFT credential — the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py). Inbox-scoped with message_send/draft_send WITHHELD since ss#2258, so it cannot transmit: the vendor refuses. NO overlay plugin reads it anymore; transmit is a broker verb keyed on AGENTMAIL_SEND_API_KEY, which never enters this process's environment."
+    consumed_by: [mcp_registry, mail-attachments]
+    note: "AgentMail READ/DRAFT credential — the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py), AND, since 2026-09-18, the Bearer credential shared/agentmail_broker.py's list_attachments/spool_attachment use against api.agentmail.to. Inbox-scoped with message_send/draft_send WITHHELD since ss#2258, so it cannot transmit: the vendor refuses. Transmit remains a broker verb keyed on AGENTMAIL_SEND_API_KEY, which never enters this process's environment. Unset, the two attachment tools do not register (requires_env) and the seat keeps its pre-2026-09-18 behavior."
+  SMD_ATTACHMENT_SPOOL_DIR:
+    # Name held in ``attachment_spool.SPOOL_DIR_ENV``; see the note above.
+    discovery: indirect
+    stage: agent
+    requirement: optional
+    consumed_by: [mail-attachments]
+    note: "where shared/attachment_spool.py writes an emailed attachment's bytes for the records connector to read back by token, on the same machine. Defaults to /opt/data/attachment-spool (the hermes-owned volume root the entrypoint already sweeps to the agent uid, so no ownership change is needed). Entries are 0600, owner-only, pruned on write after SPOOL_TTL_SECONDS."
   ANTHROPIC_API_KEY:
-    # Indirect, the AGENTMAIL_API_KEY shape: no overlay plugin reads this name.
+    # Indirect, the pre-2026-09-18 AGENTMAIL_API_KEY shape: no overlay plugin
+    # reads this name.
     # It is the SOURCE secret of an optional row on the smokeball MCP connector
     # spec (bootstrap/mcp_registry.py), which the translator resolves via
     # get_secret and materializes into that subprocess's env block.
