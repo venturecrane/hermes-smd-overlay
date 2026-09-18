@@ -386,6 +386,13 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # charge is the staged expense, read back with get_expenses (which
         # seeds). An invoice total must not certify itself in a reply.
         "mcp_smokeball_read_attachment_text",
+        # The seat's own inbox attachments (hermes-smd-mail-attachments). A
+        # filename, a content type, a byte count and a digest, all written by
+        # whoever sent the mail. None of it is the firm's record, so none of it
+        # may certify a figure or a fact in a reply: the staged expense read
+        # back with get_expenses is what seeds.
+        "mail_list_attachments",
+        "mail_spool_attachment",
         # The synthetic connector self-test fixture: echo returns its input.
         "mcp_reference_echo",
     }

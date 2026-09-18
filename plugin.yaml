@@ -11,6 +11,7 @@ plugins:
   - plugins/hermes-smd-inbound
   - plugins/hermes-smd-hook-probe
   - plugins/hermes-smd-workspace
+  - plugins/hermes-smd-mail-attachments
   - plugins/hermes-smd-reply
   # initiation MUST register before peer-memory: both resolve the turn's
   # verified sender through SESSION_INBOUND_ORIGIN's claim-once unbound

@@ -1,0 +1,6 @@
+name: hermes-smd-mail-attachments
+version: "0.1.0"
+description: "The seat's own inbox attachments: list what a message carries (the webhook event does not say), and spool one attachment's bytes to a seat-local path so the records connector can read them without the agent carrying bytes or a credential."
+author: VentureCrane
+requires_env:
+  - AGENTMAIL_API_KEY

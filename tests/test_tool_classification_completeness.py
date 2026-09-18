@@ -294,6 +294,11 @@ def _initiation_tools() -> frozenset[str]:
     return frozenset(plugin.TOOLS)
 
 
+def _mail_attachment_tools() -> frozenset[str]:
+    plugin = load_plugin("hermes-smd-mail-attachments")
+    return frozenset(plugin.TOOLS)
+
+
 # ---------------------------------------------------------------------------
 # Layer A — every WIREABLE MCP connector must have a classified tool surface.
 # ---------------------------------------------------------------------------
@@ -435,6 +440,38 @@ def test_every_initiation_tool_is_classified() -> None:
         f"initiation tool(s) not classified: {undecided}. "
         f"Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
     )
+
+
+def test_every_mail_attachment_tool_is_classified() -> None:
+    """Every tool hermes-smd-mail-attachments registers must be decided.
+
+    Same property as the workspace and initiation guards, and the same failure
+    mode: unclassified means REFUSED, and a seat would go on answering "your
+    message arrived without any attachments" — the exact defect these two tools
+    were built to close (2026-09-18) — with every other test green."""
+    undecided = sorted(t for t in _mail_attachment_tools() if not _is_decided(t))
+    assert undecided == [], (
+        f"mail attachment tool(s) not classified: {undecided}. "
+        f"Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
+    )
+
+
+def test_mail_attachment_tools_are_read() -> None:
+    """Not merely decided — READ specifically, and both of them.
+
+    Either one classed heavier sits behind an entitlement ceiling a seat may
+    never have authored, and reading one's own inbox is not a write into
+    anyone's record: the spool is a scratch file on the seat's own volume."""
+    from shared.action_classes import ActionClass, classify_tool
+
+    tools = _mail_attachment_tools()
+    assert tools == {"mail_list_attachments", "mail_spool_attachment"}, (
+        f"the mail attachment surface changed: {sorted(tools)}; decide the new tool here"
+    )
+    for name in sorted(tools):
+        resolved = classify_tool(name)
+        assert resolved.action_class is ActionClass.READ, f"{name} is {resolved.action_class}"
+        assert resolved.unmapped is False
 
 
 def test_seat_facts_is_read() -> None:

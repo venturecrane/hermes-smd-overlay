@@ -277,6 +277,19 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_agentmail_list_drafts": ActionClass.READ,
     "mcp_agentmail_get_draft": ActionClass.READ,
     "mcp_agentmail_auth_me": ActionClass.READ,
+    # The overlay's own attachment pair (plugins/hermes-smd-mail-attachments,
+    # 2026-09-18). Both READ: one asks the vendor what a message carries — the
+    # inbound event has no ``attachments`` key, so nothing else can tell a turn
+    # an attachment exists — and one fetches those bytes with the seat's
+    # inbox-scoped key and leaves them in the seat-local spool, returning a
+    # token. The spool write is a scratch file on the seat's own volume, not a
+    # write into anyone's record: nothing is created in a tenant system, nothing
+    # is sent, and the entry expires. Classing it INTERNAL_WRITE would put
+    # reading one's own mail behind an entitlement ceiling a seat need not have
+    # authored, which is how a tool ships dead. Both are fenced+tainting in
+    # hermes-smd-inbound._FENCED_READ_TOOLS: a filename is sender-chosen text.
+    "mail_list_attachments": ActionClass.READ,
+    "mail_spool_attachment": ActionClass.READ,
     # Native web search (WebSearch capability, ADR 0070). Hermes' bundled web
     # providers (plugins/web/*, e.g. brave-free) expose ONE native tool,
     # `web_search` (tools/web_tools.py) — NOT an MCP tool, so the runtime name is
