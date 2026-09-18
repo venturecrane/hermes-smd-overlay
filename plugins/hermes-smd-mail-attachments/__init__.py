@@ -57,35 +57,31 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
         {
             "type": "object",
             "properties": {
-                "inbox_id": {
-                    **STRING,
-                    "description": "The inbox the message arrived in (on the event).",
-                },
                 "message_id": {**STRING, "description": "The message id (on the event)."},
             },
-            "required": ["inbox_id", "message_id"],
+            "required": ["message_id"],
             "additionalProperties": False,
         },
     ),
     "mail_spool_attachment": (
         "Fetch ONE attachment's bytes server-side and leave them in the seat's "
         "local spool. Returns spool_token, filename, content_type, size and "
-        "sha256 — never the bytes. Pass the spool_token (and the sha256) to the "
-        "records connector's read_attachment_text / stage_vendor_invoice / "
-        "file_attachment_to_matter; the bytes never pass through this "
+        "sha256 — never the bytes. Pass it to the records connector as "
+        '"spool:" + the token, in the download_url argument of '
+        "read_attachment_text / stage_vendor_invoice / file_attachment_to_matter; "
+        "the bytes never pass through this "
         "conversation. Entries expire after a few hours, so spool again rather "
         "than reusing an old token.",
         {
             "type": "object",
             "properties": {
-                "inbox_id": {**STRING, "description": "The inbox the message arrived in."},
                 "message_id": {**STRING, "description": "The message id."},
                 "attachment_id": {
                     **STRING,
                     "description": "From mail_list_attachments on the same message.",
                 },
             },
-            "required": ["inbox_id", "message_id", "attachment_id"],
+            "required": ["message_id", "attachment_id"],
             "additionalProperties": False,
         },
     ),
@@ -93,15 +89,12 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
 
 
 def _list_handler(args: dict[str, Any], **_: Any) -> str:
-    found = agentmail_broker.list_attachments(
-        str(args.get("inbox_id") or ""), str(args.get("message_id") or "")
-    )
+    found = agentmail_broker.list_attachments(str(args.get("message_id") or ""))
     return json.dumps({"attachments": found, "count": len(found)}, ensure_ascii=False)
 
 
 def _spool_handler(args: dict[str, Any], **_: Any) -> str:
     receipt = agentmail_broker.spool_attachment(
-        str(args.get("inbox_id") or ""),
         str(args.get("message_id") or ""),
         str(args.get("attachment_id") or ""),
     )
