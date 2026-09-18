@@ -108,10 +108,20 @@ def _medchron_job_submit(args: dict[str, Any], **_: Any) -> str:
 
 
 def _medchron_job_status(args: dict[str, Any], **_: Any) -> str:
+    """One job, one matter's cumulative coverage, or the recent list.
+
+    The matter path exists because an UPDATE turn holds a matter id and no job
+    id: the job id is written into the DELIVER memo, which is the wrong place
+    to have to read a delta from, and the recent-list window is bounded, so a
+    matter's delivery can fall out of it entirely.
+    """
     job_id = str(args.get("job_id") or "").strip() or None
-    resp = MedchronBrokerClient().status(job_id)
+    matter_id = str(args.get("matter_id") or "").strip() or None
+    resp = MedchronBrokerClient().status(job_id, matter_id)
     if job_id:
         return json.dumps({"job": resp.get("job")}, ensure_ascii=False)
+    if matter_id:
+        return json.dumps({"matter": resp.get("matter")}, ensure_ascii=False)
     return json.dumps({"jobs": resp.get("jobs") or []}, ensure_ascii=False)
 
 
@@ -188,9 +198,23 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         _medchron_job_submit,
     ),
     "medchron_job_status": (
-        "Check a chronology package job by id (state, documents, pages, spend, delivery folder), "
-        "or list the last twenty when no id is given.",
-        _schema({"job_id": STRING}),
+        "Check a chronology package job by id (state, documents, pages, spend, delivery folder); "
+        "or pass matter_id for that matter's cumulative delivered coverage, which is what an "
+        "update measures its delta against; or list the last twenty when neither is given. "
+        "Pass one or the other, never both.",
+        _schema(
+            {
+                "job_id": STRING,
+                "matter_id": {
+                    "type": "string",
+                    "description": (
+                        "The practice-management matter id, resolved on this turn. Returns the "
+                        "covered and uncovered document ids accumulated across every delivered "
+                        "chronology on the matter, so an update reads only the rest."
+                    ),
+                },
+            }
+        ),
         _medchron_job_status,
     ),
     "medchron_allowance": (

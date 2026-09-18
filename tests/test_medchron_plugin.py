@@ -34,6 +34,11 @@ class _FakeBroker:
             "medchron_job_status": {
                 "ok": True,
                 "job": {"id": "01J", "state": "running", "pages": 12},
+                "matter": {
+                    "matter_number": "200454",
+                    "covered_document_ids": ["a", "b"],
+                    "uncovered_document_ids": ["c"],
+                },
             },
             "medchron_allowance": {
                 "ok": True,
@@ -187,6 +192,33 @@ def test_status_and_allowance_are_thin(broker):
     )
     assert broker.requests[-1] == {"action": "medchron_job_status", "job_id": "01J"}
     assert json.loads(tools["medchron_allowance"]["handler"]({}))["remaining"] == 40
+
+
+def test_status_by_matter_asks_for_the_matter_and_never_smuggles_a_job_id(broker):
+    """The UPDATE path: a matter id in, that matter's cumulative coverage out.
+
+    The two request assertions are the point. `matter_id` must appear ONLY when
+    it was supplied, because a key added unconditionally would change the wire
+    shape of every existing status call (the assertion above pins it), and
+    `job_id` must be absent, because the broker refuses both at once and a
+    smuggled empty string would make every matter lookup fail as a bad job id.
+    """
+    tools = _tools()
+    out = json.loads(
+        tools["medchron_job_status"]["handler"](
+            {"matter_id": "00268f88-f469-4f24-8d50-92fd4e732f4e"}
+        )
+    )
+    assert out["matter"]["covered_document_ids"] == ["a", "b"]
+    assert broker.requests[-1] == {
+        "action": "medchron_job_status",
+        "matter_id": "00268f88-f469-4f24-8d50-92fd4e732f4e",
+    }
+
+    # Neither argument: the payload carries neither key, so the recent-list
+    # call is byte-identical to what it was before the matter path existed.
+    json.loads(tools["medchron_job_status"]["handler"]({}))
+    assert broker.requests[-1] == {"action": "medchron_job_status"}
 
 
 def test_client_raises_on_a_broker_refusal_or_no_socket(broker, monkeypatch):

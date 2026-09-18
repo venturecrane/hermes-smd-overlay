@@ -40,10 +40,19 @@ class MedchronBrokerClient:
         allowance remainder, or ``accepted: False`` with a prose ``reason``."""
         return self._request({"action": "medchron_job_submit", "envelope": envelope})
 
-    def status(self, job_id: str | None = None) -> dict[str, Any]:
+    def status(self, job_id: str | None = None, matter_id: str | None = None) -> dict[str, Any]:
+        """One job by id, or a MATTER's cumulative delivered coverage, or the
+        recent list when neither is given.
+
+        Each key is added only when truthy, so a call that passes neither sends
+        exactly the payload it always sent. The broker refuses both at once
+        rather than preferring one silently.
+        """
         payload: dict[str, Any] = {"action": "medchron_job_status"}
         if job_id:
             payload["job_id"] = job_id
+        if matter_id:
+            payload["matter_id"] = matter_id
         return self._request(payload)
 
     def allowance(self) -> dict[str, Any]:
