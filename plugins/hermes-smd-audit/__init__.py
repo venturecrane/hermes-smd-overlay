@@ -85,6 +85,21 @@ def _writer() -> AuditLogWriter | None:
     return _WRITER
 
 
+#: The host's own words when a pre-call plugin callback does not return in time
+#: (hermes_cli model_tools). Matched as a phrase, not parsed: if upstream rewords
+#: it, the arm simply goes back to counting the block as a refusal, which is the
+#: behaviour that existed before this function -- never a new way to stay unbraked.
+_CALLBACK_TIMEOUT_MARKERS = ("callback timed out", "is still running")
+
+
+def _is_callback_timeout(result: object) -> bool:
+    """Did this block come from a callback that never answered?"""
+    if not isinstance(result, str) or not result:
+        return False
+    text = result.lower()
+    return all(marker in text for marker in _CALLBACK_TIMEOUT_MARKERS)
+
+
 def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
     """Feed the sticky-stop ladder's runaway-loop arms from one tool outcome.
 
@@ -138,7 +153,18 @@ def _meter_loop_arms(kwargs: dict, breaker: Any = None) -> None:
             # folded into either ladder.
             if kwargs.get("error_type") != "plugin_block":
                 return
-            state = breaker.record_refusal(tool_name)
+            if _is_callback_timeout(kwargs.get("result")):
+                # A GATE THAT NEVER ANSWERED IS NOT A GATE THAT SAID NO.
+                # 2026-09-18: four emails arrived within a minute on a 1-vCPU
+                # seat, the pre-call check timed out under the load, and twenty
+                # of those timeouts read as twenty policy refusals -- HARD_STOP
+                # mid-rehearsal, reported as a refusal cascade on a tool that
+                # had refused nothing. A slow seat and a misbehaving one need
+                # opposite responses, so a timeout feeds the FAILURE arm (which
+                # is what a stuck seat looks like) and never the refusal one.
+                state = breaker.record_tool_failure(tool_name)
+            else:
+                state = breaker.record_refusal(tool_name)
 
         if state is not None and getattr(state, "level", None) is not None:
             level = getattr(state.level, "value", state.level)

@@ -173,6 +173,27 @@ def audit_plugin():
         ),
         # A block that is NOT ours belongs to neither ladder.
         ({"status": "blocked", "error_type": "tool_error"}, []),
+        # A GATE THAT NEVER ANSWERED IS NOT A GATE THAT SAID NO (2026-09-18):
+        # a timed-out pre-call callback feeds the failure arm, never refusal.
+        (
+            {
+                "status": "blocked",
+                "error_type": "plugin_block",
+                "tool_name": "mail_list_attachments",
+                "result": '{"error": "pre_tool_call plugin callback timed out or is still running"}',
+            },
+            [("failure", "mail_list_attachments")],
+        ),
+        # A real refusal still counts, with a message or without one.
+        (
+            {
+                "status": "blocked",
+                "error_type": "plugin_block",
+                "tool_name": "email_send",
+                "result": '{"action": "block", "message": "Refused: external_send needs approval"}',
+            },
+            [("refusal", "email_send")],
+        ),
         # POSITIVE-ONLY. Each of these must record nothing: an envelope that
         # changed shape has to leave the seat exactly as unbraked as it was
         # before this code existed, never trip it.
