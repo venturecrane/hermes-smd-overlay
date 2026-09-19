@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import sys
 import types
 from pathlib import Path
@@ -31,6 +32,7 @@ def _ledger_in_tmp(tmp_path, monkeypatch):
     # Reset the module's one-shot latches between tests.
     plugin._MAPPING_BROKEN = False
     plugin._UNMAPPED_WARNED.clear()
+    plugin._SURFACE_SWEPT = False
     return tmp_path / "ledger.json"
 
 
@@ -148,3 +150,103 @@ def test_handler_never_raises(fake_mapping, _ledger_in_tmp, monkeypatch):
     monkeypatch.setattr(plugin, "record_call", boom)
     # Must swallow — health capture never breaks the agent turn.
     plugin.on_post_tool_call(tool_name="mcp_smokeball_get_matter", status="ok")
+
+
+# ---------------------------------------------------------------------------
+# Tool-surface sweep (ss-console#2845)
+#
+# The sweep is the instrument that was missing when two AgentMail READ verbs
+# sat unclassified — and therefore REFUSED on every call — while a static pin
+# in tests/test_tool_classification_completeness.py asserted the surface was
+# fully decided. These tests exist so the sweep cannot become the same kind of
+# check: one proves it NAMES drift, one proves it reports a clean surface out
+# loud rather than silently, and one proves silence means it never ran. If the
+# clean case said nothing, "swept and clean" and "never swept" would be
+# identical from outside, which is the entire defect class.
+# ---------------------------------------------------------------------------
+
+
+def _sweep_with(monkeypatch, mapping):
+    """Run one sweep against ``mapping`` through the real code path."""
+    tools_pkg = types.ModuleType("tools")
+    mcp_tool = types.ModuleType("tools.mcp_tool")
+    mcp_tool._mcp_tool_server_names = mapping
+    tools_pkg.mcp_tool = mcp_tool
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool", mcp_tool)
+    plugin._resolve_server(next(iter(mapping), "mcp_nothing_at_all"))
+
+
+def _sweep_lines(caplog):
+    return [r for r in caplog.records if "TOOL SURFACE SWEEP" in r.getMessage()]
+
+
+def test_sweep_names_an_unclassified_registered_tool(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    _sweep_with(
+        monkeypatch,
+        {
+            "mcp_agentmail_get_thread": "agentmail",
+            "mcp_agentmail_definitely_not_classified": "agentmail",
+        },
+    )
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1, f"expected one drift ERROR, got {[r.getMessage() for r in errors]}"
+    text = errors[0].getMessage()
+    assert "mcp_agentmail_definitely_not_classified" in text
+    assert "1 unclassified" in text
+    # The classified sibling must NOT be named, or the sweep is only reciting
+    # the surface back at us.
+    assert "mcp_agentmail_get_thread" not in text
+
+
+def test_sweep_reports_a_clean_surface_out_loud_and_without_erroring(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    _sweep_with(monkeypatch, {"mcp_agentmail_get_thread": "agentmail"})
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    clean = _sweep_lines(caplog)
+    assert len(clean) == 1, "a clean sweep must still say so — silence is the failure mode"
+    assert "0 unclassified" in clean[0].getMessage()
+
+
+def test_sweep_canonicalizes_the_wire_form_before_judging(monkeypatch, caplog):
+    """v0.19 spells tools ``mcp__server__tool``; the policy map is single-underscore.
+
+    Without canonicalization every tool on a v0.19 seat reads as unclassified,
+    which is the 2026-08-20 incident inverted into a false alarm.
+    """
+    caplog.set_level(logging.DEBUG)
+    _sweep_with(monkeypatch, {"mcp__agentmail__get_thread": "agentmail"})
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_sweep_does_not_latch_on_an_empty_mapping(monkeypatch, caplog):
+    """MCP servers register after plugin load; an empty dict means 'too early'."""
+    caplog.set_level(logging.DEBUG)
+    _sweep_with(monkeypatch, {})
+    assert _sweep_lines(caplog) == []
+    assert plugin._SURFACE_SWEPT is False, "an empty mapping must not burn the one shot"
+
+
+def test_sweep_runs_once_per_process(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    mapping = {"mcp_agentmail_still_not_classified": "agentmail"}
+    _sweep_with(monkeypatch, mapping)
+    _sweep_with(monkeypatch, mapping)
+    assert len(_sweep_lines(caplog)) == 1
+
+
+@pytest.mark.parametrize("tool", ["mcp_agentmail_get_message", "mcp_agentmail_search_inboxes"])
+def test_the_two_verbs_this_shipped_with_are_decided_everywhere(tool: str) -> None:
+    """Regression pin for the specific drift that prompted the sweep.
+
+    Found on a live seat 2026-09-18: both were offered by AgentMail, absent
+    from every policy table, and therefore REFUSED on every call. A READ tool
+    has to land on THREE tables, and landing on one of them is the half-wired
+    state the sibling completeness tests exist to catch.
+    """
+    from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
+    from shared.provenance import TENANT_SOURCE_READ_TOOLS
+
+    assert TOOL_ACTION_CLASS_MAP.get(tool) is ActionClass.READ
+    assert tool in TENANT_SOURCE_READ_TOOLS

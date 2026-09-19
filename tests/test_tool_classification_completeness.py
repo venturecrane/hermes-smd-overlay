@@ -112,12 +112,27 @@ UNCLASSIFIED_CONNECTORS_BY_DESIGN: dict[str, str] = {}
 # fail-open hole. Names are the full ``mcp_<server>_<tool>`` runtime form.
 # ---------------------------------------------------------------------------
 PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
-    # AgentMail (mcp:agentmail) — the persona's own mailbox. The 24-tool
-    # surface is enumerated in action_classes.py from a live tools/list
-    # (2026-06-12); pinned here so a 25th agentmail verb cannot slip in
-    # unclassified. Sends are EXTERNAL_SEND (ceiling-governed), drafts/inbox
-    # mutations INTERNAL_WRITE, delete_inbox/delete_thread DESTRUCTIVE, reads
-    # READ — every one MUST be decided.
+    # AgentMail (mcp:agentmail) — the persona's own mailbox. Sends are
+    # EXTERNAL_SEND (ceiling-governed), drafts/inbox mutations INTERNAL_WRITE,
+    # delete_inbox/delete_thread DESTRUCTIVE, reads READ — every one MUST be
+    # decided.
+    #
+    # This pin asserts DECIDED-NESS for the verbs we know about. It does NOT
+    # and CANNOT detect a new one. It used to claim "a 25th agentmail verb
+    # cannot slip in unclassified"; that sentence was false, and it was worse
+    # than useless because it read as coverage. This list is a transcription of
+    # a tools/list taken on 2026-06-12, so a verb the vendor shipped on
+    # 2026-06-13 is absent from the pin and from the map alike, and the test
+    # passes while the tool REFUSES on the seat. Exactly that happened to
+    # ``get_message`` and ``search_inboxes``, found on a live seat 2026-09-18
+    # and added here 2026-09-19 (ss-console#2845) — the same way the Brave
+    # name was found (overlay#148) and the same way the v0.19 rename was.
+    #
+    # The instrument that CAN see a new verb is the runtime sweep in
+    # plugins/hermes-smd-connector-health, which diffs Hermes' registered tool
+    # surface against TOOL_ACTION_CLASS_MAP on a live seat and logs the
+    # difference at ERROR. Read the header of this file (":34-41") for why a
+    # static assertion over a surface we do not vendor is the wrong shape.
     "agentmail": frozenset(
         {
             "mcp_agentmail_send_message",
@@ -144,6 +159,8 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_agentmail_list_drafts",
             "mcp_agentmail_get_draft",
             "mcp_agentmail_auth_me",
+            "mcp_agentmail_get_message",
+            "mcp_agentmail_search_inboxes",
         }
     ),
     # Smokeball (mcp:smokeball) — the law wedge's system of record, now a

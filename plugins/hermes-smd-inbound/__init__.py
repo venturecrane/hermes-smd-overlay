@@ -233,6 +233,18 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_agentmail_search_messages",
         "mcp_agentmail_get_attachment",
         "mcp_agentmail_get_draft",
+        # Added 2026-09-19 (ss-console#2845). ``get_message`` is the exact peer
+        # of ``get_thread``: one sender-authored body, same channel.
+        "mcp_agentmail_get_message",
+        # ``search_inboxes`` is fenced on a decision made from its NAME, not
+        # from a schema we have read. Two readings: searching inbox OBJECTS
+        # makes it a peer of list_inboxes (unfenced by design), searching
+        # MESSAGES across inboxes makes it a peer of search_messages (fenced).
+        # The membership rule at the top of this set breaks the tie — over-
+        # fencing costs autonomy, under-fencing leaves an injection channel —
+        # so it sits here until someone reads the vendor's schema and can move
+        # it down with a reason.
+        "mcp_agentmail_search_inboxes",
         # msgraph-mail (ss #1978 / ADR 0078) — the operator's client-custody
         # mailbox, the same primary untrusted channel as AgentMail's PULL path.
         # ALL THREE reads carry sender-authored content: list_messages returns
