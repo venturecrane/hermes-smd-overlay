@@ -1070,6 +1070,24 @@ def test_translate_does_not_exclude_agentmail_sends(tmp_path, monkeypatch):
         "send_draft",
         "reply_to_message",
         "forward_message",
+        # surface reduction round two (2026-09-19, ss-console#2845). Named by
+        # the seat's own tool-surface sweep, not guessed: "75 registered, 14
+        # unclassified" on pilot-smokeball, of which these were ten. Vendor
+        # additions since the 2026-07-15 catalog read, refusing on every call
+        # ever since. Provider/account/list administration is not something an
+        # Operator routine does, and connect_provider is an account-level action
+        # against our mail vendor that should not be agent-reachable at any
+        # ceiling.
+        "agent_verify",
+        "connect_provider",
+        "create_list_entry",
+        "delete_list_entry",
+        "get_list_entry",
+        "get_provider",
+        "list_accounts",
+        "list_list_entries",
+        "list_providers",
+        "search_providers",
     }
     # Reads and drafts MUST stay: the no-send key still performs them, the reply
     # channel triggers on create_draft, and the intake skill authors it. Dropping

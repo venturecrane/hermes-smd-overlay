@@ -165,6 +165,40 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             "send_draft",
             "reply_to_message",
             "forward_message",
+            # SURFACE REDUCTION, round two (2026-09-19, ss-console#2845). These
+            # ten were NAMED BY THE SEAT, not guessed: the tool-surface sweep
+            # added in overlay#365 reported "75 registered, 14 unclassified" on
+            # pilot-smokeball, and these were ten of the fourteen. The vendor
+            # shipped them after the 2026-07-15 catalog read, so they have been
+            # sitting on the menu REFUSING on every call ever since -- costing
+            # prompt-cache tokens every turn and handing a blocked model a dead
+            # end to wander into.
+            #
+            # Same rationale as the original eight above: provider connection,
+            # account and list-entry management are things no Operator routine
+            # does, and provisioning is Captain-side. connect_provider is the
+            # one that decides it on its own -- an account-level action against
+            # our mail vendor should never be agent-reachable at ANY exposure
+            # ceiling, which is an argument for removing it from the menu rather
+            # than classifying it and relying on a ceiling to hold.
+            #
+            # This is removal, not a permanent verdict. If a routine ever needs
+            # one, it comes off this tuple and onto the action-class map WITH a
+            # reason. Note also that a blocked tool never reaches Hermes'
+            # registry, so it is invisible to the sweep by construction -- which
+            # is correct (it cannot be called) but means this tuple is its own
+            # hand-maintained list, unwatched. The sweep still catches the case
+            # that matters: a NEW vendor verb arrives offered, not blocked.
+            "agent_verify",
+            "connect_provider",
+            "create_list_entry",
+            "delete_list_entry",
+            "get_list_entry",
+            "get_provider",
+            "list_accounts",
+            "list_list_entries",
+            "list_providers",
+            "search_providers",
         ),
     ),
     # Clio (oktopeak/clio-mcp v2.0.0, MIT) — practice-management system of record
@@ -284,7 +318,27 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             ("SMOKEBALL_VISION_MAX_BYTES", "SMOKEBALL_VISION_MAX_BYTES"),  # connector default
             ("SMOKEBALL_VISION_DISABLED", "SMOKEBALL_VISION_DISABLED"),  # per-seat kill switch
         ),
-        blocked_tools=(),
+        # MCP PROTOCOL PLUMBING, not Smokeball verbs (2026-09-19, ss-console#2845).
+        # The seat's tool-surface sweep named these four alongside ten AgentMail
+        # verbs. They are NOT ours: `grep` finds them nowhere in
+        # operator/connectors/smokeball, and they are absent from the manifest's
+        # [connector.tool_classes] oracle. They are the MCP prompts/resources
+        # capability, auto-exposed as tools by the client wrapper around our
+        # FastMCP server.
+        #
+        # Blocked rather than classified for two reasons. They carry no business
+        # capability -- the connector declares no prompts and no resources, so
+        # they answer empty -- and because the manifest does not declare them,
+        # adding them to the action-class map would put a name in the map that
+        # the conformance oracle cannot see, which is the half-wired shape that
+        # crashlooped a reprovision on 2026-07-24 (the missing half of #1986).
+        # Off the menu is the honest state for a tool that does nothing.
+        blocked_tools=(
+            "get_prompt",
+            "list_prompts",
+            "list_resources",
+            "read_resource",
+        ),
     ),
     # Microsoft Graph mail (mcp:msgraph-mail) — the client-custody email connector
     # (ADR 0078 / email-channel-seam D4; ss-console operator/connectors/msgraph-mail,
