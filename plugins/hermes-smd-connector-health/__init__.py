@@ -38,6 +38,14 @@ What counts (ADR 0080 failure semantics):
 * ``status="blocked"`` / ``error_type="plugin_block"`` → ignored: our own
   trust plugin refusing a call is policy, not outage.
 
+It also carries a second, unrelated observation that happens to need the
+same import. Because this file already holds Hermes' authoritative
+registered-tool mapping, it is the one place that can see the whole
+offered tool surface, so :func:`_sweep_tool_surface` names any registered
+tool the action-class map does not classify — a vendor adding a verb
+otherwise produces nothing but REFUSED calls nobody can explain. See that
+function's docstring for why it warns instead of fixing.
+
 Observer-only and exception-safe per AGENTS.md hard rule #3: the callback
 always returns None and swallows its own exceptions — health capture must
 never break the agent turn.
@@ -59,6 +67,77 @@ logger = logging.getLogger(__name__)
 # exists to kill.
 _MAPPING_BROKEN = False
 _UNMAPPED_WARNED: set[str] = set()
+_SURFACE_SWEPT = False
+
+
+def _sweep_tool_surface(mapping: dict[str, Any]) -> None:
+    """Name every REGISTERED MCP tool that the action-class map does not classify.
+
+    Why this exists. ``TOOL_ACTION_CLASS_MAP`` is a hand-maintained snapshot of
+    surfaces we do not vendor, and an unmapped tool fails closed — every call
+    REFUSED, with a message the model cannot interpret or route around. A vendor
+    ships new tools on its own schedule with no coordinated change on our side,
+    so the snapshot rots silently. It has rotted three times now: the Brave
+    single-name form (overlay#148), the v0.19 ``mcp__server__tool`` rename that
+    unmapped EVERY connector tool (``shared/mcp_tool_names.py:11-21``), and the
+    agentmail verbs this sweep shipped with. All three were caught by someone
+    driving a live seat, never by CI — which is the whole argument for observing
+    the registry at runtime instead of pinning it in a test.
+
+    This does NOT make a drifted tool work, and deliberately so: auto-classifying
+    an unknown vendor tool would be exactly the fail-open that the REFUSED
+    terminal class exists to prevent. It converts a silent dead end into a named
+    one, and a human lands the map entry.
+
+    Severity is the signal. Drift logs at ERROR so it becomes a Sentry event in
+    ``smd-operator`` (``shared/sentry_init.py`` installs no ``LoggingIntegration``,
+    so the SDK default ``event_level=ERROR`` applies and anything below it is a
+    breadcrumb nobody reads). A CLEAN sweep logs at INFO rather than ERROR: a
+    safety signal that fires on every known-good boot is a signal people learn to
+    ignore. The line is emitted either way, so "swept and clean" and "never swept"
+    are distinguishable in the log — a sweep that found nothing says ``0
+    unclassified``, a sweep that never ran says nothing at all.
+
+    Reads post-exclusion state by construction: ``blocked_tools`` never reaches
+    Hermes' registry (``bootstrap/translate.py`` writes them as an ``exclude``
+    list), so this sees exactly the tools the agent can actually call, which is
+    exactly the set that needs classifying.
+
+    Per-process and per-seat. One seat's registry reflects only the connectors
+    that seat binds, so a clean line here is not a claim about the fleet.
+    """
+    global _SURFACE_SWEPT
+    if _SURFACE_SWEPT or not mapping:
+        return
+    _SURFACE_SWEPT = True
+    try:
+        from shared.action_classes import BANNED_TOOLS, TOOL_ACTION_CLASS_MAP
+        from shared.mcp_tool_names import canonical_tool_name
+    except Exception as exc:  # noqa: BLE001 — observer, never raises
+        logger.error(
+            "SMD OVERLAY TOOL SURFACE SWEEP: cannot import the action-class "
+            "map (%s) — drift is NOT being observed on this seat",
+            exc,
+        )
+        return
+    known = set(TOOL_ACTION_CLASS_MAP) | set(BANNED_TOOLS)
+    unclassified = sorted({canonical_tool_name(wire) for wire in mapping} - known)
+    if unclassified:
+        logger.error(
+            "SMD OVERLAY TOOL SURFACE SWEEP: %d registered, %d unclassified: %s "
+            "— each REFUSES on every call until it is added to "
+            "TOOL_ACTION_CLASS_MAP (a vendor tool needs the map entry; an "
+            "author-built connector tool needs its manifest tool_classes entry "
+            "in the SAME change, or the boot probe FATALs the seat)",
+            len(mapping),
+            len(unclassified),
+            ", ".join(unclassified),
+        )
+    else:
+        logger.info(
+            "SMD OVERLAY TOOL SURFACE SWEEP: %d registered, 0 unclassified",
+            len(mapping),
+        )
 
 
 def _resolve_server(tool_name: str) -> str | None:
@@ -89,6 +168,7 @@ def _resolve_server(tool_name: str) -> str | None:
             )
             mark_mapping_broken()
         return None
+    _sweep_tool_surface(_mcp_tool_server_names)
     server = _mcp_tool_server_names.get(tool_name)
     if server is None and tool_name.startswith("mcp_") and tool_name not in _UNMAPPED_WARNED:
         _UNMAPPED_WARNED.add(tool_name)

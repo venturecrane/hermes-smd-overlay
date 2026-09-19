@@ -163,7 +163,13 @@ def test_every_agentmail_read_tool_is_fenced_or_explicitly_unfenced() -> None:
     fenced = _fenced_read_tools()
     reads = _agentmail_read_tools()
     # Guard against the live surface vanishing (a rename in action_classes
-    # would silently empty this test). The live server exposes 11 READ tools.
+    # would silently empty this test). Deliberately an emptiness check and not
+    # a count: a hardcoded number here said "11 READ tools" from 2026-06-12
+    # until 2026-09-19, describing a vendor surface nobody had re-read, while
+    # two READ verbs sat unclassified and REFUSING on the seat. The number
+    # would not have caught them either — it is the map that is derived from,
+    # and both were missing from that too. The runtime sweep in
+    # plugins/hermes-smd-connector-health is what observes the live surface.
     assert reads, (
         "no mcp_agentmail_* READ tools found in TOOL_ACTION_CLASS_MAP — the "
         "AgentMail surface may have been renamed; this guard would pass vacuously."
