@@ -209,6 +209,31 @@ def test_sweep_reports_a_clean_surface_out_loud_and_without_erroring(monkeypatch
     assert "0 unclassified" in clean[0].getMessage()
 
 
+def test_the_clean_line_is_logged_loudly_enough_to_reach_the_seat(monkeypatch, caplog):
+    """The clean sweep must be at least WARNING, and must stay below ERROR.
+
+    This shipped as INFO for one pin and was invisible: ``hermes_plugins.*``
+    INFO does not reach the seat's log. The control was this plugin's own
+    unconditional ``register()`` line -- a captured full boot of pilot-smokeball
+    on 2026-09-19 held sixteen boot markers and zero "connector-health
+    registered". A clean sweep and a sweep that never ran were both silence,
+    which is exactly the ambiguity the clean branch exists to remove.
+
+    Both bounds matter. Below WARNING it vanishes; at ERROR it becomes a Sentry
+    event on every known-good boot of every seat, and a safety signal that fires
+    when nothing is wrong is one people learn to ignore.
+    """
+    caplog.set_level(logging.DEBUG)
+    _sweep_with(monkeypatch, {"mcp_agentmail_get_thread": "agentmail"})
+    clean = _sweep_lines(caplog)
+    assert len(clean) == 1
+    assert clean[0].levelno >= logging.WARNING, (
+        "a clean sweep logged below WARNING never reaches the seat's log, so it "
+        "cannot be distinguished from a sweep that did not run"
+    )
+    assert clean[0].levelno < logging.ERROR, "a clean sweep at ERROR pages on every healthy boot"
+
+
 def test_sweep_canonicalizes_the_wire_form_before_judging(monkeypatch, caplog):
     """v0.19 spells tools ``mcp__server__tool``; the policy map is single-underscore.
 
