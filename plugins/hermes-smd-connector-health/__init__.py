@@ -89,14 +89,31 @@ def _sweep_tool_surface(mapping: dict[str, Any]) -> None:
     terminal class exists to prevent. It converts a silent dead end into a named
     one, and a human lands the map entry.
 
-    Severity is the signal. Drift logs at ERROR so it becomes a Sentry event in
-    ``smd-operator`` (``shared/sentry_init.py`` installs no ``LoggingIntegration``,
-    so the SDK default ``event_level=ERROR`` applies and anything below it is a
-    breadcrumb nobody reads). A CLEAN sweep logs at INFO rather than ERROR: a
-    safety signal that fires on every known-good boot is a signal people learn to
-    ignore. The line is emitted either way, so "swept and clean" and "never swept"
-    are distinguishable in the log — a sweep that found nothing says ``0
-    unclassified``, a sweep that never ran says nothing at all.
+    Severity is the signal, and the floor is higher than it looks.
+
+    Drift logs at ERROR so it becomes a Sentry event in ``smd-operator``
+    (``shared/sentry_init.py`` installs no ``LoggingIntegration``, so the SDK
+    default ``event_level=ERROR`` applies and anything below it is a breadcrumb
+    nobody reads).
+
+    A CLEAN sweep logs at WARNING. It was INFO for exactly one pin, and that was
+    wrong: ``hermes_plugins.*`` INFO does not reach the seat's log at all. The
+    control is this plugin's own ``register()`` line, which is unconditional --
+    a captured full boot of pilot-smokeball on 2026-09-19 contains sixteen boot
+    markers and zero "hermes-smd-connector-health registered". So the clean line
+    was invisible in production, which destroyed the very property it existed to
+    provide: "swept and clean" and "never swept" were both silence.
+
+    WARNING is the narrow band that works. It reaches the log, and it sits below
+    Sentry's ERROR floor, so a healthy seat still pages nobody -- a safety signal
+    that fires on every known-good boot is one people learn to ignore. Volume is
+    one line per agent process, not per turn.
+
+    The line is emitted either way, so a sweep that found nothing says ``0
+    unclassified`` and a sweep that never ran says nothing at all. That
+    distinction is the point of the whole function; if a future change makes the
+    clean branch quiet again, it has removed the instrument's ability to prove it
+    ran.
 
     Reads post-exclusion state by construction: ``blocked_tools`` never reaches
     Hermes' registry (``bootstrap/translate.py`` writes them as an ``exclude``
@@ -134,7 +151,10 @@ def _sweep_tool_surface(mapping: dict[str, Any]) -> None:
             ", ".join(unclassified),
         )
     else:
-        logger.info(
+        # WARNING, not INFO: plugin INFO does not reach the seat's log, so an
+        # INFO clean line is indistinguishable from no sweep at all. See the
+        # docstring. Below Sentry's ERROR floor, so this pages nobody.
+        logger.warning(
             "SMD OVERLAY TOOL SURFACE SWEEP: %d registered, 0 unclassified",
             len(mapping),
         )
