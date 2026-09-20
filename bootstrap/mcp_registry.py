@@ -318,27 +318,19 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             ("SMOKEBALL_VISION_MAX_BYTES", "SMOKEBALL_VISION_MAX_BYTES"),  # connector default
             ("SMOKEBALL_VISION_DISABLED", "SMOKEBALL_VISION_DISABLED"),  # per-seat kill switch
         ),
-        # MCP PROTOCOL PLUMBING, not Smokeball verbs (2026-09-19, ss-console#2845).
-        # The seat's tool-surface sweep named these four alongside ten AgentMail
-        # verbs. They are NOT ours: `grep` finds them nowhere in
-        # operator/connectors/smokeball, and they are absent from the manifest's
-        # [connector.tool_classes] oracle. They are the MCP prompts/resources
-        # capability, auto-exposed as tools by the client wrapper around our
-        # FastMCP server.
+        # EMPTY, and a correction worth keeping. overlay#366 listed the four MCP
+        # protocol primitives (get_prompt / list_prompts / list_resources /
+        # read_resource) here, reasoning that they are not Smokeball verbs and
+        # belong off the menu. The rebuilt seat proved that wrong: the sweep went
+        # from 14 unclassified to 4, and those exact four were the survivors.
         #
-        # Blocked rather than classified for two reasons. They carry no business
-        # capability -- the connector declares no prompts and no resources, so
-        # they answer empty -- and because the manifest does not declare them,
-        # adding them to the action-class map would put a name in the map that
-        # the conformance oracle cannot see, which is the half-wired shape that
-        # crashlooped a reprovision on 2026-07-24 (the missing half of #1986).
-        # Off the menu is the honest state for a tool that does nothing.
-        blocked_tools=(
-            "get_prompt",
-            "list_prompts",
-            "list_resources",
-            "read_resource",
-        ),
+        # blocked_tools becomes an ``exclude`` list applied to the server's
+        # DECLARED tool surface. These four are never in it -- the Hermes client
+        # synthesizes them from the FastMCP server's prompts/resources
+        # capabilities -- so naming them here filters nothing. They are
+        # classified READ in shared/action_classes.py instead; see the block
+        # above those entries for why that is the safe direction.
+        blocked_tools=(),
     ),
     # Microsoft Graph mail (mcp:msgraph-mail) — the client-custody email connector
     # (ADR 0078 / email-channel-seam D4; ss-console operator/connectors/msgraph-mail,

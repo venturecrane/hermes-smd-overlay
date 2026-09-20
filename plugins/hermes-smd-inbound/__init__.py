@@ -280,6 +280,29 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         # text such as "apply to matter X" or "also pay" must reach the model
         # fenced and taint the session like an inbound email.
         "mcp_smokeball_read_attachment_text",
+        # MCP protocol primitives (ss-console#2845). The Hermes client
+        # synthesizes these four from the Smokeball server's prompts/resources
+        # CAPABILITIES; they are not Smokeball verbs and appear nowhere in the
+        # connector. The seat's tool-surface sweep found them unclassified and
+        # therefore refusing on every call, which is why they are being decided
+        # at all.
+        #
+        # Fenced, not parked on the firm-record side, and read_resource is the
+        # one that settles it: a resource BODY would be outside-authored text,
+        # exactly what read_document and read_attachment_text fence for. The
+        # completeness guard says so independently -- it names read_resource a
+        # content read and refuses to let it sit on the firm-record side.
+        #
+        # The other three return a catalog rather than a body, and fencing them
+        # is over-fencing. That is the deliberate direction: the Smokeball
+        # connector declares no prompts and no resources today, so all four
+        # answer empty and the fence costs nothing but autonomy the seat is not
+        # using. If the connector ever serves real content here, the fence is
+        # already right rather than needing to be discovered.
+        "mcp_smokeball_get_prompt",
+        "mcp_smokeball_list_prompts",
+        "mcp_smokeball_list_resources",
+        "mcp_smokeball_read_resource",
         # The overlay's own attachment pair (hermes-smd-mail-attachments,
         # 2026-09-18). Neither returns the attachment's BODY, and both are
         # fenced anyway, because both return the vendor's FILENAME — text an
