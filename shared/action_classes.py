@@ -378,6 +378,37 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # protect_funds / unprotect_funds) are NOT here — they are hard-BANNED above.
     # Every Smokeball tool the server exposes MUST appear here or in BANNED_TOOLS;
     # an omission is unreachable until policy classifies it.
+    #
+    # The four MCP PROTOCOL PRIMITIVES below are not Smokeball verbs and are not
+    # ours: they appear nowhere in operator/connectors/smokeball and are absent
+    # from its manifest's [connector.tool_classes]. The Hermes client synthesizes
+    # them from the FastMCP server's prompts/resources CAPABILITIES. That is why
+    # overlay#366's attempt to exclude them by name did nothing -- blocked_tools
+    # filters the server's DECLARED tool surface, and these are not in it. The
+    # seat said so itself: the sweep went 14 unclassified -> 4, and these were
+    # the four left standing (vfy recorded 2026-09-19).
+    #
+    # Classified rather than left refusing, because the sweep logs drift at
+    # ERROR: four permanently unclassified tools would fire a Sentry event on
+    # every boot of every seat, and a safety signal that fires on a known-good
+    # boot is one people learn to ignore. Leaving them would have cost the
+    # instrument its meaning.
+    #
+    # READ is safe here in both directions. The conformance probe checks the
+    # manifest's DECLARED classes against this map (declared subset of map), and
+    # the ss-console side checks the server's LIVE tool_surface() -- these four
+    # are in neither set, so an entry here cannot phantom and cannot FATAL a
+    # seat. And they read the server's own prompt/resource catalog, which the
+    # Smokeball connector does not populate: they answer empty.
+    #
+    # NOT added to TENANT_SOURCE_READ_TOOLS: they return server metadata, not
+    # firm records. If the connector ever declares a resource carrying matter
+    # data, read_resource becomes a tenant-source read and that decision must be
+    # revisited here in the same change.
+    "mcp_smokeball_get_prompt": ActionClass.READ,
+    "mcp_smokeball_list_prompts": ActionClass.READ,
+    "mcp_smokeball_list_resources": ActionClass.READ,
+    "mcp_smokeball_read_resource": ActionClass.READ,
     "mcp_smokeball_auth_status": ActionClass.READ,
     "mcp_smokeball_list_matters": ActionClass.READ,
     "mcp_smokeball_get_matter": ActionClass.READ,

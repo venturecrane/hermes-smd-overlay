@@ -376,6 +376,20 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # Credential / identity metadata, carrying no tenant content.
         "mcp_agentmail_auth_me",
         "mcp_smokeball_auth_status",
+        # ss-console#2845. MCP protocol primitives the Hermes client synthesizes
+        # from the Smokeball server's prompts/resources CAPABILITIES -- not
+        # Smokeball verbs, absent from the connector source and from its
+        # manifest. They read the server's own catalog, which that connector
+        # does not populate, so there is no firm record to certify.
+        #
+        # This entry is a CLASSIFICATION, not an exemption: if the connector
+        # ever declares a resource carrying matter data, read_resource becomes a
+        # tenant-source read and must move to TENANT_SOURCE_READ_TOOLS in the
+        # same change that declares it.
+        "mcp_smokeball_get_prompt",
+        "mcp_smokeball_list_prompts",
+        "mcp_smokeball_list_resources",
+        "mcp_smokeball_read_resource",
         # The agent's own UNSENT drafts. A committed memo is the firm's record;
         # a draft is the Operator's sentence, and reading one back must not
         # certify the numbers in it.
