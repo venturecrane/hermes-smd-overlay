@@ -546,6 +546,30 @@ def _ambient_dates() -> frozenset[str]:
     return frozenset({today.isoformat(), (today - timedelta(days=1)).isoformat()})
 
 
+def _is_ambient(hit: identifier_filter.IdentifierHit, ambient: frozenset[str]) -> bool:
+    """True when the clock, not a read, vouches for this hit.
+
+    A bare DATE that is today or yesterday is exempt (see :func:`_ambient_dates`).
+    So is a PAIR whose date half is: a matter number beside today's date asserts
+    when the Operator is writing, not what the record says, so there is no
+    record on which the two could have been seen together, and demanding one
+    refuses every "alert fired on <today>, matter <n>" line. The matter number
+    itself is still checked as its own hit; only the association is exempt.
+
+    Found 2026-09-21: pilot-smokeball's deadline-miss-escalator wrote five
+    unroutable-matter memos, each "fired on <today>. Matter <n> has ...", and
+    all five were refused on the pair twice before a third draft dropped the
+    number. Those ten refusals were half of the 20 that tripped the seat's
+    refusal-cascade HARD_STOP.
+    """
+    if hit.kind is identifier_filter.IdKind.DATE:
+        return hit.canonical in ambient
+    if hit.kind is identifier_filter.IdKind.PAIR:
+        _, _, date_half = hit.canonical.rpartition("|")
+        return date_half in ambient
+    return False
+
+
 def _days_from_today_bucket(canonical: str) -> str:
     """Value-free distance bucket for a canonical YYYY-MM-DD (FP triage axis)."""
     try:
@@ -710,7 +734,7 @@ def _check_identifiers(
             h
             for h in result.unverified
             if h.kind is not identifier_filter.IdKind.NAME
-            and not (h.kind is identifier_filter.IdKind.DATE and h.canonical in ambient)
+            and not _is_ambient(h, ambient)
         ]
         register_was_empty = result.register_was_empty
         # ss-console#2511 — the negative register. A hit the SEAT's own text
