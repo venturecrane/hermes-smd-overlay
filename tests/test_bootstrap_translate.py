@@ -446,22 +446,83 @@ def test_translate_emits_disabled_toolsets_fleet_default(tmp_path):
     disabled = config["agent"]["disabled_toolsets"]
     for ts in ("browser", "session_search", "tts", "computer_use", "workspace"):
         assert ts in disabled
-    # Load-bearing surfaces must never appear here: terminal is called from
-    # SKILL.md prose (ar-chaser, retainer-hours-reconciler), web is fenced-safe
-    # in client-verification-tracker, and skills/file/memory/todo are core.
-    for ts in (
-        "terminal",
-        "web",
-        "skills",
-        "file",
-        "memory",
-        "todo",
-        "code_execution",
-        "delegation",
-        "escalation",
-        "jobs",
-    ):
+    # Load-bearing surfaces must never appear here: web is fenced-safe in
+    # client-verification-tracker, and skills/file/memory/todo are core.
+    for ts in ("web", "skills", "file", "memory", "todo", "escalation", "jobs"):
         assert ts not in disabled
+
+
+def test_translate_disables_code_toolsets_when_code_execution_unauthored(tmp_path):
+    """VALID_YAML's persona authors no code_execution exposure, so every
+    CODE_EXECUTION call is refused (ADR 0056). The toolsets come off the menu so
+    the model cannot reach for them and feed the refusal-cascade brake
+    (pilot-smokeball HARD_STOP, 2026-09-21)."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    disabled = config["agent"]["disabled_toolsets"]
+    for ts in ("terminal", "code_execution", "delegation"):
+        assert ts in disabled
+
+
+def _without_gateway_credentials(body: str) -> str:
+    """Disable VALID_YAML's gmail connector. The validator refuses any
+    non-refused code_execution beside a gateway-held credential surface
+    (ADR 0045, ss #1841), and gmail is not custody-exception eligible."""
+    out = body.replace(
+        "backend: mcp:gmail\n    enabled: true", "backend: mcp:gmail\n    enabled: false"
+    )
+    assert out != body, "gmail connector block not found in fixture"
+    return out
+
+
+def test_translate_disables_code_toolsets_when_code_execution_refused_or_draft(tmp_path):
+    """Any ceiling below autonomous refuses the call, so any of them hides the tools."""
+    for ceiling in ("refused", "draft_for_review"):
+        body = _without_gateway_credentials(
+            VALID_YAML.replace(
+                "internal_write: autonomous",
+                f"internal_write: autonomous\n        code_execution: {ceiling}",
+            )
+        )
+        assert f"code_execution: {ceiling}" in body
+        root = tmp_path / ceiling
+        root.mkdir()
+        customer_yaml, skills_dir, hermes_home = _seed_repo(root, body)
+        translate_customer_yaml(
+            customer_yaml_path=str(customer_yaml),
+            hermes_home=str(hermes_home),
+            skills_dir=str(skills_dir),
+        )
+        config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+        for ts in ("terminal", "code_execution", "delegation"):
+            assert ts in config["agent"]["disabled_toolsets"], (ceiling, ts)
+
+
+def test_translate_keeps_code_toolsets_when_code_execution_autonomous(tmp_path):
+    """terminal is called from SKILL.md prose (ar-chaser,
+    retainer-hours-reconciler); a persona that authors autonomous code_execution
+    keeps all three toolsets."""
+    body = _without_gateway_credentials(
+        VALID_YAML.replace(
+            "internal_write: autonomous",
+            "internal_write: autonomous\n        code_execution: autonomous",
+        )
+    )
+    assert "code_execution: autonomous" in body
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    for ts in ("terminal", "code_execution", "delegation"):
+        assert ts not in config["agent"]["disabled_toolsets"]
 
 
 def test_translate_keeps_workspace_toolset_when_google_auth(tmp_path):

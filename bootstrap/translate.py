@@ -877,6 +877,12 @@ def _skill_settings_block(raw: Any) -> dict[str, Any]:
     return out
 
 
+#: Hermes toolsets whose tools classify as CODE_EXECUTION (execute_code,
+#: terminal/process, delegate_task). Disabled on a persona that cannot run them;
+#: see the disabled_toolsets block in _persona_config.
+_REFUSED_CODE_EXECUTION_TOOLSETS = ("terminal", "code_execution", "delegation")
+
+
 def _entitlements_block(raw: Any) -> dict[str, Any]:
     """Build the per-profile ``entitlements`` block (ADR 0056).
 
@@ -1060,6 +1066,19 @@ def _persona_config(
     # Google credential and the tools are dead schema weight — drop them.
     if not customer.get("google_auth"):
         disabled_toolsets.append("workspace")
+    # Code-execution toolsets come off the menu when the persona's authored
+    # code_execution exposure is anything but autonomous. The trust plugin
+    # refuses every CODE_EXECUTION call below autonomous (enforce.py, ADR 0056),
+    # and a vertical floor can only narrow that ceiling, never raise it, so on
+    # such a persona these tools can never run. Offered anyway, a model reaches
+    # for them, is refused, and each refusal counts toward the seat's
+    # refusal-cascade brake: on 2026-09-21 pilot-smokeball tripped HARD_STOP at
+    # 20 refusals in 30 minutes, and nine of the morning's refusals were
+    # execute_code, terminal and delegate_task attempts by routines whose
+    # SKILL.md never asks for code at all.
+    exposure = _entitlements_block(persona.get("entitlements"))["exposure"]
+    if exposure.get("code_execution") != "autonomous":
+        disabled_toolsets.extend(_REFUSED_CODE_EXECUTION_TOOLSETS)
     # `max_turns` pins the v0.18 (v2026.7.1) per-turn tool-iteration budget of
     # 90. Hermes v0.20 raised the default to 500 (config_defaults.py:46 @
     # v2026.8.18; bridged into HERMES_MAX_ITERATIONS by gateway/run.py:1979-2022).
