@@ -109,7 +109,7 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_agentmail_get_attachment",
         "mcp_agentmail_list_messages",
         "mcp_agentmail_search_messages",
-        # Added 2026-09-19 (ss-console#2845). Both seed: a message read and an
+        # Added 2026-09-19 (overlay#365-#368). Both seed: a message read and an
         # inbox search are the tenant's own record either way, which is the one
         # question this set asks — and unlike the fence, both readings of
         # ``search_inboxes`` give the same answer here.

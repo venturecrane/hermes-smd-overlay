@@ -153,7 +153,7 @@ def test_handler_never_raises(fake_mapping, _ledger_in_tmp, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Tool-surface sweep (ss-console#2845)
+# Tool-surface sweep (overlay#365-#368)
 #
 # The sweep is the instrument that was missing when two AgentMail READ verbs
 # sat unclassified — and therefore REFUSED on every call — while a static pin

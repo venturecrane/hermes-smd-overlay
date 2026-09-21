@@ -165,7 +165,7 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             "send_draft",
             "reply_to_message",
             "forward_message",
-            # SURFACE REDUCTION, round two (2026-09-19, ss-console#2845). These
+            # SURFACE REDUCTION, round two (2026-09-19, overlay#365-#368). These
             # ten were NAMED BY THE SEAT, not guessed: the tool-surface sweep
             # added in overlay#365 reported "75 registered, 14 unclassified" on
             # pilot-smokeball, and these were ten of the fourteen. The vendor
