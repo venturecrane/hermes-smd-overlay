@@ -733,8 +733,7 @@ def _check_identifiers(
         unverified = [
             h
             for h in result.unverified
-            if h.kind is not identifier_filter.IdKind.NAME
-            and not _is_ambient(h, ambient)
+            if h.kind is not identifier_filter.IdKind.NAME and not _is_ambient(h, ambient)
         ]
         register_was_empty = result.register_was_empty
         # ss-console#2511 — the negative register. A hit the SEAT's own text
