@@ -233,7 +233,7 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_agentmail_search_messages",
         "mcp_agentmail_get_attachment",
         "mcp_agentmail_get_draft",
-        # Added 2026-09-19 (ss-console#2845). ``get_message`` is the exact peer
+        # Added 2026-09-19 (overlay#365-#368). ``get_message`` is the exact peer
         # of ``get_thread``: one sender-authored body, same channel.
         "mcp_agentmail_get_message",
         # ``search_inboxes`` is fenced on a decision made from its NAME, not
@@ -280,7 +280,7 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         # text such as "apply to matter X" or "also pay" must reach the model
         # fenced and taint the session like an inbound email.
         "mcp_smokeball_read_attachment_text",
-        # MCP protocol primitives (ss-console#2845). The Hermes client
+        # MCP protocol primitives (overlay#365-#368). The Hermes client
         # synthesizes these four from the Smokeball server's prompts/resources
         # CAPABILITIES; they are not Smokeball verbs and appear nowhere in the
         # connector. The seat's tool-surface sweep found them unclassified and

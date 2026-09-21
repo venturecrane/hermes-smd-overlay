@@ -376,7 +376,7 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # Credential / identity metadata, carrying no tenant content.
         "mcp_agentmail_auth_me",
         "mcp_smokeball_auth_status",
-        # ss-console#2845. MCP protocol primitives the Hermes client synthesizes
+        # overlay#365-#368. MCP protocol primitives the Hermes client synthesizes
         # from the Smokeball server's prompts/resources CAPABILITIES -- not
         # Smokeball verbs, absent from the connector source and from its
         # manifest. They read the server's own catalog, which that connector

@@ -277,7 +277,7 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_agentmail_list_drafts": ActionClass.READ,
     "mcp_agentmail_get_draft": ActionClass.READ,
     "mcp_agentmail_auth_me": ActionClass.READ,
-    # Added 2026-09-19 (ss-console#2845). Both were offered by the vendor and
+    # Added 2026-09-19 (overlay#365-#368). Both were offered by the vendor and
     # classified by nobody, so both REFUSED on every call. ``get_message`` is
     # the single-message read — the exact peer of ``get_thread`` above, same
     # sender-authored body text, same mailbox. ``search_inboxes`` is READ on

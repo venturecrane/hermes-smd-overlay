@@ -125,7 +125,7 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
     # 2026-06-13 is absent from the pin and from the map alike, and the test
     # passes while the tool REFUSES on the seat. Exactly that happened to
     # ``get_message`` and ``search_inboxes``, found on a live seat 2026-09-18
-    # and added here 2026-09-19 (ss-console#2845) — the same way the Brave
+    # and added here 2026-09-19 (overlay#365-#368) — the same way the Brave
     # name was found (overlay#148) and the same way the v0.19 rename was.
     #
     # The instrument that CAN see a new verb is the runtime sweep in
