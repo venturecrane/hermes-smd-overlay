@@ -1465,3 +1465,67 @@ def test_remedies_say_what_to_do_and_never_restate_the_rule() -> None:
         )
     ]
     assert verbless == [], f"these remedies do not open with an instruction: {verbless}"
+
+
+# ---- a matter number beside TODAY is not a record association -------------
+
+
+def _pair_send(trust_plugin, session_id: str, text: str):
+    return trust_plugin.outbound.check_outbound_send(
+        tool_name="smd_send_message",
+        args={"to": [_STAFF], "subject": "Deadline escalation", "text": text},
+        session_id=session_id,
+        tool_call_id="c",
+    )
+
+
+def test_a_matter_number_beside_today_is_not_refused_as_a_pair(
+    trust_plugin, rostered, monkeypatch, tmp_path
+) -> None:
+    """The 2026-09-21 pilot-smokeball escalator memos, verbatim in shape.
+
+    The pre-run seeded (2026-PI-106, due) as a record. The memo said the alert
+    fired today, beside the matter number. Today is ambient as a bare date, but
+    the pair (2026-PI-106, today) sat on no record, so every such memo was
+    refused: ten refusals, half of the HARD_STOP that morning.
+    """
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    today = datetime.now(timezone.utc).date().isoformat()
+    due = (datetime.now(timezone.utc).date() - timedelta(days=75)).isoformat()
+    provenance.record_records("sess-today", [{"matterNumber": "2026-PI-106", "dates": [due]}])
+
+    text = (
+        f"Deadline escalation alert fired on {today}. Matter 2026-PI-106 has 2 overdue "
+        f"task deadlines (authored dates {due}, both 75 days past)."
+    )
+    assert _pair_send(trust_plugin, "sess-today", text) is None
+
+
+def test_a_matter_number_beside_an_unread_date_is_still_refused_as_a_pair(
+    trust_plugin, rostered, monkeypatch, tmp_path
+) -> None:
+    """The falsifier for the exemption above: it covers the clock's dates only.
+
+    Both dates were read, but never together with this matter. A mispairing is
+    exactly what the pair check exists to catch, and it must keep refusing.
+    """
+    monkeypatch.setenv("SMD_VERTICAL", "law-firm")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    provenance._reset_for_tests()
+    _wire_fake_audit(trust_plugin.outbound)
+    due = (datetime.now(timezone.utc).date() - timedelta(days=75)).isoformat()
+    other = (datetime.now(timezone.utc).date() - timedelta(days=40)).isoformat()
+    provenance.record_records(
+        "sess-mispair",
+        [
+            {"matterNumber": "2026-PI-106", "dates": [due]},
+            {"matterNumber": "2026-PI-102", "dates": [other]},
+        ],
+    )
+
+    text = f"Matter 2026-PI-106 has an overdue task deadline (authored date {other})."
+    blocked = _pair_send(trust_plugin, "sess-mispair", text)
+    assert blocked is not None and blocked["action"] == "block"
