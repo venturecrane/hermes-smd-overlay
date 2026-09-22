@@ -29,7 +29,13 @@ PDF = b"%PDF-1.4\n" + b"x" * 400
 
 
 class _Resp:
-    """urlopen response whose ``read`` accepts the optional size the raw path passes."""
+    """urlopen response whose ``read`` accepts the optional size the raw path passes.
+
+    CONSUMES what it hands back, like a real stream. A fixture whose ``read``
+    replayed the same body turned the read-to-EOF loop into an infinite one
+    that tripped the size ceiling, which is a fault in the fixture rather than
+    in the code under test, and it would have hidden every real behaviour here.
+    """
 
     def __init__(self, status: int, body: bytes = b"") -> None:
         self.status = status
@@ -44,7 +50,9 @@ class _Resp:
 
     def read(self, size: int | None = None) -> bytes:
         self.read_sizes.append(size)
-        return self._body if size is None else self._body[:size]
+        take = len(self._body) if size is None else min(size, len(self._body))
+        head, self._body = self._body[:take], self._body[take:]
+        return head
 
 
 class _Opener:
@@ -86,13 +94,22 @@ def _json(payload: object) -> _Resp:
     return _Resp(200, json.dumps(payload).encode())
 
 
+#: What Graph adds to the raw length when it reports an attachment's ``size``.
+#: Measured on the test tenant 2026-09-22 (vfy_01M3555BPY09V64FSG4QARQMB1):
+#: raw 941 -> 1115, raw 20_000 -> 20_174, raw 400_000 -> 400_174. The fixture
+#: carries the overhead because a self-consistent one (size == len(bytes)) is
+#: what let an equality cross-check pass every test and refuse every real
+#: attachment.
+GRAPH_SIZE_OVERHEAD = 174
+
+
 def _file_entry(**over) -> dict:
     entry = {
         "@odata.type": "#microsoft.graph.fileAttachment",
         "id": "AAMkAGUz",
         "name": "letter.pdf",
         "contentType": "application/pdf",
-        "size": len(PDF),
+        "size": len(PDF) + GRAPH_SIZE_OVERHEAD,
         "isInline": False,
     }
     entry.update(over)
@@ -198,12 +215,33 @@ def test_spool_refuses_a_non_file_before_fetching_bytes(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_spool_refuses_when_the_length_disagrees_with_graph(monkeypatch, tmp_path):
-    """A short read and a complete small file are identical from the bytes alone."""
-    _install(monkeypatch, [_json(_file_entry()), _Resp(200, PDF[:100])], spool_dir=tmp_path)
-    with pytest.raises(MsGraphAttachmentError, match=f"{len(PDF)} bytes and 100 arrived"):
+def test_graphs_stated_size_is_not_an_equality_check(monkeypatch, tmp_path):
+    """The regression this file exists to prevent from coming back.
+
+    Graph's ``size`` is the attachment ITEM: raw bytes plus MIME overhead. A
+    cross-check written as ``stated != len(blob)`` passes every self-consistent
+    fixture and refuses every real attachment on every Graph seat. Measured
+    overhead is in ``GRAPH_SIZE_OVERHEAD``.
+    """
+    _install(monkeypatch, [_json(_file_entry()), _Resp(200, PDF)], spool_dir=tmp_path)
+    receipt = msgraph_attachments.spool_attachment("AAMkMSG", "AAMkATT")
+    assert receipt["size"] == len(PDF)
+
+
+def test_spool_refuses_more_bytes_than_graph_holds(monkeypatch, tmp_path):
+    """``size`` over-states, so it is a sound UPPER bound and nothing tighter."""
+    entry = _file_entry(size=len(PDF) // 2)
+    _install(monkeypatch, [_json(entry), _Resp(200, PDF)], spool_dir=tmp_path)
+    with pytest.raises(MsGraphAttachmentError, match="arrived"):
         msgraph_attachments.spool_attachment("AAMkMSG", "AAMkATT")
-    assert list(tmp_path.iterdir()) == [], "a truncated document must not reach the spool"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_spool_refuses_an_empty_body(monkeypatch, tmp_path):
+    _install(monkeypatch, [_json(_file_entry()), _Resp(200, b"")], spool_dir=tmp_path)
+    with pytest.raises(MsGraphAttachmentError):
+        msgraph_attachments.spool_attachment("AAMkMSG", "AAMkATT")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_spool_refuses_an_oversize_attachment_before_fetching(monkeypatch, tmp_path):
@@ -214,11 +252,30 @@ def test_spool_refuses_an_oversize_attachment_before_fetching(monkeypatch, tmp_p
     assert len(opener.calls) == 1
 
 
-def test_spool_reads_at_most_the_ceiling_plus_one(monkeypatch, tmp_path):
+def test_a_chunked_body_is_read_to_the_end(monkeypatch, tmp_path):
+    """Graph serves $value chunked with no Content-Length.
+
+    A single ``read(n)`` that returns one chunk would spool a truncated
+    document whose receipt looks perfectly healthy, and there is no stated
+    length that could catch it afterwards. This response hands back 64 bytes at
+    a time; the whole file must still land.
+    """
+
+    class _Chunked(_Resp):
+        def read(self, size: int | None = None) -> bytes:
+            return super().read(64 if size is None else min(64, size))
+
+    _install(monkeypatch, [_json(_file_entry()), _Chunked(200, PDF)], spool_dir=tmp_path)
+    receipt = msgraph_attachments.spool_attachment("AAMkMSG", "AAMkATT")
+    assert receipt["size"] == len(PDF)
+    assert (tmp_path / f"{receipt['spool_token']}.bin").read_bytes() == PDF
+
+
+def test_spool_never_reads_past_the_ceiling(monkeypatch, tmp_path):
     body = _Resp(200, PDF)
     _install(monkeypatch, [_json(_file_entry()), body], spool_dir=tmp_path)
     msgraph_attachments.spool_attachment("AAMkMSG", "AAMkATT")
-    assert body.read_sizes == [attachment_spool.MAX_SPOOL_BYTES + 1], (
+    assert max(s or 0 for s in body.read_sizes) <= attachment_spool.MAX_SPOOL_BYTES + 1, (
         "the bytes path must bound its read so an oversized attachment "
         "never lands in the machine's memory whole"
     )

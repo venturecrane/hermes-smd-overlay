@@ -487,7 +487,9 @@ class MsGraphClient:
                     # response, and capping those would turn a large delta page
                     # into truncated JSON, which fails as a parse error rather
                     # than as the size refusal a caller could act on.
-                    payload = resp.read() if max_bytes is None else resp.read(max_bytes + 1)
+                    payload = (
+                        resp.read() if max_bytes is None else _read_capped(resp, max_bytes + 1)
+                    )
                 if status in (202, 204) or not payload:
                     return b"" if raw else None
                 return payload if raw else json.loads(payload.decode("utf-8"))
@@ -628,6 +630,30 @@ class MsGraphClient:
             json_body={"comment": comment},
         )
         return {"status": "replied", "reply_all": reply_all, "message_id": message_id}
+
+
+def _read_capped(resp: Any, limit: int) -> bytes:
+    """Read a response to EOF, stopping once ``limit`` bytes are in hand.
+
+    A single ``resp.read(limit)`` is the obvious version and it is the one that
+    can hand a caller a SHORT read that looks exactly like a complete small
+    file. Graph serves ``$value`` chunked with no ``Content-Length`` (measured
+    on the test tenant 2026-09-22), so there is no length to compare against
+    afterwards either: the only place truncation can be closed is here, by
+    reading until the stream says it is done.
+
+    Returning ``limit`` bytes means the cap was reached and the caller refuses;
+    anything less is the whole body.
+    """
+    chunks: list[bytes] = []
+    got = 0
+    while got < limit:
+        chunk = resp.read(limit - got)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)
 
 
 def _truncate_body(text: str | None) -> str:

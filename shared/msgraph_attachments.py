@@ -219,14 +219,28 @@ def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
     small JSON call, not a download), it settles ``size`` against the spool
     ceiling, and it gives the sanitised filename the receipt carries.
 
-    Then the bytes, then the length cross-check. A short read and a complete
-    small file are indistinguishable from the bytes alone, and
-    ``attachment_spool.write`` would hash whatever arrived and hand back a
-    receipt that looks perfectly healthy. The AgentMail side added the same
-    check on 2026-09-18 after spooling 1187 bytes of a JSON record in place of a
-    1983-byte PDF, and every step downstream reported "unsupported format" about
-    a file that had never been fetched. A truncated document filed as a client's
-    record is worse than a fetch that failed out loud.
+    GRAPH'S ``size`` IS NOT THE RAW BYTE LENGTH, and this cost a defect on the
+    way in. The AgentMail side refuses when the vendor's stated size and the
+    received length disagree, after spooling 1187 bytes of a JSON record in
+    place of a 1983-byte PDF. Mirroring that as an equality check here would
+    have refused EVERY attachment on every Graph seat. Measured on the test
+    tenant 2026-09-22 (vfy_01M3555BPY09V64FSG4QARQMB1), three sizes:
+
+        raw 941     -> size 1115      ($value returned the 941 bytes sent)
+        raw 20_000  -> size 20_174
+        raw 400_000 -> size 400_174
+
+    ``size`` is the attachment ITEM: the raw bytes plus a MIME overhead that
+    varies with the filename and content type. It over-states, never
+    under-states, so it remains a sound CONSERVATIVE ceiling before the fetch
+    and a sound upper bound after it, and it can never be an equality check.
+
+    Truncation is closed at the transport instead, where it actually lives:
+    ``request_bytes`` reads to EOF rather than taking one ``read(n)``, so a
+    short read is not a state this function can be handed. ``$value`` comes
+    back chunked with no ``Content-Length`` (same probe), so there is no
+    transport-level figure to compare against either, and inventing a tolerance
+    band around ``size`` would be a check that passes for the wrong reason.
     """
     message = _checked_id(message_id, "message_id")
     attachment = _checked_id(attachment_id, "attachment_id")
@@ -260,10 +274,15 @@ def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
         raise MsGraphAttachmentError(
             f"the attachment is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; it is not spooled"
         )
-    if isinstance(stated, int) and stated != len(blob):
+    if isinstance(stated, int) and len(blob) > stated:
+        # An UPPER bound, not an equality: see the docstring. The raw file is
+        # always smaller than the item Graph measured, so more bytes arriving
+        # than Graph ever held means what arrived is not that attachment.
         raise MsGraphAttachmentError(
-            f"Graph said the attachment is {stated} bytes and {len(blob)} arrived; it is not spooled"
+            f"Graph holds {stated} bytes for this attachment and {len(blob)} arrived; it is not spooled"
         )
+    if not blob:
+        raise MsGraphAttachmentError("the attachment's bytes came back empty; it is not spooled")
 
     return attachment_spool.write(
         blob,
