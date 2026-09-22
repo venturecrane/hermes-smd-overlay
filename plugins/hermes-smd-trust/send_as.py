@@ -3,7 +3,7 @@
 ss ADR 0089. A send carrying ``from`` is not sent on the turn. It is PROPOSED:
 this module runs the content gates on the session that composed it, hands the
 broker a closed payload, and the broker stores the row and emails the draft to
-the one person it names. Nothing leaves until that person replies ``[act X]
+the one person it names. Nothing leaves until that person replies ``[draft X]
 send``, and then the broker, not this process, transmits it.
 
 WHY A PROPOSAL MAY BE MADE ON A TAINTED TURN. The taint gate exists so an

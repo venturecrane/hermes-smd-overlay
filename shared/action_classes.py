@@ -67,7 +67,7 @@ class ActionClass(str, enum.Enum):
     # that staff member's own emailed approval (ss ADR 0089). No tool maps to it
     # statically: ``evaluate_tool_call`` resolves it when a send carries ``from``.
     # Its only defined posture is ``confirm`` -- the send is PROPOSED here and
-    # transmitted by the broker when the named approver replies ``[act X] send``.
+    # transmitted by the broker when the named approver replies ``[draft X] send``.
     # Deliberately NOT taint-gated: a proposal is a draft, and nothing leaves
     # until that person has read the exact text.
     EXTERNAL_SEND_AS_STAFF = "external_send_as_staff"

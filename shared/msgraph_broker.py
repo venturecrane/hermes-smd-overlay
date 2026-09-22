@@ -276,7 +276,10 @@ def send_as_decide(
     The broker decides everything that matters: whether the row is open and
     unexpired, whether ``decided_by`` may make this decision, whether the
     answering message is a forgery out of the Operator's own Sent Items, and
-    only then consumes and transmits. Returns ``{"status", "reason",
+    only then consumes and transmits. ``tag_or_act_id`` is the bare 8-hex id
+    or the full ``[draft xxxxxxxx]`` tag; the broker accepts either. These two
+    verbs are gateway-only at the broker; call them from the gateway process
+    (``pre_tool_call`` / ``pre_llm_call``). Returns ``{"status", "reason",
     "instruction", "replaced_by"}``.
 
     ``graph_message_id`` is additive to the contract: the Graph id of the

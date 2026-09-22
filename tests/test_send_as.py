@@ -45,6 +45,7 @@ from shared.inbound import (
     TRUST_CLASS_UNKNOWN_EXTERNAL,
     InboundOrigin,
 )
+from shared.pending_acts import PENDING_ACTS
 from shared.pending_send import PENDING_SEND
 from tests.conftest import load_plugin
 
@@ -55,7 +56,7 @@ ADMIN = "christa@firm.example"
 ADJUSTER = "adjuster@insurer.example"
 SESSION = "sess-sendas"
 ACT = "7f3a2c1d"
-TAG = f"[act {ACT}]"
+TAG = f"[draft {ACT}]"
 GRAPH_ID = "AAMkAGraphId=="
 INTERNET_ID = "<CAF00d@mail.example>"
 
@@ -111,12 +112,14 @@ class _FakeCustomerConfig:
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
+    PENDING_ACTS.clear()
     PENDING_SEND.clear()
     SESSION_TAINT._tainted.clear()
     SESSION_INBOUND_ORIGIN._origins.clear()
     _FakeCustomerConfig.instance = _FakeConfig()
     monkeypatch.setattr(customer_config, "CustomerConfig", _FakeCustomerConfig)
     yield
+    PENDING_ACTS.clear()
     PENDING_SEND.clear()
     SESSION_TAINT._tainted.clear()
     SESSION_INBOUND_ORIGIN._origins.clear()
@@ -553,13 +556,13 @@ APPROVAL_EMAIL_QUOTE = f"""On Mon, 21 Sep 2026 at 09:12, Operator <ops@firm.exam
         (f"{TAG} send\n\n{APPROVAL_EMAIL_QUOTE}", "send", ""),
         (f"{TAG} cancel\n", "cancel", ""),
         (f"Hi\n{TAG} change: add the date of loss\n", "change", "add the date of loss"),
-        (f"[act {ACT.upper()}] Send", "send", ""),
+        (f"[draft {ACT.upper()}] Send", "send", ""),
     ],
 )
 def test_the_three_answers_parse(message, decision, instruction):
     command = rule_confirm.read_send_as_command(message)
     assert command is not None
-    assert command.act_id == ACT
+    assert command.draft_id == ACT
     assert command.decision == decision
     assert command.instruction == instruction
 
@@ -581,10 +584,12 @@ def test_two_different_answers_are_ambiguous():
     assert command is not None and command.decision == rule_confirm.SEND_AS_AMBIGUOUS
 
 
-def test_a_bare_yes_cannot_bind_a_send_as_row():
-    rows = [{"proposal_id": ACT, "kind": rule_confirm.SEND_AS_KIND, "instructed_by": STAFF}]
-    verdict = rule_confirm.resolve(f"yes\n\n> {TAG}", rows, STAFF, is_admin=True)
-    assert verdict.kind == rule_confirm.NONE
+def test_the_rule_and_act_matcher_never_sees_a_draft_tag():
+    """The word is the separation: find_tags reads rule/act only, so a draft tag
+    names nothing to the rule/act matcher, and an [act X] line is not a draft
+    command."""
+    assert rule_confirm.find_tags(f"yes\n\n> {TAG}") == ()
+    assert rule_confirm.read_send_as_command(f"[act {ACT}] send") is None
 
 
 # ---------------------------------------------------------------------------
@@ -714,45 +719,48 @@ def test_an_answer_not_on_a_verified_email_decides_nothing(establishment):
 
 def test_a_quoted_tag_under_a_plain_yes_decides_nothing(establishment):
     mod, state = establishment
-    state["pending"] = [
-        {"proposal_id": ACT, "kind": rule_confirm.SEND_AS_KIND, "instructed_by": STAFF}
-    ]
     _email_turn()
     _turn(mod, STAFF, f"yes\n\n{APPROVAL_EMAIL_QUOTE}")
     assert state["decisions"] == []
 
 
-def test_a_commitment_acts_lane_is_unchanged(establishment):
-    """An administrator writing "[act X] cancel" on a COMMITMENT act never
-    reaches the send-as verb; the act lane answers it as it always did."""
+def _commitment_row() -> dict:
+    return {
+        "proposal_id": ACT,
+        "kind": act_broker.KIND_TOOL_CALL,
+        "tool": "mcp_smokeball_create_matter",
+        "for_admin": True,
+        "instructed_by": ADMIN,
+        "readback": f"[act {ACT}] Create Smokeball matter",
+        "payload": {
+            "description": "Operator Library",
+            "matter_type_id": "type-1",
+            "client_contact_id": "contact-1",
+        },
+    }
+
+
+@pytest.mark.parametrize("line", [f"[act {ACT}] cancel", f"[act {ACT}] send"])
+def test_an_act_tag_never_reaches_the_send_as_verb(establishment, line):
+    """ "[act X] cancel" / "[act X] send" on a COMMITMENT act stay on the act lane
+    exactly as before; only [draft X] reaches send_as_decide."""
     mod, state = establishment
-    state["pending"] = [
-        {
-            "proposal_id": ACT,
-            "kind": act_broker.KIND_TOOL_CALL,
-            "tool": "mcp_smokeball_create_matter",
-            "for_admin": True,
-            "instructed_by": ADMIN,
-            "readback": f"{TAG} Create Smokeball matter",
-        }
-    ]
+    state["pending"] = [_commitment_row()]
     _email_turn(sender=ADMIN)
-    _turn(mod, ADMIN, f"{TAG} cancel")
+    _turn(mod, ADMIN, line)
     assert state["decisions"] == []
 
 
-def test_send_as_rows_never_reach_the_rule_outcome_letters(establishment):
+def test_the_admin_act_lane_still_confirms_on_yes_create_it(establishment):
     mod, state = establishment
-    state["pending"] = [
-        {
-            "proposal_id": ACT,
-            "kind": rule_confirm.SEND_AS_KIND,
-            "state": "lapsed",
-            "instructed_by": STAFF,
-        }
-    ]
-    assert mod._fetch_pending(STAFF, False, include_outcomes=True) == []
-    assert mod._fetch_unreported_outcomes() == []
+    state["pending"] = [_commitment_row()]
+    PENDING_ACTS.note_proposed(
+        SESSION, ACT, "mcp_smokeball_create_matter", f"[act {ACT}] Create Smokeball matter"
+    )
+    _email_turn(sender=ADMIN)
+    context = _turn(mod, ADMIN, f"yes, create it\n\n> [act {ACT}] Create Smokeball matter")
+    assert f"The administrator confirmed [act {ACT}]" in context
+    assert state["decisions"] == []
 
 
 # ---------------------------------------------------------------------------
