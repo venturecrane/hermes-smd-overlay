@@ -78,7 +78,7 @@ from shared.trust_decision import (
     TrustDecision,
 )
 
-from . import voice_gate
+from . import send_as, voice_gate
 
 # Action classes that must never fire autonomously on a turn that ingested
 # untrusted (non-internal) inbound content — the taint-gate. READ and
@@ -374,6 +374,25 @@ def _enforce_resolved(
         return _refuse(
             f"{action.value} refused: no authored exposure (fail-closed, ADR 0056) "
             "or a vertical floor refuses it",
+            action,
+        )
+    if action == ActionClass.EXTERNAL_SEND_AS_STAFF:
+        # ss ADR 0089. ONE posture: confirm, meaning "propose it to the named
+        # staff member, who approves the exact text by email". There is no
+        # allow here on any ceiling, including autonomous and including a
+        # current-turn approval: this class never executes through the tool
+        # path at all. The broker transmits on the approver's reply, so an
+        # allow from this branch would be a send nobody approved. Everything
+        # else, unauthored included, refuses.
+        if effective == Ceiling.CONFIRM:
+            return _await_approval(
+                f"{action.value} at authored confirm ceiling; proposed to the named "
+                "staff member for emailed approval (ss ADR 0089)",
+                action,
+            )
+        return _refuse(
+            f"{action.value} refused: its only posture is an authored confirm "
+            "(ss ADR 0089); unauthored or any other value refuses",
             action,
         )
     if action == ActionClass.CODE_EXECUTION:
@@ -1374,17 +1393,28 @@ def evaluate_tool_call(
         vertical_floors = _resolve_vertical_floors()
         session_taint = SESSION_TAINT.trust_class(session_id)
 
-        # Recipient axis: a proactive send to a rostered internal recipient is
-        # governed by its own external_send_internal ceiling; anyone else (or an
-        # unresolved recipient) stays external_send. Decided here where the args
-        # (and, via the registry, the draft) are available.
-        effective_action = _reclassify_send(
-            tool_name,
-            args or {},
-            classification.action_class,
-            session_id,
-            tainted=session_taint != TRUST_CLASS_INTERNAL,
-        )
+        # Staff send-as (ss ADR 0089). A send carrying ``from`` is its own class,
+        # decided BEFORE the recipient axis and before the taint gate reads the
+        # class: it is a proposal to a named staff member, not a send, so it is
+        # not taint-gated, never a send class below (``is_send`` stays False, so
+        # it is never captured into PENDING_SEND or replayed from it), and it
+        # leaves this function through the proposal branch after the decision
+        # row. With no ``from`` nothing here changes.
+        is_send_as = send_as.requested_from(tool_name, args) is not None
+        if is_send_as:
+            effective_action = ActionClass.EXTERNAL_SEND_AS_STAFF
+        else:
+            # Recipient axis: a proactive send to a rostered internal recipient
+            # is governed by its own external_send_internal ceiling; anyone else
+            # (or an unresolved recipient) stays external_send. Decided here
+            # where the args (and, via the registry, the draft) are available.
+            effective_action = _reclassify_send(
+                tool_name,
+                args or {},
+                classification.action_class,
+                session_id,
+                tainted=session_taint != TRUST_CLASS_INTERNAL,
+            )
 
         # Confirm-approval round-trip (ADR 0071 #1806). A send withheld at the
         # confirm ceiling is CAPTURED below (on await_approval); a matching
@@ -1519,6 +1549,19 @@ def evaluate_tool_call(
     # supersedes any prior pending; only a resolved-recipient send is captured.
     if is_send and send_recips and decision.audit_action == "await_approval":
         PENDING_SEND.capture(tool_name, args, send_recips)
+
+    # Staff send-as (ss ADR 0089): the whole path ends here, one way or the
+    # other. A refused ceiling refuses; the confirm ceiling proposes, which runs
+    # the fabrication, identifier and matter gates on THIS session and asks the
+    # broker to email the draft to the named staff member. Returning here is
+    # what keeps a from-bearing send out of every branch below, the content
+    # floor above all: the approval IS the human review that floor forces
+    # (ADR 0031), and the transmit happens in the broker on the approver's
+    # reply, never through this tool path.
+    if is_send_as:
+        if decision.audit_action != "await_approval":
+            return {"action": "block", "message": f"Refused: {decision.reason}"}
+        return send_as.propose(tool_name, args, session_id, tool_call_id)
 
     # A commitment withheld at the confirm ceiling starts its round trip here:
     # the authored act is put to an administrator, and the model is told to carry

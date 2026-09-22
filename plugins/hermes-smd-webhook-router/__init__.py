@@ -36,10 +36,11 @@ Hook callbacks are exception-safe per AGENTS.md hard rule #3.
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, inbound_message, read_volume
+from shared import inbound, inbound_message, msgraph_broker, read_volume
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params, sender_key
@@ -237,12 +238,74 @@ def _origin_from_dto(
             inbox_id = candidate
     if not inbox_id and isinstance(dto.mailbox, str):
         inbox_id = dto.mailbox
+    internet_message_id = ""
+    conversation_id = ""
+    if isinstance(dto.provider_refs, dict):
+        candidate = dto.provider_refs.get("internet_message_id")
+        if isinstance(candidate, str):
+            internet_message_id = candidate
+        candidate = dto.provider_refs.get("conversation_id")
+        if isinstance(candidate, str):
+            conversation_id = candidate
+    if not conversation_id and isinstance(dto.thread_ref, str):
+        conversation_id = dto.thread_ref
     return inbound.InboundOrigin(
         sender_address=sender,
         message_id=message_id,
         content_digest=inbound.content_digest(content),
         inbox_id=inbox_id,
+        internet_message_id=internet_message_id,
+        conversation_id=conversation_id,
     )
+
+
+def _match_send_as_reply(origin: inbound.InboundOrigin) -> None:
+    """Tell the broker a reply may have arrived on a send-as conversation.
+
+    ss ADR 0089. When a staff member's approved message goes out, the broker
+    records its Graph conversation; an inbound on that conversation (the outside
+    party answering) makes the broker email the approver "reply received on
+    [act X]" through its own recipient-locked path, so a tainted ingest turn
+    cannot stop the notice and the model is never the one who sends it.
+
+    FIRE AND FORGET, on a daemon thread. This runs inside dispatch, and ingest
+    must never wait on or fail because of a notification: every fault is logged
+    and dropped. Skipped outright on a seat that authors no ``staff_send_as``,
+    so no other seat pays a socket round trip per inbound.
+    """
+    if not origin.conversation_id:
+        return
+    try:
+        if not CustomerConfig.from_volume(str(_YAML_PATH)).staff_send_as:
+            return
+    except Exception:  # noqa: BLE001 — an unreadable config matches nothing
+        return
+
+    def _run() -> None:
+        try:
+            result = msgraph_broker.send_as_match_reply(
+                conversation_id=origin.conversation_id,
+                internet_message_id=origin.internet_message_id,
+                from_addr=origin.sender_address,
+            )
+            if isinstance(result, dict) and result.get("matched"):
+                logger.info(
+                    "hermes-smd-webhook-router: inbound matched send-as %s; approver notified "
+                    "by the broker",
+                    result.get("tag"),
+                )
+        except Exception:  # noqa: BLE001 — a missed notice must never touch ingest
+            logger.warning(
+                "hermes-smd-webhook-router: send_as_match_reply failed; ingest unaffected",
+                exc_info=True,
+            )
+
+    try:
+        threading.Thread(target=_run, name="smd-send-as-match", daemon=True).start()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "hermes-smd-webhook-router: could not start the send-as match", exc_info=True
+        )
 
 
 def _sender_status_text(event: Any, envelope: Any, address: Any) -> str | None:
@@ -654,6 +717,12 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         # refuses to send). Never breaks routing.
         if origin is not None:
             inbound.SESSION_INBOUND_ORIGIN.record(session_id, origin)
+            # ss ADR 0089 reply tracking. Its own guard: whatever it does, the
+            # dispatch below proceeds exactly as it would have.
+            try:
+                _match_send_as_reply(origin)
+            except Exception:  # noqa: BLE001
+                logger.debug("hermes-smd-webhook-router: send-as match skipped", exc_info=True)
             # Diagnostic: confirms the recipient-lock anchor recorded, the
             # session_id it keyed under (empty here is the case the relay's
             # address-recovery path handles), and that the inbox/message ids

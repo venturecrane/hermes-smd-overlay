@@ -82,6 +82,31 @@ OPS_TAG_KIND = "ops"
 #: ``OPS_REQUEST_KIND`` in ss-console ``operator/workspace_broker/establishment.py``.
 OPS_REQUEST_KIND = "ops_request"
 
+#: The proposal kind a staff send-as draft is stored under (ss ADR 0089). It
+#: shares the ``[act XXXXXXXX]`` tag with commitments but NOT their matcher: it
+#: is answered only by :func:`read_send_as_command`, and :func:`resolve` drops
+#: it, so a bare "yes" can never approve a message going out under a person's
+#: name.
+SEND_AS_KIND = "send_as"
+
+#: The three answers a send-as approver can give.
+SEND_AS_SEND = "send"
+SEND_AS_CHANGE = "change"
+SEND_AS_CANCEL = "cancel"
+#: Returned when the person's own text carries more than one distinct command:
+#: the seat asks which, and decides nothing.
+SEND_AS_AMBIGUOUS = "ambiguous"
+
+#: ``[act XXXXXXXX] send`` / ``[act XXXXXXXX] cancel`` / ``[act XXXXXXXX]
+#: change: <what to change>``. The verb must follow the tag, so "please send
+#: [act X]" and a sentence that merely mentions the word are not commands. The
+#: hex is matched case-insensitively (some clients upper-case a pasted tag) and
+#: lowercased on the way out.
+_SEND_AS_COMMAND = re.compile(
+    r"\[act ([0-9a-fA-F]{8})\][ \t]*[:,\-]?[ \t]*(send|change|cancel)\b",
+    re.IGNORECASE,
+)
+
 #: A line that begins the quoted history. Everything from here down is somebody
 #: else's words (usually ours, quoted back), and none of it is the reply.
 _QUOTE_HEADER = re.compile(
@@ -487,6 +512,56 @@ def read_ops_reply(message: Any) -> OpsReading:
     return OpsReading(verdict=OPS_NONE)
 
 
+@dataclass(frozen=True)
+class SendAsCommand:
+    """What a send-as approver's OWN text says.
+
+    ``decision`` is :data:`SEND_AS_SEND`, :data:`SEND_AS_CHANGE`,
+    :data:`SEND_AS_CANCEL` or :data:`SEND_AS_AMBIGUOUS`. ``instruction`` is the
+    text after ``change:``, the person's own words, unparaphrased; ``""`` for a
+    ``change`` that says nothing (the seat then asks what to change rather than
+    revising towards nothing).
+    """
+
+    act_id: str
+    decision: str
+    instruction: str = ""
+
+
+def read_send_as_command(message: Any) -> SendAsCommand | None:
+    """The send-as command in the sender's OWN text, or ``None``.
+
+    THE TAG MUST BE IN THEIR OWN WORDS, unlike :func:`find_tags`. The approval
+    email the broker sent carries the tag and the three reply forms, so a quoted
+    copy of it under any reply contains "[act X] send" verbatim. Reading the
+    quoted half would let the Operator's own email approve itself. So the text
+    is cut exactly as :func:`read_own_text` cuts it: below the prompt fence,
+    above the quoted history, before the signature.
+
+    ``None`` when there is no command (the message is not an answer to a send-as
+    draft and the ordinary matcher runs). Two DIFFERENT commands in one reply
+    (two tags, or "send" and "cancel") return :data:`SEND_AS_AMBIGUOUS` rather
+    than picking one; a command repeated identically is one command.
+    """
+    own = strip_quoted(email_body(message))
+    if not own:
+        return None
+    matches = list(_SEND_AS_COMMAND.finditer(own))
+    if not matches:
+        return None
+    distinct = {(m.group(1).lower(), m.group(2).lower()) for m in matches}
+    if len(distinct) > 1:
+        return SendAsCommand(act_id="", decision=SEND_AS_AMBIGUOUS)
+    first = matches[0]
+    act_id, decision = first.group(1).lower(), first.group(2).lower()
+    instruction = ""
+    if decision == SEND_AS_CHANGE:
+        rest = own[first.end() :]
+        rest = re.sub(r"\A[ \t]*[:,\-]?", "", rest, count=1)
+        instruction = rest.strip()
+    return SendAsCommand(act_id=act_id, decision=decision, instruction=instruction)
+
+
 def _sender_may_confirm(
     row: dict[str, Any], sender: str, is_admin: bool, apply_others: bool
 ) -> bool:
@@ -611,12 +686,17 @@ def resolve(
     # accidentally installed a routine change by saying yes" is the failure
     # worth a refusal at every layer that could pass one through, and a caller
     # that fetches rows some other way must not become the exception.
+    # ss ADR 0089. A send-as draft is dropped for the same reason and at the
+    # same layer: it is approved only by its named staff member writing
+    # "[act X] send" in their own words (:func:`read_send_as_command`), and a
+    # plain "yes" or an admin's "apply that" binding to it here would send a
+    # message under a person's name on words that were not that instruction.
     rows = [
         r
         for r in pending
         if isinstance(r, dict)
         and r.get("proposal_id")
-        and str(r.get("kind") or "rule") != OPS_REQUEST_KIND
+        and str(r.get("kind") or "rule") not in (OPS_REQUEST_KIND, SEND_AS_KIND)
     ]
     if not rows:
         if extra_open > 0 and read_own_text(message).affirmative:
@@ -700,12 +780,19 @@ __all__ = [
     "OpsReading",
     "RULE_TAG",
     "Reading",
+    "SEND_AS_AMBIGUOUS",
+    "SEND_AS_CANCEL",
+    "SEND_AS_CHANGE",
+    "SEND_AS_KIND",
+    "SEND_AS_SEND",
+    "SendAsCommand",
     "Verdict",
     "email_body",
     "find_tags",
     "may_decline",
     "read_ops_reply",
     "read_own_text",
+    "read_send_as_command",
     "resolve",
     "strip_quoted",
 ]

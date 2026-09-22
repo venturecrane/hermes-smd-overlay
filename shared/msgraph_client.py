@@ -89,7 +89,8 @@ _DEFAULT_TIMEOUT_S = 30.0
 # message normalizes from the delta payload without a separate full-body fetch
 # (mirrors the connector's _DELTA_SELECT so behavior matches the sandbox proof).
 _DELTA_SELECT = (
-    "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,conversationId,body"
+    "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,conversationId,body,"
+    "internetMessageId"
 )
 
 # The MSGRAPH_* env the client reads via shared.secrets (never os.environ direct).
@@ -228,6 +229,16 @@ def normalize_message(raw: dict[str, Any], *, mailbox: str) -> dict[str, Any]:
     message_id = raw.get("id") or ""
     conversation_id = raw.get("conversationId")
     from_addr = _bare_address(raw.get("from")) or ""
+    provider_refs: dict[str, Any] = {
+        "graph_message_id": message_id,
+        "conversation_id": conversation_id,
+    }
+    # ss ADR 0089: the RFC 2822 id, for the staff send-as forgery check and the
+    # reply match. Added only when Graph returned it, so a DTO built from a
+    # payload without it is byte-identical to before.
+    internet_message_id = raw.get("internetMessageId")
+    if isinstance(internet_message_id, str) and internet_message_id:
+        provider_refs["internet_message_id"] = internet_message_id
     return {
         "provider": PROVIDER,
         "mailbox": mailbox,
@@ -239,10 +250,7 @@ def normalize_message(raw: dict[str, Any], *, mailbox: str) -> dict[str, Any]:
         "subject": raw.get("subject") or "",
         "body_text": _body_text(raw),
         "received_at": raw.get("receivedDateTime"),
-        "provider_refs": {
-            "graph_message_id": message_id,
-            "conversation_id": conversation_id,
-        },
+        "provider_refs": provider_refs,
     }
 
 
