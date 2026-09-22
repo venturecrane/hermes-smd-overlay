@@ -135,6 +135,15 @@ class DeltaState:
         # watermark-skipped — otherwise a reset during a hold would silently eat
         # exactly the mail the cursor hold exists to protect.
         self.watermark: str | None = None
+        # The ``$select`` the stored cursor's delta chain was STARTED with. A Graph
+        # deltaLink replays the field set of the request that began its chain, and
+        # the stored link is passed back verbatim, so a field added to the select
+        # later never arrives on a cursor that predates it. ss ADR 0089 hit exactly
+        # this: ``internetMessageId`` joined the select on 2026-09-22, every seat's
+        # cursor was older, and every staff approval then arrived without the id the
+        # forgery check needs and was refused. ``None`` = recorded before this field
+        # existed, which is itself stale.
+        self.delta_select: str | None = None
         self._load()
 
     def _load(self) -> None:
@@ -165,6 +174,8 @@ class DeltaState:
         watermark = data.get("watermark")
         if isinstance(watermark, str) and _parse_iso(watermark) is not None:
             self.watermark = watermark
+        select = data.get("delta_select")
+        self.delta_select = select if isinstance(select, str) and select else None
 
     def has_seen(self, message_id: str) -> bool:
         return message_id in self._seen_set
@@ -215,7 +226,7 @@ class DeltaState:
             evicted = self._seen.pop(0)
             self._seen_set.discard(evicted)
 
-    def persist(self, delta_link: str | None) -> None:
+    def persist(self, delta_link: str | None, *, select: str | None = None) -> None:
         """Atomically write the current cursor + seen ledger + failure counts.
 
         ``delta_link=None`` KEEPS the current cursor — the hold-on-failure path
@@ -225,6 +236,10 @@ class DeltaState:
         (at-least-once, deduped by the seen ledger)."""
         if delta_link:
             self.delta_link = delta_link
+            if select:
+                # Only a NEW chain's link records a select; a resumed link keeps
+                # the select its chain began with.
+                self.delta_select = select
         payload = json.dumps(
             {
                 "delta_link": self.delta_link,
@@ -232,6 +247,7 @@ class DeltaState:
                 "failures": self._failures,
                 "poison_counts": self._poison,
                 "watermark": self.watermark,
+                "delta_select": self.delta_select,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -389,12 +405,25 @@ class MsGraphPoller:
         state = self._state
         if client is None or state is None or not self._signing_secret:
             return 0
+        # A cursor begun under a different select would keep omitting fields the
+        # current code reads (see DeltaState.delta_select). Start a new chain and
+        # treat it exactly as a 410 re-list: seen-ledger dedupe plus the watermark
+        # skip, so the inbox's history is not replayed as fresh turns.
+        stale = bool(state.delta_link) and state.delta_select != msgraph_client.DELTA_SELECT
         try:
-            raw_messages, delta_link, cursor_reset = client.poll_delta(state.delta_link)
+            raw_messages, delta_link, cursor_reset = client.poll_delta(
+                None if stale else state.delta_link
+            )
         except Exception as exc:  # noqa: BLE001 — a poll failure must never kill the loop
             logger.warning("msgraph poller: delta poll failed (%s); skipping this cycle", exc)
             return 0
-        if cursor_reset:
+        new_chain = stale or cursor_reset or not state.delta_link
+        if stale:
+            logger.info(
+                "msgraph poller: stored cursor predates the current $select; re-syncing with dedupe"
+            )
+            cursor_reset = True
+        elif cursor_reset:
             logger.info("msgraph poller: delta cursor reset (410); re-syncing with dedupe")
 
         forwarded = 0
@@ -487,7 +516,7 @@ class MsGraphPoller:
             # during a hold can never skip the held mail.
             if cycle_received:
                 state.advance_watermark(cycle_received)
-            state.persist(delta_link)
+            state.persist(delta_link, select=msgraph_client.DELTA_SELECT if new_chain else None)
         return forwarded
 
     def _watermark_skip(self, raw: Any, state: DeltaState) -> bool:
