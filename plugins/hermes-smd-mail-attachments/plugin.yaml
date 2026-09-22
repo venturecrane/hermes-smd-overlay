@@ -1,6 +1,12 @@
 name: hermes-smd-mail-attachments
-version: "0.1.0"
-description: "The seat's own inbox attachments: list what a message carries (the webhook event does not say), and spool one attachment's bytes to a seat-local path so the records connector can read them without the agent carrying bytes or a credential."
+version: "0.2.0"
+description: "The seat's own mailbox attachments, on whichever mail vendor the seat authored: list what a message carries (the inbound event does not say), and spool one attachment's bytes to a seat-local path so the records connector can read them without the agent carrying bytes or a credential."
 author: VentureCrane
-requires_env:
-  - AGENTMAIL_API_KEY
+# EMPTY ON PURPOSE, and the gate did not go away: it moved into register(),
+# which asks whether the seat authors an enabled Email connector. A vendor's key
+# is the wrong question. AGENTMAIL_API_KEY here kept this plugin off every
+# Microsoft 365 seat, so a firm on Graph had a mailbox its Operator could read
+# and attachments it could not, which inside a turn looks exactly like a message
+# that arrived carrying none. The credential check now lives in the handlers,
+# which raise a reason the model can say out loud.
+requires_env: []
