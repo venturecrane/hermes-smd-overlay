@@ -85,10 +85,11 @@ _MAX_ATTEMPTS = 4
 _MAX_ERROR_BODY = 600
 _DEFAULT_TIMEOUT_S = 30.0
 
-# The bounded field set the delta poll selects — metadata + body, so an inbound
+# The bounded field set the delta poll selects (public: the poller fingerprints
+# its stored cursor against it, see msgraph_poller.DeltaState.delta_select) — metadata + body, so an inbound
 # message normalizes from the delta payload without a separate full-body fetch
 # (mirrors the connector's _DELTA_SELECT so behavior matches the sandbox proof).
-_DELTA_SELECT = (
+DELTA_SELECT = (
     "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,conversationId,body,"
     "internetMessageId"
 )
@@ -513,7 +514,7 @@ class MsGraphClient:
             params: dict[str, Any] | None = None
         else:
             next_url = self._mail_url("mailFolders/inbox/messages/delta")
-            params = {"$select": _DELTA_SELECT}
+            params = {"$select": DELTA_SELECT}
         items: list[Any] = []
         delta_out: str | None = None
         while next_url:

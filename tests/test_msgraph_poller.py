@@ -768,3 +768,91 @@ def test_dead_letter_write_failure_captures_error_and_holds(tmp_path, monkeypatc
     assert "msgraph poller: dead-letter write failed" in messages
     error_capture = captures[messages.index("msgraph poller: dead-letter write failed")]
     assert error_capture["level"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# 5. a cursor begun under an older $select is re-synced (ss ADR 0089)
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_from_an_older_select_restarts_the_chain_with_dedupe(tmp_path):
+    # The 2026-09-22 staging failure: every stored deltaLink predated the select
+    # that added internetMessageId, and Graph replays a chain's ORIGINAL select, so
+    # approvals arrived without the id and the forgery check refused them. A state
+    # file written before delta_select existed is stale: start a new chain
+    # (poll_delta(None)), dedupe exactly as a 410 re-list, record the current
+    # select, and resume the NEW link afterwards.
+    from shared import msgraph_client
+
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {"delta_link": "old-chain", "seen_ids": ["m1"], "watermark": "2026-08-18T10:00:00Z"}
+        )
+    )
+    client = _FakeClient(
+        "op@client.example",
+        [
+            (
+                [
+                    _raw_at("m1", "a@x.example", "2026-08-18T10:00:00Z"),  # seen: dedupe
+                    _raw_at("old-1", "b@x.example", "2026-08-18T09:00:00Z"),  # pre-watermark
+                    _raw_at("m2", "c@x.example", "2026-08-18T11:00:00Z"),  # new
+                ],
+                "new-chain",
+                False,
+            ),
+            ([], "new-chain-2", False),
+        ],
+    )
+    fwd = _Forwarder()
+    poller = _poller(tmp_path, client, fwd)
+    poller._ready()
+    assert poller.poll_once() == 1
+    assert [json.loads(p["body"])["event_id"] for p in fwd.posts] == ["m2"]
+    saved = json.loads(state_path.read_text())
+    assert saved["delta_link"] == "new-chain"
+    assert saved["delta_select"] == msgraph_client.DELTA_SELECT
+    assert "old-1" in saved["seen_ids"]
+    poller.poll_once()
+    # The stale link was never replayed; the second poll resumed the new chain.
+    assert client.calls == [None, "new-chain"]
+
+
+def test_current_select_cursor_resumes_verbatim(tmp_path):
+    # The falsifier for the test above: a cursor recorded under the CURRENT select
+    # is resumed as-is. Without this, "always restart" would pass the stale test.
+    from shared import msgraph_client
+
+    (tmp_path / "state.json").write_text(
+        json.dumps({"delta_link": "live-chain", "delta_select": msgraph_client.DELTA_SELECT})
+    )
+    client = _FakeClient("op@client.example", [([], "live-chain-2", False)])
+    poller = _poller(tmp_path, client, _Forwarder())
+    poller._ready()
+    poller.poll_once()
+    assert client.calls == ["live-chain"]
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_select"] == msgraph_client.DELTA_SELECT
+
+
+def test_held_restart_does_not_bless_the_old_cursor(tmp_path):
+    # A re-sync whose forward fails HOLDS the cursor (overlay#275), which keeps the
+    # OLD link. The select must not be recorded against it, or the stale chain
+    # would be resumed next cycle as if it were current.
+    (tmp_path / "state.json").write_text(json.dumps({"delta_link": "old-chain"}))
+    client = _FakeClient(
+        "op@client.example",
+        [
+            ([_raw_at("m2", "c@x.example", "2026-08-18T11:00:00Z")], "new-chain", False),
+            ([], "new-chain-b", False),
+        ],
+    )
+    poller = _poller(tmp_path, client, _Forwarder(status=500))
+    poller._ready()
+    assert poller.poll_once() == 0
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] == "old-chain"
+    assert saved.get("delta_select") is None
+    poller.poll_once()
+    assert client.calls == [None, None]
