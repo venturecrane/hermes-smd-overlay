@@ -901,35 +901,70 @@ def test_the_ceiling_accessor_reads_the_authored_value_raw():
     assert cfg.external_send_as_staff_ceiling("missing") is None
 
 
-def _validate(tmp_path: Path, fixture_name: str) -> list[str]:
-    from bootstrap.validate import validate_customer_yaml
-
+def _fixture_yaml(name: str) -> str:
     manifest = json.loads(
         (Path(__file__).parent / "contract" / "validator_parity_fixtures.json").read_text()
     )
-    fixture = next(f for f in manifest["fixtures"] if f["name"] == fixture_name)
+    return next(f for f in manifest["fixtures"] if f["name"] == name)["yaml"]
+
+
+def _validate_yaml(tmp_path: Path, text: str) -> list[str]:
+    from bootstrap.validate import validate_customer_yaml
+
     path = tmp_path / "customer.yaml"
-    path.write_text(fixture["yaml"])
+    path.write_text(text)
     return validate_customer_yaml(path)
 
 
+_ROSTER = "  staff_send_as:\n    - address: paralegal@firm.com\n      name: Pat Lee\n"
+
+
 def test_the_validator_accepts_the_authored_roster_and_confirm(tmp_path):
-    assert _validate(tmp_path, "staff_send_as_confirm_accepted") == []
+    assert _validate_yaml(tmp_path, _fixture_yaml("staff_send_as_accepted")) == []
 
 
 @pytest.mark.parametrize(
     ("fixture", "needle"),
     [
-        ("staff_send_as_autonomous_rejected", "one posture, 'confirm'"),
-        ("staff_send_as_draft_for_review_rejected", "one posture, 'confirm'"),
-        ("staff_send_as_missing_name_rejected", "staff_send_as[0].name"),
-        ("staff_send_as_domain_address_rejected", "exact person address"),
-        ("staff_send_as_duplicate_address_rejected", "duplicate staff_send_as address"),
+        ("external_send_as_staff_autonomous_rejected", "one posture, 'confirm'"),
+        ("external_send_as_staff_in_ceiling_rejected", "has no exposure_ceiling"),
+        ("staff_send_as_domain_grant_rejected", "exact person address"),
+        ("staff_send_as_unreachable_rejected", "not covered by scope.inbound_allow_from"),
     ],
 )
-def test_the_validator_rejects_each_malformed_shape(tmp_path, fixture, needle):
-    errors = _validate(tmp_path, fixture)
+def test_the_validator_rejects_each_contract_case(tmp_path, fixture, needle):
+    errors = _validate_yaml(tmp_path, _fixture_yaml(fixture))
     assert any(needle in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "needle"),
+    [
+        (
+            "external_send_as_staff: confirm",
+            "external_send_as_staff: draft_for_review",
+            "one posture, 'confirm'",
+        ),
+        (_ROSTER, "  staff_send_as:\n    - address: paralegal@firm.com\n", "staff_send_as[0].name"),
+        (
+            _ROSTER,
+            _ROSTER + "    - address: Paralegal@Firm.com\n      name: Pat Lee\n",
+            "duplicate staff_send_as address",
+        ),
+    ],
+)
+def test_the_validator_rejects_the_other_malformed_shapes(tmp_path, old, new, needle):
+    base = _fixture_yaml("staff_send_as_accepted")
+    assert base.count(old) == 1
+    errors = _validate_yaml(tmp_path, base.replace(old, new))
+    assert any(needle in e for e in errors), errors
+
+
+def test_an_exact_admin_address_makes_a_staff_member_reachable(tmp_path):
+    base = _fixture_yaml("staff_send_as_unreachable_rejected")
+    assert _validate_yaml(tmp_path, base) != []
+    fixed = base.replace("scope:\n", "scope:\n  admins:\n    - paralegal@firm.com\n", 1)
+    assert not any("not covered" in e for e in _validate_yaml(tmp_path, fixed))
 
 
 def test_translation_carries_the_new_exposure_key():

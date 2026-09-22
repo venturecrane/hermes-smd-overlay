@@ -116,7 +116,9 @@ CONFIRM_NON_SEND_CLASSES_BY_FIELD = {"exposure": {"commitment"}}
 # person without that person, which no firm can author, and `draft_for_review`
 # / `refused` would each read as a posture while doing nothing (absence is
 # already refused). Kept out of SEND_ACTION_CLASSES because the confirm guard
-# there admits every ceiling, and this class admits exactly one.
+# there admits every ceiling, and this class admits exactly one. It is never
+# authored in `exposure_ceiling`: that map bounds the runtime entitlement dial,
+# which has nothing to raise here, so any entry there is rejected.
 STAFF_SEND_AS_CLASS = "external_send_as_staff"
 STAFF_SEND_AS_CEILINGS = {"confirm"}
 
@@ -568,6 +570,13 @@ def _validate_exposure_map(
             )
         elif value not in ACCEPTED_CEILINGS:
             _err(f"{ep}: must be one of {sorted(ACCEPTED_CEILINGS)}", errors)
+        elif key == STAFF_SEND_AS_CLASS and field == "exposure_ceiling":
+            _err(
+                f"{ep}: external_send_as_staff has no exposure_ceiling; the runtime "
+                "entitlement dial never raises it, so author it in exposure only "
+                "(ss ADR 0089)",
+                errors,
+            )
         elif key == STAFF_SEND_AS_CLASS and value not in STAFF_SEND_AS_CEILINGS:
             _err(
                 f"{ep}: sending as a staff member has one posture, 'confirm' (the "
@@ -1013,6 +1022,12 @@ def _validate_staff_send_as(cfg: dict[str, Any], errors: list[str]) -> None:
     are compared case-insensitively and a duplicate is rejected so the list
     stays reviewable as the literal set of people the Operator may write as.
     Absent is valid (nobody may be sent as).
+
+    Each address must also be REACHABLE: covered, exactly or by an ``@domain``
+    grant, by ``scope.inbound_allow_from``, ``scope.admins`` or
+    ``scope.outbound_roster``. The approval arrives as an email from that person
+    and the approval request goes to them, so a staff member the seat can
+    neither hear from nor write to could never approve anything.
     """
     scope = cfg.get("scope")
     if not isinstance(scope, dict):
@@ -1023,6 +1038,7 @@ def _validate_staff_send_as(cfg: dict[str, Any], errors: list[str]) -> None:
     if not isinstance(raw, list):
         _err(f"scope.staff_send_as must be a list; got {type(raw).__name__}", errors)
         return
+    reachable = _staff_reachable_set(scope)
     seen: set[str] = set()
     for i, entry in enumerate(raw):
         prefix = f"scope.staff_send_as[{i}]"
@@ -1047,6 +1063,33 @@ def _validate_staff_send_as(cfg: dict[str, Any], errors: list[str]) -> None:
             _err(f"{prefix}.address: duplicate staff_send_as address {canon!r}", errors)
             continue
         seen.add(canon)
+        if canon not in reachable and f"@{canon.partition('@')[2]}" not in reachable:
+            _err(
+                f"{prefix}.address: {canon!r} is not covered by scope.inbound_allow_from, "
+                "scope.admins or scope.outbound_roster, so the seat could neither ask "
+                "them nor hear their approval",
+                errors,
+            )
+
+
+def _staff_reachable_set(scope: dict[str, Any]) -> set[str]:
+    """Canonical addresses and ``@domain`` grants the seat can exchange mail with."""
+    out: set[str] = set()
+    for key in ("inbound_allow_from", "admins"):
+        entries = scope.get(key)
+        if isinstance(entries, list):
+            for entry in entries:
+                canon = _canon_roster_address(entry) if isinstance(entry, str) else None
+                if canon:
+                    out.add(canon)
+    roster = scope.get("outbound_roster")
+    if isinstance(roster, list):
+        for entry in roster:
+            address = entry.get("address") if isinstance(entry, dict) else None
+            canon = _canon_roster_address(address) if isinstance(address, str) else None
+            if canon:
+                out.add(canon)
+    return out
 
 
 def _validate_google_auth_entitlements(cfg: dict[str, Any], errors: list[str]) -> None:
