@@ -31,7 +31,7 @@ not the row.
 import logging
 import os
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from shared import identifier_filter, provenance, spec_gate
@@ -542,7 +542,7 @@ def _ambient_dates() -> frozenset[str]:
     computed date is a true positive under the read-not-compute doctrine
     (ss #2115), not an FP.
     """
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     return frozenset({today.isoformat(), (today - timedelta(days=1)).isoformat()})
 
 

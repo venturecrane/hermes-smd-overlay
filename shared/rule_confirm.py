@@ -82,6 +82,33 @@ OPS_TAG_KIND = "ops"
 #: ``OPS_REQUEST_KIND`` in ss-console ``operator/workspace_broker/establishment.py``.
 OPS_REQUEST_KIND = "ops_request"
 
+#: The tag word of a staff send-as draft (ss ADR 0089): ``[draft XXXXXXXX]``.
+#: A DIFFERENT word from ``rule`` / ``act`` on purpose, and deliberately absent
+#: from :data:`RULE_TAG`: a draft is answered only by
+#: :func:`read_send_as_command`, so :func:`find_tags` and :func:`resolve` never
+#: see one, a bare "yes" can never approve a message going out under a person's
+#: name, and the admin act lane is untouched. Drafts live in their own broker
+#: store, not the rule/act one.
+DRAFT_TAG_KIND = "draft"
+
+#: The three answers a send-as approver can give.
+SEND_AS_SEND = "send"
+SEND_AS_CHANGE = "change"
+SEND_AS_CANCEL = "cancel"
+#: Returned when the person's own text carries more than one distinct command:
+#: the seat asks which, and decides nothing.
+SEND_AS_AMBIGUOUS = "ambiguous"
+
+#: ``[draft XXXXXXXX] send`` / ``[draft XXXXXXXX] cancel`` / ``[draft XXXXXXXX]
+#: change: <what to change>``. The verb must follow the tag, so "please send
+#: [draft X]" and a sentence that merely mentions the word are not commands. The
+#: hex is matched case-insensitively (some clients upper-case a pasted tag) and
+#: lowercased on the way out.
+_SEND_AS_COMMAND = re.compile(
+    r"\[draft ([0-9a-fA-F]{8})\][ \t]*[:,\-]?[ \t]*(send|change|cancel)\b",
+    re.IGNORECASE,
+)
+
 #: A line that begins the quoted history. Everything from here down is somebody
 #: else's words (usually ours, quoted back), and none of it is the reply.
 _QUOTE_HEADER = re.compile(
@@ -487,6 +514,56 @@ def read_ops_reply(message: Any) -> OpsReading:
     return OpsReading(verdict=OPS_NONE)
 
 
+@dataclass(frozen=True)
+class SendAsCommand:
+    """What a send-as approver's OWN text says.
+
+    ``decision`` is :data:`SEND_AS_SEND`, :data:`SEND_AS_CHANGE`,
+    :data:`SEND_AS_CANCEL` or :data:`SEND_AS_AMBIGUOUS`. ``instruction`` is the
+    text after ``change:``, the person's own words, unparaphrased; ``""`` for a
+    ``change`` that says nothing (the seat then asks what to change rather than
+    revising towards nothing).
+    """
+
+    draft_id: str
+    decision: str
+    instruction: str = ""
+
+
+def read_send_as_command(message: Any) -> SendAsCommand | None:
+    """The send-as command in the sender's OWN text, or ``None``.
+
+    THE TAG MUST BE IN THEIR OWN WORDS, unlike :func:`find_tags`. The approval
+    email the broker sent carries the tag and the three reply forms, so a quoted
+    copy of it under any reply contains "[draft X] send" verbatim. Reading the
+    quoted half would let the Operator's own email approve itself. So the text
+    is cut exactly as :func:`read_own_text` cuts it: below the prompt fence,
+    above the quoted history, before the signature.
+
+    ``None`` when there is no command (the message is not an answer to a send-as
+    draft and the ordinary matcher runs). Two DIFFERENT commands in one reply
+    (two tags, or "send" and "cancel") return :data:`SEND_AS_AMBIGUOUS` rather
+    than picking one; a command repeated identically is one command.
+    """
+    own = strip_quoted(email_body(message))
+    if not own:
+        return None
+    matches = list(_SEND_AS_COMMAND.finditer(own))
+    if not matches:
+        return None
+    distinct = {(m.group(1).lower(), m.group(2).lower()) for m in matches}
+    if len(distinct) > 1:
+        return SendAsCommand(draft_id="", decision=SEND_AS_AMBIGUOUS)
+    first = matches[0]
+    draft_id, decision = first.group(1).lower(), first.group(2).lower()
+    instruction = ""
+    if decision == SEND_AS_CHANGE:
+        rest = own[first.end() :]
+        rest = re.sub(r"\A[ \t]*[:,\-]?", "", rest, count=1)
+        instruction = rest.strip()
+    return SendAsCommand(draft_id=draft_id, decision=decision, instruction=instruction)
+
+
 def _sender_may_confirm(
     row: dict[str, Any], sender: str, is_admin: bool, apply_others: bool
 ) -> bool:
@@ -687,6 +764,7 @@ __all__ = [
     "BARE_AFFIRMATIVES",
     "CONFIRMABLE_TAG_KINDS",
     "CONFIRMED",
+    "DRAFT_TAG_KIND",
     "DECLINED",
     "DECLINE_TOKENS",
     "DEFEATERS",
@@ -700,12 +778,18 @@ __all__ = [
     "OpsReading",
     "RULE_TAG",
     "Reading",
+    "SEND_AS_AMBIGUOUS",
+    "SEND_AS_CANCEL",
+    "SEND_AS_CHANGE",
+    "SEND_AS_SEND",
+    "SendAsCommand",
     "Verdict",
     "email_body",
     "find_tags",
     "may_decline",
     "read_ops_reply",
     "read_own_text",
+    "read_send_as_command",
     "resolve",
     "strip_quoted",
 ]

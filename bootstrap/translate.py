@@ -840,6 +840,7 @@ _AUTHORED_EXPOSURE_ACTION_CLASSES = (
     "external_send_internal",
     "external_send_client",
     "external_send_vendor",
+    "external_send_as_staff",
     "commitment",
     "destructive",
     "code_execution",

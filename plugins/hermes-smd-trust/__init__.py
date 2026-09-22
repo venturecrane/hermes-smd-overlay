@@ -680,7 +680,9 @@ _SEND_TOOL_DESCRIPTION = (
     "Send an email from this Operator's own mailbox. Recipients must be people "
     "this engagement's configuration names; anyone else is refused. Subject to "
     "the authored send posture — an external send may be held for the owner's "
-    "approval rather than sent immediately."
+    "approval rather than sent immediately. To send AS a staff member instead, "
+    "set `from` to that person's address: the full draft is emailed to them and "
+    "it goes out from their address only when they reply to approve it."
 )
 _SEND_TOOL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -696,6 +698,20 @@ _SEND_TOOL_SCHEMA: dict[str, Any] = {
         "text": {"type": "string", "description": "Plain-text body."},
         "html": {"type": "string", "description": "Optional HTML body."},
         "reply_to": {"type": "string"},
+        # ss ADR 0089. Optional; absent means today's send, byte for byte. When
+        # present the gate PROPOSES rather than sends (trust ``send_as``), drops
+        # bcc / reply_to / html, and the broker transmits only on the named
+        # staff member's emailed approval.
+        "from": {
+            "type": "string",
+            "description": (
+                "Optional. A staff member's address to send AS, for a message that "
+                "person asked you to send for them. Only people this engagement "
+                "authorizes may be named. The draft is emailed to them for "
+                "approval and nothing is sent until they approve it. Omit to send "
+                "from the Operator's own mailbox."
+            ),
+        },
     },
     "required": ["to", "subject"],
 }
@@ -816,6 +832,16 @@ def _smd_send_message(args: dict[str, Any], **kwargs: Any) -> str:
     ``_attach_html_body`` on this same dict before dispatch, so the html half of
     a send and the grant marker arrive here only through the positional object.
     """
+    if args.get("from") not in (None, ""):
+        # ss ADR 0089. A send AS a staff member is never transmitted by this
+        # handler: the gate proposes it and always blocks, and the broker sends
+        # it on the approver's reply. Reaching here with a ``from`` means that
+        # gate did not run, so refuse rather than send the message from the
+        # Operator's own mailbox, which is not what anybody asked for.
+        return (
+            "Not sent: a message to go out as a staff member is proposed for that "
+            "person's approval, never sent directly. Report this rather than retrying."
+        )
     authored = _authored_email_adapter()
     if authored is None:
         # The config was READ and names no Email connector. Refuse plainly rather

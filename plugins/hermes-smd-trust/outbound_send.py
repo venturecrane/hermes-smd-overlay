@@ -138,6 +138,13 @@ def send_message(
 # `smd_send_message` tool carries what its schema advertises (`text`, `html`,
 # `bcc`, `reply_to`). Anything else on the args is NOT forwarded — the wire body is
 # built from a closed allowlist at both ends.
+#
+# ``from`` is absent ON PURPOSE (ss ADR 0089). A send as a staff member never
+# travels this path: the gate proposes it (``send_as_propose``) and the broker
+# transmits it itself on the approver's ``send_as_decide``. Forwarding ``from``
+# here would give ``msgraph_send`` a second way to be asked for a staff From,
+# one with no approved row behind it; leaving it off means that verb keeps
+# sending as the seat mailbox and nothing else.
 _MSGRAPH_SEND_FIELDS: tuple[str, ...] = (
     "to",
     "cc",

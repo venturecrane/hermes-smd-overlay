@@ -653,12 +653,21 @@ class InboundOrigin:
     {message_id}/reply``) — the reply is keyed on the recorded inbox + message,
     so it threads structurally back to the original sender regardless of any
     recipient the agent's draft names (the recipient-lock's structural half).
+
+    ``internet_message_id`` and ``conversation_id`` (ss ADR 0089) are the Graph
+    ``internetMessageId`` / ``conversationId`` of the same message, when the
+    msgraph seam supplied them. A staff send-as approval carries the first to
+    the broker's forgery check (an approval that is really a message out of the
+    Operator's own Sent Items is refused). Empty on AgentMail and whenever the
+    provider did not say; the broker fails closed on empty.
     """
 
     sender_address: str
     message_id: str
     content_digest: str = ""
     inbox_id: str = ""
+    internet_message_id: str = ""
+    conversation_id: str = ""
 
 
 @dataclass

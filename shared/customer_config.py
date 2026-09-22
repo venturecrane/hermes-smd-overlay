@@ -571,6 +571,88 @@ class CustomerConfig:
             return False
         return addr in self.admins
 
+    @property
+    def staff_send_as(self) -> list[dict[str, str]]:
+        """Return ``scope.staff_send_as``: the staff the Operator may send AS
+        (ss ADR 0089), each ``{"address": <lowercased>, "name": <authored>}``.
+
+        A different thing from ``personas[].send_as`` (the Operator's OWN
+        sending identity) despite the shared words: an entry here is a HUMAN
+        whose address a send may carry as ``from``, and only after that person
+        approved the exact text by email. The broker re-reads the same key
+        before it stores or transmits anything; this accessor is the gateway's
+        reading, used to refuse early.
+
+        FAIL-CLOSED TO ``[]`` on any malformed shape, like :attr:`admins`: an
+        entry that is not a mapping, has no exact person address, or has no
+        authored name is DROPPED (a name is shown to the approver and must not
+        be invented), and a duplicate address keeps its first entry. Empty
+        means nobody may be sent as, ever, until a PR authors someone.
+        """
+        scope = self._data.get("scope")
+        if not isinstance(scope, dict):
+            return []
+        raw = scope.get("staff_send_as")
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            address = entry.get("address")
+            name = entry.get("name")
+            if not isinstance(address, str) or not isinstance(name, str) or not name.strip():
+                continue
+            norm = unicodedata.normalize("NFC", address).strip().lower()
+            if norm.count("@") != 1 or norm.startswith("@"):
+                continue
+            local, _, domain = norm.partition("@")
+            if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append({"address": norm, "name": name.strip()})
+        return out
+
+    def staff_send_as_entry(self, address: object) -> dict[str, str] | None:
+        """The ``scope.staff_send_as`` entry for ``address`` (exact, case-
+        insensitive), or ``None``. Fail-closed on a non-string address."""
+        if not isinstance(address, str):
+            return None
+        wanted = unicodedata.normalize("NFC", address).strip().lower()
+        if not wanted:
+            return None
+        for entry in self.staff_send_as:
+            if entry["address"] == wanted:
+                return entry
+        return None
+
+    def external_send_as_staff_ceiling(self, persona_slug: object) -> str | None:
+        """The AUTHORED ``entitlements.exposure.external_send_as_staff`` value
+        for ``persona_slug``, or ``None`` when unauthored (= refused).
+
+        Returned raw and unjudged: the only value with defined behavior is
+        ``confirm``, and the trust gate treats anything else, including
+        ``autonomous``, as refused. No runtime override is layered here; the
+        gate's own exposure resolution does that and can only narrow.
+        """
+        if not isinstance(persona_slug, str) or not persona_slug:
+            return None
+        try:
+            personas = self.personas
+        except CustomerConfigError:
+            return None
+        for persona in personas:
+            if not isinstance(persona, dict) or persona.get("slug") != persona_slug:
+                continue
+            entitlements = persona.get("entitlements")
+            exposure = entitlements.get("exposure") if isinstance(entitlements, dict) else None
+            value = exposure.get("external_send_as_staff") if isinstance(exposure, dict) else None
+            return value if isinstance(value, str) and value else None
+        return None
+
     def authored_person_name(self, address: object) -> str | None:
         """The firm's OWN authored name for ``address``, or ``None`` (ss#2152).
 

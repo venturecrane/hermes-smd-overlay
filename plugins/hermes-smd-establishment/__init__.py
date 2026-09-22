@@ -273,6 +273,7 @@ from shared import (
     act_broker,
     admin_possession,
     matter_gate,
+    msgraph_broker,
     provenance,
     read_capture,
     rule_confirm,
@@ -4019,6 +4020,163 @@ def _confirmation_note(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Staff send-as answers (ss ADR 0089)
+#
+# The Operator emailed a staff member a draft that would go out FROM them. Their
+# reply is one of three lines, in their own words: "[draft X] send", "[draft X]
+# change: ...", "[draft X] cancel". The seat reads it with
+# ``rule_confirm.read_send_as_command`` (own text only, tag required) and
+# carries it to the broker, which decides everything that matters: whether the
+# row is open, whether this person may make this decision, whether the reply is
+# a forgery out of the Operator's own Sent Items, and, on send, the atomic
+# consume and transmit. The seat never sends here and never guesses.
+# ---------------------------------------------------------------------------
+
+_SEND_AS_INSTRUCTION_MAX = 2000
+_SEND_AS_TAG_IN_TEXT = re.compile(r"\[(?:rule|act|ops|draft) [0-9a-fA-F]{8}\]")
+
+_SEND_AS_NOTES: dict[str, str] = {
+    "DISPATCHED": (
+        "{sender} approved the draft held as [draft {draft_id}], and it has been sent "
+        "from their address. Do not send it again, by any tool. Confirm to them in "
+        "one line that it went out."
+    ),
+    "REVISED": (
+        "{sender} asked for changes to the draft held as [draft {draft_id}] instead of "
+        'sending it. Nothing was sent. Their words: "{instruction}". Redraft the '
+        "message with exactly those changes (the draft they were shown is quoted "
+        "in their reply), then call smd_send_message again with from set to "
+        "{sender}. That proposes a new act and emails them the revised draft; do "
+        "not tell them anything was sent."
+    ),
+    "CANCELLED": (
+        "The draft held as [draft {draft_id}] was cancelled. Nothing was sent. "
+        "Acknowledge it to {sender} in one line."
+    ),
+    "EXPIRED": (
+        "The draft held as [draft {draft_id}] had expired before this reply, so "
+        "nothing was sent. Tell {sender} that plainly and offer to prepare it again."
+    ),
+    "SUPERSEDED": (
+        "The draft held as [draft {draft_id}] was replaced by a newer draft{replaced}, "
+        "so nothing was sent from it. Tell {sender} plainly to answer the newer one."
+    ),
+    "REFUSED": (
+        "The reply about [draft {draft_id}] was refused and nothing was sent: "
+        "{reason}. Tell {sender} that plainly, and do not send the message any "
+        "other way."
+    ),
+    "FAILED": (
+        "{sender} approved [draft {draft_id}], but the send failed and nothing went "
+        "out: {reason}. Tell them plainly. Do not retry it and do not send it any "
+        "other way."
+    ),
+}
+
+_SEND_AS_UNREACHABLE_NOTE = (
+    "This seat could not reach the broker with the reply about [draft {draft_id}], "
+    "so it was not recorded and nothing was sent by this turn. Tell {sender} "
+    "plainly, and do not send the message any other way."
+)
+
+_SEND_AS_CHANGE_EMPTY_NOTE = (
+    '{sender} replied "change" to [draft {draft_id}] without saying what to change. '
+    "Nothing was sent and nothing was revised; the draft is still waiting. Ask "
+    'them what they want changed, in the form "[draft {draft_id}] change: ...".'
+)
+
+_SEND_AS_AMBIGUOUS_NOTE = (
+    "The reply carries more than one send-as answer, so none was acted on and "
+    "nothing was sent. Ask the person to reply with exactly one line, such as "
+    '"[draft XXXXXXXX] send".'
+)
+
+_SEND_AS_NO_ORIGIN_NOTE = (
+    "The reply about [draft {draft_id}] did not arrive as a verified email, so it was "
+    "not acted on and nothing was sent. An approval to send as a staff member is "
+    "accepted only by email from that person. Say so plainly."
+)
+
+
+def _send_as_instruction(text: str) -> str:
+    """The approver's change request, bounded and tag-free, never paraphrased."""
+    folded = _SEND_AS_TAG_IN_TEXT.sub("", text or "").strip()
+    return folded[:_SEND_AS_INSTRUCTION_MAX]
+
+
+def _send_as_reply_note(session_id: str, sender: str, user_message: Any) -> tuple[str | None, bool]:
+    """Did this message answer a send-as draft? ``(note, handled)``.
+
+    ``handled`` is True whenever the message carried a send-as command this lane
+    owns, including every refusal, so the caller skips the rule/act matcher: a
+    "[draft X] change: ..." must never also be read as a qualified answer to a
+    rule. ``(None, False)`` means this lane has nothing to say.
+    """
+    command = rule_confirm.read_send_as_command(user_message)
+    if command is None:
+        return None, False
+    if command.decision == rule_confirm.SEND_AS_AMBIGUOUS:
+        return _SEND_AS_AMBIGUOUS_NOTE, True
+    draft_id = command.draft_id
+
+    origin = None
+    try:
+        origin = SESSION_INBOUND_ORIGIN.get(session_id)
+    except Exception:  # noqa: BLE001 — an unresolved origin decides nothing
+        logger.debug("hermes-smd-establishment: send-as origin unresolved", exc_info=True)
+    origin_sender = _normalize_address(getattr(origin, "sender_address", ""))
+    if origin is None or not origin_sender or origin_sender != sender:
+        logger.info("hermes-smd-establishment: send-as %s answer not on a verified email", draft_id)
+        return _SEND_AS_NO_ORIGIN_NOTE.format(draft_id=draft_id), True
+
+    instruction: str | None = None
+    if command.decision == rule_confirm.SEND_AS_CHANGE:
+        instruction = _send_as_instruction(command.instruction)
+        if not instruction:
+            return _SEND_AS_CHANGE_EMPTY_NOTE.format(sender=sender, draft_id=draft_id), True
+
+    try:
+        response = msgraph_broker.send_as_decide(
+            tag_or_act_id=draft_id,
+            decision=command.decision,
+            decided_by=sender,
+            internet_message_id=str(getattr(origin, "internet_message_id", "") or ""),
+            instruction=instruction,
+            graph_message_id=str(getattr(origin, "message_id", "") or ""),
+        )
+    except Exception:  # noqa: BLE001 — unknown outcome: say so, never claim a send
+        logger.warning("hermes-smd-establishment: send_as_decide failed", exc_info=True)
+        return _SEND_AS_UNREACHABLE_NOTE.format(sender=sender, draft_id=draft_id), True
+
+    response = response if isinstance(response, dict) else {}
+    status = str(response.get("status") or "").upper()
+    if status not in _SEND_AS_NOTES:
+        status = "REFUSED"
+    reason = str(response.get("reason") or "no reason was given").strip()
+    echoed = response.get("instruction")
+    replaced_by = str(response.get("replaced_by") or "").strip()
+    logger.info(
+        "hermes-smd-establishment: send-as %s %s by %s -> %s",
+        draft_id,
+        command.decision,
+        sender,
+        status,
+    )
+    return (
+        _SEND_AS_NOTES[status].format(
+            sender=sender,
+            draft_id=draft_id,
+            reason=reason,
+            instruction=_send_as_instruction(echoed if isinstance(echoed, str) else "")
+            or instruction
+            or "",
+            replaced=f" ({replaced_by})" if replaced_by else "",
+        ),
+        True,
+    )
+
+
 def _note_ops_resolved(session_id: str, proposal_id: str) -> None:
     """This turn recorded SMD's answer. Bounded, like every register here."""
     if not session_id:
@@ -4320,12 +4478,24 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         # tag is SMD answering a request the Operator raised, not a person at
         # the firm answering a readback, and running it through ``resolve``
         # first would ask "which rule do you mean?" about a tag no rule holds.
-        ops_note, ops_resolved = _ops_reply_note(
-            session_id, sender_id, cfg, kwargs.get("user_message")
+        # ss ADR 0089. FIRST of the answer lanes: a message whose own text says
+        # "[draft X] send / change: / cancel" is a staff member answering a draft
+        # that would go out under their name. It must never fall through to the
+        # rule matcher, where "change" reads as a qualifier and "cancel" as a
+        # refusal of something else.
+        send_as_note, send_as_handled = _send_as_reply_note(
+            session_id, _normalize_address(sender_id), kwargs.get("user_message")
+        )
+        if send_as_note:
+            lines.append(send_as_note)
+        ops_note, ops_resolved = (
+            (None, False)
+            if send_as_handled
+            else _ops_reply_note(session_id, sender_id, cfg, kwargs.get("user_message"))
         )
         if ops_note:
             lines.append(ops_note)
-        if ops_resolved:
+        if send_as_handled or ops_resolved:
             # Skipped, but the stash is still CLEARED: what an earlier turn
             # confirmed must not stand over a submit on this one merely because
             # this turn went down the other path.
