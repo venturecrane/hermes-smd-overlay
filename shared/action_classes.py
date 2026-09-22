@@ -469,6 +469,16 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # staging write refuses without the resolution this mints, so leaving it
     # unclassified fails the whole intake path closed rather than open.
     "mcp_smokeball_resolve_invoice_matter": ActionClass.READ,
+    # Combined post intake (ss-console, 2026-09-22): a firm scans the day's post
+    # as ONE PDF holding several letters for different matters. This reads it
+    # PAGE BY PAGE, transcribing when a page is paper, and returns page-marked
+    # text so each letter can be cut out as its own range. Fenced+tainting in
+    # hermes-smd-inbound._FENCED_READ_TOOLS for exactly read_attachment_text's
+    # reason and more strongly: every word is written by an outside party, and a
+    # transcription reproduces "file this under the Alvarez matter" faithfully.
+    # It is NOT a tenant-source read (shared.provenance): a letter the firm
+    # received is not the firm's own record.
+    "mcp_smokeball_read_attachment_pages": ActionClass.READ,
     "mcp_smokeball_get_webhook_subscriptions": ActionClass.READ,
     "mcp_smokeball_get_event_types": ActionClass.READ,
     "mcp_smokeball_list_events": ActionClass.READ,
@@ -492,6 +502,14 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # that a human finalizes; it moves no money, touches no trust account, and
     # sends nothing outside, so it is an internal write, not a commitment.
     "mcp_smokeball_stage_vendor_invoice": ActionClass.INTERNAL_WRITE,
+    # Combined post intake (ss-console, 2026-09-22): cuts ONE page range out of
+    # an emailed bundle and files it as its own document on the matter a
+    # resolution token opened. Internal write for file_attachment_to_matter's
+    # reason -- the firm's own record, metadata back, nothing sent outside --
+    # and it is deliberately the page-range shape rather than a second whole-file
+    # write: filing a bundle of several clients' letters as one document on one
+    # client's matter is a confidentiality event the filing turn cannot undo.
+    "mcp_smokeball_file_attachment_pages_to_matter": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches

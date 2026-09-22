@@ -400,6 +400,13 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # charge is the staged expense, read back with get_expenses (which
         # seeds). An invoice total must not certify itself in a reply.
         "mcp_smokeball_read_attachment_text",
+        # A scanned bundle of letters the firm RECEIVED, read page by page for
+        # combined post intake. Outside parties authored every word, and a
+        # transcription of a page is further from the firm's record still. The
+        # firm's record of the letter is the document filed from it, and nothing
+        # in the reply states a fact read out of the scan beyond who a letter is
+        # from and which pages it ran to.
+        "mcp_smokeball_read_attachment_pages",
         # The seat's own inbox attachments (hermes-smd-mail-attachments). A
         # filename, a content type, a byte count and a digest, all written by
         # whoever sent the mail. None of it is the firm's record, so none of it
