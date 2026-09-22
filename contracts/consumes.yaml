@@ -99,7 +99,7 @@ vars:
     stage: agent
     requirement: optional
     consumed_by: [mcp_registry, mail-attachments]
-    note: "AgentMail READ/DRAFT credential — the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py), AND, since 2026-09-18, the Bearer credential shared/agentmail_broker.py's list_attachments/spool_attachment use against api.agentmail.to. Inbox-scoped with message_send/draft_send WITHHELD since ss#2258, so it cannot transmit: the vendor refuses. Transmit remains a broker verb keyed on AGENTMAIL_SEND_API_KEY, which never enters this process's environment. Unset, the two attachment tools do not register (requires_env) and the seat keeps its pre-2026-09-18 behavior."
+    note: "AgentMail READ/DRAFT credential — the secret_env of the agentmail MCP connector (bootstrap/mcp_registry.py), AND, since 2026-09-18, the Bearer credential shared/agentmail_broker.py's list_attachments/spool_attachment use against api.agentmail.to. Inbox-scoped with message_send/draft_send WITHHELD since ss#2258, so it cannot transmit: the vendor refuses. Transmit remains a broker verb keyed on AGENTMAIL_SEND_API_KEY, which never enters this process's environment. Unset on a seat that authors adapter: agentmail, the two attachment tools still REGISTER and raise a named reason when called — until 0.2.0 they were dropped by requires_env, which is silent, so a turn had no way to look and no way to know it could not. A seat that authors a different adapter does not read this key at all."
   SMD_ATTACHMENT_SPOOL_DIR:
     # Name held in ``attachment_spool.SPOOL_DIR_ENV``; see the note above.
     discovery: indirect

@@ -334,6 +334,16 @@ class MsGraphClient:
         self._open = opener or urllib.request.urlopen
 
     # ---- url building -----------------------------------------------------
+    def mail_url(self, suffix: str) -> str:
+        """Public alias for :meth:`_mail_url`.
+
+        ``shared.msgraph_attachments`` composes its own path suffixes and must
+        not reach into a private method to do it. Every existing caller keeps
+        using ``_mail_url``; this is the same function under a name another
+        module may depend on.
+        """
+        return self._mail_url(suffix)
+
     def _mail_url(self, suffix: str) -> str:
         """A Graph URL under the PINNED mailbox: ``.../users/{mailbox}/{suffix}``.
 
@@ -435,7 +445,16 @@ class MsGraphClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: Any | None = None,
+        raw: bool = False,
+        accept: str = "application/json",
+        max_bytes: int | None = None,
     ) -> Any:
+        """One request loop, two response shapes.
+
+        ``raw`` is threaded through here rather than given its own loop because
+        the 429 backoff and the single 401 re-mint are the behaviour callers are
+        on this class for, and a second copy of them would drift from this one.
+        """
         if params:
             clean = {k: v for k, v in params.items() if v is not None}
             if clean:
@@ -455,7 +474,7 @@ class MsGraphClient:
                 data=data,
                 headers={
                     "Authorization": f"Bearer {self._bearer()}",
-                    "Accept": "application/json",
+                    "Accept": accept,
                     **({"Content-Type": "application/json"} if data is not None else {}),
                 },
                 method=method,
@@ -463,10 +482,17 @@ class MsGraphClient:
             try:
                 with self._open(req, timeout=self._timeout) as resp:
                     status = resp.status
-                    payload = resp.read()
+                    # Bounded ONLY on the raw path. The JSON path's read stays
+                    # exactly as it was: every caller of it is a Graph metadata
+                    # response, and capping those would turn a large delta page
+                    # into truncated JSON, which fails as a parse error rather
+                    # than as the size refusal a caller could act on.
+                    payload = (
+                        resp.read() if max_bytes is None else _read_capped(resp, max_bytes + 1)
+                    )
                 if status in (202, 204) or not payload:
-                    return None
-                return json.loads(payload.decode("utf-8"))
+                    return b"" if raw else None
+                return payload if raw else json.loads(payload.decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 last_status = exc.code
                 try:
@@ -484,6 +510,50 @@ class MsGraphClient:
             except urllib.error.URLError as exc:
                 raise MsGraphApiError(method, url, 0, f"unreachable: {exc.reason}") from exc
         raise MsGraphApiError(method, url, last_status, _truncate_body(last_body))
+
+    def request_bytes(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        max_bytes: int,
+        accept: str = "*/*",
+    ) -> bytes:
+        """Authenticated Graph request whose response is BYTES, not JSON.
+
+        Graph's ``/attachments/{id}/$value`` answers with the raw file. Every
+        other caller of this class wants parsed JSON, and :meth:`request` gives
+        them that by ending in ``json.loads(payload.decode("utf-8"))`` with a
+        hardcoded ``Accept: application/json``. Handed a PDF that line raises
+        ``UnicodeDecodeError``, which is neither :class:`MsGraphApiError` nor
+        :class:`MsGraphAuthError`, so it escapes :meth:`request`'s except
+        clauses AND never reaches ``_record_channel_outcome``. A seat that had
+        stopped being able to read any attachment would page nobody.
+
+        So this shares the ONE request loop rather than opening a second one.
+        The 429 backoff, the single 401 re-mint and the health ledger are the
+        reason to be on this class at all, and a parallel fetcher in the
+        attachments module would have silently had none of them.
+
+        ``max_bytes`` is required, not defaulted. The read stops one byte past
+        it, so an oversized attachment is refused by the caller without the
+        whole thing landing in a shared-cpu-1x machine's memory first (the
+        posture ``agentmail_broker._get`` already takes). A caller that gets
+        ``max_bytes + 1`` bytes back knows it hit the ceiling and nothing else.
+        """
+        try:
+            result = self._request_inner(
+                method, url, params=params, raw=True, accept=accept, max_bytes=max_bytes
+            )
+        except MsGraphAuthError as exc:
+            _record_channel_outcome(ok=False, status=401, message=str(exc))
+            raise
+        except MsGraphApiError as exc:
+            _record_channel_outcome(ok=False, status=exc.status, message=str(exc))
+            raise
+        _record_channel_outcome(ok=True)
+        return result if isinstance(result, bytes) else b""
 
     # ---- reads ------------------------------------------------------------
     def get_message(self, message_id: str) -> Any:
@@ -560,6 +630,30 @@ class MsGraphClient:
             json_body={"comment": comment},
         )
         return {"status": "replied", "reply_all": reply_all, "message_id": message_id}
+
+
+def _read_capped(resp: Any, limit: int) -> bytes:
+    """Read a response to EOF, stopping once ``limit`` bytes are in hand.
+
+    A single ``resp.read(limit)`` is the obvious version and it is the one that
+    can hand a caller a SHORT read that looks exactly like a complete small
+    file. Graph serves ``$value`` chunked with no ``Content-Length`` (measured
+    on the test tenant 2026-09-22), so there is no length to compare against
+    afterwards either: the only place truncation can be closed is here, by
+    reading until the stream says it is done.
+
+    Returning ``limit`` bytes means the cap was reached and the caller refuses;
+    anything less is the whole body.
+    """
+    chunks: list[bytes] = []
+    got = 0
+    while got < limit:
+        chunk = resp.read(limit - got)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)
 
 
 def _truncate_body(text: str | None) -> str:
