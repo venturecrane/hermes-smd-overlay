@@ -79,6 +79,7 @@ AUTHORED_EXPOSURE_ACTION_CLASSES = {
     "external_send_internal",
     "external_send_client",
     "external_send_vendor",
+    "external_send_as_staff",
     "commitment",
     "destructive",
     "code_execution",
@@ -106,6 +107,18 @@ SEND_ACTION_CLASSES = {
 # (pilot-smokeball, 2026-08-21 22:57Z): the enforce branch landed in #303 and the
 # validator had not moved with it.
 CONFIRM_NON_SEND_CLASSES_BY_FIELD = {"exposure": {"commitment"}}
+
+# Sending FROM a rostered staff member's address, on that person's emailed
+# approval (ss ADR 0089). Its only defined posture is `confirm`: the send is
+# proposed, the named staff member approves the exact text, and only then does
+# the broker transmit. Any other value is REJECTED rather than stored, in both
+# `exposure` and `exposure_ceiling` -- `autonomous` would mean sending as a
+# person without that person, which no firm can author, and `draft_for_review`
+# / `refused` would each read as a posture while doing nothing (absence is
+# already refused). Kept out of SEND_ACTION_CLASSES because the confirm guard
+# there admits every ceiling, and this class admits exactly one.
+STAFF_SEND_AS_CLASS = "external_send_as_staff"
+STAFF_SEND_AS_CEILINGS = {"confirm"}
 
 # Closed vocabulary for a scope.outbound_roster entry's `class` (ADR 0075).
 OUTBOUND_ROSTER_CLASSES = {"client", "records_vendor", "firm_staff"}
@@ -226,6 +239,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_scope_entitlements(cfg, errors)
     _validate_scope_admins(cfg, errors)
     _validate_outbound_roster(cfg, errors)
+    _validate_staff_send_as(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
     _validate_email_seam(cfg, errors)
@@ -554,6 +568,15 @@ def _validate_exposure_map(
             )
         elif value not in ACCEPTED_CEILINGS:
             _err(f"{ep}: must be one of {sorted(ACCEPTED_CEILINGS)}", errors)
+        elif key == STAFF_SEND_AS_CLASS and value not in STAFF_SEND_AS_CEILINGS:
+            _err(
+                f"{ep}: sending as a staff member has one posture, 'confirm' (the "
+                "named staff member approves the exact text by email; ss ADR 0089); "
+                "leave it unauthored to refuse it",
+                errors,
+            )
+        elif key == STAFF_SEND_AS_CLASS:
+            out[str(key)] = str(value)
         elif (
             value == "confirm"
             and key not in SEND_ACTION_CLASSES
@@ -977,6 +1000,53 @@ def _validate_one_outbound_entry(
         )
         return
     seen_class[canon] = class_str
+
+
+def _validate_staff_send_as(cfg: dict[str, Any], errors: list[str]) -> None:
+    """Validate ``scope.staff_send_as`` (ss ADR 0089).
+
+    The staff a send may carry as ``from``, each ``{address, name}``. The
+    address is an EXACT person address (``local@domain``): sending as a domain
+    is meaningless, and a person is who approves. The name is required and
+    non-empty because it is what the approval email and the Operator call that
+    person, and a name the seat had to invent is not one it may show. Addresses
+    are compared case-insensitively and a duplicate is rejected so the list
+    stays reviewable as the literal set of people the Operator may write as.
+    Absent is valid (nobody may be sent as).
+    """
+    scope = cfg.get("scope")
+    if not isinstance(scope, dict):
+        return
+    raw = scope.get("staff_send_as")
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        _err(f"scope.staff_send_as must be a list; got {type(raw).__name__}", errors)
+        return
+    seen: set[str] = set()
+    for i, entry in enumerate(raw):
+        prefix = f"scope.staff_send_as[{i}]"
+        if not isinstance(entry, dict):
+            _err(f"{prefix}: must be a mapping with address and name", errors)
+            continue
+        address = entry.get("address")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            _err(f"{prefix}.name: required non-empty string", errors)
+        if not isinstance(address, str) or not address.strip():
+            _err(f"{prefix}.address: required non-empty string email address", errors)
+            continue
+        canon = _canon_roster_address(address)
+        if canon is None or canon.startswith("@"):
+            _err(
+                f"{prefix}.address: {address!r} must be an exact person address (local@domain)",
+                errors,
+            )
+            continue
+        if canon in seen:
+            _err(f"{prefix}.address: duplicate staff_send_as address {canon!r}", errors)
+            continue
+        seen.add(canon)
 
 
 def _validate_google_auth_entitlements(cfg: dict[str, Any], errors: list[str]) -> None:

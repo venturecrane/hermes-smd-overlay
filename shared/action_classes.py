@@ -63,6 +63,14 @@ class ActionClass(str, enum.Enum):
     # unclassifiable recipient is forced OUTSIDE (draft), never CLIENT/VENDOR.
     EXTERNAL_SEND_CLIENT = "external_send_client"
     EXTERNAL_SEND_VENDOR = "external_send_vendor"
+    # Send FROM a rostered staff member's address (``scope.staff_send_as``), on
+    # that staff member's own emailed approval (ss ADR 0089). No tool maps to it
+    # statically: ``evaluate_tool_call`` resolves it when a send carries ``from``.
+    # Its only defined posture is ``confirm`` -- the send is PROPOSED here and
+    # transmitted by the broker when the named approver replies ``[act X] send``.
+    # Deliberately NOT taint-gated: a proposal is a draft, and nothing leaves
+    # until that person has read the exact text.
+    EXTERNAL_SEND_AS_STAFF = "external_send_as_staff"
     COMMITMENT = "commitment"  # Sign, accept terms, agree to dates — never autonomous
     DESTRUCTIVE = "destructive"  # Delete, drop, irreversible — explicit per-call approval
     CODE_EXECUTION = (
@@ -171,6 +179,14 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # The PRINCIPAL-identity sends (`email_send`, `email_reply`, ...) stay
         # banned above — the agent sends only from its OWN identity, never
         # from a human principal's mailbox.
+        #
+        # NOTE on staff send-as (ss ADR 0089): that ban is UNCHANGED. Sending
+        # from a staff member's address is not these tools and not the model's
+        # act: a send carrying ``from`` is classified EXTERNAL_SEND_AS_STAFF,
+        # only PROPOSED on the turn, and transmitted by the broker after the
+        # named staff member replies "send" to the exact text. Authorship is
+        # theirs, by their own written approval of that text, which is the
+        # attribution this ban protects.
     }
 )
 
