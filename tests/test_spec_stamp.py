@@ -68,6 +68,14 @@ def test_block_carries_the_pointer_and_hash(installed_specs):
     assert hashlib.sha256(BODY.encode()).hexdigest()[:16] in block
 
 
+def test_block_carries_no_em_dash(installed_specs):
+    """This block is stamped into every SKILL.md the model reads, and the
+    outbound fabrication filter refuses any draft with an em dash. Modeling the
+    banned character in the model's own instructions is how pilot-smokeball's
+    escalator had every memo refused once on 2026-09-22."""
+    assert "—" not in spec_stamp.render_pointer_block()
+
+
 def test_block_never_carries_the_spec_prose(installed_specs):
     """The pointer, never the prose. A boot-frozen prose stamp against a
     hot-synced spec would disagree, silently."""
