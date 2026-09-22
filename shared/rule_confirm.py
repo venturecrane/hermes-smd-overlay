@@ -109,6 +109,64 @@ _SEND_AS_COMMAND = re.compile(
     re.IGNORECASE,
 )
 
+#: What a staff member actually types when they mean yes to the draft in front
+#: of them. Matched as the WHOLE of their own text, never as a substring: "ok"
+#: is a send, "ok but move the date" is not, and the second must fall through to
+#: the model rather than send a letter nobody edited. The tag then comes from
+#: the thread they replied on (see :func:`read_send_as_command`), so nothing here
+#: decides WHICH draft.
+_SEND_AS_BARE_SEND: tuple[str, ...] = (
+    "send",
+    "send it",
+    "send it as is",
+    "send as is",
+    "send this",
+    "send that",
+    "sent it",
+    "approved",
+    "approve",
+    "approve it",
+    "yes",
+    "yes send it",
+    "yes please send",
+    "ok",
+    "okay",
+    "ok send it",
+    "go ahead",
+    "go ahead and send it",
+    "looks good",
+    "looks good send it",
+    "fine send it",
+    "that works send it",
+)
+
+#: The same, for stopping it. A cancel has to be as easy to say as a send, or
+#: the person who wants to stop a letter starts hunting for the code.
+_SEND_AS_BARE_CANCEL: tuple[str, ...] = (
+    "cancel",
+    "cancel it",
+    "do not send",
+    "don't send",
+    "dont send",
+    "do not send it",
+    "don't send it",
+    "scrap it",
+    "kill it",
+    "hold off",
+    "hold it",
+)
+
+#: Every draft tag anywhere in the turn, quoted half and subject included.
+#: Its own matcher, NOT :data:`RULE_TAG`: a draft must stay invisible to
+#: :func:`find_tags` and :func:`resolve`, so a bare "yes" can never confirm a
+#: rule off a draft tag, nor the reverse.
+_DRAFT_TAG_ANY = re.compile(r"\[draft ([0-9a-fA-F]{8})\]", re.IGNORECASE)
+
+#: A change with no tag: the words after the colon are the instruction.
+_SEND_AS_BARE_CHANGE = re.compile(
+    r"\A(?:change|changes|edit|revise)\b[ \t]*[:,-][ \t]*(.+)\Z", re.IGNORECASE | re.DOTALL
+)
+
 #: A line that begins the quoted history. Everything from here down is somebody
 #: else's words (usually ours, quoted back), and none of it is the reply.
 _QUOTE_HEADER = re.compile(
@@ -550,7 +608,7 @@ def read_send_as_command(message: Any) -> SendAsCommand | None:
         return None
     matches = list(_SEND_AS_COMMAND.finditer(own))
     if not matches:
-        return None
+        return _bare_send_as_command(own, message)
     distinct = {(m.group(1).lower(), m.group(2).lower()) for m in matches}
     if len(distinct) > 1:
         return SendAsCommand(draft_id="", decision=SEND_AS_AMBIGUOUS)
@@ -562,6 +620,46 @@ def read_send_as_command(message: Any) -> SendAsCommand | None:
         rest = re.sub(r"\A[ \t]*[:,\-]?", "", rest, count=1)
         instruction = rest.strip()
     return SendAsCommand(draft_id=draft_id, decision=decision, instruction=instruction)
+
+
+def _bare_send_as_command(own: str, message: Any) -> SendAsCommand | None:
+    """A send-as answer in plain words, with the draft taken from the thread.
+
+    Typing an eight-character code to send a letter is a tax on the one person
+    the lane exists to serve, and the code is already in front of them: the
+    approval email carries it in its subject, so a reply carries it back in
+    ``Re:`` and in the quoted copy. So the WORDS are read from the person's own
+    text (as strictly as the tagged form: whole-text equality, so "ok but change
+    the date" is not a send), and WHICH draft comes from the tags anywhere in the
+    turn, exactly as a bare "yes" to a rule readback resolves today.
+
+    Two tags in the thread, or none, decide nothing and ask instead: with no tag
+    the answer could belong to any open draft, and guessing would send a letter
+    the person was not looking at.
+    """
+    text = " ".join(own.split()).strip().strip(".!").lower()
+    change = _SEND_AS_BARE_CHANGE.match(own.strip())
+    if change:
+        decision, instruction = SEND_AS_CHANGE, change.group(1).strip()
+    elif text in _SEND_AS_BARE_SEND:
+        decision, instruction = SEND_AS_SEND, ""
+    elif text in _SEND_AS_BARE_CANCEL:
+        decision, instruction = SEND_AS_CANCEL, ""
+    else:
+        return None
+    tags = (
+        {m.group(1).lower() for m in _DRAFT_TAG_ANY.finditer(message)}
+        if isinstance(message, str)
+        else set()
+    )
+    if not tags:
+        # No draft anywhere in the turn: this is not a send-as answer at all, and
+        # claiming it as an ambiguous one would swallow every bare "yes" the rule
+        # and act lanes live on.
+        return None
+    if len(tags) > 1:
+        return SendAsCommand(draft_id="", decision=SEND_AS_AMBIGUOUS)
+    return SendAsCommand(draft_id=next(iter(tags)), decision=decision, instruction=instruction)
 
 
 def _sender_may_confirm(

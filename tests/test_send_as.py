@@ -574,9 +574,59 @@ def test_a_quoted_tag_is_not_an_answer():
     assert rule_confirm.read_send_as_command(f"> {TAG} send") is None
 
 
-@pytest.mark.parametrize("message", ["send", "send it", "yes please send", f"send {TAG}"])
-def test_no_tag_or_tag_after_the_verb_is_not_an_answer(message):
+@pytest.mark.parametrize("message", ["send", "send it", "yes please send"])
+def test_plain_words_with_no_draft_in_the_turn_are_not_a_send_as_answer(message):
+    # Plain words are an answer (2026-09-22), but only when the turn names a
+    # draft. With no tag anywhere this is not the send-as lane at all, and
+    # claiming it would swallow the bare "yes" the rule and act lanes live on.
     assert rule_confirm.read_send_as_command(message) is None
+
+
+def test_two_drafts_in_the_thread_ask_which():
+    other = "[draft 1a2b3c4d]"
+    command = rule_confirm.read_send_as_command(f"send it\n\n{APPROVAL_EMAIL_QUOTE}\n{other}")
+    assert command is not None and command.decision == rule_confirm.SEND_AS_AMBIGUOUS
+
+
+def test_a_tag_after_the_verb_is_not_an_answer():
+    # "send [draft X]" is prose about a draft, not the command form, and it is
+    # not one of the bare phrases either.
+    assert rule_confirm.read_send_as_command(f"send {TAG}") is None
+
+
+@pytest.mark.parametrize(
+    "words", ["send", "send it", "approved", "ok", "go ahead", "Looks good.", "YES"]
+)
+def test_plain_words_on_the_approval_thread_send(words):
+    # What a staff member actually types. The words are their own; the draft
+    # comes from the tag the approval email put in the subject and the quote.
+    command = rule_confirm.read_send_as_command(f"{words}\n\n{APPROVAL_EMAIL_QUOTE}")
+    assert command is not None
+    assert (command.draft_id, command.decision) == (ACT, rule_confirm.SEND_AS_SEND)
+
+
+@pytest.mark.parametrize("words", ["cancel", "don't send", "hold off"])
+def test_plain_words_can_also_stop_it(words):
+    command = rule_confirm.read_send_as_command(f"{words}\n\n{APPROVAL_EMAIL_QUOTE}")
+    assert command is not None
+    assert (command.draft_id, command.decision) == (ACT, rule_confirm.SEND_AS_CANCEL)
+
+
+def test_a_plain_change_carries_the_instruction():
+    command = rule_confirm.read_send_as_command(
+        f"change: add the date of loss\n\n{APPROVAL_EMAIL_QUOTE}"
+    )
+    assert command is not None
+    assert (command.draft_id, command.decision) == (ACT, rule_confirm.SEND_AS_CHANGE)
+    assert command.instruction == "add the date of loss"
+
+
+def test_a_qualified_yes_is_not_a_send():
+    # THE case the whole-text rule exists for: a reply that agrees and then asks
+    # for an edit must not send the unedited letter.
+    assert (
+        rule_confirm.read_send_as_command(f"ok but move the date\n\n{APPROVAL_EMAIL_QUOTE}") is None
+    )
 
 
 def test_two_different_answers_are_ambiguous():
@@ -761,10 +811,25 @@ def test_an_answer_not_on_a_verified_email_decides_nothing(establishment):
     assert "did not arrive as a verified email" in context
 
 
-def test_a_quoted_tag_under_a_plain_yes_decides_nothing(establishment):
+def test_a_plain_yes_on_the_approval_thread_decides_the_draft(establishment):
+    # Reversed 2026-09-22: a staff member should not have to type an
+    # eight-character code to send their own letter. The affirmative is still
+    # read from their own words only; the quoted half supplies the draft id.
     mod, state = establishment
+    state["answer"] = {"status": "DISPATCHED", "reason": ""}
     _email_turn()
     _turn(mod, STAFF, f"yes\n\n{APPROVAL_EMAIL_QUOTE}")
+    (decision,) = state["decisions"]
+    assert (decision["tag_or_act_id"], decision["decision"]) == (ACT, "send")
+
+
+def test_a_quoted_approval_email_alone_decides_nothing(establishment):
+    # The self-approval guard, unchanged: our own email quoted back carries all
+    # three forms verbatim, and with no words of the person's own it approves
+    # nothing.
+    mod, state = establishment
+    _email_turn()
+    _turn(mod, STAFF, f"thanks!\n\n{APPROVAL_EMAIL_QUOTE}")
     assert state["decisions"] == []
 
 

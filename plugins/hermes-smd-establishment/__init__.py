@@ -4089,9 +4089,11 @@ _SEND_AS_CHANGE_EMPTY_NOTE = (
 )
 
 _SEND_AS_AMBIGUOUS_NOTE = (
-    "The reply carries more than one send-as answer, so none was acted on and "
-    "nothing was sent. Ask the person to reply with exactly one line, such as "
-    '"[draft XXXXXXXX] send".'
+    "This reply does not say which draft it answers: it carries more than one "
+    "send-as answer, or it answers in plain words on a thread that names more "
+    "than one draft, or none. Nothing was acted on and nothing was sent. Ask "
+    "which draft they mean, naming the ones still waiting, and tell them a "
+    "reply on that draft's own approval email is enough."
 )
 
 _SEND_AS_NO_ORIGIN_NOTE = (
