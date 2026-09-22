@@ -4048,7 +4048,9 @@ _SEND_AS_NOTES: dict[str, str] = {
         "message with exactly those changes (the draft they were shown is quoted "
         "in their reply), then call smd_send_message again with from set to "
         "{sender}. That proposes a new act and emails them the revised draft; do "
-        "not tell them anything was sent."
+        "not tell them anything was sent. Their original draft stays open until "
+        "the replacement is proposed, so if you cannot produce the redraft, say "
+        "what stopped you and tell them the draft they have is still answerable."
     ),
     "CANCELLED": (
         "The draft held as [draft {draft_id}] was cancelled. Nothing was sent. "
@@ -4156,6 +4158,8 @@ def _send_as_reply_note(session_id: str, sender: str, user_message: Any) -> tupl
     reason = str(response.get("reason") or "no reason was given").strip()
     echoed = response.get("instruction")
     replaced_by = str(response.get("replaced_by") or "").strip()
+    if status == "REVISED":
+        _seed_revision_provenance(session_id, response, instruction)
     logger.info(
         "hermes-smd-establishment: send-as %s %s by %s -> %s",
         draft_id,
@@ -4175,6 +4179,41 @@ def _send_as_reply_note(session_id: str, sender: str, user_message: Any) -> tupl
         ),
         True,
     )
+
+
+def _seed_revision_provenance(
+    session_id: str, response: dict[str, Any], instruction: str | None
+) -> None:
+    """Carry an approved draft's own identifiers, and the approver's words, into
+    the redraft turn (ss ADR 0089 amendment, 2026-09-22).
+
+    WHY. The identifier gate verifies a value against what THIS session read, and
+    a revision arrives in a later session that read neither the matter nor the
+    original request. On smd-staging the first draft passed and its revision was
+    refused for the claim number the approver was looking at in the very email he
+    answered. The two sources seeded here are narrow on purpose: the payload the
+    gate already cleared when that draft was proposed, and the instruction the
+    named staff member typed themselves. A value the approver supplies is their
+    assertion, not the model's invention, and it cannot leave without their
+    approval of the final text either way. Nothing the model wrote this turn is
+    seeded, so a fabricated identifier is still refused.
+    """
+    if not session_id:
+        return
+    parts = [
+        str(response.get("prior_subject") or ""),
+        str(response.get("prior_text") or ""),
+        instruction or "",
+    ]
+    text = "\n".join(p for p in parts if p)
+    if not text:
+        return
+    try:
+        from shared import provenance
+
+        provenance.record_read(session_id, text)
+    except Exception:  # noqa: BLE001 — seeding is best-effort; a failure only re-refuses
+        logger.debug("hermes-smd-establishment: revision provenance not seeded", exc_info=True)
 
 
 def _note_ops_resolved(session_id: str, proposal_id: str) -> None:
