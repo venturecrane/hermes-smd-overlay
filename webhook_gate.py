@@ -48,6 +48,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from shared import (
+    approve_page,
     forward_signature,
     gate_envelope_capture,
     gate_inbound_cap,
@@ -985,6 +986,12 @@ class _Handler(BaseHTTPRequestHandler):
                 split.query, self.headers.get("Host"), os.environ
             )
             self._html(status, html)
+        elif path.rstrip("/") == "/approve":
+            # A send-as approve button (ss ADR 0089 amendment 5a). GET only ever
+            # RENDERS: mail scanners follow links, and a GET that acted would be
+            # pressed by the scanner before the person read the message.
+            status, page = approve_page.confirm_page(approve_page.token_from_query(split.query))
+            self._html(status, page)
         elif path.startswith(_RUNTIME_PREFIX):
             self._handle_runtime(path, split.query)
         else:
@@ -1200,6 +1207,21 @@ class _Handler(BaseHTTPRequestHandler):
         status, body = _mcp_turn(req)
         self._json(status, body)
 
+    def _handle_approve_click(self) -> None:
+        """Apply a send-as approve button press. The token is the whole of the
+        authorization and the broker holds its key; this only carries it."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length).decode("utf-8", "replace") if 0 < length <= 4096 else ""
+        from shared import msgraph_broker  # local import: the gate boots without a mail seat
+
+        status, page = approve_page.apply_click(
+            approve_page.token_from_query(raw), msgraph_broker.send_as_decide_link
+        )
+        self._html(status, page)
+
     def _handle_handoff(self) -> None:
         """Console → Machine async task handoff endpoint (/webhooks/handoff, Phase 2 ADR 0043).
 
@@ -1289,6 +1311,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         post_path = urlsplit(self.path).path.rstrip("/")
+        if post_path == "/approve":
+            self._handle_approve_click()
+            return
         if post_path == "/mcp/turn":
             self._handle_mcp_turn()
             return

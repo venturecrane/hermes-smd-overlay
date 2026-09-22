@@ -189,6 +189,7 @@ def _vendor_id(response: dict[str, Any]) -> str:
 ACTION_SEND_AS_PROPOSE = "send_as_propose"
 ACTION_SEND_AS_DECIDE = "send_as_decide"
 ACTION_SEND_AS_MATCH_REPLY = "send_as_match_reply"
+ACTION_SEND_AS_DECIDE_LINK = "send_as_decide_link"
 
 #: The decisions ``send_as_decide`` accepts. Closed: anything else is a bug in
 #: the caller, refused here before it can reach a verb that transmits.
@@ -302,6 +303,19 @@ def send_as_decide(
     return _verdict(request)
 
 
+def send_as_decide_link(*, token: str) -> dict[str, Any]:
+    """Carry an approve-button click to the broker (ss ADR 0089 amendment 5a).
+
+    The token IS the authorization and the broker holds the key, so this call
+    carries nothing else: no approver, no decision, nothing a caller could
+    choose. The broker re-reads the row and applies every check the emailed lane
+    applies. Callable from any broker peer on purpose — the seat's web gate is
+    not the gateway process — which is safe only because the key is broker-owned
+    and unreadable here.
+    """
+    return _verdict({"action": ACTION_SEND_AS_DECIDE_LINK, "token": token})
+
+
 def send_as_match_reply(
     *, conversation_id: str, internet_message_id: str, from_addr: str
 ) -> dict[str, Any]:
@@ -322,6 +336,7 @@ def send_as_match_reply(
 
 __all__ = [
     "ACTION_SEND_AS_DECIDE",
+    "ACTION_SEND_AS_DECIDE_LINK",
     "ACTION_SEND_AS_MATCH_REPLY",
     "ACTION_SEND_AS_PROPOSE",
     "BrokerError",
@@ -329,6 +344,7 @@ __all__ = [
     "SEND_AS_DECISIONS",
     "SEND_AS_STATUSES",
     "send_as_decide",
+    "send_as_decide_link",
     "send_as_match_reply",
     "send_as_propose",
     "send_message",
