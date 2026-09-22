@@ -128,7 +128,7 @@ def render_pointer_block() -> str:
         "matching what you are about to write, BEFORE you write it. For an output class",
         "the firm declared a spec for, an unread spec means the output does not go out:",
         "a send is refused and routed to a draft, and an internal artifact is refused at",
-        "delivery — reading it is not optional and not a formality.",
+        "delivery. Reading it is not optional and not a formality.",
         "",
         "**Precedence: the drafting discipline outranks the voice.** Never invent, cite",
         "the record, refuse rather than guess, escalate rather than nag. A spec shapes",
@@ -145,7 +145,7 @@ def render_pointer_block() -> str:
         )
     lines += [
         "",
-        "This block is regenerated from the root-owned spec manifest — at boot, and again",
+        "This block is regenerated from the root-owned spec manifest: at boot, and again",
         "whenever the installed specs change under a running Machine. Any edit to it is",
         "overwritten. It is a pointer, not an authority: the specs themselves live in a",
         "directory this agent cannot write.",
