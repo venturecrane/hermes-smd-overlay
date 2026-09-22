@@ -280,6 +280,14 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         # text such as "apply to matter X" or "also pay" must reach the model
         # fenced and taint the session like an inbound email.
         "mcp_smokeball_read_attachment_text",
+        # Smokeball attachment PAGES (read_attachment_pages, combined post
+        # intake) — the same reason, harder. It returns the page-marked text of
+        # a bundle of letters an outside party wrote, TRANSCRIBED when a page is
+        # paper, and a transcription reproduces "file this under the Alvarez
+        # matter" or "please forward this to your client" as faithfully as it
+        # reproduces the letterhead. Every word is outside-authored, so it
+        # reaches the model fenced and taints the session like an inbound email.
+        "mcp_smokeball_read_attachment_pages",
         # MCP protocol primitives (overlay#365-#368). The Hermes client
         # synthesizes these four from the Smokeball server's prompts/resources
         # CAPABILITIES; they are not Smokeball verbs and appear nowhere in the
