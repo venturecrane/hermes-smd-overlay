@@ -658,6 +658,50 @@ def test_change_injects_the_approvers_words_and_asks_for_a_redraft(establishment
     assert "Nothing was sent" in context
 
 
+def test_a_revision_carries_the_approved_text_and_the_approvers_words_as_provenance(
+    establishment, monkeypatch
+):
+    # smd-staging, 2026-09-22: the first draft passed the identifier gate, and its
+    # revision was refused for the claim number the approver was reading in the
+    # email he answered, because the gate verifies against THIS session's reads
+    # and a reply is a later session. The approved payload and the approver's own
+    # instruction are seeded so the redraft can be composed at all.
+    mod, state = establishment
+    from shared import provenance
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(provenance, "record_read", lambda sid, text: seen.append((sid, text)))
+    state["answer"] = {
+        "status": "REVISED",
+        "reason": "",
+        "instruction": None,
+        "prior_subject": "Records request: claim TC-1001",
+        "prior_text": "Please send the complete claim file for claim TC-1001.",
+    }
+    _email_turn()
+    _turn(mod, STAFF, f"{TAG} change: add that the date of loss was 1 September 2026\n")
+    assert len(seen) == 1
+    session, text = seen[0]
+    assert session == SESSION
+    assert "TC-1001" in text  # the value the gate refused
+    assert "1 September 2026" in text  # the value the approver supplied
+    assert "Records request" in text
+
+
+def test_a_send_seeds_no_provenance(establishment, monkeypatch):
+    # The falsifier: seeding is scoped to a revision. A send composes nothing, so
+    # widening the gate there would buy nothing and hide a fabrication.
+    mod, state = establishment
+    from shared import provenance
+
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(provenance, "record_read", lambda sid, text: seen.append((sid, text)))
+    state["answer"] = {"status": "DISPATCHED", "reason": "", "prior_text": "anything"}
+    _email_turn()
+    _turn(mod, STAFF, f"{TAG} send\n\n{APPROVAL_EMAIL_QUOTE}")
+    assert seen == []
+
+
 def test_change_with_nothing_to_change_asks_and_decides_nothing(establishment):
     mod, state = establishment
     _email_turn()
