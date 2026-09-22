@@ -300,9 +300,7 @@ def test_a_msgraph_seat_dispatches_to_the_graph_backend(fake_ctx: Any, monkeypat
         email_adapter, "email_adapter", lambda *_, **__: email_adapter.ADAPTER_MSGRAPH
     )
     seen: list[str] = []
-    monkeypatch.setattr(
-        msgraph_attachments, "list_attachments", lambda mid: seen.append(mid) or []
-    )
+    monkeypatch.setattr(msgraph_attachments, "list_attachments", lambda mid: seen.append(mid) or [])
     plugin = load_plugin("hermes-smd-mail-attachments")
     plugin.register(fake_ctx)
     json.loads(fake_ctx.tools["mail_list_attachments"]["handler"]({"message_id": "graph-id"}))
