@@ -21,6 +21,7 @@ import pytest
 
 from shared import agentmail_broker as broker
 from shared import attachment_spool as spool
+from shared import email_adapter, msgraph_attachments
 from tests.conftest import load_plugin
 
 MESSAGE = {
@@ -246,12 +247,33 @@ def test_a_vendor_error_never_echoes_the_key(
 # ---------------------------------------------------------------------------
 
 
-def test_the_plugin_registers_both_tools_with_the_read_credential(fake_ctx: Any) -> None:
+@pytest.fixture()
+def mail_seat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A seat that authors an enabled Email connector on AgentMail.
+
+    The plugin's load gate asks the CAPABILITY question (does this seat have a
+    mailbox?) rather than the vendor one (is AGENTMAIL_API_KEY set?), because
+    the vendor question is what kept these tools off every Microsoft 365 seat.
+    So a test that wants the tools has to give the seat a mailbox.
+    """
+    monkeypatch.setattr(email_adapter, "email_connector_enabled", lambda *_, **__: True)
+    monkeypatch.setattr(
+        email_adapter, "email_adapter", lambda *_, **__: email_adapter.ADAPTER_AGENTMAIL
+    )
+
+
+def test_the_plugin_registers_both_tools_on_a_seat_with_mail(
+    fake_ctx: Any, mail_seat: None
+) -> None:
     plugin = load_plugin("hermes-smd-mail-attachments")
     plugin.register(fake_ctx)
     assert set(fake_ctx.tools) == {"mail_list_attachments", "mail_spool_attachment"}
     for entry in fake_ctx.tools.values():
-        assert entry["requires_env"] == [broker.READ_KEY_ENV]
+        # NO requires_env, deliberately: a failing requires_env check drops the
+        # tool from the resolved surface SILENTLY, leaving a turn with no way to
+        # look and no way to know it could not. The handlers raise a named
+        # reason instead.
+        assert not entry.get("requires_env")
         # tool_registration's function shape: parameters must be nested, or the
         # model is advertised a tool it cannot pass an argument to.
         assert "parameters" in entry["schema"]
@@ -259,7 +281,55 @@ def test_the_plugin_registers_both_tools_with_the_read_credential(fake_ctx: Any)
         assert entry["schema"]["description"]
 
 
-def test_the_spool_handler_returns_the_receipt_as_json(seat: list[str], fake_ctx: Any) -> None:
+def test_a_seat_with_no_mail_gets_no_attachment_tools(fake_ctx: Any, monkeypatch) -> None:
+    """The gate did not disappear when it moved off the vendor key."""
+    monkeypatch.setattr(email_adapter, "email_connector_enabled", lambda *_, **__: False)
+    plugin = load_plugin("hermes-smd-mail-attachments")
+    plugin.register(fake_ctx)
+    assert fake_ctx.tools == {}
+
+
+def test_a_msgraph_seat_dispatches_to_the_graph_backend(fake_ctx: Any, monkeypatch) -> None:
+    """The two tool NAMES are the same on both channels; the backend is not.
+
+    ``vendor-invoice-intake`` and ``discovery-served-watch`` hardcode these
+    names, so a seat's transport must not reach the skills.
+    """
+    monkeypatch.setattr(email_adapter, "email_connector_enabled", lambda *_, **__: True)
+    monkeypatch.setattr(
+        email_adapter, "email_adapter", lambda *_, **__: email_adapter.ADAPTER_MSGRAPH
+    )
+    seen: list[str] = []
+    monkeypatch.setattr(msgraph_attachments, "list_attachments", lambda mid: seen.append(mid) or [])
+    plugin = load_plugin("hermes-smd-mail-attachments")
+    plugin.register(fake_ctx)
+    json.loads(fake_ctx.tools["mail_list_attachments"]["handler"]({"message_id": "graph-id"}))
+    assert seen == ["graph-id"], "a msgraph seat must not be served by the AgentMail branch"
+
+
+def test_an_unreadable_seat_config_raises_rather_than_defaulting(
+    fake_ctx: Any, monkeypatch
+) -> None:
+    """Unknown transport is a refusal, never a silent fall back to agentmail.
+
+    A Graph seat quietly dispatched to AgentMail reports that its own mailbox
+    has no attachments, which is the exact dead end these tools exist to close.
+    """
+    monkeypatch.setattr(email_adapter, "email_connector_enabled", lambda *_, **__: True)
+
+    def boom(*_: Any, **__: Any) -> str:
+        raise email_adapter.EmailAdapterUnreadable("customer.yaml is unreadable")
+
+    monkeypatch.setattr(email_adapter, "email_adapter", boom)
+    plugin = load_plugin("hermes-smd-mail-attachments")
+    plugin.register(fake_ctx)
+    with pytest.raises(email_adapter.EmailAdapterUnreadable):
+        fake_ctx.tools["mail_list_attachments"]["handler"]({"message_id": "m"})
+
+
+def test_the_spool_handler_returns_the_receipt_as_json(
+    seat: list[str], fake_ctx: Any, mail_seat: None
+) -> None:
     """End to end through the registered handler, which is the shape the model
     actually calls."""
     plugin = load_plugin("hermes-smd-mail-attachments")
