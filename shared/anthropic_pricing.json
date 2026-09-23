@@ -1,8 +1,8 @@
 {
   "_meta": {
-    "version": "2",
-    "updated": "2026-07-03",
-    "source": "https://platform.claude.com/docs/en/about-claude/pricing (manually retrieved)",
+    "version": "3",
+    "updated": "2026-09-23",
+    "source": "https://platform.claude.com/docs/en/about-claude/pricing (manually retrieved); claude-opus-5-5 added 2026-09-23 from the Opus 5.5 launch pricing",
     "note": "Per-million-token pricing in cents. Captain updates on Anthropic price changes. CI test ensures every customer.yaml-declared `model` has a pricing entry. Cited in docs/specs/operator/cost-telemetry-events.md 'Per-call emission (Claude API)'.",
     "units": "cents per million tokens"
   },
@@ -22,6 +22,10 @@
     "claude-opus-4-8": {
       "input_per_million_cents": 500,
       "output_per_million_cents": 2500
+    },
+    "claude-opus-5-5": {
+      "input_per_million_cents": 400,
+      "output_per_million_cents": 2000
     }
   }
 }
