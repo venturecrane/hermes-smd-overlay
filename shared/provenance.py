@@ -119,6 +119,10 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_msgraph_mail_list_messages",
         "mcp_msgraph_mail_read_message",
         "mcp_msgraph_mail_poll_delta",
+        # A staff mailbox the firm authored is the firm's own record, as the
+        # Operator's mailbox is.
+        "mcp_msgraph_mail_list_staff_messages",
+        "mcp_msgraph_mail_read_staff_message",
         # Generic connector surface (mail, SMS, calendar, practice management).
         "email_list_messages",
         "email_get_message",

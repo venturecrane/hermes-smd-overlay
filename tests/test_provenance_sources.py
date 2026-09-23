@@ -414,6 +414,8 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # back with get_expenses is what seeds.
         "mail_list_attachments",
         "mail_spool_attachment",
+        # The whole email spooled as .eml: a sender-written subject and a digest.
+        "mail_spool_message",
         # The synthetic connector self-test fixture: echo returns its input.
         "mcp_reference_echo",
     }

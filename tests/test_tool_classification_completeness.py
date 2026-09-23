@@ -482,7 +482,7 @@ def test_mail_attachment_tools_are_read() -> None:
     from shared.action_classes import ActionClass, classify_tool
 
     tools = _mail_attachment_tools()
-    assert tools == {"mail_list_attachments", "mail_spool_attachment"}, (
+    assert tools == {"mail_list_attachments", "mail_spool_attachment", "mail_spool_message"}, (
         f"the mail attachment surface changed: {sorted(tools)}; decide the new tool here"
     )
     for name in sorted(tools):
@@ -519,6 +519,8 @@ def test_msgraph_mail_tools_mirror_the_manifest_oracle():
         "mcp_msgraph_mail_create_draft": ActionClass.INTERNAL_WRITE,
         "mcp_msgraph_mail_send_message": ActionClass.EXTERNAL_SEND,
         "mcp_msgraph_mail_reply_message": ActionClass.EXTERNAL_SEND,
+        "mcp_msgraph_mail_list_staff_messages": ActionClass.READ,
+        "mcp_msgraph_mail_read_staff_message": ActionClass.READ,
     }
     for name, cls in expected.items():
         resolved = classify_tool(name)

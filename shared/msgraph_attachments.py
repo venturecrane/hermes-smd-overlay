@@ -35,7 +35,7 @@ import re
 import urllib.parse
 from typing import Any
 
-from shared import attachment_spool, msgraph_client
+from shared import attachment_spool, msgraph_client, staff_mailboxes
 
 
 class MsGraphAttachmentError(RuntimeError):
@@ -291,9 +291,81 @@ def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
     )
 
 
+#: What the name of a spooled email is built from. Nothing else of the message
+#: is read before the bytes: the name is the whole point of the metadata call.
+_MESSAGE_SELECT = "subject,receivedDateTime"
+_EML_CONTENT_TYPE = "message/rfc822"
+#: Smokeball truncates a file name at its first period ("09.22.2026 Letter"
+#: displays as "09"), so the stem keeps only characters that survive it.
+_STEM_DROP_RE = re.compile(r"[^A-Za-z0-9 _-]+")
+
+
+def _eml_name(meta: dict[str, Any]) -> str:
+    """``<YYYY-MM-DD> <subject>.eml``, or ``<YYYY-MM-DD> email.eml`` when the
+    subject leaves nothing. The date is when the mailbox received it."""
+    received = str(meta.get("receivedDateTime") or "")[:10]
+    date = received if re.fullmatch(r"\d{4}-\d{2}-\d{2}", received) else ""
+    subject = _STEM_DROP_RE.sub(" ", str(meta.get("subject") or ""))
+    subject = " ".join(subject.split())[:120] or "email"
+    return f"{date} {subject}.eml".strip()
+
+
+def _message_base(client: msgraph_client.MsGraphClient, message_id: str, mailbox: Any) -> str:
+    """The Graph URL of one message: in the seat's own mailbox when ``mailbox``
+    is empty, otherwise in a staff mailbox the firm authored, and nowhere else."""
+    quoted = urllib.parse.quote(message_id, safe="")
+    if mailbox is None or (isinstance(mailbox, str) and not mailbox.strip()):
+        return client.mail_url(f"messages/{quoted}")
+    try:
+        addr = staff_mailboxes.authorize(mailbox, own_mailbox=client.mailbox)
+    except staff_mailboxes.StaffMailboxRefused as exc:
+        raise MsGraphAttachmentError(f"the message was not spooled: {exc}") from exc
+    user = urllib.parse.quote(addr, safe="@")
+    return f"{msgraph_client._GRAPH_BASE}/users/{user}/messages/{quoted}"
+
+
+def spool_message(message_id: str, mailbox: Any = None) -> dict[str, Any]:
+    """Spool ONE whole email, as the ``.eml`` Graph holds for it, so the
+    records connector can file the email itself on a matter.
+
+    Same receipt as :func:`spool_attachment`; ``filename`` is a name ready to
+    file under (``<received date> <subject>.eml``, no periods in the stem). The
+    bytes are Graph's MIME for the message: headers, body and any attachments,
+    exactly as received, which is what a firm means by "the email" on a file.
+
+    ``mailbox`` empty means the seat's own mailbox. Otherwise it must be a
+    staff mailbox the firm authored in ``staff_mailbox_reads``; anything else
+    is refused before any Graph call.
+    """
+    message = _checked_id(message_id, "message_id")
+    client = _client()
+    base = _message_base(client, message, mailbox)
+    try:
+        meta = client.request("GET", base, params={"$select": _MESSAGE_SELECT})
+    except msgraph_client.MsGraphApiError as exc:
+        raise MsGraphAttachmentError(f"the message could not be read: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise MsGraphAttachmentError("Graph returned a message record that is not an object")
+    try:
+        blob = client.request_bytes(
+            "GET", f"{base}/$value", max_bytes=attachment_spool.MAX_SPOOL_BYTES
+        )
+    except msgraph_client.MsGraphApiError as exc:
+        raise MsGraphAttachmentError(f"the message's bytes could not be fetched: {exc}") from exc
+    if len(blob) > attachment_spool.MAX_SPOOL_BYTES:
+        raise MsGraphAttachmentError(
+            f"the message is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; "
+            "it is not spooled"
+        )
+    if not blob:
+        raise MsGraphAttachmentError("the message's bytes came back empty; it is not spooled")
+    return attachment_spool.write(blob, filename=_eml_name(meta), content_type=_EML_CONTENT_TYPE)
+
+
 __all__ = [
     "FILE_ATTACHMENT_TYPE",
     "MsGraphAttachmentError",
     "list_attachments",
     "spool_attachment",
+    "spool_message",
 ]

@@ -267,7 +267,11 @@ def test_the_plugin_registers_both_tools_on_a_seat_with_mail(
 ) -> None:
     plugin = load_plugin("hermes-smd-mail-attachments")
     plugin.register(fake_ctx)
-    assert set(fake_ctx.tools) == {"mail_list_attachments", "mail_spool_attachment"}
+    assert set(fake_ctx.tools) == {
+        "mail_list_attachments",
+        "mail_spool_attachment",
+        "mail_spool_message",
+    }
     for entry in fake_ctx.tools.values():
         # NO requires_env, deliberately: a failing requires_env check drops the
         # tool from the resolved surface SILENTLY, leaving a turn with no way to

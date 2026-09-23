@@ -315,6 +315,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # hermes-smd-inbound._FENCED_READ_TOOLS: a filename is sender-chosen text.
     "mail_list_attachments": ActionClass.READ,
     "mail_spool_attachment": ActionClass.READ,
+    # The whole email as an .eml, into the same seat-local spool (2026-09-23).
+    # READ for the same reason: a scratch file on the seat's own volume, and
+    # the matter write it enables is file_attachment_to_matter's, classed there.
+    "mail_spool_message": ActionClass.READ,
     # Native web search (WebSearch capability, ADR 0070). Hermes' bundled web
     # providers (plugins/web/*, e.g. brave-free) expose ONE native tool,
     # `web_search` (tools/web_tools.py) — NOT an MCP tool, so the runtime name is
@@ -341,6 +345,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_msgraph_mail_list_messages": ActionClass.READ,
     "mcp_msgraph_mail_read_message": ActionClass.READ,
     "mcp_msgraph_mail_poll_delta": ActionClass.READ,
+    # The two staff-mailbox reads (ss-console, 2026-09-23). READ: they take a
+    # mailbox, but the connector refuses every mailbox the firm has not authored
+    # in customer.yaml ``staff_mailbox_reads`` before calling Graph, and no send,
+    # draft, move or delete reaches a staff mailbox.
+    "mcp_msgraph_mail_list_staff_messages": ActionClass.READ,
+    "mcp_msgraph_mail_read_staff_message": ActionClass.READ,
     "mcp_msgraph_mail_create_draft": ActionClass.INTERNAL_WRITE,
     "mcp_msgraph_mail_send_message": ActionClass.EXTERNAL_SEND,
     "mcp_msgraph_mail_reply_message": ActionClass.EXTERNAL_SEND,
