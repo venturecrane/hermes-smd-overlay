@@ -315,6 +315,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # hermes-smd-inbound._FENCED_READ_TOOLS: a filename is sender-chosen text.
     "mail_list_attachments": ActionClass.READ,
     "mail_spool_attachment": ActionClass.READ,
+    # The whole email as an .eml, into the same seat-local spool (2026-09-23).
+    # READ for the same reason: a scratch file on the seat's own volume, and
+    # the matter write it enables is file_attachment_to_matter's, classed there.
+    "mail_spool_message": ActionClass.READ,
     # Native web search (WebSearch capability, ADR 0070). Hermes' bundled web
     # providers (plugins/web/*, e.g. brave-free) expose ONE native tool,
     # `web_search` (tools/web_tools.py) — NOT an MCP tool, so the runtime name is

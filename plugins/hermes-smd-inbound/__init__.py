@@ -326,6 +326,9 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         # exists to close, and the cost of fencing a filename is nothing.
         "mail_list_attachments",
         "mail_spool_attachment",
+        # The whole-email spool returns a filename built from the SUBJECT, which
+        # the sender wrote. Fenced for the same reason as the pair above.
+        "mail_spool_message",
         # Calendar reads — external invites carry third-party content (titles,
         # descriptions, locations are attacker-controllable text). Captain call
         # 2026-06-12: fence both, closing the code-review fence-candidate note.
