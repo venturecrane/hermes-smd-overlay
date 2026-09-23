@@ -254,6 +254,12 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_msgraph_mail_list_messages",
         "mcp_msgraph_mail_read_message",
         "mcp_msgraph_mail_poll_delta",
+        # The staff-mailbox reads return the same sender-authored mail from a
+        # staff member's own mailbox (a letter from outside the firm is no less
+        # untrusted for having landed on the office manager). Fenced exactly as
+        # list_messages / read_message are.
+        "mcp_msgraph_mail_list_staff_messages",
+        "mcp_msgraph_mail_read_staff_message",
         # Web fetches — attacker-controlled page content.
         "web_search",
         "web_extract",

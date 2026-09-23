@@ -519,6 +519,8 @@ def test_msgraph_mail_tools_mirror_the_manifest_oracle():
         "mcp_msgraph_mail_create_draft": ActionClass.INTERNAL_WRITE,
         "mcp_msgraph_mail_send_message": ActionClass.EXTERNAL_SEND,
         "mcp_msgraph_mail_reply_message": ActionClass.EXTERNAL_SEND,
+        "mcp_msgraph_mail_list_staff_messages": ActionClass.READ,
+        "mcp_msgraph_mail_read_staff_message": ActionClass.READ,
     }
     for name, cls in expected.items():
         resolved = classify_tool(name)
