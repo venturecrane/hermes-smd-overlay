@@ -503,6 +503,15 @@ def _act_reference(result: Any) -> str:
         return ""
     while isinstance(payload, dict) and "result" in payload and "id" not in payload:
         payload = payload["result"]
+        # Hermes wraps an MCP tool's result as {"result": "<json text>"}, so the
+        # inner value is a STRING. Read live on pilot-smokeball 2026-09-25: every
+        # committed act row carried an empty reference because the loop stopped
+        # at that string. Decode it and keep unwrapping.
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                return ""
     if not isinstance(payload, dict):
         return ""
     for key in ("id", "matter_id", "matterId", "ref"):
