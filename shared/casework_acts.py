@@ -49,12 +49,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from shared import casework_ledger
 from shared.pending_acts import tool_call_failed
 
 logger = logging.getLogger(__name__)
 
 #: The one tool the register replays.
-UPDATE_TASK_TOOL = "mcp_smokeball_update_task"
+UPDATE_TASK_TOOL = casework_ledger.UPDATE_TASK_TOOL
 
 COMPLETED = "completed"
 WRITE_FAILED = "write_failed"
@@ -86,7 +87,7 @@ class TaskWrite:
     task_id: str
     staff_id: str
     item_key: str
-    matter_id: str | None
+    matter_id: str
     skill: str
     is_completed: bool | None = None
     assignee_ids: tuple[str, ...] | None = None
@@ -103,8 +104,17 @@ class TaskWrite:
 
 
 def valid_write(write: TaskWrite) -> bool:
-    """Well-formed: ids present, and exactly one kind of change."""
+    """Well-formed: ids present, the item_key is the one the ledger derives
+    from this write's own matter and task, and exactly one kind of change."""
     if not (write.task_id and write.staff_id and write.item_key and write.skill):
+        return False
+    try:
+        derived = casework_ledger.item_key(
+            matter_id=write.matter_id, kind="task", source_id=write.task_id
+        )
+    except ValueError:
+        return False
+    if derived != write.item_key:
         return False
     closes = write.is_completed is True
     reassigns = bool(write.assignee_ids) and all(write.assignee_ids or ())
@@ -125,6 +135,7 @@ class _Queue:
     loaded_at: float
     in_flight: TaskWrite | None = None
     outcomes: list[Outcome] = field(default_factory=list)
+    unwritten: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -159,23 +170,27 @@ def broker_append(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def outcome_event(
-    write: TaskWrite, status: str, session_id: str, *, audit_ref: str = "", reason: str = ""
+    write: TaskWrite, status: str, session_id: str, *, tool_call_id: str = "", error: str = ""
 ) -> dict[str, Any]:
-    """The ``completed`` / ``write_failed`` row for one write. The broker stamps
-    ts and id; ``audit_ref`` is the update_task call's tool_call_id, the key its
-    TOOL_CALL_COMPLETED audit row carries."""
+    """The ``completed`` / ``write_failed`` row for one write (the casework
+    ledger's shape: ``shared/casework_ledger.py``). The broker stamps ts and id.
+    ``completed`` carries the update_task call's ``tool_call_id``, which the
+    broker matches to that call's TOOL_CALL_COMPLETED audit row; ``write_failed``
+    carries a short ``error``."""
     event: dict[str, Any] = {
         "ts": None,
         "skill": write.skill,
         "matter_id": write.matter_id,
+        "kind": "task",
+        "source_id": write.task_id,
         "item_key": write.item_key,
         "event": status,
         "session_id": session_id,
     }
-    if audit_ref:
-        event["audit_ref"] = audit_ref
-    if reason:
-        event["reason"] = reason[:300]
+    if status == COMPLETED:
+        event["tool_call_id"] = tool_call_id
+    else:
+        event["error"] = (error or "the task update did not complete")[:500]
     return event
 
 
@@ -305,36 +320,60 @@ class CaseworkActs:
                     queue.in_flight = None
             if act is None:
                 return
+            call_id = str(kwargs.get("tool_call_id") or "")
             failed = tool_call_failed(kwargs.get("status"), kwargs.get("error_type"))
             if failed or _result_reports_error(kwargs.get("result")):
                 self._record(session_id, act, WRITE_FAILED, reason="the task update failed")
-            else:
+            elif not call_id:
+                # A completed row must name its call; without one the write
+                # cannot be proven, and an unproven write is not a success.
                 self._record(
-                    session_id, act, COMPLETED, audit_ref=str(kwargs.get("tool_call_id") or "")
+                    session_id, act, WRITE_FAILED, reason="the update could not be tied to its call"
                 )
+            else:
+                self._record(session_id, act, COMPLETED, audit_ref=call_id)
         except Exception:  # noqa: BLE001 — a hook must never raise
             logger.warning("casework_acts: post-tool outcome not recorded", exc_info=True)
 
     def _record(
         self, session_id: str, act: TaskWrite, status: str, *, audit_ref: str = "", reason: str = ""
     ) -> None:
+        event = outcome_event(act, status, session_id, tool_call_id=audit_ref, error=reason)
         with self._lock:
             queue = self._queues.get(session_id)
             if queue is not None:
                 queue.outcomes.append(Outcome(act, status, reason, audit_ref))
-        event = outcome_event(act, status, session_id, audit_ref=audit_ref, reason=reason)
+        if not self._write(event) and queue is not None:
+            # Kept for one retry at the turn's next casework call: the broker
+            # can refuse a ``completed`` whose audit row it has not seen yet.
+            with self._lock:
+                queue.unwritten.append(event)
+
+    def _write(self, event: dict[str, Any]) -> bool:
         writer = self._writer or broker_append
         try:
             response = writer(event)
         except Exception as exc:  # noqa: BLE001 — one lost row must not break the turn
-            logger.warning(
-                "casework_acts: %s row for %s not written (%s)", status, act.item_key, exc
-            )
-            return
+            logger.warning("casework_acts: %s row not written (%s)", event.get("event"), exc)
+            return False
         if not (isinstance(response, dict) and response.get("ok")):
-            logger.warning(
-                "casework_acts: %s row for %s refused (%s)", status, act.item_key, response
-            )
+            logger.warning("casework_acts: %s row refused (%s)", event.get("event"), response)
+            return False
+        return True
+
+    def flush(self, session_id: str) -> int:
+        """Retry this session's outcome rows the broker did not take. Returns
+        how many are still unwritten."""
+        with self._lock:
+            queue = self._fresh(session_id) if session_id else None
+            if queue is None:
+                return 0
+            events, queue.unwritten = queue.unwritten, []
+        left = [event for event in events if not self._write(event)]
+        if left:
+            with self._lock:
+                queue.unwritten.extend(left)
+        return len(left)
 
 
 #: The process singleton the trust gate and the escalation tools share.

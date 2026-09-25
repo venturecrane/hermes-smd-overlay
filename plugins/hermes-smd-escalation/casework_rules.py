@@ -17,16 +17,12 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
-from shared import cron_attribution, digest_reply_ref, pre_run_handoff
+from shared import casework_ledger, cron_attribution, digest_reply_ref, pre_run_handoff
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LEDGER_PATH = "/opt/data/audit/casework-ledger.jsonl"
-
 CASEWORK_SUFFIX = "casework"
 BRIEF_SUFFIX = "brief"
-
-VERDICT_EVENTS = frozenset({"approved", "held"})
 
 _MAX_MESSAGES = 10
 _MAX_RECIPIENTS = 20
@@ -44,10 +40,6 @@ _MAX_BRIEF_DONE_CHARS = 120
 _MAX_QUESTION = 300
 _MAX_DECISIONS = 2
 _EM_DASH = "\u2014"
-
-ACTIONS = frozenset({"close", "keep", "reassign", "step"})
-CLASSES = frozenset({"open", "done", "stale", "at_stake"})
-LEVELS = frozenset({"surfaces", "prepares", "handles"})
 
 DEFAULT_FOOTER = 'Reply here in words, for example "yes to all", "all except 3" or "leave 2".'
 BRIEF_FOOTER = "Reply here and I'll take it from there."
@@ -135,50 +127,57 @@ def _queued_note(count: int, tool: str) -> str:
 
 
 def ledger_path() -> str:
-    return os.environ.get("SMD_CASEWORK_LEDGER_PATH") or DEFAULT_LEDGER_PATH
-
-
-def read_rows(path: str) -> list[dict]:
-    """Every well-formed row in the casework ledger twin; a missing file is empty."""
-    rows: list[dict] = []
-    try:
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict) and isinstance(row.get("event"), str):
-                    rows.append(row)
-    except OSError:
-        return []
-    return rows
+    """The casework ledger twin the agent uid reads (the broker is its only writer)."""
+    return os.environ.get("SMD_CASEWORK_LEDGER_PATH") or casework_ledger.DEFAULT_LEDGER_PATH
 
 
 def _event(
-    kind: str,
+    name: str,
     *,
     skill: str,
-    matter_id: object,
+    matter_id: str,
+    kind: str,
+    source_id: str,
     item_key: str,
     session_id: str,
     **fields: Any,
 ) -> dict[str, Any]:
-    """One row bound for the broker's ``casework_event_append`` verb. The broker
-    stamps ts and id; nobody here can backdate."""
+    """One row bound for the broker's ``casework_event_append`` verb, in the
+    ledger's shape (``shared/casework_ledger.py``). The broker stamps ts and id;
+    nobody here can backdate. Absent optional fields are left off, because the
+    broker refuses a field an event kind does not carry."""
     event: dict[str, Any] = {
         "ts": None,
         "skill": skill,
         "matter_id": matter_id,
+        "kind": kind,
+        "source_id": source_id,
         "item_key": item_key,
-        "event": kind,
+        "event": name,
         "session_id": session_id,
     }
     event.update({k: v for k, v in fields.items() if v is not None})
     return event
+
+
+def _keyed(matter_id: object, kind: str, source_id: object, item_key: object) -> bool:
+    """``item_key`` is the one the ledger derives from this matter, kind and id.
+    An envelope whose key disagrees names a different item than its ids do."""
+    try:
+        derived = casework_ledger.item_key(matter_id=matter_id, kind=kind, source_id=source_id)
+    except ValueError:
+        return False
+    return derived == item_key
+
+
+def _ledger_accepts(name: str, payload: object, kind: str) -> bool:
+    """The broker's own payload rules, run early so a malformed envelope is
+    refused whole instead of failing row by row after the send."""
+    try:
+        casework_ledger._validate_payload(name, payload, kind)
+    except ValueError:
+        return False
+    return True
 
 
 def _ok(response: object) -> bool:
@@ -259,26 +258,25 @@ def _valid_done_since(value: object) -> bool:
         return False
     return all(
         isinstance(row, dict)
-        and _id(row.get("item_key"))
-        and _optional_id(row.get("matter_id"))
+        and _id(row.get("task_id"))
+        and _keyed(row.get("matter_id"), "task", row.get("task_id"), row.get("item_key"))
         and _text(row.get("line"), _MAX_SHORT_LINE)
         for row in value
     )
 
 
-def _valid_payload(payload: object) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("action") not in ACTIONS or payload.get("class") not in CLASSES:
-        return False
-    if payload.get("action") == "close" and payload.get("class") == "at_stake":
-        return False  # money or court at stake is never closed without a person
-    if not _id(payload.get("staff_id")):
-        return False
-    if payload.get("action") == "reassign" and not _id(payload.get("to_staff_id")):
-        return False
-    evidence = payload.get("evidence", [])
-    return isinstance(evidence, list) and all(isinstance(e, str) for e in evidence)
+def close_payload(close: dict) -> dict:
+    """The ``closed_by_record`` payload for one envelope close: the record shows
+    the task done, and the evidence atoms say what shows it."""
+    payload = {
+        "action": "close",
+        "class": "done",
+        "staff_id": close["staff_id"],
+        "evidence": list(close["evidence"]),
+    }
+    if close.get("reason"):
+        payload["reason"] = close["reason"]
+    return payload
 
 
 def _valid_item(item: object) -> bool:
@@ -288,21 +286,23 @@ def _valid_item(item: object) -> bool:
         and _text(item.get("group"), _MAX_SHORT_LINE, required=False)
         and _text(item.get("line"), _MAX_LINE)
         and item.get("event") in ("proposed", "named")
-        and _id(item.get("item_key"))
-        and _optional_id(item.get("matter_id"))
         and _id(item.get("task_id"))
-        and _valid_payload(item.get("payload"))
+        and _keyed(item.get("matter_id"), "task", item.get("task_id"), item.get("item_key"))
+        and _ledger_accepts(str(item.get("event")), item.get("payload"), "task")
+        and item["payload"].get("action") != "step"
+        and (item["payload"].get("action") == "keep" or _id(item["payload"].get("staff_id")))
     )
 
 
 def _valid_close(close: object) -> bool:
     return (
         isinstance(close, dict)
-        and _id(close.get("item_key"))
-        and _optional_id(close.get("matter_id"))
         and _id(close.get("task_id"))
         and _id(close.get("staff_id"))
+        and _keyed(close.get("matter_id"), "task", close.get("task_id"), close.get("item_key"))
         and _text(close.get("line"), _MAX_SHORT_LINE)
+        and isinstance(close.get("evidence"), list)
+        and _ledger_accepts("closed_by_record", close_payload(close), "task")
     )
 
 
@@ -339,13 +339,28 @@ def valid_casework_envelope(payload: dict) -> bool:
     )
 
 
+def step_payload(entry: dict) -> dict:
+    """The ``briefed`` payload for one catalog entry (class open: a date-prep
+    step is work still to do, never a close)."""
+    return {
+        "action": "step",
+        "class": "open",
+        "step": {
+            "catalog_id": entry["catalog_id"],
+            "skill": entry["skill"],
+            "level": entry["level"],
+            "params": dict(entry.get("params") or {}),
+        },
+    }
+
+
 def _valid_catalog_entry(entry: object) -> bool:
     return (
         isinstance(entry, dict)
         and _id(entry.get("catalog_id"))
-        and _id(entry.get("skill"))
         and entry.get("level") in ("prepares", "handles")
         and isinstance(entry.get("params", {}), dict)
+        and _ledger_accepts("briefed", step_payload(entry), "date")
     )
 
 
@@ -357,9 +372,10 @@ def valid_brief_envelope(payload: dict) -> bool:
     return (
         all(_valid_catalog_entry(entry) for entry in catalog)
         and len(set(ids)) == len(ids)
-        and _id(payload.get("matter_id"))
-        and _id(payload.get("item_key"))
-        and _optional_id(payload.get("event_id"))
+        and _id(payload.get("event_id"))
+        and _keyed(
+            payload.get("matter_id"), "date", payload.get("event_id"), payload.get("item_key")
+        )
         and _text(payload.get("subject_label"), _MAX_SUBJECT_LABEL)
         and _addresses(payload.get("recipients"), required=True)
         and _addresses(payload.get("cc"), required=False)

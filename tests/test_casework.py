@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from shared import casework_acts, inbound, send_dispatch
+from shared import casework_acts, casework_ledger, inbound, send_dispatch
 from shared.casework_acts import CASEWORK_ACTS, TaskWrite
 from tests.conftest import load_plugin
 
@@ -33,6 +33,16 @@ REF = "e" * 32
 ATTORNEY = "atty@firm.example"
 PARALEGAL = "para@firm.example"
 NOW = datetime(2026, 9, 28, 15, 6, tzinfo=timezone.utc)
+
+
+def _key(task: str, matter: str = "m-104", kind: str = "task") -> str:
+    return casework_ledger.item_key(matter_id=matter, kind=kind, source_id=task)
+
+
+K_CLOSE = _key("t-close-1")
+K1, K2, K3, K9 = _key("t-1"), _key("t-2"), _key("t-3"), _key("t-9")
+K_OLD = _key("t-old")
+K_DATE = _key("ev-1", "m-105", "date")
 
 
 # ---------------------------------------------------------------------------
@@ -80,10 +90,11 @@ def _review_envelope(**overrides) -> dict:
                 "lead": "Two overdue tasks on your matters look ready to tidy up.",
                 "closes": [
                     {
-                        "item_key": "k-close-1",
+                        "item_key": K_CLOSE,
                         "matter_id": "m-104",
                         "task_id": "t-close-1",
                         "staff_id": "staff-atty",
+                        "evidence": ["Proof of Service 2026-06-18"],
                         "line": "2026-PI-104: Serve discovery responses",
                     }
                 ],
@@ -93,7 +104,7 @@ def _review_envelope(**overrides) -> dict:
                         "group": "2026-PI-104",
                         "line": "Discovery follow-up. Suggest: close (proof of service on file).",
                         "event": "proposed",
-                        "item_key": "k-1",
+                        "item_key": K1,
                         "matter_id": "m-104",
                         "task_id": "t-1",
                         "payload": {
@@ -110,7 +121,7 @@ def _review_envelope(**overrides) -> dict:
                         "group": "2026-PI-104",
                         "line": "Records request. Suggest: keep.",
                         "event": "proposed",
-                        "item_key": "k-2",
+                        "item_key": K2,
                         "matter_id": "m-104",
                         "task_id": "t-2",
                         "payload": {
@@ -124,8 +135,9 @@ def _review_envelope(**overrides) -> dict:
                 ],
                 "done_since": [
                     {
-                        "item_key": "k-old",
+                        "item_key": K_OLD,
                         "matter_id": "m-104",
+                        "task_id": "t-old",
                         "line": "Closed the July intake task",
                     }
                 ],
@@ -227,7 +239,7 @@ def test_the_wrapper_is_approve_or_all_minus_holds():
 # ---------------------------------------------------------------------------
 
 
-def _write(task_id="t-1", key="k-1") -> TaskWrite:
+def _write(task_id="t-1", key=K1) -> TaskWrite:
     return TaskWrite(
         task_id=task_id,
         staff_id="staff-atty",
@@ -261,7 +273,7 @@ def test_a_call_beyond_the_queue_is_refused(rows):
     assert replay.refusal == casework_acts.BEYOND_QUEUE
 
 
-def test_post_tool_writes_completed_with_the_audit_ref(rows):
+def test_post_tool_writes_completed_with_its_call_id(rows):
     CASEWORK_ACTS.load(SESSION, [_write()])
     CASEWORK_ACTS.replay(SESSION, casework_acts.UPDATE_TASK_TOOL, {})
     CASEWORK_ACTS.on_post_tool(
@@ -269,8 +281,9 @@ def test_post_tool_writes_completed_with_the_audit_ref(rows):
     )
     [row] = rows
     assert row["event"] == "completed"
-    assert row["audit_ref"] == "tc-1"
-    assert row["item_key"] == "k-1" and row["ts"] is None
+    assert row["tool_call_id"] == "tc-1"
+    assert row["kind"] == "task" and row["source_id"] == "t-1"
+    assert row["item_key"] == K1 and row["ts"] is None
 
 
 @pytest.mark.parametrize(
@@ -289,10 +302,10 @@ def test_a_failed_call_writes_write_failed(rows, kwargs):
 
 
 def test_an_outcome_that_never_arrived_is_not_a_success(rows):
-    CASEWORK_ACTS.load(SESSION, [_write("t-1", "k-1"), _write("t-2", "k-2")])
+    CASEWORK_ACTS.load(SESSION, [_write("t-1", K1), _write("t-2", K2)])
     CASEWORK_ACTS.replay(SESSION, casework_acts.UPDATE_TASK_TOOL, {})
     CASEWORK_ACTS.replay(SESSION, casework_acts.UPDATE_TASK_TOOL, {})
-    assert [(r["item_key"], r["event"]) for r in rows] == [("k-1", "write_failed")]
+    assert [(r["item_key"], r["event"]) for r in rows] == [(K1, "write_failed")]
 
 
 def test_a_malformed_write_is_never_queued(rows):
@@ -403,14 +416,14 @@ def test_finish_closes_first_then_renders_and_sends(tmp_path, rows):
     ref = message["audit_extra"]["dispatch_ref"]
     raises = [e for e in broker if e["event"] == "proposed"]
     assert [(e["item_key"], e["n"], e["dispatch_ref"]) for e in raises] == [
-        ("k-1", 1, ref),
-        ("k-2", 2, ref),
+        (K1, 1, ref),
+        (K2, 2, ref),
     ]
     assert all("thread_ref" not in e for e in broker)
-    assert sorted(e["item_key"] for e in broker if e["event"] == "mentioned") == [
-        "k-close-1",
-        "k-old",
-    ]
+    assert sorted(e["item_key"] for e in broker if e["event"] == "mentioned") == sorted(
+        [K_CLOSE, K_OLD]
+    )
+    assert all("dispatch_ref" not in e for e in broker if e["event"] == "mentioned")
     assert _finish(tmp_path, dispatched, broker)["status"] == "already_sent"
 
 
@@ -428,7 +441,7 @@ def test_a_failed_close_is_not_reported_closed(tmp_path, rows):
         "I couldn't update these in Smokeball just now: 2026-PI-104: Serve discovery responses."
         in text
     )
-    assert "k-close-1" not in [e["item_key"] for e in broker if e["event"] == "mentioned"]
+    assert K_CLOSE not in [e["item_key"] for e in broker if e["event"] == "mentioned"]
 
 
 def test_no_decision_no_message(tmp_path, rows):
@@ -491,7 +504,7 @@ def _brief_envelope() -> dict:
         "matter_id": "m-105",
         "matter_number": "2026-PI-105",
         "event_id": "ev-1",
-        "item_key": "k-date",
+        "item_key": K_DATE,
         "subject_label": "2026-PI-105: status conference Fri Oct 2",
         "recipients": [ATTORNEY],
         "cc": [PARALEGAL],
@@ -558,7 +571,7 @@ def test_the_brief_is_framed_in_code(tmp_path, rows):
         (1, "witness_list_finalize"),
         (2, "records_refresh:reyes"),
     ]
-    assert all(e["item_key"] == "k-date" and "thread_ref" not in e for e in briefed)
+    assert all(e["item_key"] == K_DATE and "thread_ref" not in e for e in briefed)
     again = _brief(tmp_path, _ARGS, dispatched, broker)
     assert again["status"] == "refused" and len(dispatched) == 1
 
@@ -622,7 +635,8 @@ def _raise_row(n, key, task, action="close", *, event="proposed", thread=THREAD,
         "item_key": key,
         "event": event,
         "n": n,
-        "task_id": task,
+        "kind": "task" if task else "date",
+        "source_id": task or "ev-1",
         "dispatch_ref": ref,
         "thread_ref": thread,
         "payload": payload,
@@ -664,9 +678,9 @@ def _three(tmp_path):
     return _ledger(
         tmp_path,
         [
-            _raise_row(1, "k-1", "t-1"),
-            _raise_row(2, "k-2", "t-2"),
-            _raise_row(3, "k-3", "t-3", "reassign", to_staff_id="staff-para"),
+            _raise_row(1, K1, "t-1"),
+            _raise_row(2, K2, "t-2"),
+            _raise_row(3, K3, "t-3", "reassign", to_staff_id="staff-para"),
         ],
     )
 
@@ -677,12 +691,16 @@ def test_yes_except_2_changes_exactly_the_approved_tasks(tmp_path, rows):
     broker: list = []
     out = _answer(path, broker)
     assert out["status"] == "writes_queued" and out["writes"] == 2
-    assert [(e["event"], e["n"], e["item_key"]) for e in broker] == [
-        ("approved", 1, "k-1"),
-        ("held", 2, "k-2"),
-        ("approved", 3, "k-3"),
+    assert [(e["event"], e.get("n"), e["item_key"]) for e in broker] == [
+        ("approved", 1, K1),
+        ("held", 2, K2),
+        ("kept", None, K2),
+        ("approved", 3, K3),
     ]
-    assert all(e["acked_by"]["name"] == "Dana Whitfield" for e in broker)
+    verdicts = [e for e in broker if e["event"] in ("approved", "held")]
+    assert all(e["decided_by"]["name"] == "Dana Whitfield" for e in verdicts)
+    assert all(e["thread_ref"] == THREAD for e in verdicts)
+    assert all("dispatch_ref" not in e and "step" not in e for e in verdicts)
     executed = []
     for _ in range(2):
         args = {"task_id": "model-chosen"}
@@ -735,16 +753,14 @@ def test_ambiguity_writes_nothing_and_asks(tmp_path, rows, text, status, phrase)
 
 
 def test_a_bare_yes_to_a_one_line_list_approves_it(tmp_path, rows):
-    path = _ledger(tmp_path, [_raise_row(1, "k-1", "t-1")])
+    path = _ledger(tmp_path, [_raise_row(1, K1, "t-1")])
     _reply_origin("yes please")
     broker: list = []
     assert _answer(path, broker)["writes"] == 1
 
 
 def test_a_thread_with_two_lists_is_ambiguous(tmp_path, rows):
-    path = _ledger(
-        tmp_path, [_raise_row(1, "k-1", "t-1"), _raise_row(1, "k-9", "t-9", ref="f" * 32)]
-    )
+    path = _ledger(tmp_path, [_raise_row(1, K1, "t-1"), _raise_row(1, K9, "t-9", ref="f" * 32)])
     _reply_origin("yes on 1")
     broker: list = []
     assert _answer(path, broker)["status"] == "ambiguous_thread"
@@ -752,7 +768,7 @@ def test_a_thread_with_two_lists_is_ambiguous(tmp_path, rows):
 
 
 def test_a_thread_with_no_casework_rows_falls_through(tmp_path, rows):
-    path = _ledger(tmp_path, [_raise_row(1, "k-1", "t-1", thread="another-thread")])
+    path = _ledger(tmp_path, [_raise_row(1, K1, "t-1", thread="another-thread")])
     _reply_origin("got it on 1")
     assert _answer(path, [])["status"] == "digest"
 
@@ -767,16 +783,23 @@ def test_an_off_roster_sender_gets_nothing(tmp_path, rows):
 
 
 def test_an_answered_line_is_not_acted_on_twice(tmp_path, rows):
-    rows_ = [_raise_row(1, "k-1", "t-1"), _raise_row(2, "k-2", "t-2")]
+    rows_ = [_raise_row(1, K1, "t-1"), _raise_row(2, K2, "t-2")]
     rows_.append(
-        {"event": "approved", "item_key": "k-1", "n": 1, "dispatch_ref": REF, "skill": "x"}
+        {
+            "ts": "2026-09-28T16:00:00Z",
+            "event": "approved",
+            "item_key": K1,
+            "n": 1,
+            "thread_ref": THREAD,
+            "skill": "x",
+        }
     )
     path = _ledger(tmp_path, rows_)
     _reply_origin("yes to all")
     broker: list = []
     out = _answer(path, broker)
     assert out["writes"] == 1
-    assert [e["item_key"] for e in broker] == ["k-2"]
+    assert [e["item_key"] for e in broker] == [K2]
 
 
 def test_an_approved_step_is_returned_for_the_router(tmp_path, rows):
@@ -789,10 +812,8 @@ def test_an_approved_step_is_returned_for_the_router(tmp_path, rows):
     path = _ledger(
         tmp_path,
         [
-            _raise_row(1, "k-date", None, "step", event="briefed", step=step),
-            _raise_row(
-                2, "k-date", None, "step", event="briefed", step={**step, "level": "handles"}
-            ),
+            _raise_row(1, K_DATE, None, "step", event="briefed", step=step),
+            _raise_row(2, K_DATE, None, "step", event="briefed", step={**step, "level": "handles"}),
         ],
     )
     _reply_origin("yes on 1, leave 2")
@@ -813,7 +834,7 @@ def test_an_approved_step_is_returned_for_the_router(tmp_path, rows):
         "Got it. I'll prepare 1 and send it to you for review. Leaving 2 as it is."
     )
     approved = next(e for e in broker if e["event"] == "approved")
-    assert approved["step"]["catalog_id"] == "witness_list_finalize"
+    assert approved["n"] == 1 and approved["kind"] == "date" and "step" not in approved
 
 
 def test_the_tool_schemas_take_no_ids():

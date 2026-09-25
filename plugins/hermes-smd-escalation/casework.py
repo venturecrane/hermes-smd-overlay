@@ -61,9 +61,11 @@ from .casework_rules import (
     _queued_note,
     _routine,
     _text,
+    close_payload,
     ledger_path,
     render_brief,
     render_review,
+    step_payload,
     take_envelope,
     valid_brief_envelope,
     valid_casework_envelope,
@@ -185,10 +187,12 @@ def casework_finish(
                     _event(
                         "closed_by_record",
                         skill=skill,
-                        matter_id=close.get("matter_id"),
+                        matter_id=close["matter_id"],
+                        kind="task",
+                        source_id=close["task_id"],
                         item_key=close["item_key"],
                         session_id=session_id,
-                        payload={"action": "close", "staff_id": close["staff_id"]},
+                        payload=close_payload(close),
                     ),
                 )
                 if not recorded:
@@ -199,7 +203,7 @@ def casework_finish(
                         task_id=close["task_id"],
                         staff_id=close["staff_id"],
                         item_key=close["item_key"],
-                        matter_id=close.get("matter_id"),
+                        matter_id=close["matter_id"],
                         skill=skill,
                         is_completed=True,
                         line=close["line"],
@@ -214,6 +218,7 @@ def casework_finish(
         return _finish_result(
             "writes_queued", _queued_note(remaining, "casework_finish"), writes=remaining
         )
+    acts.flush(session_id)
     return _send_reviews(session_id, state, append, dispatch, acts)
 
 
@@ -265,18 +270,9 @@ def _send_reviews(
         if report["sent"]:
             report["raises_written"] = _write_raises(append, skill, session_id, dispatch_ref, items)
             # What this body told a person about is not told again (Job 3).
-            for row in [*(message.get("done_since") or []), *closed]:
-                _append(
-                    append,
-                    _event(
-                        "mentioned",
-                        skill=skill,
-                        matter_id=row.get("matter_id"),
-                        item_key=row["item_key"],
-                        session_id=session_id,
-                        dispatch_ref=dispatch_ref,
-                    ),
-                )
+            _write_mentions(
+                append, skill, session_id, [*(message.get("done_since") or []), *closed]
+            )
         else:
             report["reason"] = getattr(result, "reason", "")
         sent.append(report)
@@ -308,15 +304,35 @@ def _write_raises(
         event = _event(
             item["event"],
             skill=skill,
-            matter_id=item.get("matter_id"),
+            matter_id=item["matter_id"],
+            kind="task",
+            source_id=item["task_id"],
             item_key=item["item_key"],
             session_id=session_id,
-            task_id=item["task_id"],
             payload=dict(item["payload"]),
         )
         digest_reply_ref.stamp_casework_raise(event, item["n"], dispatch_ref)
         written += 1 if _append(append, event) else 0
     return written
+
+
+def _write_mentions(
+    append: Callable[[dict], Any], skill: str, session_id: str, rows: list[dict]
+) -> None:
+    """What a sent body told a person about is not told again (Job 3)."""
+    for row in rows:
+        _append(
+            append,
+            _event(
+                "mentioned",
+                skill=skill,
+                matter_id=row["matter_id"],
+                kind="task",
+                source_id=row["task_id"],
+                item_key=row["item_key"],
+                session_id=session_id,
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -438,36 +454,19 @@ def casework_brief(
     catalog = {entry["catalog_id"]: entry for entry in envelope["catalog"]}
     written = 0
     for n, decision in enumerate(decisions, start=1):
-        entry = catalog[decision["catalog_id"]]
-        step = {
-            "catalog_id": entry["catalog_id"],
-            "skill": entry["skill"],
-            "level": entry["level"],
-            "params": dict(entry.get("params") or {}),
-        }
         event = _event(
             "briefed",
             skill=state["skill"],
             matter_id=envelope["matter_id"],
+            kind="date",
+            source_id=envelope["event_id"],
             item_key=envelope["item_key"],
             session_id=session_id,
-            event_id=envelope.get("event_id"),
-            payload={"action": "step", "step": step},
+            payload=step_payload(catalog[decision["catalog_id"]]),
         )
         digest_reply_ref.stamp_casework_raise(event, n, dispatch_ref)
         written += 1 if _append(append, event) else 0
-    for row in envelope.get("done_since") or []:
-        _append(
-            append,
-            _event(
-                "mentioned",
-                skill=state["skill"],
-                matter_id=row.get("matter_id"),
-                item_key=row["item_key"],
-                session_id=session_id,
-                dispatch_ref=dispatch_ref,
-            ),
-        )
+    _write_mentions(append, state["skill"], session_id, envelope.get("done_since") or [])
     return json.dumps(
         {
             "status": "sent",
