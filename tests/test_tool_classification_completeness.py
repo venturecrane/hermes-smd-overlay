@@ -217,6 +217,7 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_smokeball_stage_vendor_invoice",
             "mcp_smokeball_render_docx_template",
             "mcp_smokeball_render_docx_draft",
+            "mcp_smokeball_add_workbook",
             "mcp_smokeball_get_upload_url",
             "mcp_smokeball_create_webhook_subscription",
             "mcp_smokeball_create_event",

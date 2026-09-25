@@ -295,6 +295,10 @@ _DRAFT_SCAN_KEYS: tuple[str, ...] = (
     # each is a whole document, and neither was scanned by anything.
     "content_text",
     "draft_markdown",
+    # add_workbook's structured payload: a list of sheets whose cells carry the
+    # figures, dates and case numbers. Non-string, so it is FLATTENED to its
+    # scalar leaves below rather than repr'd.
+    "sheets",
     # structured, identifier-bearing args (#2132)
     "subject",
     "title",
@@ -307,10 +311,31 @@ _DRAFT_SCAN_KEYS: tuple[str, ...] = (
 )
 
 
+def _flatten_scalars(value: object, out: list[str]) -> None:
+    """Append every scalar leaf of a nested list/dict to ``out`` as text.
+
+    A workbook's ``sheets`` arrives as nested lists and dicts; ``str()`` of that
+    is a Python repr whose quoting and brackets sit between an identifier and
+    its neighbours. Walking the leaves hands the scanner each cell on its own
+    line, as it would see a prose body. ``None`` is skipped (an empty cell).
+    """
+    if value is None:
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _flatten_scalars(item, out)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _flatten_scalars(item, out)
+    else:
+        out.append(str(value))
+
+
 def _extract_draft_scan_text(args: dict | None) -> str:
     """Concatenate every present ``_DRAFT_SCAN_KEYS`` value for the identifier
     scan. Returns ``""`` when nothing scannable is present (a structured-only
-    call carrying no identifier-bearing args has no fabrication surface)."""
+    call carrying no identifier-bearing args has no fabrication surface).
+    A non-string value (``sheets``) is flattened to its scalar leaves."""
     if not isinstance(args, dict):
         return ""
     parts: list[str] = []
@@ -318,7 +343,12 @@ def _extract_draft_scan_text(args: dict | None) -> str:
         value = args.get(key)
         if value is None:
             continue
-        text = value if isinstance(value, str) else str(value)
+        if isinstance(value, str):
+            text = value
+        else:
+            leaves: list[str] = []
+            _flatten_scalars(value, leaves)
+            text = "\n".join(leaves)
         if text.strip():
             parts.append(text)
     return "\n".join(parts)
