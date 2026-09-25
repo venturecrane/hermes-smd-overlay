@@ -90,12 +90,36 @@ def stamp_raise(event: dict, append: dict, dispatch_ref: str) -> dict:
     return event
 
 
+#: The casework ledger's raises (``shared/casework_ledger.py``): a task-review
+#: proposal line, a one-time handover line, and a date-prep decision. They ride
+#: the same join as a digest's raises: ``dispatch_ref`` from the send, ``n`` from
+#: the body, ``thread_ref`` stamped by the broker, never by the overlay.
+CASEWORK_RAISE_EVENTS = frozenset({"proposed", "named", "briefed"})
+
+
+def stamp_casework_raise(event: dict, number: object, dispatch_ref: str) -> dict:
+    """Stamp one casework raise bound for the broker with its digest fields.
+
+    Same rule as :func:`stamp_raise`: only a raise carries them, ``n`` only when
+    valid, and ``thread_ref`` is never set here (the broker saw the send and
+    stamps it; a caller's thread_ref is always dropped)."""
+    event.pop("thread_ref", None)
+    if event.get("event") not in CASEWORK_RAISE_EVENTS or not dispatch_ref:
+        return event
+    event["dispatch_ref"] = dispatch_ref
+    if valid_digest_number(number):
+        event["n"] = number
+    return event
+
+
 __all__ = [
+    "CASEWORK_RAISE_EVENTS",
     "MAX_DIGEST_NUMBER",
     "MAX_SNOOZE_DAYS",
     "RAISE_EVENTS",
     "append_digest_fields_ok",
     "mint_dispatch_ref",
+    "stamp_casework_raise",
     "stamp_raise",
     "valid_digest_number",
     "valid_snooze_days",

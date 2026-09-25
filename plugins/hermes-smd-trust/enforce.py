@@ -68,6 +68,7 @@ from shared.action_classes import (
 from shared.action_classes import (
     VERTICAL_FLOORS as _SHARED_VERTICAL_FLOORS,
 )
+from shared.casework_acts import CASEWORK_ACTS
 from shared.customer_config import CustomerConfigMissingError
 from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT, TRUST_CLASS_INTERNAL
 from shared.pending_acts import PENDING_ACTS
@@ -1274,6 +1275,44 @@ def _propose_commitment_act(tool_name: str, session_id: str, args: dict | None =
 
 
 def evaluate_tool_call(
+    tool_name: str,
+    args: dict,
+    customer_slug: str,
+    session_id: str = "",
+    tool_call_id: str = "",
+    session_match: str = "",
+) -> dict | None:
+    """Decide whether a tool call may proceed (see :func:`_evaluate_tool_call`).
+
+    Casework replay first (``shared.casework_acts``): in a session that loaded a
+    queue of approved task writes, ``update_task`` executes the queue head, never
+    the model's arguments, and a call beyond the queue is refused. The ceiling
+    below still decides the replayed write; a refused one is recorded
+    ``write_failed``."""
+    replay = CASEWORK_ACTS.replay(session_id, tool_name, args)
+    if replay.refusal is not None:
+        _record_decision(
+            tool_call_id,
+            tool_name,
+            _resolve_active_persona(),
+            action_class=ActionClass.INTERNAL_WRITE.value,
+            audit_action="refuse",
+            allowed=False,
+            reason=f"CASEWORK_REPLAY: {replay.refusal}",
+            effective_ceiling=Ceiling.REFUSED,
+            session_id=session_id,
+            session_match=session_match,
+        )
+        return {"action": "block", "message": f"Refused: {replay.refusal}"}
+    verdict = _evaluate_tool_call(
+        tool_name, args, customer_slug, session_id, tool_call_id, session_match
+    )
+    if replay.act is not None and verdict is not None:
+        CASEWORK_ACTS.blocked(session_id, str(verdict.get("message") or "refused"))
+    return verdict
+
+
+def _evaluate_tool_call(
     tool_name: str,
     args: dict,
     customer_slug: str,

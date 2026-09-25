@@ -24,7 +24,8 @@ to a deadline email, and to send back ``confirmation_text`` verbatim.
 
 ALL OR NOTHING. A reply naming a number the digest does not carry writes
 nothing and asks. So does a reply the parser cannot read, and a thread holding
-more than one digest. Ambiguity is asked, never guessed: a wrong ack silences a
+more than one digest. "All except 2" acks every item but 2 (the parser reads
+holds: ``parse_reply_verdicts``). Ambiguity is asked, never guessed: a wrong ack silences a
 real deadline, and a question costs one more email.
 
 WHAT AN ACK DOES is unchanged: it quiets an item until the snooze lapses; only
@@ -83,9 +84,11 @@ DESCRIPTION = (
 # - . / : are a phone number, a date, a time or a decimal, never an item.
 _NUMBER = re.compile(r"(?<![\w])(?<!\d[-./:])([1-9]\d{0,2})(?![\w])(?![-./:]\d)")
 _ALL = re.compile(r"\b(all(?:\s+of\s+them)?|every\s+one|everything)\b")
-# Words that, within the few words before a number in the same clause, mean
-# the reader is NOT confirming it ("got 1, not 2", "still working on 3").
-_NEGATORS = frozenset(
+# Words that put the numbers after them on HOLD, until an approving word or
+# the end of the clause: "got 1, not 2", "leave 2 and 3", "still working on 3",
+# "all except 3", "all but 2". A hold is never an approval, so on the deadline
+# digest path a held number is simply not acked.
+_HOLD_WORDS = frozenset(
     {
         "not",
         "no",
@@ -95,6 +98,11 @@ _NEGATORS = frozenset(
         "without",
         "still",
         "yet",
+        "leave",
+        "keep",
+        "skip",
+        "hold",
+        "wait",
         "haven't",
         "havent",
         "hasn't",
@@ -114,7 +122,37 @@ _NEGATORS = frozenset(
         "pending",
     }
 )
-_NEGATION_WINDOW = 3
+# The hold words that make "yes" mean "yes to all but these": "yes except 3".
+_EXCEPT_WORDS = frozenset({"except", "excluding", "but", "without"})
+# Words that turn a hold off again inside one clause: "leave 2 yes on 3".
+_APPROVE_WORDS = frozenset(
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "ok",
+        "okay",
+        "approve",
+        "approved",
+        "go",
+        "do",
+        "got",
+        "done",
+        "fine",
+        "sure",
+        "close",
+        "agreed",
+        "confirm",
+        "confirmed",
+        "please",
+    }
+)
+_YES_WORDS = frozenset({"yes", "yeah", "yep", "ok", "okay", "approve", "approved", "sure"})
+# A reply that says yes and names nothing ("yes", "yes please", "sounds good").
+_BARE_YES = re.compile(
+    r"^\s*(?:yes|yeah|yep|ok|okay|sure|sounds good|go ahead|please do|do it|approved?)"
+    r"(?:[\s,]+(?:please|thanks|thank you|go ahead|do it|sounds good))*[\s.!]*$"
+)
 # A greeting, a thank-you or a closing is not "all of them": "Hi all",
 # "thanks all", "that's all", "1 is all I have".
 _ALL_GREETERS = frozenset(
@@ -146,8 +184,9 @@ _SIGNOFF = re.compile(
 # A clause ends at punctuation, but a period inside a number ("1.5") does not.
 _CLAUSE = re.compile(r"(?:[,;!?\n]|\.(?!\d))+")
 _WORD = re.compile(r"[a-z']+|\d+")
-# The digest's item line ("1. matter 2026-PI-101, ..."), quoted or not.
-_DIGEST_ITEM_LINE = re.compile(r"^[\s>]*\d{1,3}\.\s+matter\b", re.MULTILINE)
+# A list's own item line, quoted or not: the digest's ("1. matter 2026-PI-101,
+# ...") and the casework list's ("1. 2026-PI-104: ...").
+_DIGEST_ITEM_LINE = re.compile(r"^[\s>]*\d{1,3}\.\s+(?:matter\b|\d{4}-)", re.MULTILINE)
 
 
 def _own_words(text: str) -> str:
@@ -160,47 +199,88 @@ def _own_words(text: str) -> str:
     return "\n".join(kept)
 
 
-def parse_reply_items(text: object) -> dict[str, Any]:
-    """The item numbers a reader's reply confirms: ``{"all": bool, "numbers": [...]}``.
+def _no_verdicts() -> dict[str, Any]:
+    return {"approve": set(), "hold": set(), "all": False, "conflict": False, "bare_yes": False}
 
-    Pure and literal. A number counts only when it appears as a standalone
-    1..999 token in the reader's own words, above any signature, and no
-    negating word ("not", "except", "still"...) sits in the few words before it
-    in the same clause. "all" / "all of them" / "every one" / "everything"
-    select every item, unless it is a greeting ("Hi all") or the reply also
-    excludes a number ("all except 2"), which is ambiguous and reads as nothing.
-    Anything else is ignored.
 
-    A line shaped like the digest's own item line (``N. matter ...``) means the
-    quoted list leaked into the text (a quote marker the provider or
-    :mod:`shared.reply_text` did not recognize). Then the reader's words cannot
-    be told from the list, and the whole reply reads as nothing: asking costs
-    one email, acking every quoted number silences real deadlines."""
+def parse_reply_verdicts(text: object) -> dict[str, Any]:
+    """The reader's verdict per number.
+
+    Returns ``{"approve": set, "hold": set, "all": bool, "conflict": bool,
+    "bare_yes": bool}``. Pure and literal, over the reader's OWN words above any
+    signature. A number is a standalone 1..999 token. Inside one clause a hold
+    word ("leave", "keep", "not", "skip", "hold", "except", "but", "still"...)
+    holds every number after it until an approving word ("yes", "ok", "done"...)
+    turns it off; every other number approves. "all" / "yes to all" / "all of
+    them" / "every one" / "everything" select every line, and the holds come off
+    ("all except 3", "all but 2"); "yes except 3" reads the same way. A greeting
+    ("Hi all") is not "all". A number both approved and held is a CONFLICT: the
+    caller writes nothing and asks. ``bare_yes`` is a reply that says yes and
+    names nothing, which only a one-line list can resolve.
+
+    A line shaped like the list's own item line means the quoted list leaked
+    into the text (a quote marker the provider or :mod:`shared.reply_text` did
+    not recognize). Then the reader's words cannot be told from the list, and
+    the whole reply reads as nothing: asking costs one email, acting on every
+    quoted number acts on things nobody chose."""
     if not isinstance(text, str) or not text.strip():
-        return {"all": False, "numbers": []}
+        return _no_verdicts()
     words = _own_words(text).lower()
     if _DIGEST_ITEM_LINE.search(words):
-        return {"all": False, "numbers": []}
-    numbers: set[int] = set()
-    negated = False
+        return _no_verdicts()
+    approve: set[int] = set()
+    hold: set[int] = set()
+    saw_except = False
+    saw_yes = False
     for clause in _CLAUSE.split(words):
-        for match in _NUMBER.finditer(clause):
-            before = _WORD.findall(clause[: match.start()])[-_NEGATION_WINDOW:]
-            if any(word in _NEGATORS for word in before):
-                negated = True
-                continue
-            numbers.add(int(match.group(1)))
+        numbers = {match.start(1) for match in _NUMBER.finditer(clause)}
+        holding = False
+        for match in _WORD.finditer(clause):
+            token = match.group(0)
+            if token.isdigit():
+                if match.start() in numbers:
+                    (hold if holding else approve).add(int(token))
+            elif token in _HOLD_WORDS:
+                holding = True
+                saw_except = saw_except or token in _EXCEPT_WORDS
+            elif token in _APPROVE_WORDS:
+                holding = False
+                saw_yes = saw_yes or token in _YES_WORDS
     select_all = False
     for match in _ALL.finditer(words):
         before = _WORD.findall(words[: match.start()])[-1:]
-        if before and before[0] in _ALL_GREETERS | _NEGATORS:
+        if before and before[0] in _ALL_GREETERS | _HOLD_WORDS:
             continue
         select_all = True
-    if select_all and negated:
-        # "all except 2": the reader named an exception the parser will not
-        # model. Ask rather than silence the one item they held back.
+    if saw_except and saw_yes and hold and not approve:
+        # "yes except 3": yes to every line but the named exception.
+        select_all = True
+    bare_yes = not (select_all or approve or hold) and bool(_BARE_YES.match(words))
+    return {
+        "approve": approve,
+        "hold": hold,
+        "all": select_all,
+        "conflict": bool(approve & hold),
+        "bare_yes": bare_yes,
+    }
+
+
+def parse_reply_items(text: object) -> dict[str, Any]:
+    """The item numbers a reader's reply confirms: ``{"all": bool, "numbers": [...]}``.
+
+    A wrapper over :func:`parse_reply_verdicts`: the approved numbers minus the
+    held ones, or "all" with the held numbers under ``"except"`` ("all except
+    2" is ``{"all": True, "numbers": [], "except": [2]}``; the key is present
+    only when something was held). A conflicting reply reads as nothing."""
+    verdicts = parse_reply_verdicts(text)
+    if verdicts["conflict"]:
         return {"all": False, "numbers": []}
-    return {"all": select_all, "numbers": sorted(numbers)}
+    if verdicts["all"]:
+        result: dict[str, Any] = {"all": True, "numbers": []}
+        if verdicts["hold"]:
+            result["except"] = sorted(verdicts["hold"])
+        return result
+    return {"all": False, "numbers": sorted(verdicts["approve"] - verdicts["hold"])}
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +460,11 @@ def escalation_reply_ack(
     valid = sorted(digest)
     open_now = [n for n in valid if not all(_quiet(states.get(k)) for k in digest[n])]
     parsed = parse_reply_items(getattr(origin, "reply_text", ""))
-    selected = valid if parsed["all"] else parsed["numbers"]
-    if not selected:
+    held = parsed.get("except", [])
+    selected = [n for n in valid if n not in held] if parsed["all"] else parsed["numbers"]
+    unknown = [n for n in [*selected, *held] if n not in digest]
+    if not selected and not unknown:
         return _result(NOTHING_PARSED, still_open=open_now)
-    unknown = [n for n in selected if n not in digest]
     if unknown:
         # All or nothing: one number off the list writes no row at all.
         return _result(UNKNOWN_NUMBERS, still_open=open_now, unknown=unknown, valid=valid)
