@@ -106,7 +106,12 @@ SEND_ACTION_CLASSES = {
 # authored `commitment: confirm` crash-looped at boot on this validator
 # (pilot-smokeball, 2026-08-21 22:57Z): the enforce branch landed in #303 and the
 # validator had not moved with it.
-CONFIRM_NON_SEND_CLASSES_BY_FIELD = {"exposure": {"commitment"}}
+# `destructive` joined it 2026-09-25 (Captain decision): the admin-confirmed
+# calendar-event deletion (shared/act_broker.py CALL_PAYLOAD_ACTS) lists every
+# event it would remove in the [act ...] line. Any other destructive tool at
+# confirm still refuses in enforce, which withholds only a tool it has an act
+# shape for.
+CONFIRM_NON_SEND_CLASSES_BY_FIELD = {"exposure": {"commitment", "destructive"}}
 
 # Sending FROM a rostered staff member's address, on that person's emailed
 # approval (ss ADR 0089). Its only defined posture is `confirm`: the send is
@@ -601,7 +606,11 @@ def _validate_exposure_map(
             _err(
                 f"{ep}: 'confirm' is only valid for the send classes "
                 f"{sorted(SEND_ACTION_CLASSES)} (ADR 0071)"
-                + (", plus commitment in exposure (#303)" if field == "exposure" else "")
+                + (
+                    ", plus commitment and destructive in exposure (#303)"
+                    if field == "exposure"
+                    else ""
+                )
                 + f"; valid here: {allowed}",
                 errors,
             )

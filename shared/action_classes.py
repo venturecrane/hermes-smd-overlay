@@ -553,6 +553,20 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_create_folder": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_matter": ActionClass.COMMITMENT,
     "mcp_smokeball_delete_file": ActionClass.DESTRUCTIVE,
+    # Calendar-event deletion as an ADMIN-CONFIRMED ACT (ss-console, 2026-09-25).
+    # prepare_event_deletion READS the matters' live calendars and returns the
+    # manifest (event id, matter id, matter number, subject, date, as the vendor
+    # holds them). delete_events takes it and is DESTRUCTIVE: at an authored
+    # `destructive: confirm` the trust gate withholds it as an act proposal
+    # (shared/act_broker.py CALL_PAYLOAD_ACTS), the broker renders every event
+    # into the [act ...] line, and only an administrator's emailed yes replays
+    # the stored list. The connector then deletes an event only if it still
+    # matches what the administrator read. It is the ONLY destructive tool with
+    # an act shape; any other destructive tool at confirm still refuses.
+    # Distinct from the generic `calendar_delete_event` hard ban above, which
+    # governs an unconfirmed calendar capability, not this act.
+    "mcp_smokeball_prepare_event_deletion": ActionClass.READ,
+    "mcp_smokeball_delete_events": ActionClass.DESTRUCTIVE,
     # ----------------------------------------------------------------------
     # Clio MCP (oktopeak/clio-mcp v2.0.0) — the law wedge's ORIGINAL
     # practice-management system of record. It was bound as `mcp:clio-oktopeak`

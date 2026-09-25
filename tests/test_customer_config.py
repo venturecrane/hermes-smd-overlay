@@ -703,3 +703,26 @@ def test_exposure_action_class_parity_validate_translate_enum():
         ActionClass.EXTERNAL_SEND_CLIENT.value,
         ActionClass.EXTERNAL_SEND_VENDOR.value,
     }
+
+
+# ---- validate_customer_yaml: destructive: confirm (2026-09-25) --------------
+
+
+def test_validate_accepts_confirm_on_destructive_in_exposure(tmp_path):
+    """The admin-confirmed calendar-event deletion is authored as
+    `destructive: confirm`. A seat authoring it must boot."""
+    good = VALID_YAML.replace(
+        "internal_write: autonomous", "internal_write: autonomous\n        destructive: confirm"
+    )
+    assert "destructive: confirm" in good  # guard: replace landed
+    assert validate_customer_yaml(_write(tmp_path, good)) == []
+
+
+def test_validate_still_rejects_confirm_on_destructive_in_exposure_ceiling(tmp_path):
+    bad = VALID_YAML.replace(
+        "      exposure:\n",
+        "      exposure_ceiling:\n        destructive: confirm\n      exposure:\n",
+    )
+    assert "exposure_ceiling:" in bad  # guard: replace landed
+    errors = validate_customer_yaml(_write(tmp_path, bad))
+    assert any("exposure_ceiling.destructive" in e and "confirm" in e for e in errors)

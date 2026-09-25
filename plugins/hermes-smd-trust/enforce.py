@@ -339,6 +339,7 @@ def _enforce_resolved(
             label="destructive",
             draft_reason="draft_for_review skills do not originate destructive actions; report instead",
             draft_audit="refuse",
+            act_shape=act_broker.is_call_payload_act(tool_name),
         )
     if action in (
         ActionClass.EXTERNAL_SEND,
@@ -445,6 +446,7 @@ def _decide_approval_class(
     label: str,
     draft_reason: str,
     draft_audit: str,
+    act_shape: bool = False,
 ) -> EnforcementDecision:
     """COMMITMENT / DESTRUCTIVE: an exposure that does not reach autonomous never
     originates the action; an autonomous exposure still needs current-turn
@@ -459,7 +461,9 @@ def _decide_approval_class(
         return EnforcementDecision(
             allowed=False, reason=draft_reason, audit_action=draft_audit, action_class=action
         )
-    if effective == Ceiling.CONFIRM and action == ActionClass.COMMITMENT:
+    if effective == Ceiling.CONFIRM and (
+        action == ActionClass.COMMITMENT or (action == ActionClass.DESTRUCTIVE and act_shape)
+    ):
         # The confirm ceiling for a COMMITMENT (ss-console operator-own-matter).
         # A send at this ceiling waits on a Telegram "yes"; a commitment waits on
         # an Operator administrator's written instruction, which is authority they
@@ -470,10 +474,11 @@ def _decide_approval_class(
         # what the send confirm ceiling does, withhold rather than refuse, so the
         # caller can start the round trip instead of ending the turn.
         #
-        # DESTRUCTIVE is deliberately excluded: it falls through to the refusal
-        # below, so an authored `destructive: confirm` (which the ss-console
-        # validator does not accept in the first place) can never become an
-        # approvable act by this route.
+        # DESTRUCTIVE joins ONLY for a tool with a call-payload act shape
+        # (act_broker.CALL_PAYLOAD_ACTS: today, deleting a set of calendar
+        # events, every one of which the [act ...] line lists). Any other
+        # destructive tool at an authored `destructive: confirm` falls through
+        # to the refusal below and can never become an approvable act.
         if approved:
             return _allow(f"{label} confirmed by an administrator's current-turn approval", action)
         return _await_approval(
@@ -1097,7 +1102,7 @@ _ACT_ALREADY_OPEN_REFUSAL = (
 )
 
 _ACT_WITHHELD_INSTRUCTION = (
-    "Withheld pending the administrator's confirmation. Nothing was created. Put "
+    "Withheld pending the administrator's confirmation. Nothing was done. Put "
     "this line in your reply exactly as written, then end the turn: {readback}"
 )
 
@@ -1183,7 +1188,14 @@ def _resolve_authored_act(tool_name: str) -> dict | None:
     return payload
 
 
-def _propose_commitment_act(tool_name: str, session_id: str) -> dict:
+_ACT_NO_LIST_REFUSAL = (
+    "Refused: mcp_smokeball_delete_events needs the events list that "
+    "mcp_smokeball_prepare_event_deletion returned. Call that first for the "
+    "matters, then call this with its events unchanged. Nothing was deleted."
+)
+
+
+def _propose_commitment_act(tool_name: str, session_id: str, args: dict | None = None) -> dict:
     """Start the round trip for a withheld commitment. Always returns a block.
 
     Order is load-bearing. The origin gate runs FIRST, so a turn that may not
@@ -1199,9 +1211,17 @@ def _propose_commitment_act(tool_name: str, session_id: str) -> dict:
     if PENDING_SEND.peek() is not None or PENDING_ACTS.has_open(session_id):
         logger.info("trust: %s not proposed; another approval is already outstanding", tool_name)
         return {"action": "block", "message": _ACT_ALREADY_OPEN_REFUSAL}
-    payload = _resolve_authored_act(tool_name)
-    if payload is None:
-        return {"action": "block", "message": _ACT_NOT_AUTHORED_REFUSAL}
+    if act_broker.is_call_payload_act(tool_name):
+        # The payload is the withheld call's own list; the broker validates every
+        # entry and renders the line, and the connector re-verifies each against
+        # the vendor before deleting (act_broker.CALL_PAYLOAD_ACTS).
+        payload = act_broker.call_payload(tool_name, args)
+        if payload is None:
+            return {"action": "block", "message": _ACT_NO_LIST_REFUSAL}
+    else:
+        payload = _resolve_authored_act(tool_name)
+        if payload is None:
+            return {"action": "block", "message": _ACT_NOT_AUTHORED_REFUSAL}
     try:
         response = act_broker.propose(
             tool=tool_name,
@@ -1454,7 +1474,12 @@ def evaluate_tool_call(
         # ceiling decides and before anything downstream inspects them. A model
         # that re-composes the call with a different matter number on the
         # confirming turn changes nothing.
-        is_commitment = effective_action is ActionClass.COMMITMENT
+        # "commitment" here means any act this channel proposes: every
+        # COMMITMENT, plus a DESTRUCTIVE tool with a call-payload act shape.
+        is_commitment = effective_action is ActionClass.COMMITMENT or (
+            effective_action is ActionClass.DESTRUCTIVE
+            and act_broker.is_call_payload_act(tool_name)
+        )
         confirmed_act = (
             PENDING_ACTS.peek_confirmed(session_id, tool_name) if is_commitment else None
         )
@@ -1570,7 +1595,7 @@ def evaluate_tool_call(
     # and deliberately not on the confirmed pass (``confirmed_act`` is None only
     # when nothing has been approved yet).
     if is_commitment and confirmed_act is None and decision.audit_action == "await_approval":
-        return _propose_commitment_act(tool_name, session_id)
+        return _propose_commitment_act(tool_name, session_id, args)
 
     # ---- Outbound matter identity (ss#2167) --------------------------------
     # Deliberately OUTSIDE the ``decision.allowed`` guard below. On a seat where

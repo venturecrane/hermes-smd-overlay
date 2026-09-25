@@ -1197,6 +1197,19 @@ _ACTION_CEILING_SOUL_LINE: dict[tuple[str, str], str] = {
         "When the administrator answers that line, call the same tool again with "
         "the same values and report what the system recorded"
     ),
+    # Deleting calendar events (the only destructive act shape). Two calls, so
+    # the list the administrator reads is the vendor's, not the model's words.
+    ("destructive", "confirm"): (
+        "only calendar events can be deleted, and only this way: when an "
+        "Operator administrator asks, CALL mcp_smokeball_prepare_event_deletion "
+        "for the matters, then CALL mcp_smokeball_delete_events with the events "
+        "it returned, unchanged. The gate withholds the delete and hands you back "
+        'a line beginning "[act " listing every event; put that line in your '
+        "reply verbatim and end the turn. When the administrator answers that "
+        "line, call mcp_smokeball_delete_events again and report what was "
+        "deleted, what is pending, and what was skipped and why. Never delete "
+        "anything else"
+    ),
 }
 
 

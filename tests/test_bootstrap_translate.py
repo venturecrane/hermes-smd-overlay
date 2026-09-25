@@ -2052,3 +2052,25 @@ def test_commitment_confirm_renders_the_call_first_line_not_the_send_line(tmp_pa
         ln for ln in soul2.splitlines() if ln.startswith("- **external_send**: confirm")
     )
     assert "request explicit approval in the same turn" in send_line
+
+
+def test_destructive_confirm_renders_the_prepare_then_delete_line(tmp_path):
+    """The only destructive act shape is the calendar-event deletion. At
+    `destructive: confirm` the model is told the two calls, in order, and to
+    relay the gate's [act line verbatim, not to ask in its own words."""
+    with_destructive = VALID_YAML.replace(
+        "internal_write: autonomous", "internal_write: autonomous\n        destructive: confirm"
+    )
+    assert "destructive: confirm" in with_destructive  # guard: replace landed
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, with_destructive)
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    soul = (hermes_home / "profiles" / "marcus" / "SOUL.md").read_text()
+    line = next(ln for ln in soul.splitlines() if ln.startswith("- **destructive**: confirm"))
+    assert "mcp_smokeball_prepare_event_deletion" in line
+    assert "mcp_smokeball_delete_events" in line
+    assert '"[act ' in line
+    assert "request explicit approval in the same turn" not in line
