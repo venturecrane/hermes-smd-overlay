@@ -29,6 +29,7 @@ _MAX_RECIPIENTS = 20
 _MAX_ITEMS = 30
 _MAX_CLOSES = 30
 _MAX_DONE_SINCE = 20
+_MAX_MEMOS = 50
 _MAX_SUBJECT = 500
 _MAX_LEAD = 600
 _MAX_LINE = 240
@@ -267,7 +268,11 @@ def _valid_done_since(value: object) -> bool:
 
 def close_payload(close: dict) -> dict:
     """The ``closed_by_record`` payload for one envelope close: the record shows
-    the task done, and the evidence atoms say what shows it."""
+    the task done, and the evidence atoms say what shows it. An envelope may
+    carry that payload whole (``close["payload"]``); it is used verbatim and the
+    ledger's own rules still judge it."""
+    if isinstance(close.get("payload"), dict):
+        return dict(close["payload"])
     payload = {
         "action": "close",
         "class": "done",
@@ -301,8 +306,24 @@ def _valid_close(close: object) -> bool:
         and _id(close.get("staff_id"))
         and _keyed(close.get("matter_id"), "task", close.get("task_id"), close.get("item_key"))
         and _text(close.get("line"), _MAX_SHORT_LINE)
-        and isinstance(close.get("evidence"), list)
+        and (isinstance(close.get("evidence"), list) or isinstance(close.get("payload"), dict))
         and _ledger_accepts("closed_by_record", close_payload(close), "task")
+        and close_payload(close).get("staff_id") == close.get("staff_id")
+    )
+
+
+def _valid_memos(value: object) -> bool:
+    """Memos the turn files verbatim (Job 3): the overlay writes none itself."""
+    if value is None:
+        return True
+    if not isinstance(value, list) or len(value) > _MAX_MEMOS:
+        return False
+    return all(
+        isinstance(memo, dict)
+        and set(memo) == {"matter_id", "text"}
+        and _id(memo.get("matter_id"))
+        and _text(memo.get("text"), _MAX_LEAD)
+        for memo in value
     )
 
 
@@ -336,6 +357,7 @@ def valid_casework_envelope(payload: dict) -> bool:
         isinstance(messages, list)
         and len(messages) <= _MAX_MESSAGES
         and all(_valid_message(m) for m in messages)
+        and _valid_memos(payload.get("memos"))
     )
 
 

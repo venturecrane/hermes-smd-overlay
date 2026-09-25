@@ -854,3 +854,39 @@ def test_no_rendered_text_carries_an_em_dash(tmp_path, rows):
 
 def test_the_published_sender_is_the_default_dispatch():
     assert casework.casework_finish.__kwdefaults__["dispatch"] is send_dispatch.dispatch
+
+
+def test_memos_come_back_to_the_turn_once_sent(tmp_path, rows):
+    memos = [
+        {"matter_id": "m-104", "text": "Closed the July intake task: proof of service on file."}
+    ]
+    envelope = _review_envelope(memos=memos)
+    envelope["messages"][0]["closes"] = []
+    _write_envelope(tmp_path, "casework", envelope, "task-list-keeper")
+    out = _finish(tmp_path, [], [])
+    assert out["status"] == "sent" and out["memos"] == memos
+    assert "create_memo" in out["note"]
+
+
+def test_a_malformed_memo_refuses_the_envelope(tmp_path, rows):
+    envelope = _review_envelope(memos=[{"matter_id": "m-104", "text": "x", "extra": 1}])
+    _write_envelope(tmp_path, "casework", envelope, "task-list-keeper")
+    assert _finish(tmp_path, [], [])["status"] == "no_envelope"
+
+
+def test_a_close_may_carry_its_payload_whole(tmp_path, rows):
+    envelope = _review_envelope()
+    close = envelope["messages"][0]["closes"][0]
+    evidence = close.pop("evidence")
+    close["payload"] = {
+        "action": "close",
+        "class": "done",
+        "staff_id": "staff-atty",
+        "to_staff_id": None,
+        "reason": "document_on_file",
+        "evidence": evidence,
+    }
+    _write_envelope(tmp_path, "casework", envelope, "task-list-keeper")
+    broker: list = []
+    assert _finish(tmp_path, [], broker)["status"] == "writes_queued"
+    assert broker[0]["payload"] == close["payload"]

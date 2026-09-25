@@ -289,7 +289,10 @@ def _send_reviews(
             f"{len(sent) - delivered} of {len(sent)} review message(s) could not be sent. "
             "Report that in one plain line and send nothing else."
         )
-    return _finish_result("sent", note, messages=sent)
+    memos = list(state["envelope"].get("memos") or [])
+    if memos:
+        note += " Then file each memo in memos with create_memo, verbatim, on its matter."
+    return _finish_result("sent", note, messages=sent, memos=memos)
 
 
 def _write_raises(

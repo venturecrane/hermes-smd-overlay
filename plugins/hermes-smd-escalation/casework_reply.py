@@ -181,6 +181,22 @@ def _ask(verdicts: dict, approve: set[int], holds: set[int], valid: list[int]) -
     return None
 
 
+def _start_steps(
+    append: Callable[[dict], Any], group: list[dict], session_id: str, number: int, thread: str
+) -> None:
+    """An approved step line starts now: this turn runs the step's skill, so the
+    ledger records ``step_started`` on the same line (thread and number). A step
+    at level surfaces is never offered, so it never starts here either."""
+    for row in group:
+        step = _payload(row).get("step")
+        if _payload(row).get("action") != "step" or not isinstance(step, dict):
+            continue
+        if step.get("level") in ("prepares", "handles"):
+            _append(
+                append, _row_event("step_started", row, session_id, n=number, thread_ref=thread)
+            )
+
+
 def _act_on_approval(state: dict, number: int, group: list[dict]) -> None:
     for row in group:
         payload = _payload(row)
@@ -298,6 +314,7 @@ def reply_verdicts(
         elif verdict == HELD:
             state["left"].append(number)
         else:
+            _start_steps(append, group, session_id, number, thread_ref)
             _act_on_approval(state, number, group)
 
     if state["writes"]:

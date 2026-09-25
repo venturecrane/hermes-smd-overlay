@@ -362,4 +362,6 @@ def test_a_brief_and_its_answer_are_rows_the_broker_accepts(tmp_path, broker):
     assert broker.refused == []
     assert out["confirmation_text"] == "Got it. Starting on 2 now."
     assert [s["catalog_id"] for s in out["steps_to_run"]] == ["records_refresh:reyes"]
-    assert [r["event"] for r in broker.rows] == ["briefed", "briefed", "approved"]
+    assert [r["event"] for r in broker.rows] == ["briefed", "briefed", "approved", "step_started"]
+    started = broker.rows[-1]
+    assert (started["n"], started["thread_ref"]) == (2, THREAD)

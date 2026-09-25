@@ -331,14 +331,41 @@ class CaseworkActs:
                     session_id, act, WRITE_FAILED, reason="the update could not be tied to its call"
                 )
             else:
-                self._record(session_id, act, COMPLETED, audit_ref=call_id)
+                # The broker's witness matches this row's session_id against the
+                # call's TOOL_CALL_COMPLETED audit row, and the audit plugin
+                # stamps the RAW post_tool_call session id there
+                # (plugins/hermes-smd-audit/__init__.py on_post_tool_call ->
+                # emit.py ``metadata["session_id"]``). So the completed row
+                # carries that same raw id, not the resolved key of the queue.
+                self._record(
+                    session_id,
+                    act,
+                    COMPLETED,
+                    audit_ref=call_id,
+                    row_session=str(kwargs.get("session_id") or ""),
+                )
         except Exception:  # noqa: BLE001 — a hook must never raise
             logger.warning("casework_acts: post-tool outcome not recorded", exc_info=True)
 
     def _record(
-        self, session_id: str, act: TaskWrite, status: str, *, audit_ref: str = "", reason: str = ""
+        self,
+        session_id: str,
+        act: TaskWrite,
+        status: str,
+        *,
+        audit_ref: str = "",
+        reason: str = "",
+        row_session: str | None = None,
     ) -> None:
-        event = outcome_event(act, status, session_id, tool_call_id=audit_ref, error=reason)
+        """``session_id`` keys the queue; ``row_session`` (when given) is the id
+        the row itself carries."""
+        event = outcome_event(
+            act,
+            status,
+            session_id if row_session is None else row_session,
+            tool_call_id=audit_ref,
+            error=reason,
+        )
         with self._lock:
             queue = self._queues.get(session_id)
             if queue is not None:
