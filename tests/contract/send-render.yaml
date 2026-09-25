@@ -65,6 +65,15 @@
 #                                   # html) -- absence means "text is still the
 #                                   # authored bytes", not "unknown".
 #     body_variant:         full | skeleton
+#     dispatch_ref:         <uuid4 hex>  # one per dispatch entry, full and
+#                                   # skeleton alike (shared/digest_reply_ref.py).
+#                                   # Also stamped on each fired/chased append
+#                                   # written after the full send, with the
+#                                   # body's item number `n` and the ack
+#                                   # `snooze_days` when authored; the broker joins
+#                                   # those raises to this row on session_id +
+#                                   # dispatch_ref and stamps their thread_ref
+#                                   # (plain-word digest replies).
 #     message_id / audit_row_token  # the broker's own join keys: the vendor id
 #                                   # and the ULID it stamped on the message as
 #                                   # X-SMD-Audit-Row (ss#2499). The identity

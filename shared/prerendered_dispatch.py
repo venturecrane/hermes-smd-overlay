@@ -79,7 +79,14 @@ import os
 import socket
 from collections import OrderedDict
 
-from shared import cron_attribution, escalation_ledger, pre_run_handoff, provenance, send_dispatch
+from shared import (
+    cron_attribution,
+    digest_reply_ref,
+    escalation_ledger,
+    pre_run_handoff,
+    provenance,
+    send_dispatch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +175,8 @@ def _valid_dispatch(entry: object) -> bool:
         if append.get("event") not in _ALLOWED_EVENTS:
             return False
         if not isinstance(append.get("item_key"), str) or not append["item_key"]:
+            return False
+        if not digest_reply_ref.append_digest_fields_ok(append):
             return False
     return True
 
@@ -268,10 +277,15 @@ def _broker_request(payload: dict) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 
-def _write_appends(skill: str, appends: list, session_id: str) -> tuple[int, int]:
+def _write_appends(
+    skill: str, appends: list, session_id: str, dispatch_ref: str = ""
+) -> tuple[int, int]:
     """Append each event through the broker's validated verb. Returns
     (written, attempted). A refused or failed append is logged and skipped —
-    the item re-fires next run; never a raised exception into the hook."""
+    the item re-fires next run; never a raised exception into the hook.
+    Raises carry the dispatch's ``dispatch_ref``, the body's item number ``n``
+    and the ack ``snooze_days`` (:mod:`shared.digest_reply_ref`) so a plain-word
+    reply resolves and its confirmation can say how long an item stays quiet."""
     written = 0
     attempted = 0
     for entry in appends[:_MAX_APPENDS]:
@@ -288,6 +302,7 @@ def _write_appends(skill: str, appends: list, session_id: str) -> tuple[int, int
             # The witness key: the broker joins the raise to the send row it
             # just wrote on this same resolved session id (ss#2603).
             event["session_id"] = session_id
+            digest_reply_ref.stamp_raise(event, entry, dispatch_ref)
             response = _broker_request({"action": "escalation_event_append", "event": event})
             if isinstance(response, dict) and response.get("ok"):
                 written += 1
@@ -382,7 +397,10 @@ def dispatch_prerendered(session_id: str) -> str | None:
             # Deploy order: the broker's allowlist is a SILENT closed list, so
             # the ss-console half lands first; on an older broker this key is
             # dropped without error and the row is what it was.
-            audit_base = {"skill_name": routine.skill}
+            # One ref per dispatch: the broker joins this send's raises to its
+            # CONFIRM row on it and stamps their thread_ref (plain-word replies).
+            dispatch_ref = digest_reply_ref.mint_dispatch_ref()
+            audit_base = {"skill_name": routine.skill, "dispatch_ref": dispatch_ref}
             if isinstance(entry.get("routing_leg"), str) and entry["routing_leg"]:
                 audit_base["routing_leg"] = entry["routing_leg"]
             result = send_dispatch.dispatch(
@@ -397,7 +415,7 @@ def dispatch_prerendered(session_id: str) -> str | None:
             who = _recipients_phrase(result.recipients or tuple(recipients))
             if result.sent:
                 written, attempted = _write_appends(
-                    routine.skill, entry.get("appends") or [], resolved
+                    routine.skill, entry.get("appends") or [], resolved, dispatch_ref
                 )
                 appended_total += written
                 note = (

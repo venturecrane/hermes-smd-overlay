@@ -251,3 +251,93 @@ def test_normalizer_never_raises_on_weird_payload() -> None:
 def test_accepted_providers_match_registry() -> None:
     # The closed provider vocabulary and the normalizer registry stay in lock-step.
     assert set(im.NORMALIZERS) == im.ACCEPTED_PROVIDERS
+
+
+# ---------------------------------------------------------------------------
+# Plain-word digest replies: reply_text + auto_submitted
+# ---------------------------------------------------------------------------
+
+
+def _agentmail(**fields) -> dict:
+    return {
+        "data": {
+            "inbox_id": "inbox_abc",
+            "message_id": "msg_1",
+            "thread_id": "thr_1",
+            "from": "dana@firm.example",
+            "text": "got it on 1\n\nOn Thu, the Operator wrote:\n> 1. matter A\n> 2. matter B",
+            **fields,
+        }
+    }
+
+
+def test_agentmail_reply_text_is_extracted_text_only() -> None:
+    dto = im.normalize_inbound("agentmail", _agentmail(extracted_text="got it on 1"))
+    assert dto.reply_text == "got it on 1"
+    assert dto.auto_submitted is False
+
+
+def test_agentmail_reply_text_never_falls_back_to_the_quoted_body() -> None:
+    """No extracted_text means no reader words, not the body with its quote."""
+    dto = im.normalize_inbound("agentmail", _agentmail())
+    assert dto.reply_text == ""
+
+
+def test_agentmail_reply_text_must_be_a_string() -> None:
+    dto = im.normalize_inbound("agentmail", _agentmail(extracted_text=["1"]))
+    assert dto.reply_text == ""
+
+
+def test_agentmail_auto_submitted_header() -> None:
+    for headers, expected in [
+        ({"Auto-Submitted": "auto-replied"}, True),
+        ({"auto-submitted": "auto-generated"}, True),
+        ({"Auto-Submitted": "no"}, False),
+        ({"Auto-Submitted": " NO "}, False),
+        ({"Auto-Submitted": ""}, False),
+        ({"Subject": "hi"}, False),
+        ([{"name": "Auto-Submitted", "value": "auto-replied"}], True),
+        ("Auto-Submitted: auto-replied", False),  # unparseable shape: no verdict
+        (None, False),
+    ]:
+        dto = im.normalize_inbound("agentmail", _agentmail(headers=headers))
+        assert dto.auto_submitted is expected, headers
+
+
+def test_reply_fields_stay_out_of_the_directive_projection_and_repr() -> None:
+    dto = im.normalize_inbound(
+        "agentmail",
+        _agentmail(extracted_text="1", headers={"Auto-Submitted": "auto-replied"}),
+    )
+    assert "reply_text" not in dto.to_dict()
+    assert "auto_submitted" not in dto.to_dict()
+    assert "reply_text=" not in repr(dto)
+
+
+def test_msgraph_reply_fields_accepted_and_strict() -> None:
+    base = {"provider": "msgraph", "message_id": "g1", "from_addr": "dana@firm.example"}
+    dto = im.normalize_inbound("msgraph", {**base, "reply_text": "all", "auto_submitted": True})
+    assert dto.reply_text == "all"
+    assert dto.auto_submitted is True
+    loose = im.normalize_inbound("msgraph", {**base, "reply_text": 3, "auto_submitted": "yes"})
+    assert loose.reply_text == ""
+    assert loose.auto_submitted is False
+    bare = im.normalize_inbound("msgraph", base)
+    assert bare.reply_text == ""
+    assert bare.auto_submitted is False
+
+
+def test_router_origin_carries_the_reply_fields() -> None:
+    from tests.conftest import load_plugin
+
+    router = load_plugin("hermes-smd-webhook-router")
+    dto = im.normalize_inbound(
+        "agentmail",
+        _agentmail(extracted_text="got it on 1", headers={"Auto-Submitted": "auto-replied"}),
+    )
+    origin = router._origin_from_dto(dto, content="x")
+    assert origin.reply_text == "got it on 1"
+    assert origin.auto_submitted is True
+    assert origin.conversation_id == "thr_1"
+    # The reader's words never reach a log line that prints the origin.
+    assert "got it on 1" not in repr(origin)

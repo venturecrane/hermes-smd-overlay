@@ -742,7 +742,7 @@ def test_state_missing_file_is_empty_not_error(escalation, monkeypatch, tmp_path
     assert out == {"event_count": 0, "item_count": 0, "items": {}}
 
 
-def test_register_registers_both_tools(escalation):
+def test_register_registers_all_three_tools(escalation):
     plugin, _ = escalation
     registered: list[dict] = []
 
@@ -752,7 +752,7 @@ def test_register_registers_both_tools(escalation):
 
     plugin.register(Ctx())
     names = {r["name"] for r in registered}
-    assert names == {"escalation_append", "escalation_state"}
+    assert names == {"escalation_append", "escalation_state", "escalation_reply_ack"}
     for r in registered:
         assert "parameters" in r["schema"]  # function shape, not bare JSON-schema
 
@@ -761,6 +761,8 @@ def test_tools_are_mapped_in_action_class_registry():
     assert classify_tool("escalation_append").action_class is ActionClass.INTERNAL_WRITE
     assert classify_tool("escalation_state").action_class is ActionClass.READ
     assert classify_tool("escalation_append").unmapped is False
+    assert classify_tool("escalation_reply_ack").action_class is ActionClass.INTERNAL_WRITE
+    assert classify_tool("escalation_reply_ack").unmapped is False
 
 
 def test_vendored_ledger_twin_matches_reference_shapes():

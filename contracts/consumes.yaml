@@ -384,7 +384,7 @@ vars:
     stage: agent
     requirement: optional
     consumed_by: [escalation]
-    note: "override for the escalation-ledger twin path read by escalation_state (plugins/hermes-smd-escalation); unset => the Machine default /opt/data/audit/escalation-ledger.jsonl (shared/escalation_ledger.DEFAULT_LEDGER_PATH). Tests set it to a tmp file."
+    note: "override for the escalation-ledger twin path read by escalation_state and escalation_reply_ack (plugins/hermes-smd-escalation); unset => the Machine default /opt/data/audit/escalation-ledger.jsonl (shared/escalation_ledger.DEFAULT_LEDGER_PATH). Tests set it to a tmp file."
   R2_ENDPOINT_URL:
     discovery: static
     stage: agent
