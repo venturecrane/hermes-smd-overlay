@@ -91,6 +91,12 @@ def run_sweep_once(
     blocked: set[str] = set()
 
     for row in store.iter_held():
+        # Who the reply is DELIVERED to: the stored ``reply_to`` for a device
+        # redirect, else the sender (every row written before the column
+        # existed). The limiter, the per-recipient ordering and the audit row all
+        # key on it, exactly as the live path does.
+        recipient = row.recipient
+        device = _device_metadata(row)
         # TTL first: an expired reply is never sent, even if a slot is free.
         if now - row.created_at >= policy.held_ttl_s:
             if store.claim(row.id):
@@ -99,7 +105,8 @@ def run_sweep_once(
                     action_type="REPLY_FAILED",
                     metadata={
                         "reason": "hold_expired",
-                        "recipient": row.sender,
+                        "recipient": recipient,
+                        **device,
                         "message_id": row.message_id,
                         "adapter": row.adapter,
                         "held_reason": row.hold_reason,
@@ -109,7 +116,7 @@ def run_sweep_once(
                 if notify_fn is not None:
                     notify_fn(
                         reason="hold_expired",
-                        sender=row.sender,
+                        sender=recipient,
                         sender_class=row.sender_class,
                         adapter=row.adapter,
                         message_id=row.message_id,
@@ -118,19 +125,19 @@ def run_sweep_once(
                 expired += 1
             continue
 
-        if row.sender in blocked:
+        if recipient in blocked:
             skipped += 1
             continue
 
-        internal = bool(internal_senders(row.sender)) if internal_senders else False
-        decision = limiter.check(row.sender, internal=internal, policy=policy)
+        internal = bool(internal_senders(recipient)) if internal_senders else False
+        decision = limiter.check(recipient, internal=internal, policy=policy)
         if not decision.allowed:
             reason = decision.reason or ""
             if reason in ("rate_limited_global", "rate_limited_backstop"):
                 # Bounds everyone — nothing else in this pass can release.
                 skipped += 1
                 break
-            blocked.add(row.sender)
+            blocked.add(recipient)
             skipped += 1
             continue
 
@@ -145,7 +152,8 @@ def run_sweep_once(
                 action_type="REPLY_FAILED",
                 metadata={
                     "reason": str(exc)[:500],
-                    "recipient": row.sender,
+                    "recipient": recipient,
+                    **device,
                     "message_id": row.message_id,
                     "adapter": row.adapter,
                     "released_from_hold": True,
@@ -158,7 +166,8 @@ def run_sweep_once(
         emit_fn(
             action_type="REPLY_SENT",
             metadata={
-                "recipient": row.sender,
+                "recipient": recipient,
+                **device,
                 "recipient_class": row.sender_class or "unclassified",
                 "adapter": row.adapter,
                 "in_reply_to": row.message_id,
@@ -176,6 +185,17 @@ def run_sweep_once(
         released += 1
 
     return SweepResult(released=released, expired=expired, skipped=skipped, failed=failed)
+
+
+def _device_metadata(row: held_store_mod.HeldReply) -> dict[str, Any]:
+    """The redirect half of a released row: which device wrote in, or nothing.
+
+    Present only when the row was redirected (``reply_to`` set), so a released
+    ordinary reply writes exactly the row it wrote before device senders existed.
+    """
+    if not row.reply_to:
+        return {}
+    return {"device_sender": row.sender, "redirected_from_device": True}
 
 
 def start_sweeper_thread(

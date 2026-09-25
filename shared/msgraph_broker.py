@@ -126,8 +126,17 @@ def send_reply(
     html: str = "",
     session_id: str = "",
     matter_ref: str | None = None,
+    to: str | None = None,
 ) -> str:
     """Reply in-thread to an inbound Graph message.
+
+    ``to`` redirects the reply when the source message came from an authored
+    DEVICE (``scope.device_senders``: an office scanner nobody reads). It is a
+    request, not a grant: the broker re-fetches the source message, and sends
+    to ``to`` only when the seat's own customer.yaml names it as that verified
+    sender's ``replies_to``; any other value is refused. Omitted (the default,
+    and every reply that is not to a device) the wire payload is exactly what
+    it was before this parameter existed.
 
     The recipient is structural — Graph derives it from the source message — and
     the broker independently re-fetches that message to check its sender against
@@ -145,6 +154,8 @@ def send_reply(
     payload: dict[str, Any] = {"message_id": message_id, "comment": comment}
     if html.strip():
         payload["html"] = html
+    if to and to.strip():
+        payload["to"] = to.strip()
     return _vendor_id(_call("msgraph_reply", payload, session_id=session_id, matter_ref=matter_ref))
 
 

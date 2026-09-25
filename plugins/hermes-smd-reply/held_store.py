@@ -68,9 +68,16 @@ CREATE TABLE IF NOT EXISTS held_replies (
   hold_reason TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'held',
   released_at REAL,
-  last_error TEXT
+  last_error TEXT,
+  reply_to TEXT NOT NULL DEFAULT ''
 )
 """
+
+# Added after the table shipped to seats: a volume created before it has no such
+# column, and CREATE TABLE IF NOT EXISTS does not add one. The column reads empty
+# on every older row, which means "reply to the sender", the only thing an older
+# row ever meant.
+_ADD_REPLY_TO_SQL = "ALTER TABLE held_replies ADD COLUMN reply_to TEXT NOT NULL DEFAULT ''"
 
 _CREATE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_held_replies_status ON held_replies(status, id)"
 _CREATE_SENDER_INDEX_SQL = (
@@ -93,6 +100,15 @@ class HeldReply:
     send_html: str
     body_digest: str
     hold_reason: str
+    #: The person the reply goes to when ``sender`` is an authored device
+    #: (``scope.device_senders``); empty for every other reply and for every row
+    #: written before this field existed. Read it through :attr:`recipient`.
+    reply_to: str = ""
+
+    @property
+    def recipient(self) -> str:
+        """Who this reply is delivered to: ``reply_to`` when set, else ``sender``."""
+        return self.reply_to or self.sender
 
 
 class HeldReplyStore:
@@ -123,6 +139,9 @@ class HeldReplyStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute(_CREATE_TABLE_SQL)
+            columns = {str(r[1]) for r in conn.execute("PRAGMA table_info(held_replies)")}
+            if "reply_to" not in columns:
+                conn.execute(_ADD_REPLY_TO_SQL)
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_SENDER_INDEX_SQL)
             conn.commit()
@@ -148,13 +167,19 @@ class HeldReplyStore:
         send_html: str,
         body_digest: str,
         hold_reason: str,
+        reply_to: str = "",
     ) -> int:
-        """Persist one held reply. Returns the row id."""
+        """Persist one held reply. Returns the row id.
+
+        ``reply_to`` is stored only when it differs from ``sender`` (a device
+        redirect), so an ordinary row is identical to one written before the
+        column existed.
+        """
         conn = self._connect()
         cur = conn.execute(
             "INSERT INTO held_replies (created_at, sender, sender_class, adapter, inbox_id, "
-            "message_id, send_text, send_html, body_digest, hold_reason, status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "message_id, send_text, send_html, body_digest, hold_reason, status, reply_to) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 self._clock(),
                 sender,
@@ -167,6 +192,7 @@ class HeldReplyStore:
                 body_digest,
                 hold_reason,
                 STATUS_HELD,
+                reply_to if reply_to and reply_to != sender else "",
             ),
         )
         conn.commit()
@@ -248,7 +274,7 @@ class HeldReplyStore:
         conn = self._connect()
         rows = conn.execute(
             "SELECT id, created_at, sender, sender_class, adapter, inbox_id, message_id, "
-            "send_text, send_html, body_digest, hold_reason FROM held_replies "
+            "send_text, send_html, body_digest, hold_reason, reply_to FROM held_replies "
             "WHERE status=? ORDER BY id ASC LIMIT ?",
             (STATUS_HELD, limit),
         ).fetchall()
@@ -265,12 +291,18 @@ class HeldReplyStore:
                 send_html=str(r[8] or ""),
                 body_digest=str(r[9] or ""),
                 hold_reason=str(r[10]),
+                reply_to=str(r[11] or ""),
             )
             for r in rows
         ]
 
     def has_pending(self, sender: str) -> bool:
-        """True iff this sender already has a reply waiting to be released.
+        """True iff a reply to this address is already waiting to be released.
+
+        Keyed on who the reply is DELIVERED to (``reply_to`` when a device
+        redirect stored one, else ``sender``), the key the rate limiter uses, so
+        the ordering guard and the limiter agree about whose queue a redirected
+        reply waits in.
 
         The live send path consults this BEFORE the rate check: without it, a
         later reply whose window has cleared would overtake an earlier held one
@@ -280,7 +312,8 @@ class HeldReplyStore:
         """
         conn = self._connect()
         row = conn.execute(
-            "SELECT 1 FROM held_replies WHERE sender=? AND status IN (?, ?) LIMIT 1",
+            "SELECT 1 FROM held_replies WHERE (CASE WHEN reply_to != '' THEN reply_to "
+            "ELSE sender END)=? AND status IN (?, ?) LIMIT 1",
             (sender, STATUS_HELD, STATUS_SENDING),
         ).fetchone()
         return row is not None

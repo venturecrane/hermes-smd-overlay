@@ -80,8 +80,15 @@ def draft_recipients(args: Any) -> set[str]:
     return {addr for addr in (_normalize_addr(x) for x in items) if addr}
 
 
-def recipient_locked(args: Any, recorded_sender: str) -> bool:
+def recipient_locked(args: Any, recorded_sender: str, reply_to: str = "") -> bool:
     """True iff the draft addresses EXACTLY the recorded inbound sender.
+
+    ``reply_to`` is the one widening, and it is not the model's: when the
+    sender is an authored device (``scope.device_senders``), the reply lane
+    answers the person the config names instead, so a draft may address the
+    device, that person, or both. The set is still closed. Any address outside
+    ``{recorded_sender, reply_to}`` fails the lock, and the transport sends to
+    ``reply_to`` alone whichever of the two the draft named.
 
     The lock is the security crux: the reply can only go back to whoever emailed
     in. It holds iff the draft's normalized recipient set is exactly the single
@@ -94,7 +101,11 @@ def recipient_locked(args: Any, recorded_sender: str) -> bool:
     recorded = (recorded_sender or "").strip().lower()
     if not recorded:
         return False
-    return draft_recipients(args) == {recorded}
+    named = draft_recipients(args)
+    target = (reply_to or "").strip().lower()
+    if not target or target == recorded:
+        return named == {recorded}
+    return bool(named) and named <= {recorded, target}
 
 
 def draft_body(args: Any) -> tuple[str, str, str]:

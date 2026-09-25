@@ -203,8 +203,15 @@ def _send_msgraph_reply(
     *,
     session_id: str = "",
     matter_ref: str | None = None,
+    to: str | None = None,
 ) -> str:
     """Reply in-thread via Microsoft Graph, keyed on the recorded message id.
+
+    ``to`` is set only for a DEVICE redirect (``scope.device_senders``): the
+    source message came from a scanner nobody reads, and the reply goes to the
+    person the seat's config names for it. The broker re-checks that pairing
+    against the source message it fetches itself, so this process asking for a
+    different ``to`` gets a refusal, not a send.
 
     Graph derives the recipients from the original message (POST
     /messages/{id}/reply), so the reply is structurally locked to the inbound
@@ -259,6 +266,9 @@ def _send_msgraph_reply(
             html=body_html,
             session_id=session_id,
             matter_ref=matter_ref,
+            # Passed only when set, so a reply that is not a redirect makes
+            # exactly the call it made before device senders existed.
+            **({"to": to} if to else {}),
         )
     except msgraph_broker.BrokerError as exc:
         raise relay.RelaySendError(f"broker refused the msgraph reply: {exc}") from exc
@@ -373,12 +383,14 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
     # body cites pass it; everyone else lets ``_emit_reply_event`` resolve the
     # session's own (ss-console#2497).
     matter_ref = extra.pop("_matter_ref", None)
+    recipient, device = _reply_recipient(origin)
     _emit_reply_event(
         action_type="REPLY_HELD",
         metadata={
             "reason": reason,
-            "recipient": origin.sender_address,
+            "recipient": recipient,
             "message_id": origin.message_id,
+            **device,
             **extra,
         },
         matter_ref=matter_ref,
@@ -394,11 +406,32 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
         _HOLD_NOTICES.record(
             tool_call_id=getattr(_CURRENT_CALL, "tool_call_id", "") or "",
             reason=reason,
-            recipient=origin.sender_address,
+            recipient=recipient,
             message_id=origin.message_id,
         )
     except Exception as exc:  # noqa: BLE001 — telling must never break the hook
         logger.warning("hermes-smd-reply: hold notice not recorded (%s)", exc)
+
+
+def _current_reply_to() -> str:
+    """The redirect target resolved for this dispatch, or "" when there is none."""
+    value = getattr(_CURRENT_CALL, "reply_to", "")
+    return value if isinstance(value, str) else ""
+
+
+def _reply_recipient(origin: inbound.InboundOrigin) -> tuple[str, dict[str, Any]]:
+    """Who this dispatch's reply is for, plus the redirect's audit fields.
+
+    ``(origin.sender_address, {})`` for every ordinary reply. For a device
+    redirect (``scope.device_senders``) the recipient is the person the config
+    names, and the row also says which device wrote in, so an auditor reading
+    "this person got a reply" can see it answered the scanner's email.
+    Addresses and a flag only; never the body.
+    """
+    reply_to = _current_reply_to()
+    if not reply_to or reply_to == origin.sender_address.strip().lower():
+        return origin.sender_address, {}
+    return reply_to, {"device_sender": origin.sender_address, "redirected_from_device": True}
 
 
 def _notify_hold(
@@ -488,6 +521,9 @@ def _enqueue_hold(
             send_html=send_html,
             body_digest=body_digest,
             hold_reason=reason,
+            # A device redirect's target rides the row so the sweeper releases
+            # to the person, not back to the scanner (empty otherwise).
+            reply_to=_current_reply_to(),
         )
         return True
     except Exception as exc:  # noqa: BLE001 — a broken store degrades to drop
@@ -518,6 +554,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # asking "why did this person get no answer" reads first.
         raw_session_id = kwargs.get("session_id")
         _CURRENT_CALL.session_id = raw_session_id if isinstance(raw_session_id, str) else ""
+        # The device-redirect target, resolved after the roster check below.
+        # Empty until then, so an early hold is recorded against the sender.
+        _CURRENT_CALL.reply_to = ""
 
         # (0) The draft must actually exist. ``post_tool_call`` fires after every
         # dispatch, including one that returned an error, and the relay used to
@@ -610,14 +649,45 @@ def on_post_tool_call(**kwargs: Any) -> None:
             _held("sender_not_on_roster", origin)
             return
 
+        # (a2) Device redirect. A sender authored under ``scope.device_senders``
+        # is a machine (an office scanner emailing its scans), and a reply sent
+        # back to it reaches nobody. The reply goes to the person the config
+        # names instead, and EVERYTHING below keys on that person: the lock,
+        # the content floor's classification, the matter gate, the rate limit,
+        # the held-reply row and the audit. The roster check above stays on the
+        # device, because the device is who wrote in. The target is authored
+        # config (validator: on scope.admins), never anything the draft said.
+        # Unmapped, ``reply_to`` IS ``origin.sender_address``, byte for byte, so
+        # every ordinary reply keys its limiter, queue and rows exactly as before.
+        device_target = cfg.device_reply_target(origin.sender_address)
+        redirected = bool(device_target) and (
+            device_target != origin.sender_address.strip().lower()
+        )
+        reply_to = device_target if redirected and device_target else origin.sender_address
+        _CURRENT_CALL.reply_to = reply_to if redirected else ""
+        if redirected:
+            logger.info(
+                "hermes-smd-reply: sender is an authored device; the reply is "
+                "redirected to its authored person (message=%s)",
+                origin.message_id,
+            )
+
         # (b) Recipient-lock — the reply can go ONLY to the address that emailed
-        # in. An injected extra/substituted recipient fails the lock here.
-        if not relay.recipient_locked(args, origin.sender_address):
+        # in (or, for a device, to the person answering for it). An injected
+        # extra/substituted recipient fails the lock here.
+        if not relay.recipient_locked(args, origin.sender_address, reply_to):
             _held("recipient_mismatch", origin, draft_to=sorted(relay.draft_recipients(args)))
             return
         if not origin.inbox_id:
             # No inbox to thread the reply into — fail closed.
             _held("no_inbox_id", origin)
+            return
+        if redirected and _email_adapter(cfg) != _ADAPTER_MSGRAPH:
+            # Only the Graph broker can aim a reply at someone other than the
+            # source message's sender (and re-checks the pairing itself). On any
+            # other transport the reply would go back to the device, which is
+            # the silence this redirect exists to end, so it is held instead.
+            _held("device_redirect_unsupported", origin)
             return
 
         scan_text, send_text, send_html = relay.draft_body(args)
@@ -642,8 +712,10 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # body cannot redirect the reply. The fabrication gate still applies to
         # every reply. Classification faults fail toward floored, never open.
         try:
+            # ``reply_to``: the person who actually receives this reply, which is
+            # the sender unless the sender is an authored device.
             recipient_class = classify_recipients_typed(
-                [origin.sender_address], cfg.inbound_roster, cfg.outbound_roster
+                [reply_to], cfg.inbound_roster, cfg.outbound_roster
             )
         except Exception:  # noqa: BLE001 — unclassifiable recipient keeps the floor
             logger.exception(
@@ -745,7 +817,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
         matter_verdict = matter_gate.evaluate(
             session_id=session_id,
             body=scan_text,
-            recipients={origin.sender_address},
+            # The person receiving it: a device redirect is gated on the person,
+            # since the device is never a party to anything.
+            recipients={reply_to},
             # Firm staff and records vendors are not expected to be parties
             # (ADR 0072, the same carve-out enforce.py applies).
             recipient_is_exempt=recipient_class in (RecipientClass.INTERNAL, RecipientClass.VENDOR),
@@ -774,8 +848,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
             _emit_reply_event(
                 action_type="MATTER_UNRESOLVED",
                 metadata={
-                    "recipient": origin.sender_address,
+                    "recipient": reply_to,
                     "message_id": origin.message_id,
+                    **_reply_recipient(origin)[1],
                     "matters": list(matter_verdict.matters),
                     "detail": matter_verdict.reason,
                 },
@@ -803,10 +878,12 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # window has cleared would overtake the earlier held one (the client
         # reads answer 5 before answer 4), and under sustained traffic the live
         # path would keep eating the freed slots so the held row never releases.
-        if _held_pending_for(origin.sender_address, policy):
+        # Keyed on ``reply_to``: a device's replies count against the person who
+        # receives them, so a scanner batch cannot flood that person unbounded.
+        if _held_pending_for(reply_to, policy):
             decision = relay.RateDecision(False, "queued_behind_held")
         else:
-            decision = _LIMITER.check(origin.sender_address, internal=internal, policy=policy)
+            decision = _LIMITER.check(reply_to, internal=internal, policy=policy)
         if not decision.allowed:
             reason = decision.reason or "rate_limited"
             enqueued = _enqueue_hold(
@@ -832,7 +909,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
             )
             _notify_hold(
                 reason=reason,
-                sender=origin.sender_address,
+                sender=reply_to,
                 sender_class=sender_class,
                 adapter=adapter,
                 message_id=origin.message_id,
@@ -845,7 +922,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # recipient-lock), via the seat's Email transport. Provider dispatch (ADR
         # 0078): msgraph replies in-thread through Graph (Graph derives the
         # recipients from the original message id — the reply cannot be
-        # redirected); agentmail via its REST reply endpoint. Fail-closed: a
+        # redirected, except to a device's AUTHORED person, which the broker
+        # re-verifies from its own copy of customer.yaml against the sender it
+        # fetches); agentmail via its REST reply endpoint. Fail-closed: a
         # msgraph seat with no MSGRAPH_* creds REFUSES (audited REPLY_FAILED),
         # never falls back to AgentMail.
         # The bytes this transport is handed, resolved once so the audit row's
@@ -860,6 +939,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
                     wire_html,
                     session_id=session_id,
                     matter_ref=cited_matter_ref,
+                    to=reply_to if redirected else None,
                 )
             else:
                 sent_id = relay.send_reply(
@@ -875,8 +955,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 metadata={
                     "reason": str(exc),
                     "adapter": adapter,
-                    "recipient": origin.sender_address,
+                    "recipient": reply_to,
                     "message_id": origin.message_id,
+                    **_reply_recipient(origin)[1],
                 },
                 session_id=session_id,
                 matter_ref=cited_matter_ref,
@@ -893,7 +974,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
         _emit_reply_event(
             action_type="REPLY_SENT",
             metadata={
-                "recipient": origin.sender_address,
+                "recipient": reply_to,
+                # For a device redirect: which device wrote in. Absent otherwise.
+                **_reply_recipient(origin)[1],
                 "recipient_class": recipient_class.value if recipient_class else "unclassified",
                 "content_floor_applied": not internal,
                 "adapter": adapter,
@@ -925,6 +1008,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
     finally:
         _CURRENT_CALL.tool_call_id = ""
         _CURRENT_CALL.session_id = ""
+        _CURRENT_CALL.reply_to = ""
 
 
 def on_transform_tool_result(**kwargs: Any) -> str | None:
@@ -978,7 +1062,13 @@ def _release_send(row: held_store.HeldReply) -> str:
     """
     wire_text, wire_html = _transmitted_body(row.adapter, row.send_text, row.send_html)
     if row.adapter == _ADAPTER_MSGRAPH:
-        return _send_msgraph_reply(row.message_id, wire_text, wire_html)
+        # ``reply_to`` is set only on a device redirect's row (empty on every
+        # older row), and the broker re-checks it against the source message.
+        return _send_msgraph_reply(row.message_id, wire_text, wire_html, to=row.reply_to or None)
+    if row.reply_to:
+        # The live path never enqueues a redirect on another transport; a row
+        # that claims one is refused rather than sent back to the device.
+        raise relay.RelaySendError("device redirect requires the msgraph transport")
     return relay.send_reply(
         message_id=row.message_id,
         text=wire_text,
