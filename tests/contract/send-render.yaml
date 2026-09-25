@@ -69,7 +69,8 @@
 #                                   # skeleton alike (shared/digest_reply_ref.py).
 #                                   # Also stamped on each fired/chased append
 #                                   # written after the full send, with the
-#                                   # body's item number `n`; the broker joins
+#                                   # body's item number `n` and the ack
+#                                   # `snooze_days` when authored; the broker joins
 #                                   # those raises to this row on session_id +
 #                                   # dispatch_ref and stamps their thread_ref
 #                                   # (plain-word digest replies).

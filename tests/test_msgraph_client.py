@@ -193,28 +193,51 @@ def test_normalize_message_matches_connector_dto_shape():
     assert dto["provider_refs"] == {"graph_message_id": "AAMk-1", "conversation_id": "conv-1"}
 
 
-def test_normalize_message_reply_text_is_the_unique_body():
-    """Plain-word digest replies: the reply-only part (uniqueBody), html reduced
-    to text the same way the body is. Absent -> the key is absent, so a DTO from
-    a payload without it is byte-identical to before."""
+OUTLOOK_HTML_REPLY = (
+    "<html><body>"
+    "<div>Got it on 1 and 3.</div>"
+    "<div>Dana</div>"
+    '<hr style="display:inline-block;width:98%">'
+    '<div id="divRplyFwdMsg"><b>From:</b> Operator &lt;ops@firm.example&gt;<br>'
+    "<b>Sent:</b> Thursday, September 25, 2026 7:00 AM<br>"
+    "<b>To:</b> Dana Whitfield &lt;dana@firm.example&gt;<br>"
+    "<b>Subject:</b> [Deadlines] 3 need you</div>"
+    "<div>1. matter 2026-PI-101, due 2026-09-20</div>"
+    "<div>2. matter 2026-PI-102, due 2026-09-21</div>"
+    "<div>3. matter 2026-PI-103, due 2026-09-22</div>"
+    "</body></html>"
+)
+
+
+def test_normalize_message_reply_text_cuts_the_quoted_outlook_reply():
+    """Plain-word digest replies: the reader's own words, cut from the body the
+    poll already fetched. The quoted digest below Outlook's header block is not
+    the reader's answer."""
     raw = {
         "id": "AAMk-2",
         "conversationId": "conv-2",
-        "body": {
-            "contentType": "html",
-            "content": "<p>got 1</p><blockquote>1. a 2. b</blockquote>",
-        },
-        "uniqueBody": {"contentType": "html", "content": "<p>got <b>1</b></p>"},
+        "body": {"contentType": "html", "content": OUTLOOK_HTML_REPLY},
     }
     dto = msgraph_client.normalize_message(raw, mailbox="op@client.example")
-    assert dto["reply_text"] == "got 1"
+    assert dto["reply_text"] == "Got it on 1 and 3.\nDana"
+    assert "2026-PI-102" in dto["body_text"]  # the body itself is unchanged
     assert "auto_submitted" not in dto
-    raw.pop("uniqueBody")
-    assert "reply_text" not in msgraph_client.normalize_message(raw, mailbox="op@client.example")
 
 
-def test_delta_select_asks_for_the_unique_body():
-    assert "uniqueBody" in msgraph_client.DELTA_SELECT.split(",")
+def test_normalize_message_without_a_body_carries_no_reply_text():
+    dto = msgraph_client.normalize_message({"id": "g1", "conversationId": "c1"}, mailbox="m")
+    assert "reply_text" not in dto
+
+
+def test_delta_select_does_not_ask_for_the_unique_body():
+    """uniqueBody under the delta $select is unproven on a live tenant, and a
+    failing delta poll stops a firm's inbound. The reply text is cut from the
+    body instead (shared.reply_text)."""
+    assert "uniqueBody" not in msgraph_client.DELTA_SELECT
+    assert msgraph_client.DELTA_SELECT == (
+        "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,"
+        "conversationId,body,internetMessageId"
+    )
 
 
 def test_build_client_from_env_fail_closed_when_unset(monkeypatch):

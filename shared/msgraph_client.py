@@ -39,6 +39,7 @@ from collections.abc import Callable
 from html.parser import HTMLParser
 from typing import Any
 
+from shared import reply_text as reply_text_mod
 from shared.secrets import get_secret
 
 logger = logging.getLogger(__name__)
@@ -89,12 +90,9 @@ _DEFAULT_TIMEOUT_S = 30.0
 # its stored cursor against it, see msgraph_poller.DeltaState.delta_select) — metadata + body, so an inbound
 # message normalizes from the delta payload without a separate full-body fetch
 # (mirrors the connector's _DELTA_SELECT so behavior matches the sandbox proof).
-# ``uniqueBody`` (plain-word digest replies): the part of a reply that is not
-# quoted history, so "thanks" above a quoted numbered list reads as "thanks".
-# Changing this set re-syncs the stored cursor with dedupe (msgraph_poller).
 DELTA_SELECT = (
     "id,subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,conversationId,body,"
-    "internetMessageId,uniqueBody"
+    "internetMessageId"
 )
 
 # The MSGRAPH_* env the client reads via shared.secrets (never os.environ direct).
@@ -201,11 +199,10 @@ def _address_list(recipients: Any) -> list[str]:
     return [a for a in (_bare_address(r) for r in recipients) if a]
 
 
-def _body_text(raw: dict[str, Any], key: str = "body") -> str:
+def _body_text(raw: dict[str, Any]) -> str:
     """Plain-text body: strip HTML when ``body.contentType == 'html'``; otherwise
-    the text content verbatim. ``""`` when the message carries no body content.
-    ``key="uniqueBody"`` reads the reply-only part the same way."""
-    body = raw.get(key)
+    the text content verbatim. ``""`` when the message carries no body content."""
+    body = raw.get("body")
     if not isinstance(body, dict):
         return ""
     content = body.get("content") or ""
@@ -244,6 +241,7 @@ def normalize_message(raw: dict[str, Any], *, mailbox: str) -> dict[str, Any]:
     internet_message_id = raw.get("internetMessageId")
     if isinstance(internet_message_id, str) and internet_message_id:
         provider_refs["internet_message_id"] = internet_message_id
+    body_text = _body_text(raw)
     dto: dict[str, Any] = {
         "provider": PROVIDER,
         "mailbox": mailbox,
@@ -253,15 +251,17 @@ def normalize_message(raw: dict[str, Any], *, mailbox: str) -> dict[str, Any]:
         "to": _address_list(raw.get("toRecipients")),
         "cc": _address_list(raw.get("ccRecipients")),
         "subject": raw.get("subject") or "",
-        "body_text": _body_text(raw),
+        "body_text": body_text,
         "received_at": raw.get("receivedDateTime"),
         "provider_refs": provider_refs,
     }
-    # Plain-word digest replies: the reader's own words (Graph ``uniqueBody``).
-    # Added only when Graph returned it, so a DTO built from a payload without it
-    # is byte-identical to before. ``auto_submitted`` is never set on this side:
-    # the delta select carries no headers, so the DTO default (False) holds.
-    reply_text = _body_text(raw, "uniqueBody")
+    # Plain-word digest replies: the reader's own words, cut from the body this
+    # poll already fetched (shared.reply_text). NOT Graph ``uniqueBody``: adding
+    # it to DELTA_SELECT is unproven on a live tenant, and a failing delta poll
+    # stops the firm's inbound. Added only when non-empty, so an empty-body DTO
+    # is byte-identical to before. ``auto_submitted`` is never set here: the
+    # delta select carries no headers, so the DTO default (False) holds.
+    reply_text = reply_text_mod.strip_quoted_reply(body_text)
     if reply_text:
         dto["reply_text"] = reply_text
     return dto

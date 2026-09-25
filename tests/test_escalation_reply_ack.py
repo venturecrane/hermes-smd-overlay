@@ -216,6 +216,45 @@ def test_an_unauthored_rostered_sender_acks_unattributed(env):
     assert "acked_by" not in event
 
 
+def _with_snooze(rows: list[dict], days) -> list[dict]:
+    return [{**row, "snooze_days": days} for row in rows]
+
+
+def test_the_snooze_period_comes_off_the_raise_rows(env):
+    env.write_ledger(_with_snooze(_digest_rows(), 7))
+    _reply("got it on 1")
+    out = _call(env)
+    assert out["confirmation_text"] == "Got it: 1 is quiet for 7 days. Still open: 2 and 3."
+
+
+def test_a_one_day_snooze_is_singular(env):
+    env.write_ledger(_with_snooze(_digest_rows(), 1))
+    _reply("all")
+    assert _call(env)["confirmation_text"] == "Got it: all 3 are quiet for 1 day."
+
+
+def test_disagreeing_or_missing_snooze_says_for_now(env):
+    rows = _with_snooze(_digest_rows(), 7)
+    rows[1]["snooze_days"] = 14
+    env.write_ledger(rows)
+    _reply("1 and 2")
+    assert _call(env)["confirmation_text"] == "Got it: 1 and 2 are quiet for now. Still open: 3."
+    env.requests.clear()
+    rows = _with_snooze(_digest_rows(), 7)
+    del rows[3]["snooze_days"]  # one row of the group carries none
+    env.write_ledger(rows)
+    _reply("3", session="sess-reply-2")
+    out = _call(env, session="sess-reply-2")
+    assert out["confirmation_text"] == "Got it: 3 is quiet for now. Still open: 1 and 2."
+
+
+@pytest.mark.parametrize("bad", [0, 366, "7", True, 7.0])
+def test_a_malformed_snooze_on_a_row_says_for_now(env, bad):
+    env.write_ledger(_with_snooze(_digest_rows(), bad))
+    _reply("1")
+    assert "quiet for now" in _call(env)["confirmation_text"]
+
+
 def test_numbers_already_quiet_are_not_reported_open(env):
     rows = _digest_rows()
     rows.append(
@@ -520,6 +559,10 @@ def _parse(text):
         ),
         ("1\n-- \nDana | 602 555 1234", {"all": False, "numbers": [1]}),
         ("2\n\nSent from my iPhone", {"all": False, "numbers": [2]}),
+        # A quoted digest line leaked into the text: the reader's words cannot
+        # be told from the list, so the whole reply reads as nothing.
+        ("thanks\n1. matter 2026-PI-101, due 2026-09-20", {"all": False, "numbers": []}),
+        ("got 2\n> 1. matter A\n> 2. matter B", {"all": False, "numbers": []}),
     ],
 )
 def test_parse_reply_items(text, expected):

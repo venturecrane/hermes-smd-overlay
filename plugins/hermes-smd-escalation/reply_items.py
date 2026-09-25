@@ -43,7 +43,7 @@ from collections.abc import Callable
 from typing import Any
 
 from shared import escalation_ledger, inbound
-from shared.digest_reply_ref import RAISE_EVENTS, valid_digest_number
+from shared.digest_reply_ref import RAISE_EVENTS, valid_digest_number, valid_snooze_days
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +146,8 @@ _SIGNOFF = re.compile(
 # A clause ends at punctuation, but a period inside a number ("1.5") does not.
 _CLAUSE = re.compile(r"(?:[,;!?\n]|\.(?!\d))+")
 _WORD = re.compile(r"[a-z']+|\d+")
+# The digest's item line ("1. matter 2026-PI-101, ..."), quoted or not.
+_DIGEST_ITEM_LINE = re.compile(r"^[\s>]*\d{1,3}\.\s+matter\b", re.MULTILINE)
 
 
 def _own_words(text: str) -> str:
@@ -167,10 +169,18 @@ def parse_reply_items(text: object) -> dict[str, Any]:
     in the same clause. "all" / "all of them" / "every one" / "everything"
     select every item, unless it is a greeting ("Hi all") or the reply also
     excludes a number ("all except 2"), which is ambiguous and reads as nothing.
-    Anything else is ignored."""
+    Anything else is ignored.
+
+    A line shaped like the digest's own item line (``N. matter ...``) means the
+    quoted list leaked into the text (a quote marker the provider or
+    :mod:`shared.reply_text` did not recognize). Then the reader's words cannot
+    be told from the list, and the whole reply reads as nothing: asking costs
+    one email, acking every quoted number silences real deadlines."""
     if not isinstance(text, str) or not text.strip():
         return {"all": False, "numbers": []}
     words = _own_words(text).lower()
+    if _DIGEST_ITEM_LINE.search(words):
+        return {"all": False, "numbers": []}
     numbers: set[int] = set()
     negated = False
     for clause in _CLAUSE.split(words):
@@ -222,17 +232,24 @@ def render_confirmation(
     unknown: list[int] | None = None,
     valid: list[int] | None = None,
     all_selected: bool = False,
+    snooze_days: int | None = None,
 ) -> str:
     """The sentence the seat sends back. Empty means send nothing: an auto-reply,
-    an unverified sender and a sender off the roster get no answer at all."""
+    an unverified sender and a sender off the roster get no answer at all.
+    ``snooze_days`` comes off the raise rows (the skill's own interval); without
+    one the sentence says "for now" rather than invent a number."""
     acked = acked or []
     still_open = still_open or []
     if status == STATUS_ACKED:
+        if valid_snooze_days(snooze_days):
+            period = f"for {snooze_days} day" + ("" if snooze_days == 1 else "s")
+        else:
+            period = "for now"
         if all_selected and len(acked) > 1 and not failed:
-            text = f"Got it: all {len(acked)} are quiet for now."
+            text = f"Got it: all {len(acked)} are quiet {period}."
         else:
             verb = "is" if len(acked) == 1 else "are"
-            text = f"Got it: {_join(acked)} {verb} quiet for now."
+            text = f"Got it: {_join(acked)} {verb} quiet {period}."
         if still_open:
             text += f" Still open: {_join(still_open)}."
         if failed:
@@ -304,6 +321,17 @@ def _dispatch_refs(events: list[dict], thread_ref: str) -> set[object]:
         and event.get("thread_ref") == thread_ref
         and valid_digest_number(event.get("n"))
     }
+
+
+def _one_snooze(digest: dict[int, dict[str, dict]], numbers: list[int]) -> int | None:
+    """The ack snooze every acked row agrees on, or ``None``. Rows that carry
+    none, or disagree, get "for now": the sentence never states a period one of
+    the acked items does not have."""
+    values = {row.get("snooze_days") for n in numbers for row in digest[n].values()}
+    if len(values) != 1:
+        return None
+    value = values.pop()
+    return value if valid_snooze_days(value) else None
 
 
 def _quiet(state: escalation_ledger.ItemState | None) -> bool:
@@ -397,6 +425,7 @@ def escalation_reply_ack(
         still_open=still_open,
         failed=failed,
         all_selected=parsed["all"],
+        snooze_days=_one_snooze(digest, acked),
     )
 
 

@@ -567,3 +567,42 @@ def test_a_malformed_digest_number_refuses_the_whole_envelope(monkeypatch, tmp_p
     send_dispatch.set_sender(sender)
     assert prerendered_dispatch.dispatch_prerendered(SESSION) is None
     assert sender.calls == []
+
+
+def test_raises_carry_the_ack_snooze_days(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    entry = _numbered_entry()
+    for append in entry["appends"]:
+        append["snooze_days"] = 7
+    _write_envelope(tmp_path, dispatches=[entry])
+    written = _appends_recorder(monkeypatch)
+    send_dispatch.set_sender(_Sender([DispatchResult(sent=True, message_id="m1")]))
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    events = {r["event"]["item_key"]: r["event"] for r in written}
+    assert events["a" * 16]["snooze_days"] == 7
+    assert events["c" * 16]["snooze_days"] == 7
+    # A release carries no digest fields, snooze included.
+    assert "snooze_days" not in events["d" * 16]
+
+
+def test_absent_or_null_snooze_days_is_simply_not_stamped(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    entry = _numbered_entry()
+    entry["appends"][0]["snooze_days"] = None
+    _write_envelope(tmp_path, dispatches=[entry])
+    written = _appends_recorder(monkeypatch)
+    send_dispatch.set_sender(_Sender([DispatchResult(sent=True, message_id="m1")]))
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    assert all("snooze_days" not in r["event"] for r in written)
+
+
+@pytest.mark.parametrize("bad", [0, -7, 366, "7", 7.0, True])
+def test_a_malformed_snooze_days_refuses_the_whole_envelope(monkeypatch, tmp_path, bad):
+    _routine(monkeypatch)
+    entry = _numbered_entry()
+    entry["appends"][1]["snooze_days"] = bad
+    _write_envelope(tmp_path, dispatches=[entry])
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    assert prerendered_dispatch.dispatch_prerendered(SESSION) is None
+    assert sender.calls == []

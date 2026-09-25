@@ -176,7 +176,7 @@ def _valid_dispatch(entry: object) -> bool:
             return False
         if not isinstance(append.get("item_key"), str) or not append["item_key"]:
             return False
-        if not digest_reply_ref.append_number_ok(append):
+        if not digest_reply_ref.append_digest_fields_ok(append):
             return False
     return True
 
@@ -283,8 +283,9 @@ def _write_appends(
     """Append each event through the broker's validated verb. Returns
     (written, attempted). A refused or failed append is logged and skipped —
     the item re-fires next run; never a raised exception into the hook.
-    Raises carry the dispatch's ``dispatch_ref`` and the body's item number
-    ``n`` (:mod:`shared.digest_reply_ref`) so a plain-word reply resolves."""
+    Raises carry the dispatch's ``dispatch_ref``, the body's item number ``n``
+    and the ack ``snooze_days`` (:mod:`shared.digest_reply_ref`) so a plain-word
+    reply resolves and its confirmation can say how long an item stays quiet."""
     written = 0
     attempted = 0
     for entry in appends[:_MAX_APPENDS]:
