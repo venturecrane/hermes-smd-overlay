@@ -1481,13 +1481,13 @@ _ACT_CONFIRMED_NOTE = (
 _ACT_NOT_ADMIN_NOTE = (
     "The person agreed to [act {proposal_id}], but only an Operator "
     "administrator can tell this seat to act on the firm's system of record, and "
-    "they are not one. Nothing was recorded and nothing will be created. Say so "
+    "they are not one. Nothing was recorded and nothing will be done. Say so "
     "plainly, name who can ({admins}), and do not call the tool."
 )
 
 _ACT_NOT_OPEN_NOTE = (
     "The person agreed to [act {proposal_id}], but this seat is no longer "
-    "holding that as something to do, so nothing will be created. Say so, and "
+    "holding that as something to do, so nothing will be done. Say so, and "
     "offer to put the same thing to them again."
 )
 

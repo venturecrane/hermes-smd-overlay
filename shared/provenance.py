@@ -178,6 +178,9 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_smokeball_get_webhook_subscriptions",
         "mcp_smokeball_get_event_types",
         "mcp_smokeball_list_events",
+        # The deletion manifest: the same calendar entries, and the reply quotes
+        # their matter numbers in the [act ...] line.
+        "mcp_smokeball_prepare_event_deletion",
         "mcp_smokeball_list_folders",
         # Clio.
         "mcp_clio_oktopeak_list_matters",

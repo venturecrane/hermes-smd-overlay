@@ -299,6 +299,9 @@ SMOKEBALL_FIRM_RECORD_READS: frozenset[str] = frozenset(
         "mcp_smokeball_get_memos_on_matter",
         "mcp_smokeball_get_event_types",
         "mcp_smokeball_list_events",
+        # The same calendar entries, shaped as the manifest a deletion act
+        # carries (id, matter, matter number, subject, date). Nothing else.
+        "mcp_smokeball_prepare_event_deletion",
         # File and folder METADATA and a presigned URL string. The document
         # BODY is only reachable through read_document, which is fenced.
         "mcp_smokeball_get_files_on_matter",
