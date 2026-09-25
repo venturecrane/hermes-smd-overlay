@@ -385,6 +385,12 @@ vars:
     requirement: optional
     consumed_by: [escalation]
     note: "override for the escalation-ledger twin path read by escalation_state and escalation_reply_ack (plugins/hermes-smd-escalation); unset => the Machine default /opt/data/audit/escalation-ledger.jsonl (shared/escalation_ledger.DEFAULT_LEDGER_PATH). Tests set it to a tmp file."
+  SMD_CASEWORK_LEDGER_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [escalation]
+    note: "override for the casework-ledger twin path read by reply_verdicts (plugins/hermes-smd-escalation/casework.py); unset => the Machine default /opt/data/audit/casework-ledger.jsonl. Tests set it to a tmp file."
   R2_ENDPOINT_URL:
     discovery: static
     stage: agent

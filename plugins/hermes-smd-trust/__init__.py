@@ -34,6 +34,7 @@ from shared import (
     spec_stamp,
 )
 from shared.broker_audit import write_decision
+from shared.casework_acts import CASEWORK_ACTS
 from shared.pending_acts import PENDING_ACTS, tool_call_failed
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
@@ -607,6 +608,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # happened (ss-console operator-own-matter). Runs BEFORE the READ-class
         # early return below, because a commitment is by definition not a read.
         _commit_confirmed_act(tool_name, resolved, kwargs)
+        # A replayed casework task write records completed / write_failed.
+        CASEWORK_ACTS.on_post_tool(tool_name, resolved, kwargs)
 
         try:
             classification = enforce.classify_tool(tool_name)

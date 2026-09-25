@@ -739,6 +739,14 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # same broker verb as escalation_append, from the verified reply's thread and
     # words; no model-supplied arguments. Internal state, never client-facing.
     "escalation_reply_ack": ActionClass.INTERNAL_WRITE,
+    # Case-manager tools (hermes-smd-escalation/casework.py). Each writes rows
+    # through the broker's casework_event_append verb and loads the task-write
+    # replay queue; any mail they send goes through send_dispatch, which
+    # re-authorizes it through the full gate as its own send class, and every
+    # task write they queue is gated again as update_task. Internal state only.
+    "casework_finish": ActionClass.INTERNAL_WRITE,
+    "casework_brief": ActionClass.INTERNAL_WRITE,
+    "reply_verdicts": ActionClass.INTERNAL_WRITE,
     # Correction capture (hermes-smd-corrections, ss-console #2091, ADR 0083 §4).
     # INTERNAL_WRITE for the same reason the escalation append is: it appends one
     # validated row to the broker's append-only ledger and reaches nothing

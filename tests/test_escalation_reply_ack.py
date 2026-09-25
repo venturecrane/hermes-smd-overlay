@@ -550,8 +550,8 @@ def _parse(text):
         ("not at all", {"all": False, "numbers": []}),
         ("that's all for now, got 1", {"all": False, "numbers": [1]}),
         ("1 is all I have", {"all": False, "numbers": [1]}),
-        # "all except 2" is an exception the parser will not model: ask.
-        ("all except 2", {"all": False, "numbers": []}),
+        # "all except 2" is every item but 2.
+        ("all except 2", {"all": True, "numbers": [], "except": [2]}),
         # The signature is not the reader's words.
         (
             "got 1\n\nThanks,\nDana Whitfield\nSuite 200\n(602) 555-1234",

@@ -49,7 +49,7 @@ from shared.audit_contract import sender_key
 from shared.customer_config import CustomerConfig
 from shared.tool_registration import register_wrapped_tool
 
-from . import reply_items
+from . import casework, reply_items
 
 logger = logging.getLogger(__name__)
 
@@ -695,6 +695,36 @@ def _escalation_reply_ack(args: dict[str, Any], **kwargs: Any) -> str:
     )
 
 
+def _casework_append(event: dict[str, Any]) -> dict[str, Any]:
+    return _broker_request({"action": "casework_event_append", "event": event})
+
+
+def _casework_finish(args: dict[str, Any], **kwargs: Any) -> str:
+    """Task review (``casework.py``). No model arguments."""
+    return casework.casework_finish(
+        session_id=_resolved_session(kwargs), append=lambda event: _casework_append(event)
+    )
+
+
+def _casework_brief(args: dict[str, Any], **kwargs: Any) -> str:
+    """Date-prep brief (``casework.py``): lines and catalog ids only."""
+    return casework.casework_brief(
+        args, session_id=_resolved_session(kwargs), append=lambda event: _casework_append(event)
+    )
+
+
+def _reply_verdicts(args: dict[str, Any], **kwargs: Any) -> str:
+    """Every plain-word reply: casework rows first, else the digest ack path."""
+    return casework.reply_verdicts(
+        session_id=_resolved_session(kwargs),
+        load_config=lambda: CustomerConfig.from_volume(),
+        verified_acker=lambda session_id: _verified_acker(session_id),
+        append=lambda event: _casework_append(event),
+        fallthrough=lambda: _escalation_reply_ack({}, **kwargs),
+        casework_ledger_path=casework.ledger_path(),
+    )
+
+
 TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "escalation_append": (
         "Append one escalation-ledger event (fired/chased/acked/handed_off/resolved) "
@@ -722,6 +752,13 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         reply_items.SCHEMA,
         _escalation_reply_ack,
     ),
+    "casework_finish": (casework.FINISH_DESCRIPTION, casework.EMPTY_SCHEMA, _casework_finish),
+    "casework_brief": (
+        casework.BRIEF_DESCRIPTION,
+        casework.BRIEF_SCHEMA,
+        _casework_brief,
+    ),
+    "reply_verdicts": (casework.REPLY_DESCRIPTION, casework.EMPTY_SCHEMA, _reply_verdicts),
 }
 
 
