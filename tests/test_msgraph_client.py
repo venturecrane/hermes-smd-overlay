@@ -193,6 +193,30 @@ def test_normalize_message_matches_connector_dto_shape():
     assert dto["provider_refs"] == {"graph_message_id": "AAMk-1", "conversation_id": "conv-1"}
 
 
+def test_normalize_message_reply_text_is_the_unique_body():
+    """Plain-word digest replies: the reply-only part (uniqueBody), html reduced
+    to text the same way the body is. Absent -> the key is absent, so a DTO from
+    a payload without it is byte-identical to before."""
+    raw = {
+        "id": "AAMk-2",
+        "conversationId": "conv-2",
+        "body": {
+            "contentType": "html",
+            "content": "<p>got 1</p><blockquote>1. a 2. b</blockquote>",
+        },
+        "uniqueBody": {"contentType": "html", "content": "<p>got <b>1</b></p>"},
+    }
+    dto = msgraph_client.normalize_message(raw, mailbox="op@client.example")
+    assert dto["reply_text"] == "got 1"
+    assert "auto_submitted" not in dto
+    raw.pop("uniqueBody")
+    assert "reply_text" not in msgraph_client.normalize_message(raw, mailbox="op@client.example")
+
+
+def test_delta_select_asks_for_the_unique_body():
+    assert "uniqueBody" in msgraph_client.DELTA_SELECT.split(",")
+
+
 def test_build_client_from_env_fail_closed_when_unset(monkeypatch):
     for name in msgraph_client.MSGRAPH_ENV:
         monkeypatch.delenv(name, raising=False)

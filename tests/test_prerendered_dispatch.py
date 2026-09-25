@@ -11,6 +11,7 @@ rule.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -228,10 +229,15 @@ def test_full_send_carries_body_variant_and_routing_leg(monkeypatch, tmp_path):
     # seen from this side, and a key added here without its broker twin
     # vanishes silently between the repos. `skill_name` (ss-console claims
     # review 2026-09-04, B3) is the cron-resolved routine, not an agent claim.
+    # `dispatch_ref` is minted per dispatch (plain-word digest replies): the
+    # broker joins this send's raises to its CONFIRM row on it.
+    dispatch_ref = call["audit_extra"]["dispatch_ref"]
+    assert re.fullmatch(r"[0-9a-f]{32}", dispatch_ref)
     assert call["audit_extra"] == {
         "skill_name": SKILL,
         "routing_leg": "central",
         "body_variant": "full",
+        "dispatch_ref": dispatch_ref,
     }
     assert call["to"] == ["ops@firm.example"]
 
@@ -267,11 +273,13 @@ def test_refused_full_falls_back_to_skeleton_with_no_appends(monkeypatch, tmp_pa
     assert "reduced" in note
     assert "retried on the next run" in note
     assert written == []  # per-item codes never reached a person
-    # The skeleton is still this routine's send: same column, same join.
+    # The skeleton is still this routine's send: same column, same join, and
+    # the same dispatch_ref as the refused full body (one dispatch, one ref).
     assert sender.calls[1]["audit_extra"] == {
         "skill_name": SKILL,
         "routing_leg": "central",
         "body_variant": "skeleton",
+        "dispatch_ref": sender.calls[0]["audit_extra"]["dispatch_ref"],
     }
     assert sender.calls[1]["text"].startswith("## Deadline digest")
 
@@ -443,3 +451,119 @@ def test_append_refusal_is_survivable_and_counted(monkeypatch, tmp_path):
     note = prerendered_dispatch.dispatch_prerendered(SESSION)
     assert "1 of 2 item record(s) written" in note
     assert len(calls) == 2  # one refusal does not lose the rest
+
+
+# ---------------------------------------------------------------------------
+# Plain-word digest replies: dispatch_ref + item number stamping
+# ---------------------------------------------------------------------------
+
+
+def _numbered_entry():
+    """Item 1 is a single needs-you item; item 2 is a per-matter group of two
+    rows sharing one number; a handed_off row rides the same envelope."""
+    return _dispatch_entry(
+        appends=[
+            {
+                "item_key": "a" * 16,
+                "matter_id": "m-1",
+                "event": "fired",
+                "attempt": 1,
+                "token": "ACK-AAAAAA",
+                "n": 1,
+            },
+            {
+                "item_key": "b" * 16,
+                "matter_id": "m-2",
+                "event": "chased",
+                "attempt": 2,
+                "token": "ACK-BBBBBB",
+                "n": 2,
+            },
+            {
+                "item_key": "c" * 16,
+                "matter_id": "m-2",
+                "event": "fired",
+                "attempt": 1,
+                "token": None,
+                "n": 2,
+            },
+            {"item_key": "d" * 16, "matter_id": "m-3", "event": "handed_off", "attempt": 0},
+        ]
+    )
+
+
+def test_raises_carry_the_dispatch_ref_and_their_digest_number(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    _write_envelope(tmp_path, dispatches=[_numbered_entry()])
+    written = _appends_recorder(monkeypatch)
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    ref = sender.calls[0]["audit_extra"]["dispatch_ref"]
+    events = {r["event"]["item_key"]: r["event"] for r in written}
+    assert events["a" * 16]["dispatch_ref"] == ref
+    assert events["a" * 16]["n"] == 1
+    # A group number: every row in the group carries the same n.
+    assert events["b" * 16]["n"] == 2
+    assert events["c" * 16]["n"] == 2
+    assert events["b" * 16]["dispatch_ref"] == ref == events["c" * 16]["dispatch_ref"]
+    # A release is not a raise: no digest fields ride it.
+    assert "n" not in events["d" * 16]
+    assert "dispatch_ref" not in events["d" * 16]
+    # The overlay never names the thread: only the broker saw the send.
+    assert all("thread_ref" not in e for e in events.values())
+
+
+def test_each_dispatch_gets_its_own_ref(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    second = _numbered_entry()
+    second["recipients"] = ["other@firm.example"]
+    _write_envelope(tmp_path, dispatches=[_numbered_entry(), second])
+    written = _appends_recorder(monkeypatch)
+    sender = _Sender(
+        [DispatchResult(sent=True, message_id="m1"), DispatchResult(sent=True, message_id="m2")]
+    )
+    send_dispatch.set_sender(sender)
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    refs = [c["audit_extra"]["dispatch_ref"] for c in sender.calls]
+    assert len(set(refs)) == 2
+    raise_refs = {r["event"].get("dispatch_ref") for r in written if "n" in r["event"]}
+    assert raise_refs == set(refs)
+
+
+def test_an_envelope_without_numbers_still_dispatches(monkeypatch, tmp_path):
+    """Envelopes written before numbering carry no n: absence is allowed and
+    the raise simply has no number (it can still be acked by its code)."""
+    _routine(monkeypatch)
+    _write_envelope(tmp_path)
+    written = _appends_recorder(monkeypatch)
+    send_dispatch.set_sender(_Sender([DispatchResult(sent=True, message_id="m1")]))
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    [request] = written
+    assert "n" not in request["event"]
+    assert re.fullmatch(r"[0-9a-f]{32}", request["event"]["dispatch_ref"])
+
+
+def test_a_null_digest_number_is_an_unnumbered_row(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    entry = _numbered_entry()
+    entry["appends"][0]["n"] = None
+    _write_envelope(tmp_path, dispatches=[entry])
+    written = _appends_recorder(monkeypatch)
+    send_dispatch.set_sender(_Sender([DispatchResult(sent=True, message_id="m1")]))
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    first = next(r["event"] for r in written if r["event"]["item_key"] == "a" * 16)
+    assert "n" not in first
+    assert first["dispatch_ref"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1000, "1", 1.0, True])
+def test_a_malformed_digest_number_refuses_the_whole_envelope(monkeypatch, tmp_path, bad):
+    _routine(monkeypatch)
+    entry = _numbered_entry()
+    entry["appends"][0]["n"] = bad
+    _write_envelope(tmp_path, dispatches=[entry])
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    assert prerendered_dispatch.dispatch_prerendered(SESSION) is None
+    assert sender.calls == []

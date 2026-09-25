@@ -22,7 +22,11 @@ These two tools close the gap without widening any entitlement:
   ``shared/escalation_ledger`` module (byte-identical twin of
   ``operator/workspace_broker/escalation_ledger.py``).
 
-Both tools are mapped in ``shared/action_classes.py`` (``internal_write`` /
+* ``escalation_reply_ack`` — a plain-word reply to a numbered deadline digest
+  ("got it on 1"), resolved to its raise rows by thread and number in code
+  (``reply_items.py``); takes no model arguments at all.
+
+All three are mapped in ``shared/action_classes.py`` (``internal_write`` /
 ``read``) — an unmapped tool is REFUSED by design, which is exactly how the
 execute_code gap surfaced.
 """
@@ -44,6 +48,8 @@ from shared import escalation_ledger, inbound, provenance
 from shared.audit_contract import sender_key
 from shared.customer_config import CustomerConfig
 from shared.tool_registration import register_wrapped_tool
+
+from . import reply_items
 
 logger = logging.getLogger(__name__)
 
@@ -675,6 +681,20 @@ def _escalation_state(args: dict[str, Any], **_: Any) -> str:
     )
 
 
+def _escalation_reply_ack(args: dict[str, Any], **kwargs: Any) -> str:
+    """Plain-word digest replies (``reply_items``). ``args`` is ignored by
+    design: the schema is empty and every input is injected here from the
+    runtime session, the verified origin and the ledger, never from the model.
+    The lambdas late-bind so the broker and config seams stay patchable."""
+    return reply_items.escalation_reply_ack(
+        session_id=_resolved_session(kwargs),
+        load_config=lambda: CustomerConfig.from_volume(),
+        verified_acker=lambda session_id: _verified_acker(session_id),
+        broker_request=lambda payload: _broker_request(payload),
+        ledger_path=os.environ.get(_LEDGER_PATH_ENV) or escalation_ledger.DEFAULT_LEDGER_PATH,
+    )
+
+
 TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "escalation_append": (
         "Append one escalation-ledger event (fired/chased/acked/handed_off/resolved) "
@@ -696,6 +716,11 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         "determination), optionally filtered by skill.",
         _STATE_SCHEMA,
         _escalation_state,
+    ),
+    "escalation_reply_ack": (
+        reply_items.DESCRIPTION,
+        reply_items.SCHEMA,
+        _escalation_reply_ack,
     ),
 }
 

@@ -660,6 +660,17 @@ class InboundOrigin:
     the broker's forgery check (an approval that is really a message out of the
     Operator's own Sent Items is refused). Empty on AgentMail and whenever the
     provider did not say; the broker fails closed on empty.
+
+    ``reply_text`` and ``auto_submitted`` serve plain-word digest replies
+    (``hermes-smd-escalation.reply_items``). ``reply_text`` is the reader's OWN
+    words with the quoted history removed by the provider (AgentMail
+    ``extracted_text``, Graph ``uniqueBody``), so a reply of "thanks" above a
+    quoted numbered list reads as "thanks", never as the list. It is the one
+    content field here, and the exception is narrow: deterministic code parses
+    numbers out of it; it is never injected into a prompt, and ``repr=False``
+    keeps it out of every log line that prints an origin. ``auto_submitted`` is
+    the RFC 3834 ``Auto-Submitted`` header (present and not ``no``): an
+    out-of-office never acknowledges anything. Both degrade to empty/False.
     """
 
     sender_address: str
@@ -668,6 +679,8 @@ class InboundOrigin:
     inbox_id: str = ""
     internet_message_id: str = ""
     conversation_id: str = ""
+    reply_text: str = field(default="", repr=False)
+    auto_submitted: bool = False
 
 
 @dataclass

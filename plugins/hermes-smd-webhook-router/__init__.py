@@ -256,6 +256,10 @@ def _origin_from_dto(
         inbox_id=inbox_id,
         internet_message_id=internet_message_id,
         conversation_id=conversation_id,
+        # Plain-word digest replies (hermes-smd-escalation.reply_items): the
+        # reader's own words and the RFC 3834 verdict, straight off the DTO.
+        reply_text=dto.reply_text if isinstance(dto.reply_text, str) else "",
+        auto_submitted=dto.auto_submitted is True,
     )
 
 

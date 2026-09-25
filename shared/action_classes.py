@@ -721,6 +721,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # skills never need a code_execution exposure to run the escalation loop.
     "escalation_append": ActionClass.INTERNAL_WRITE,
     "escalation_state": ActionClass.READ,
+    # Plain-word digest replies (reply_items.py): writes `acked` rows through the
+    # same broker verb as escalation_append, from the verified reply's thread and
+    # words; no model-supplied arguments. Internal state, never client-facing.
+    "escalation_reply_ack": ActionClass.INTERNAL_WRITE,
     # Correction capture (hermes-smd-corrections, ss-console #2091, ADR 0083 §4).
     # INTERNAL_WRITE for the same reason the escalation append is: it appends one
     # validated row to the broker's append-only ledger and reaches nothing

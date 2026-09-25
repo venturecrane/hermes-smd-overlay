@@ -27,7 +27,7 @@ source (fail-closed): a channel with no seam normalizer produces no agent turn.
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.utils import parseaddr
 
 # Closed provider vocabulary — grows by adapter, in lock-step with the seam
@@ -47,6 +47,12 @@ class InboundMessage:
     is opaque: only the matching provider's send/reply transport reads it (it
     carries the ids the reply path threads on — AgentMail inbox/message ids, the
     Graph message/conversation ids).
+
+    ``reply_text`` is the reader's own words with the quoted history removed by
+    the provider (AgentMail ``extracted_text``, Graph ``uniqueBody``), and
+    ``auto_submitted`` the RFC 3834 ``Auto-Submitted`` verdict. Both feed only the
+    deterministic digest-reply parser; neither enters :meth:`to_dict` (the
+    directive the model reads already carries ``body_text``).
     """
 
     provider: str
@@ -60,6 +66,8 @@ class InboundMessage:
     body_text: str
     received_at: str
     provider_refs: dict
+    reply_text: str = field(default="", repr=False)
+    auto_submitted: bool = False
 
     def to_dict(self) -> dict:
         """Plain-dict projection for embedding in the dispatch directive."""
@@ -121,6 +129,28 @@ def _address_list(raw: object) -> list[str]:
 
 def _str_or_empty(raw: object) -> str:
     return raw.strip() if isinstance(raw, str) else ""
+
+
+def _auto_submitted(headers: object) -> bool:
+    """RFC 3834: an ``Auto-Submitted`` header whose value is anything but ``no``
+    marks machine-sent mail (out-of-office, auto-reply). Accepts the header set
+    as a mapping (case-insensitive name) or a list of ``{name, value}`` pairs;
+    anything else, or no such header, is ``False`` (a person wrote it)."""
+    values: list[object] = []
+    if isinstance(headers, dict):
+        values = [
+            v for k, v in headers.items() if isinstance(k, str) and k.lower() == "auto-submitted"
+        ]
+    elif isinstance(headers, list):
+        for pair in headers:
+            if isinstance(pair, dict) and str(pair.get("name", "")).lower() == "auto-submitted":
+                values.append(pair.get("value"))
+    for value in values:
+        if isinstance(value, list):
+            value = value[0] if value else ""
+        if isinstance(value, str) and value.strip() and value.strip().lower() != "no":
+            return True
+    return False
 
 
 def _first_present(msg: dict, *keys: str) -> str:
@@ -190,6 +220,11 @@ def _normalize_agentmail(payload: dict) -> InboundMessage | None:
         body_text=_first_present(msg, "text", "body", "body_plain", "content"),
         received_at=_first_present(msg, "received_at", "timestamp", "created_at", "date"),
         provider_refs=provider_refs,
+        # The reader's own words only: AgentMail strips the quoted history into
+        # ``extracted_text``. No fallback to ``text`` -- that carries the quote,
+        # and a quoted numbered list must never read as the reader's answer.
+        reply_text=_str_or_empty(msg.get("extracted_text")),
+        auto_submitted=_auto_submitted(msg.get("headers")),
     )
 
 
@@ -254,6 +289,8 @@ def _normalize_msgraph(payload: dict) -> InboundMessage | None:
         body_text=_str_or_empty(block.get("body_text")),
         received_at=_str_or_empty(block.get("received_at")),
         provider_refs=provider_refs,
+        reply_text=_str_or_empty(block.get("reply_text")),
+        auto_submitted=block.get("auto_submitted") is True,
     )
 
 
