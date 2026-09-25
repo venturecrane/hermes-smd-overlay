@@ -1101,9 +1101,18 @@ _ACT_ALREADY_OPEN_REFUSAL = (
     "that first."
 )
 
+# Read live on pilot-smokeball 2026-09-25 (session 20260925_214749_dbc67acb):
+# told only to "put this line in your reply", the model ended the turn with the
+# line as its final TEXT and never sent anything, so the administrator was never
+# asked; and it "corrected" the line's characters on the way. On an email seat a
+# turn's final text reaches nobody. The sentence now says both things plainly.
 _ACT_WITHHELD_INSTRUCTION = (
-    "Withheld pending the administrator's confirmation. Nothing was done. Put "
-    "this line in your reply exactly as written, then end the turn: {readback}"
+    "Withheld pending the administrator's confirmation. Nothing was done. Now "
+    "SEND your email reply to the administrator, the same way you answer any "
+    "email, and include this line in it character for character (do not "
+    "change, correct or reformat any of it, brackets and quotes included). A "
+    "turn that ends without sending that reply leaves them with nothing to "
+    "answer. Then end the turn. The line: {readback}"
 )
 
 

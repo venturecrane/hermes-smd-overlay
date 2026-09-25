@@ -89,10 +89,12 @@ from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params, sender_key
 from shared.customer_config import CustomerConfig, CustomerConfigError
+from shared.pending_acts import PENDING_ACTS
 from shared.recipient_classifier import RecipientClass, classify_recipients_typed
 from shared.secrets import get_secret
 
 from . import (
+    act_delivery,
     held_store,
     notice,
     relay,  # noqa: F401 - surface for tests
@@ -901,6 +903,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
                 # committed. Without this a retry in the same turn would enqueue
                 # a SECOND row and the sweeper would deliver the answer twice.
                 _REPLIED.commit(origin.message_id)
+                # It WILL go out, so an act line it carries is not owed again.
+                _ACT_BODIES.note(session_id, send_text, send_html)
             _held(
                 reason,
                 origin,
@@ -967,6 +971,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # (f) The reply for this inbound is now committed — record it before the
         # audit emission so a retry cannot race between the send and the mark.
         _REPLIED.commit(origin.message_id)
+        # The only evidence the end-of-turn act delivery trusts: bytes the
+        # transport was actually handed (act_delivery module docstring).
+        _ACT_BODIES.note(session_id, wire_text, wire_html)
 
         # (g) Audit the send — digest + recipient + message ids, never the body.
         inbound_sender_key = sender_key(origin.sender_address)
@@ -1172,6 +1179,105 @@ def _start_held_release() -> None:
         logger.warning("hermes-smd-reply: held-reply sweeper failed to start (%s)", exc)
 
 
+# Act lines this plugin transmitted, per session (act_delivery). Module-level
+# like the other register-time state; bounded and thread-safe.
+_ACT_BODIES = act_delivery.TransmittedBodies()
+
+
+def _deliver_owed_act(session_id: str) -> str:
+    """End of turn: send an act line the model proposed and did not send.
+
+    See ``act_delivery``. Returns the outcome word for tests and logs. Never
+    raises out of a hook."""
+    if not session_id:
+        return "none"
+    pending = PENDING_ACTS.peek(session_id)
+    if act_delivery.owed_line(pending) is None:
+        return "none"
+    origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id)
+    try:
+        adapter = _email_adapter(CustomerConfig.from_volume(str(_YAML_PATH)))
+    except Exception:  # noqa: BLE001 - an unreadable config still gets the default transport
+        adapter = "agentmail"
+
+    def _send(message_id: str, body: str) -> str:
+        text, html = _transmitted_body(adapter, body, "")
+        if adapter == _ADAPTER_MSGRAPH:
+            return _send_msgraph_reply(message_id, text, html, session_id=session_id)
+        return relay.send_reply(message_id=message_id, text=text, html=html, session_id=session_id)
+
+    proposal_id = str(getattr(pending, "proposal_id", "") or "")
+    recipient = str(getattr(origin, "sender_address", "") or "") if origin is not None else ""
+
+    def _sent(line: str, sent_id: str) -> None:
+        PENDING_ACTS.mark_delivered(session_id, line)
+        _emit_reply_event(
+            action_type="REPLY_SENT",
+            metadata={
+                "recipient": recipient,
+                "adapter": adapter,
+                "in_reply_to": str(getattr(origin, "message_id", "") or ""),
+                "sent_message_id": sent_id,
+                "body_digest": inbound.content_digest(act_delivery.body_for(line)),
+                # Why this row exists: the model withheld nothing and sent
+                # nothing, so the seat delivered the act line itself.
+                "seat_delivered_act": proposal_id,
+            },
+            session_id=session_id,
+        )
+        logger.warning(
+            "hermes-smd-reply: act %s line was not sent by the turn; the seat delivered it (%s)",
+            proposal_id,
+            sent_id,
+        )
+
+    def _failed(line: str, why: str) -> None:
+        _emit_reply_event(
+            action_type="REPLY_FAILED",
+            metadata={
+                "reason": f"act_line_undelivered: {why}",
+                "adapter": adapter,
+                "recipient": recipient,
+                "seat_delivered_act": proposal_id,
+            },
+            session_id=session_id,
+        )
+        logger.error(
+            "hermes-smd-reply: act %s line is owed to the administrator and could not be delivered: %s",
+            proposal_id,
+            why,
+        )
+        try:
+            import sentry_sdk
+
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("reason", "act_line_undelivered")
+                scope.set_tag("adapter", adapter)
+                scope.set_extra("proposal_id", proposal_id)
+                sentry_sdk.capture_message("act_line_undelivered", level="error")
+        except Exception as exc:  # noqa: BLE001 - monitoring must never break the hook
+            logger.debug("hermes-smd-reply: act delivery page skipped (%s)", exc)
+
+    return act_delivery.deliver_if_owed(
+        session_id,
+        pending=pending,
+        origin=origin,
+        ledger=_ACT_BODIES,
+        send=_send,
+        on_sent=_sent,
+        on_failed=_failed,
+    )
+
+
+def on_turn_end(**kwargs: Any) -> None:
+    """``post_llm_call`` and ``on_session_end``: deliver an owed act line."""
+    try:
+        session_id = kwargs.get("session_id")
+        _deliver_owed_act(session_id if isinstance(session_id, str) else "")
+    except Exception as exc:  # noqa: BLE001 - never raise out of a hook
+        logger.error("hermes-smd-reply: end-of-turn act delivery failed (%s)", exc)
+
+
 def register(ctx) -> None:
     """Plugin entry point. Wires ``post_tool_call`` + ``transform_tool_result``.
 
@@ -1221,6 +1327,12 @@ def register(ctx) -> None:
     # ss-console#2367: a hold the agent is never told about is silence to the
     # person who wrote in. This is the seam that tells it, in the same turn.
     ctx.register_hook("transform_tool_result", on_transform_tool_result)
+    # An act line the model proposed and never sent is delivered by the seat at
+    # the end of the turn (act_delivery). Both hooks: post_llm_call fires only
+    # on a completed turn, on_session_end on every turn; the ledger's claim keeps
+    # the line from going out twice.
+    ctx.register_hook("post_llm_call", on_turn_end)
+    ctx.register_hook("on_session_end", on_turn_end)
     logger.info(
         "hermes-smd-reply registered (infra_ready=True, customer=%s); "
         "replies gated on the live organization roster (scope.inbound_allow_from); "

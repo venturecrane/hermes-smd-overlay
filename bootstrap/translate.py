@@ -1193,7 +1193,8 @@ _ACTION_CEILING_SOUL_LINE: dict[tuple[str, str], str] = {
         "CALL the tool as soon as an Operator administrator asks for the act; do "
         "not ask for permission in your own words first. The gate withholds the "
         'call and hands you back a line beginning "[act " naming exactly what '
-        "would be done; put that line in your reply verbatim and end the turn. "
+        "would be done; SEND your email reply containing that line character for "
+        "character (a turn's final text reaches nobody), then end the turn. "
         "When the administrator answers that line, call the same tool again with "
         "the same values and report what the system recorded"
     ),
@@ -1204,8 +1205,9 @@ _ACTION_CEILING_SOUL_LINE: dict[tuple[str, str], str] = {
         "Operator administrator asks, CALL mcp_smokeball_prepare_event_deletion "
         "for the matters, then CALL mcp_smokeball_delete_events with the events "
         "it returned, unchanged. The gate withholds the delete and hands you back "
-        'a line beginning "[act " listing every event; put that line in your '
-        "reply verbatim and end the turn. When the administrator answers that "
+        'a line beginning "[act " listing every event; SEND your email reply '
+        "containing that line character for character (a turn's final text "
+        "reaches nobody), then end the turn. When the administrator answers that "
         "line, call mcp_smokeball_delete_events again and report what was "
         "deleted, what is pending, and what was skipped and why. Never delete "
         "anything else"

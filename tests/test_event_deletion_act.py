@@ -314,3 +314,36 @@ def test_the_commit_names_the_message_and_carries_the_outcome_counts(gate, monke
     assert commit["tool"] == TOOL and commit["payload"] == {"events": EVENTS}
     assert commit["confirmed_by"] == ADMIN and commit["confirmed_message_id"] == MESSAGE_ID
     assert commit["outcome"] == {"ok": True, "ref": "deleted=2 pending=0 skipped=0 failed=0"}
+
+
+def test_the_commit_reads_the_ref_through_hermes_result_wrapper(gate, monkeypatch):
+    """Read live on pilot-smokeball 2026-09-25: Hermes hands post_tool_call the
+    MCP result as {"result": "<json text>"}, and the committed rows carried an
+    empty reference because the unwrap stopped at that string."""
+    trust, _enforce, calls = gate
+    monkeypatch.setattr(trust, "_paused_hard", lambda: False)
+    PENDING_ACTS.note_proposed(SESSION, PROPOSAL, TOOL, READBACK)
+    _confirm_on_seat()
+    PENDING_ACTS.take_in_flight(SESSION, TOOL)
+    inner = json.dumps({"deleted": [], "ref": "deleted=2 pending=0 skipped=1 failed=0"})
+    trust.on_post_tool_call(
+        tool_name=TOOL,
+        args=_args(),
+        result=json.dumps({"result": inner}),
+        session_id=SESSION,
+        status="ok",
+    )
+    (commit,) = _commits(calls)
+    assert commit["outcome"]["ref"] == "deleted=2 pending=0 skipped=1 failed=0"
+
+
+def test_the_withheld_line_tells_the_model_to_send_it_unchanged(gate):
+    """Read live 2026-09-25: told only to "put this line in your reply", the
+    model ended the turn with it as final text, sent nothing, and restored the
+    line's neutralized brackets."""
+    _trust, enforce, _calls = gate
+    _admin_turn()
+    message = enforce.evaluate_tool_call(TOOL, _args(), "smd", session_id=SESSION)["message"]
+    assert "SEND your email reply" in message
+    assert "character for character" in message
+    assert message.endswith(READBACK)
