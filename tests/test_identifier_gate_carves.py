@@ -329,3 +329,80 @@ def test_a_mail_draft_with_a_body_is_scanned_not_blocked_outright(gate) -> None:
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# The workbook producer: its identifiers live in nested sheet cells
+# ---------------------------------------------------------------------------
+
+
+def _workbook_args(cell: str) -> dict:
+    return {
+        "matter_id": "00000000-0000-0000-0000-000000000001",
+        "file_name": "costs.xlsx",
+        "sheets": [
+            {
+                "name": "Costs",
+                "columns": [
+                    {"header": "Date", "format": "date"},
+                    {"header": "Reference", "format": "text"},
+                    {"header": "Amount", "format": "currency"},
+                ],
+                "rows": [["filing fee", "", 435.0], ["", cell, None]],
+                "totals": ["Amount"],
+            }
+        ],
+    }
+
+
+def test_the_flattener_reaches_a_nested_sheet_cell() -> None:
+    """A case number inside a row inside a sheet reaches the scan text as its own
+    line; non-string scalars are kept and None is skipped rather than repr'd."""
+    ob = load_plugin("hermes-smd-trust").outbound
+    lines = ob._extract_draft_scan_text(_workbook_args(UNREAD_BODY)).splitlines()
+    assert UNREAD_BODY in lines
+    assert "435.0" in lines
+    assert "None" not in lines
+    # A repr would carry the list punctuation; the flattener carries none.
+    assert not any(ln.startswith(("[", "{")) for ln in lines)
+
+
+def test_add_workbook_is_a_gated_draft_tool_on_the_block_posture() -> None:
+    ob = load_plugin("hermes-smd-trust").outbound
+    assert "mcp_smokeball_add_workbook" in ob.GATED_DRAFT_TOOLS
+    assert "mcp_smokeball_add_workbook" not in ob._REPORT_ONLY_DRAFT_TOOLS
+
+
+def test_a_workbook_refuses_an_unread_identifier_in_a_cell(gate) -> None:
+    plugin, fake = gate
+    directive = plugin.outbound.check_outbound_draft(
+        tool_name="mcp_smokeball_add_workbook",
+        args=_workbook_args(UNREAD_BODY),
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert directive is not None and directive["action"] == "block"
+    rows = _rows(fake)
+    assert len(rows) == 1, rows
+    assert '"mode":"block"' in rows[0]
+    assert '"case_number"' in rows[0]
+    assert SENTINEL not in rows[0]
+
+
+def test_a_workbook_passes_once_the_identifier_was_read(gate) -> None:
+    """The falsifier for the refusal above: the same cell, read first, files."""
+    plugin, fake = gate
+    plugin.on_post_tool_call(
+        tool_name="mcp_smokeball_get_matter",
+        result=json.dumps({"id": "m2", "matterNumber": SENTINEL, "hearingDate": "2027-03-04"}),
+        session_id="s",
+        tool_call_id="r2",
+    )
+    directive = plugin.outbound.check_outbound_draft(
+        tool_name="mcp_smokeball_add_workbook",
+        args=_workbook_args(UNREAD_BODY),
+        session_id="s",
+        tool_call_id="c",
+    )
+    assert directive is None
+    assert _rows(fake) == []

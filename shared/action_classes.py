@@ -539,6 +539,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # in what they are permitted to do. Delivery to anyone outside the firm
     # remains a separate act under a separate class.
     "mcp_smokeball_render_docx_draft": ActionClass.INTERNAL_WRITE,
+    # The .xlsx producer: builds a workbook from structured sheets (headers,
+    # rows, totals) and files it on the matter through the same upload as
+    # add_file. Same class and same reason as the two render tools above: the
+    # agent saving its own work product into the firm's own record. Draft-gated
+    # like add_file, and identifier-scanned through its `sheets` cells.
+    "mcp_smokeball_add_workbook": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_get_upload_url": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_event": ActionClass.INTERNAL_WRITE,
