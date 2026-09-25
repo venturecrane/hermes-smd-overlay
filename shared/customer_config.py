@@ -77,6 +77,24 @@ def _clean_str_list(value: Any) -> list[str]:
     return [s for s in value if isinstance(s, str) and s]
 
 
+def _person_address(value: Any) -> str:
+    """NFC + strip + lower of an exact ``local@domain`` address, or ``""``.
+
+    The same shape rule :attr:`CustomerConfig.admins` applies: one ``@``, a
+    non-empty local part, a dotted domain. A domain grant or anything else
+    unreadable yields ``""`` and is never widened into a match.
+    """
+    if not isinstance(value, str):
+        return ""
+    norm = unicodedata.normalize("NFC", value).strip().lower()
+    if norm.count("@") != 1 or norm.startswith("@"):
+        return ""
+    local, _, domain = norm.partition("@")
+    if not local or "." not in domain or domain.startswith(".") or domain.endswith("."):
+        return ""
+    return norm
+
+
 class CustomerConfigError(ValueError):
     """Raised when ``customer.yaml`` is missing, unparseable, or invalid."""
 
@@ -627,6 +645,64 @@ class CustomerConfig:
         for entry in self.staff_send_as:
             if entry["address"] == wanted:
                 return entry
+        return None
+
+    # ------------------------------------------------------------------
+    # Device senders — mailboxes that are machines, not people
+    # ------------------------------------------------------------------
+
+    @property
+    def device_senders(self) -> list[dict[str, str]]:
+        """Return ``scope.device_senders``: devices whose replies go to a person.
+
+        An office scanner emails scans to the Operator from a mailbox on the
+        firm's own domain. Nobody reads that mailbox, so a reply sent back to it
+        is a reply nobody gets. Each entry is ``{"address", "replies_to"}``,
+        both lowercased: the device, and the person the reply lane answers
+        instead.
+
+        FAIL-CLOSED TO ``[]`` like :attr:`admins`: an entry that is not a
+        mapping, whose two values are not exact person addresses, or whose
+        ``replies_to`` is not on :attr:`admins` is DROPPED (the validator
+        rejects all three; this is the runtime backstop, because a redirect is
+        the one place the reply lane writes to somebody other than who wrote
+        in). A duplicate device keeps its first entry. Absent means no device:
+        every reply goes back to its sender, exactly as before this key.
+        """
+        scope = self._data.get("scope")
+        if not isinstance(scope, dict):
+            return []
+        raw = scope.get("device_senders")
+        if not isinstance(raw, list):
+            return []
+        admins = set(self.admins)
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            address = _person_address(entry.get("address"))
+            replies_to = _person_address(entry.get("replies_to"))
+            if not address or not replies_to or replies_to not in admins or address in seen:
+                continue
+            seen.add(address)
+            out.append({"address": address, "replies_to": replies_to})
+        return out
+
+    def device_reply_target(self, sender_address: object) -> str | None:
+        """The person a reply to ``sender_address`` goes to, when it is a device.
+
+        Exact, case-insensitive match on the device address (no domain match:
+        a device is one mailbox). ``None`` when the sender is not an authored
+        device, which is every sender on a seat that authors no
+        ``scope.device_senders``; the caller then replies to the sender.
+        """
+        wanted = _person_address(sender_address)
+        if not wanted:
+            return None
+        for entry in self.device_senders:
+            if entry["address"] == wanted:
+                return entry["replies_to"]
         return None
 
     def external_send_as_staff_ceiling(self, persona_slug: object) -> str | None:

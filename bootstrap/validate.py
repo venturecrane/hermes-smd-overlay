@@ -242,6 +242,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_scope_admins(cfg, errors)
     _validate_outbound_roster(cfg, errors)
     _validate_staff_send_as(cfg, errors)
+    _validate_device_senders(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
     _validate_email_seam(cfg, errors)
@@ -1090,6 +1091,108 @@ def _staff_reachable_set(scope: dict[str, Any]) -> set[str]:
             if canon:
                 out.add(canon)
     return out
+
+
+_DEVICE_SENDER_KEYS = frozenset({"address", "replies_to"})
+
+
+def _validate_device_senders(cfg: dict[str, Any], errors: list[str]) -> None:
+    """Validate ``scope.device_senders``: mailboxes that are MACHINES, not people.
+
+    An office scanner, a fax gateway, a copier: a device on the firm's own
+    domain that emails documents to the Operator. A reply sent back to the
+    device reaches nobody, so each entry names the person the Operator answers
+    instead: ``{address, replies_to}``, exactly those two keys.
+
+    The rules, each a way the redirect could otherwise widen who the seat
+    writes to:
+
+    * both are EXACT addresses (``local@domain``). A domain grant would turn
+      "this scanner" into "anything at the firm", and a redirect target that is
+      a domain is nobody in particular;
+    * ``address`` must be covered by ``scope.inbound_allow_from``, exactly or by
+      an ``@domain`` grant. A device the seat does not answer has no reply to
+      redirect, and authoring one would be a silent no-op;
+    * ``replies_to`` must be on ``scope.admins``. The redirect sends the reply
+      to somebody other than who wrote in, so it may only reach a person who
+      already speaks for the firm; the broker re-checks this on every reply;
+    * no ``address`` appears twice, so a device has exactly one answerer.
+
+    Absent is valid: no device, every reply goes to whoever wrote in.
+    """
+    scope = cfg.get("scope")
+    if not isinstance(scope, dict):
+        return
+    raw = scope.get("device_senders")
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        _err(f"scope.device_senders must be a list; got {type(raw).__name__}", errors)
+        return
+    inbound = _canon_set(scope.get("inbound_allow_from"))
+    admins = _canon_set(scope.get("admins"))
+    seen: set[str] = set()
+    for i, entry in enumerate(raw):
+        prefix = f"scope.device_senders[{i}]"
+        canon = _validate_one_device_sender(entry, prefix, inbound, admins, errors)
+        if canon is None:
+            continue
+        if canon in seen:
+            _err(f"{prefix}.address: duplicate device address {canon!r}", errors)
+            continue
+        seen.add(canon)
+
+
+def _canon_set(entries: Any) -> set[str]:
+    """Canonical addresses and ``@domain`` grants from one authored string list."""
+    out: set[str] = set()
+    if isinstance(entries, list):
+        for entry in entries:
+            canon = _canon_roster_address(entry) if isinstance(entry, str) else None
+            if canon:
+                out.add(canon)
+    return out
+
+
+def _validate_one_device_sender(
+    entry: Any,
+    prefix: str,
+    inbound: set[str],
+    admins: set[str],
+    errors: list[str],
+) -> str | None:
+    """One ``{address, replies_to}`` entry: its canonical address, or None."""
+    if not isinstance(entry, dict):
+        _err(f"{prefix}: must be a mapping with address and replies_to", errors)
+        return None
+    extra = sorted(str(k) for k in entry if k not in _DEVICE_SENDER_KEYS)
+    if extra:
+        _err(f"{prefix}: unknown key(s) {extra}; only address and replies_to", errors)
+        return None
+    canon: dict[str, str] = {}
+    for key in ("address", "replies_to"):
+        value = entry.get(key)
+        parsed = _canon_roster_address(value) if isinstance(value, str) else None
+        if parsed is None or parsed.startswith("@"):
+            _err(f"{prefix}.{key}: {value!r} must be an exact address (local@domain)", errors)
+            return None
+        canon[key] = parsed
+    address, replies_to = canon["address"], canon["replies_to"]
+    if address not in inbound and f"@{address.partition('@')[2]}" not in inbound:
+        _err(
+            f"{prefix}.address: {address!r} is not covered by scope.inbound_allow_from, "
+            "so the seat never answers it and there is no reply to redirect",
+            errors,
+        )
+        return None
+    if replies_to not in admins:
+        _err(
+            f"{prefix}.replies_to: {replies_to!r} is not on scope.admins; a device's "
+            "reply may only be redirected to a person who speaks for the firm",
+            errors,
+        )
+        return None
+    return address
 
 
 def _validate_google_auth_entitlements(cfg: dict[str, Any], errors: list[str]) -> None:
