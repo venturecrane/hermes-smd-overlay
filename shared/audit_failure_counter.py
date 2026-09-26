@@ -115,11 +115,40 @@ def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
     * ``0``     — ``.smd`` exists and no tally file does. A REAL zero: the
       writer has been up and has lost nothing. This is the value that lets a
       recovered seat stop alerting.
-    * ``n > 0`` — that many rows have been lost since the volume was created.
+    * ``n > 0`` — that many rows have been lost since the volume was created,
+      summed across the seat home AND every profile home that still exists.
+
+    WHY THE SUM. The tally lives under ``$HERMES_HOME``, and that is not one
+    directory on a seat. The gateway runs as ``hermes -p operator gateway run``,
+    so inside the process ``HERMES_HOME`` is ``/opt/data/profiles/operator`` and
+    its losses land in ``profiles/operator/.smd``; the gate process that reports
+    them runs with ``/opt/data``. Reading only the caller's own home made every
+    row the GATEWAY lost invisible to the console: on pilot-smokeball 2026-09-26
+    the heartbeat said 13 while the gateway's own file held 238 (its
+    ``audit_status.json`` names pid 650, the gateway). Summing on read counts that
+    history without moving a byte, and a writer in any profile is counted the
+    moment it writes.
     """
-    path = tally_path(hermes_home)
-    if not path.parent.is_dir():
+    home = Path(hermes_home or os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+    # A caller running inside a profile home still answers for the whole seat.
+    if home.parent.name == "profiles":
+        home = home.parent.parent
+    root = tally_path(str(home))
+    if not root.parent.is_dir():
         return None
+    root_count = _tally_size(root, required=True)
+    if root_count is None:
+        return None
+    total = root_count
+    for profile_tally in sorted((home / "profiles").glob(f"*/{_TALLY_RELPATH}")):
+        # A broken PROFILE tally is skipped, not fatal: the seat can still give an
+        # honest lower bound from the files it can read, and the warning names it.
+        total += _tally_size(profile_tally, required=False) or 0
+    return total
+
+
+def _tally_size(path: Path, *, required: bool) -> int | None:
+    """Byte count of one tally file; 0 when absent; None when it cannot answer."""
     try:
         st = path.stat()
     except FileNotFoundError:
@@ -131,7 +160,11 @@ def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
         # A directory's st_size is a real number and a meaningless count. Report
         # "cannot answer" rather than a fabricated figure — a wrong number here
         # would page someone about failures that never happened.
-        logger.warning("audit_failure_counter: tally path %s is not a regular file", path)
+        logger.warning(
+            "audit_failure_counter: tally path %s is not a regular file%s",
+            path,
+            "" if required else "; not counted",
+        )
         return None
     return st.st_size
 

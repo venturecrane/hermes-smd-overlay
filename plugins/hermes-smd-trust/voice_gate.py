@@ -72,7 +72,7 @@ from shared.audit_contract import CANONICAL_TOOL_CALL_KEY, agent_event_params
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_status import NoAuditWarner
 from shared.customer_config import CustomerConfig
-from shared.spec_gate import resolve_output_class
+from shared.spec_gate import resolve_output_class, spec_read_instruction
 from shared.spec_status import SPEC_STATUS
 from shared.voice_status import VOICE_STATUS
 
@@ -287,9 +287,9 @@ def _spec_draft_message(output_class: str, reason: str) -> str:
     if reason == _REASON_SPEC_NOT_READ:
         return (
             f"Refused: this seat declares an authored voice spec for the '{output_class}' "
-            "output class, and this turn did not read it. Read the spec named in your "
-            "skill's authored-spec pointer, compose against it, then send — or create a "
-            "draft for review. (voice live-gate, ss ADR 0083)"
+            f"output class, and this turn did not read it. {spec_read_instruction(output_class)}, "
+            "compose against it, then send — or create a draft for review. "
+            "(voice live-gate, ss ADR 0083)"
         )
     return (
         f"Refused: the voice live-gate could not certify this '{output_class}' send "
