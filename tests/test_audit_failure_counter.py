@@ -137,3 +137,52 @@ def test_a_successful_audit_write_tallies_nothing(machine_home):
     before = counter.read_audit_write_failures()
     assert before == 0
     assert counter.read_audit_write_failures() == 0
+
+
+# ---------------------------------------------------------------------------
+# The seat has more than one HERMES_HOME (pilot-smokeball, 2026-09-26)
+# ---------------------------------------------------------------------------
+
+
+def _profile_tally(home: Path, profile: str, count: int) -> Path:
+    smd = home / "profiles" / profile / ".smd"
+    smd.mkdir(parents=True, mode=0o700)
+    tally = smd / "audit_write_failures.tally"
+    tally.write_bytes(b"x" * count)
+    return tally
+
+
+def test_the_gateways_profile_tally_is_counted(machine_home):
+    """The gateway runs under ``-p operator`` and tallies into its profile home.
+    Reading only the seat home reported 13 while the gateway's file held 238.
+    Falsifier: drop the profile glob and this reads 13."""
+    (machine_home / ".smd" / "audit_write_failures.tally").write_bytes(b"x" * 13)
+    _profile_tally(machine_home, "operator", 238)
+    assert counter.read_audit_write_failures() == 251
+
+
+def test_a_reader_inside_a_profile_home_still_answers_for_the_seat(machine_home, monkeypatch):
+    (machine_home / ".smd" / "audit_write_failures.tally").write_bytes(b"x" * 2)
+    _profile_tally(machine_home, "operator", 5)
+    monkeypatch.setenv("HERMES_HOME", str(machine_home / "profiles" / "operator"))
+    assert counter.read_audit_write_failures() == 7
+
+
+def test_profile_losses_count_when_the_seat_home_has_none(machine_home):
+    _profile_tally(machine_home, "operator", 4)
+    assert counter.read_audit_write_failures() == 4
+
+
+def test_a_profile_tally_without_a_seat_smd_is_still_unknown(tmp_path, monkeypatch):
+    """No seat-level ``.smd`` keeps its meaning: this seat cannot answer."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _profile_tally(tmp_path, "operator", 4)
+    assert counter.read_audit_write_failures() is None
+
+
+def test_a_broken_profile_tally_is_skipped_not_fatal(machine_home):
+    (machine_home / ".smd" / "audit_write_failures.tally").write_bytes(b"x" * 3)
+    bad = machine_home / "profiles" / "operator" / ".smd" / "audit_write_failures.tally"
+    bad.mkdir(parents=True)
+    _profile_tally(machine_home, "other", 2)
+    assert counter.read_audit_write_failures() == 5

@@ -416,15 +416,45 @@ def _broken_control_message(output_class: str, props: list[str]) -> str:
     )
 
 
+def spec_location(output_class: str, prop: str = "voice") -> str | None:
+    """The installed path of ``output_class``'s ``prop`` spec, or ``None``.
+
+    A spec_not_read refusal used to say only "read the spec named in your skill's
+    authored-spec pointer". A turn that loaded no skill (a webhook reply) has no
+    pointer, so on ashton-price 2026-09-22..24 the model guessed paths under its
+    profile home, got File not found three times, and the staff send was refused
+    each time with the guide sitting at ``/var/lib/smd-config/specs/classes/
+    staff/voice.md``. Same manifest source the pointer stamp and the read register
+    use, so the path named here is the path whose read clears the gate.
+    """
+    try:
+        directory = spec_manifest.spec_dir()
+        if directory is None:
+            return None
+        for entry in spec_manifest.entries_for_class(output_class, directory):
+            if entry.prop == prop:
+                return str(entry.path_under(directory))
+    except Exception:  # noqa: BLE001 — a refusal message must never fail to render
+        logger.debug("spec_gate: spec_location failed", exc_info=True)
+    return None
+
+
+def spec_read_instruction(output_class: str, prop: str = "voice") -> str:
+    """How to read the spec: the exact path when known, else the pointer."""
+    path = spec_location(output_class, prop)
+    if path:
+        return f"Read it now with read_file at {path}"
+    return "Read the spec named in your skill's authored-spec pointer"
+
+
 def _draft_message(output_class: str, reason: str) -> str:
     internal = output_class in _INTERNAL_ARTIFACT_CLASSES
     if reason == _REASON_SPEC_NOT_READ:
+        read = spec_read_instruction(output_class)
         remedy = (
-            "Read the spec named in your skill's authored-spec pointer, compose against "
-            "it, and deliver again."
+            f"{read}, compose against it, and deliver again."
             if internal
-            else "Read the spec named in your skill's authored-spec pointer, compose "
-            "against it, then send — or create a draft for review."
+            else f"{read}, compose against it, then send — or create a draft for review."
         )
         return (
             f"Refused: this seat declares an authored voice spec for the '{output_class}' "

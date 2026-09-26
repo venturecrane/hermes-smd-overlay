@@ -458,3 +458,41 @@ def test_enforce_undeclared_outside_send_keeps_fallback_downgrade(monkeypatch):
     assert isinstance(result, dict)
     assert result["action"] == "block"
     assert calls[0]["reason"] == "no_samples"
+
+
+# ===========================================================================
+# The refusal names the file, and reading that file clears the gate
+# (ashton-price 2026-09-22..24: a webhook turn has no skill pointer and guessed)
+# ===========================================================================
+
+
+def test_spec_not_read_refusal_names_the_installed_path(voice_gate, monkeypatch, spec_tree):
+    _set_config(monkeypatch, voice_library={"samples_path": "r2://x/"}, output_classes=_DECLARING)
+    _capture_audit(monkeypatch, voice_gate)
+    result = _gate(voice_gate)
+    expected = str(spec_tree / "classes/outbound_client/voice.md")
+    assert expected in result["message"]
+
+
+def test_reading_the_named_path_clears_the_gate_on_the_same_turn(
+    voice_gate, monkeypatch, spec_tree
+):
+    """The loop the message promises. Falsifier: name any path the read register
+    does not accept and the second gate call still blocks."""
+    import re
+
+    _set_config(monkeypatch, voice_library={"samples_path": "r2://x/"}, output_classes=_DECLARING)
+    _capture_audit(monkeypatch, voice_gate)
+    first = _gate(voice_gate)
+    named = re.search(r"read_file at (\S+?voice\.md)", first["message"]).group(1)
+    spec_read = _load_trust("spec_read")
+    spec_read.observe_read("read_file", {"path": named}, SESSION)
+    assert _gate(voice_gate) is None
+
+
+def test_refusal_keeps_the_pointer_wording_when_no_path_is_known(monkeypatch):
+    from shared import spec_gate, spec_manifest
+
+    monkeypatch.delenv(spec_manifest.SPEC_DIR_ENV, raising=False)
+    assert spec_gate.spec_location("outbound_client") is None
+    assert "authored-spec pointer" in spec_gate.spec_read_instruction("outbound_client")

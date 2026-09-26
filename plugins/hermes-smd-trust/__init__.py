@@ -353,6 +353,16 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
                 ),
             }
 
+        # Non-gateway wall (pilot-smokeball 2026-09-21). A second Hermes runtime
+        # on the Machine runs real tools while the broker refuses every one of its
+        # audit rows. Nothing that cannot be recorded runs. See
+        # shared/gateway_identity.py for who decides and why unset fails closed.
+        from shared.gateway_identity import wall_block
+
+        gateway_block = wall_block()
+        if gateway_block is not None:
+            return gateway_block
+
         # The .smd fence (ss#2547). Ahead of the ceiling because it is not a
         # question about this seat's entitlements: no exposure any customer
         # could author permits a turn to write the seat's own provenance, so

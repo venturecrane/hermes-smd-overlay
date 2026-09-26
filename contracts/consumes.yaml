@@ -85,6 +85,13 @@ vars:
     consumed_by: [audit, trust, webhook-router]
     note: "read via os.environ.get(SOCKET_ENV) where SOCKET_ENV = 'SMD_AUDIT_BROKER_SOCKET' (shared/audit_client.py); set => audit writes route through the broker's append-only audit_append (OP-P1-4); unset => direct D1 write"
 
+  SMD_GATEWAY_PID:
+    discovery: indirect
+    stage: agent
+    requirement: optional
+    consumed_by: [trust]
+    note: "read via os.environ.get(GATEWAY_PID_ENV) (shared/gateway_identity.py); exported by the entrypoint for the container main that becomes the gateway. Fallback only: the broker's health `caller_is_gateway` decides first. With SMD_AUDIT_BROKER_SOCKET set and the broker unable to answer, unset or different from os.getpid() refuses every tool (a second Hermes runtime's audit rows are refused, so it may not act)"
+
   # ---- Optional: plugin no-ops cleanly / a default applies when absent ----
   AGENTMAIL_API_KEY:
     # ss#2258 made this indirect: the ``secret_env`` FIELD VALUE on the
