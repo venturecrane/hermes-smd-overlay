@@ -41,7 +41,11 @@ _COPY = _REPO_ROOT / "shared" / "casework_ledger.py"
 # feat/casework-done-since. Adds the ``step_ran`` event (a date-prep step the
 # Operator ran itself, witnessed by its create_memo call) and lets ``mentioned``
 # close a date item's untold steps.
-CANONICAL_SHA256 = "75308878f418d5adbe1f086a8456b5e64ca161675c51609c8c79d13685a1ac9a"
+#
+# 2026-09-25c: restamped. _validate_payload splits its two kind-shape checks
+# into _check_kind_shape (ss-console's function-complexity ceiling); rules and
+# refusal text unchanged.
+CANONICAL_SHA256 = "228f5a20366e6260ca0069dbf148b7b1e6841cfe428936b4d974ac6fd15b8b02"
 
 
 def test_copy_matches_the_pinned_canonical_digest() -> None:
