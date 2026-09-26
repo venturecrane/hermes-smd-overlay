@@ -252,18 +252,34 @@ def take_envelope(
         return None
 
 
+def done_item(row: dict) -> tuple[str, str]:
+    """``(kind, source_id)`` of one done-since row. A task row may name its id
+    as ``task_id`` (the original shape) or ``source_id``; a date row (a
+    date-prep step the Operator ran itself) names its event as ``source_id``."""
+    kind = row.get("kind", "task")
+    source = row.get("source_id") if row.get("source_id") is not None else row.get("task_id")
+    return str(kind), str(source)
+
+
+def _valid_done_row(row: object) -> bool:
+    if not isinstance(row, dict) or row.get("kind", "task") not in casework_ledger.ITEM_KINDS:
+        return False
+    kind, source = done_item(row)
+    if row.get("task_id") is not None and (kind != "task" or row["task_id"] != source):
+        return False
+    return (
+        _id(source)
+        and _keyed(row.get("matter_id"), kind, source, row.get("item_key"))
+        and _text(row.get("line"), _MAX_SHORT_LINE)
+    )
+
+
 def _valid_done_since(value: object) -> bool:
     if value is None:
         return True
     if not isinstance(value, list) or len(value) > _MAX_DONE_SINCE:
         return False
-    return all(
-        isinstance(row, dict)
-        and _id(row.get("task_id"))
-        and _keyed(row.get("matter_id"), "task", row.get("task_id"), row.get("item_key"))
-        and _text(row.get("line"), _MAX_SHORT_LINE)
-        for row in value
-    )
+    return all(_valid_done_row(row) for row in value)
 
 
 def close_payload(close: dict) -> dict:
@@ -377,12 +393,19 @@ def step_payload(entry: dict) -> dict:
 
 
 def _valid_catalog_entry(entry: object) -> bool:
+    """A step the brief may offer. A ``handles`` entry may carry ``done_line``,
+    the closed phrase the brief lists under Done once the turn has run and
+    recorded that step (``casework_step_done``)."""
     return (
         isinstance(entry, dict)
         and _id(entry.get("catalog_id"))
         and entry.get("level") in ("prepares", "handles")
         and isinstance(entry.get("params", {}), dict)
         and _ledger_accepts("briefed", step_payload(entry), "date")
+        and (
+            entry.get("done_line") is None
+            or (entry["level"] == "handles" and _text(entry["done_line"], _MAX_SHORT_LINE))
+        )
     )
 
 

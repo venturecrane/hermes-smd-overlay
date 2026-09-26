@@ -747,6 +747,9 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "casework_finish": ActionClass.INTERNAL_WRITE,
     "casework_brief": ActionClass.INTERNAL_WRITE,
     "reply_verdicts": ActionClass.INTERNAL_WRITE,
+    # A date-prep step the turn ran at "handles", recorded as a step_ran row
+    # (casework_steps.py): no arguments, backed by the step's own memo call.
+    "casework_step_done": ActionClass.INTERNAL_WRITE,
     # Correction capture (hermes-smd-corrections, ss-console #2091, ADR 0083 §4).
     # INTERNAL_WRITE for the same reason the escalation append is: it appends one
     # validated row to the broker's append-only ledger and reaches nothing

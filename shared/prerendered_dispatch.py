@@ -55,7 +55,9 @@ APPENDS ARE POST-DISPATCH AND FULL-BODY ONLY. After a successful FULL send,
 this module writes the envelope's ``fired``/``chased``/``handed_off`` events
 through the broker's ``escalation_event_append`` verb with the SAME resolved
 session id the send row carries, so the broker's send witness joins them
-deterministically. A skeleton delivery appends NOTHING — the per-item codes
+deterministically. On a case-manager seat the same holds for the casework
+``mentioned`` rows a body's "Done since last time" line earns
+(:mod:`shared.casework_mentions`). A skeleton delivery appends NOTHING — the per-item codes
 never reached a person, and the items re-fire next run by the ledger's own
 re-fire property (annoying, never dangerous). The derive-handle discipline
 (ss #2304) guards MODEL-supplied identity; this module is deterministic code
@@ -80,6 +82,7 @@ import socket
 from collections import OrderedDict
 
 from shared import (
+    casework_mentions,
     cron_attribution,
     digest_reply_ref,
     escalation_ledger,
@@ -178,7 +181,7 @@ def _valid_dispatch(entry: object) -> bool:
             return False
         if not digest_reply_ref.append_digest_fields_ok(append):
             return False
-    return True
+    return casework_mentions.valid(entry.get("casework_mentions"))
 
 
 def take_envelope(
@@ -418,6 +421,11 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     routine.skill, entry.get("appends") or [], resolved, dispatch_ref
                 )
                 appended_total += written
+                # Case-manager seats: the "Done since last time" line this body
+                # carried is told once (shared/casework_mentions.py).
+                casework_mentions.write(
+                    routine.skill, entry.get("casework_mentions") or [], resolved
+                )
                 note = (
                     f"Your {routine.skill} alert was already delivered to {who} "
                     f"(message {result.message_id})"

@@ -23,6 +23,8 @@ Record shape (one JSON object per line)::
      # closed_by_record: "payload" (action close, class done, evidence required)
      # approved|held|step_started: "n","thread_ref", approved|held: "decided_by"
      # completed: "tool_call_id" (joins the update_task TOOL_CALL_COMPLETED row)
+     # step_ran: "payload" (action step, level handles), "tool_call_id" (joins
+     #   the create_memo TOOL_CALL_COMPLETED row the step's routine filed)
      # write_failed: "error"}
 
 The doors ``validate_append`` keeps shut, each refused by name:
@@ -33,6 +35,9 @@ The doors ``validate_append`` keeps shut, each refused by name:
 * a verdict with no raise on the same thread and number;
 * an outcome with no open authorization (an approved line or a
   closed_by_record), or a ``completed`` with no successful update_task call;
+* a ``step_ran`` that is not a date item's step at ``handles``, or that names
+  no successful create_memo call of its own session (every prep routine files
+  its ``[Operator]`` memo on the matter, so a step that left none did not run);
 * an ``item_key`` not derived from the row's own matter, kind and source id.
 
 Pure stdlib with no broker imports, so vendored copies load standalone.
@@ -65,6 +70,7 @@ EVENTS: tuple[str, ...] = (
     "mentioned",
     "step_started",
     "kept",
+    "step_ran",
 )
 #: Events that claim a message reached a person, so the broker must witness a send.
 WITNESSED_EVENTS: tuple[str, ...] = (*RAISING_EVENTS, "mentioned")
@@ -75,6 +81,10 @@ LEVELS: tuple[str, ...] = ("surfaces", "prepares", "handles")
 WRITE_ACTIONS: tuple[str, ...] = ("close", "reassign")
 CLASSES: tuple[str, ...] = ("open", "done", "stale", "at_stake")
 UPDATE_TASK_TOOL = "mcp_smokeball_update_task"
+#: The write every prep routine makes when it runs a step: its ``[Operator]`` memo.
+STEP_WITNESS_TOOL = "mcp_smokeball_create_memo"
+#: The successful tool call that witnesses each call-backed event.
+WITNESS_TOOLS: dict[str, str] = {"completed": UPDATE_TASK_TOOL, "step_ran": STEP_WITNESS_TOOL}
 
 DEFAULT_LEDGER_PATH = "/opt/data/audit/casework-ledger.jsonl"
 LEDGER_PATH_ENV = "SMD_CASEWORK_LEDGER_PATH"
@@ -104,6 +114,7 @@ _ALLOWED: dict[str, frozenset[str]] = {
     "write_failed": _COMMON | {"error"},
     "mentioned": _COMMON,
     "kept": _COMMON,
+    "step_ran": _COMMON | {"payload", "tool_call_id"},
 }
 _PAYLOAD_KEYS = frozenset(
     {"action", "class", "staff_id", "to_staff_id", "reason", "evidence", "step"}
@@ -188,6 +199,9 @@ class ItemState:
     "closed_by_record"); an outcome consumes it, so one approval authorizes one
     write. ``completed_via`` names which license the last completed write used;
     Job 3 mentions an item once when that is "closed_by_record".
+    ``unmentioned_steps`` holds the date-prep steps the Operator ran itself
+    (``step_ran``) that no message has told anyone about yet, each
+    ``{"step": <payload.step>, "day": <date|None>}``; a ``mentioned`` clears it.
     """
 
     item_key: str
@@ -207,6 +221,7 @@ class ItemState:
     mentioned: bool = False
     kept: bool = False
     last_kept_date: date | None = None
+    unmentioned_steps: list[dict] = field(default_factory=list)
 
 
 def _ts_date(ts) -> date | None:
@@ -263,6 +278,12 @@ def _fold(state: ItemState, event: dict) -> None:
         state.authorization, state.authorized_decision = None, None
     elif kind == "mentioned":
         state.mentioned = True
+        state.unmentioned_steps = []
+    elif kind == "step_ran":
+        ran = event.get("payload")
+        ran_step = ran.get("step") if isinstance(ran, dict) else None
+        step = ran_step if isinstance(ran_step, dict) else {}
+        state.unmentioned_steps.append({"step": step, "day": _ts_date(ts)})
     elif kind == "kept":
         state.kept, state.last_kept_date = True, _ts_date(ts)
 
@@ -283,8 +304,11 @@ def pending_decisions(state: ItemState | None) -> list[Decision]:
 
 
 def needs_mention(state: ItemState | None) -> bool:
-    """A task the Operator closed on the record's evidence and has not yet
-    mentioned to anyone (Job 3: one line in the next message, never its own)."""
+    """A task the Operator closed on the record's evidence, or a date-prep step
+    it ran itself, that it has not yet mentioned to anyone (Job 3: one line in
+    the next message, never its own)."""
+    if state is not None and state.unmentioned_steps:
+        return True
     return bool(
         state
         and state.completed
@@ -373,6 +397,16 @@ def _validate_payload(kind: str, payload, item: str) -> None:
         raise ValueError(f"payload.evidence must be a list of at most {_MAX_EVIDENCE} atoms")
     if not all(_short_str(atom, _MAX_EVIDENCE_CHARS) for atom in evidence):
         raise ValueError(f"each evidence atom must be 1..{_MAX_EVIDENCE_CHARS} characters")
+    if kind == "step_ran" and (
+        action != "step"
+        or klass != "open"
+        or item != "date"
+        or payload["step"].get("level") != "handles"
+    ):
+        raise ValueError(
+            "step_ran records a date-prep step the Operator ran itself: kind date, action step, "
+            "class open, and a step at level handles. A step at any other level waits for a person."
+        )
     if kind == "closed_by_record" and (
         action != "close" or klass != "done" or not evidence or item != "task"
     ):
@@ -462,6 +496,23 @@ def _check_answer(kind: str, event: dict, state: ItemState | None) -> None:
         raise ValueError(f"line {slot[1]} on this thread was already answered ({decision.verdict})")
 
 
+def _check_call(kind: str, event: dict, existing_events, audit_witness) -> None:
+    """A call-backed row names one successful tool call of its own session, and
+    no call backs two rows."""
+    tool = WITNESS_TOOLS[kind]
+    call_id = event.get("tool_call_id")
+    if not _short_str(call_id, _MAX_ID_CHARS):
+        raise ValueError(f"{kind} carries tool_call_id, the id of the {tool} call")
+    if any(e.get("tool_call_id") == call_id for e in existing_events):
+        raise ValueError(f"that {tool} call already backs another casework row")
+    if not callable(audit_witness) or not audit_witness(event):
+        raise ValueError(
+            f"refusing {kind}: the audit log holds no successful {tool} call with that id in "
+            "this session. Record write_failed if a write did not land; record no step that "
+            "cannot be shown to have run."
+        )
+
+
 def _check_outcome(kind, event, state, existing_events, audit_witness) -> None:
     if state is None or state.authorization is None:
         raise ValueError(
@@ -472,18 +523,7 @@ def _check_outcome(kind, event, state, existing_events, audit_witness) -> None:
         if not _short_str(event.get("error"), _MAX_ERROR_CHARS):
             raise ValueError(f"write_failed carries error, 1..{_MAX_ERROR_CHARS} characters")
         return
-    call_id = event.get("tool_call_id")
-    if not _short_str(call_id, _MAX_ID_CHARS):
-        raise ValueError("completed carries tool_call_id, the id of the update_task call")
-    if any(
-        e.get("event") == "completed" and e.get("tool_call_id") == call_id for e in existing_events
-    ):
-        raise ValueError("that update_task call already completed another item")
-    if not callable(audit_witness) or not audit_witness(event):
-        raise ValueError(
-            f"refusing completed: the audit log holds no successful {UPDATE_TASK_TOOL} call with "
-            "that id in this session. Record write_failed if the write did not land."
-        )
+    _check_call(kind, event, existing_events, audit_witness)
 
 
 def _check_followup(kind: str, state: ItemState | None) -> None:
@@ -491,8 +531,11 @@ def _check_followup(kind: str, state: ItemState | None) -> None:
         state is None or not any(d.verdict == "held" for d in state.decisions.values())
     ):
         raise ValueError("kept records a person's hold; this item has no held line")
-    if kind == "mentioned" and (state is None or not state.completed):
-        raise ValueError("mentioned records telling someone a task was closed; this one was not")
+    if kind == "mentioned" and (state is None or not (state.completed or state.unmentioned_steps)):
+        raise ValueError(
+            "mentioned records telling someone a task was closed or a step was run; "
+            "this item has neither"
+        )
 
 
 def validate_append(existing_events, new_event: dict, *, send_witness, audit_witness) -> None:
@@ -500,7 +543,8 @@ def validate_append(existing_events, new_event: dict, *, send_witness, audit_wit
 
     ``send_witness(event) -> bool``: the broker itself dispatched to a person in
     the event's session. ``audit_witness(event) -> bool``: ``event["tool_call_id"]``
-    names this session's successful update_task call in the audit log. Both
+    names this session's successful ``WITNESS_TOOLS[event["event"]]`` call in the
+    audit log. Both
     keyword-only with no default, so a caller that forgets one gets a TypeError,
     not an open door.
     """
@@ -520,6 +564,8 @@ def validate_append(existing_events, new_event: dict, *, send_witness, audit_wit
         _check_answer(kind, new_event, state)
     elif kind in OUTCOME_EVENTS:
         _check_outcome(kind, new_event, state, existing_events, audit_witness)
+    elif kind == "step_ran":
+        _check_call(kind, new_event, existing_events, audit_witness)
     else:
         _check_followup(kind, state)
 

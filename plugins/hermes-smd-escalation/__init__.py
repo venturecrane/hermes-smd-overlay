@@ -713,6 +713,13 @@ def _casework_brief(args: dict[str, Any], **kwargs: Any) -> str:
     )
 
 
+def _casework_step_done(args: dict[str, Any], **kwargs: Any) -> str:
+    """A date-prep step the turn ran at handles (``casework_steps.py``). No arguments."""
+    return casework.casework_step_done(
+        session_id=_resolved_session(kwargs), append=lambda event: _casework_append(event)
+    )
+
+
 def _reply_verdicts(args: dict[str, Any], **kwargs: Any) -> str:
     """Every plain-word reply: casework rows first, else the digest ack path."""
     return casework.reply_verdicts(
@@ -759,6 +766,11 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         _casework_brief,
     ),
     "reply_verdicts": (casework.REPLY_DESCRIPTION, casework.EMPTY_SCHEMA, _reply_verdicts),
+    "casework_step_done": (
+        casework.STEP_DONE_DESCRIPTION,
+        casework.EMPTY_SCHEMA,
+        _casework_step_done,
+    ),
 }
 
 

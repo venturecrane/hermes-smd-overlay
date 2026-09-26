@@ -48,13 +48,11 @@ from shared.casework_acts import CASEWORK_ACTS, COMPLETED, CaseworkActs, TaskWri
 
 from .casework_reply import reply_verdicts
 from .casework_rules import (
-    _BRIEFED,
     _FINISH,
     _MAX_BRIEF_DONE,
     _MAX_BRIEF_DONE_CHARS,
     _MAX_DECISIONS,
     _MAX_QUESTION,
-    BRIEF_SUFFIX,
     CASEWORK_SUFFIX,
     _append,
     _event,
@@ -62,6 +60,7 @@ from .casework_rules import (
     _routine,
     _text,
     close_payload,
+    done_item,
     ledger_path,
     render_brief,
     render_review,
@@ -69,6 +68,13 @@ from .casework_rules import (
     take_envelope,
     valid_brief_envelope,
     valid_casework_envelope,
+)
+from .casework_steps import (
+    STEP_DONE_DESCRIPTION,
+    brief_state,
+    casework_step_done,
+    recorded_lines,
+    recorded_mentions,
 )
 
 logger = logging.getLogger(__name__)
@@ -322,16 +328,22 @@ def _write_raises(
 def _write_mentions(
     append: Callable[[dict], Any], skill: str, session_id: str, rows: list[dict]
 ) -> None:
-    """What a sent body told a person about is not told again (Job 3)."""
+    """What a sent body told a person about is not told again (Job 3): a task
+    closed on the record's evidence, or a date-prep step the Operator ran."""
+    told: set[str] = set()
     for row in rows:
+        if row["item_key"] in told:
+            continue
+        told.add(row["item_key"])
+        kind, source_id = done_item(row)
         _append(
             append,
             _event(
                 "mentioned",
                 skill=skill,
                 matter_id=row["matter_id"],
-                kind="task",
-                source_id=row["task_id"],
+                kind=kind,
+                source_id=source_id,
                 item_key=row["item_key"],
                 session_id=session_id,
             ),
@@ -395,33 +407,18 @@ def casework_brief(
     hermes_home: str | None = None,
     now: datetime | None = None,
 ) -> str:
-    if not session_id:
-        return _brief_refusal("There is no date-prep brief to send in this run.")
-    state = _BRIEFED.get(session_id)
-    if state is not None and state.get("sent"):
-        return _brief_refusal("This run's brief has already gone out. Send nothing else.")
+    state = brief_state(session_id, routine=routine, hermes_home=hermes_home, now=now)
     if state is None:
-        found = routine(session_id)
-        envelope = None
-        if found is not None:
-            skill, persona = found
-            envelope = take_envelope(
-                skill,
-                BRIEF_SUFFIX,
-                valid_brief_envelope,
-                persona=persona,
-                hermes_home=hermes_home,
-                now=now,
-            )
-        if envelope is None:
-            return _brief_refusal("There is no date-prep brief to send in this run.")
-        state = {"skill": envelope["skill"], "envelope": envelope, "sent": False}
-        _BRIEFED.put(session_id, state)
+        return _brief_refusal("There is no date-prep brief to send in this run.")
+    if state.get("sent"):
+        return _brief_refusal("This run's brief has already gone out. Send nothing else.")
     envelope = state["envelope"]
     refusal = _check_brief_args(args if isinstance(args, dict) else {}, envelope)
     if refusal:
         return _brief_refusal(refusal)
-    done = [str(line) for line in args.get("done") or []]
+    # Steps the turn ran and recorded (casework_step_done) are listed in the
+    # catalog's own words, ahead of the turn's lines, and marked told below.
+    done = [*recorded_lines(state), *(str(line) for line in args.get("done") or [])]
     decisions = list(args["decisions"])
     subject, body = render_brief(envelope, done, decisions)
     dispatch_ref = digest_reply_ref.mint_dispatch_ref()
@@ -469,7 +466,8 @@ def casework_brief(
         )
         digest_reply_ref.stamp_casework_raise(event, n, dispatch_ref)
         written += 1 if _append(append, event) else 0
-    _write_mentions(append, state["skill"], session_id, envelope.get("done_since") or [])
+    told = [*(envelope.get("done_since") or []), *recorded_mentions(state)]
+    _write_mentions(append, state["skill"], session_id, told)
     return json.dumps(
         {
             "status": "sent",
@@ -487,7 +485,9 @@ __all__ = [
     "EMPTY_SCHEMA",
     "FINISH_DESCRIPTION",
     "REPLY_DESCRIPTION",
+    "STEP_DONE_DESCRIPTION",
     "reply_verdicts",
+    "casework_step_done",
     "casework_finish",
     "ledger_path",
     "casework_brief",
