@@ -397,6 +397,14 @@ def _validate_payload(kind: str, payload, item: str) -> None:
         raise ValueError(f"payload.evidence must be a list of at most {_MAX_EVIDENCE} atoms")
     if not all(_short_str(atom, _MAX_EVIDENCE_CHARS) for atom in evidence):
         raise ValueError(f"each evidence atom must be 1..{_MAX_EVIDENCE_CHARS} characters")
+    _check_kind_shape(kind, payload, item)
+
+
+def _check_kind_shape(kind: str, payload: dict, item: str) -> None:
+    """The two row kinds whose payload has one legal shape: a step the
+    Operator ran itself, and a task the record shows done."""
+    action, klass = payload.get("action"), payload.get("class")
+    evidence = payload.get("evidence", [])
     if kind == "step_ran" and (
         action != "step"
         or klass != "open"
