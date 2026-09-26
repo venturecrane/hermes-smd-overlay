@@ -36,7 +36,12 @@ _COPY = _REPO_ROOT / "shared" / "casework_ledger.py"
 # 2026-09-25 (case-manager deadline work): first stamp, from ss-console
 # feat/casework-broker 2e511a11 (formatted at the overlay's 100-column line
 # length so the byte-identical copy passes this repo's ruff format check).
-CANONICAL_SHA256 = "ed3711fef7b7d1eb47270cd507ee6945814c1d18765db3d859d2ffd4e8ba8392"
+#
+# 2026-09-25b (case-manager done-since): restamped from ss-console
+# feat/casework-done-since. Adds the ``step_ran`` event (a date-prep step the
+# Operator ran itself, witnessed by its create_memo call) and lets ``mentioned``
+# close a date item's untold steps.
+CANONICAL_SHA256 = "75308878f418d5adbe1f086a8456b5e64ca161675c51609c8c79d13685a1ac9a"
 
 
 def test_copy_matches_the_pinned_canonical_digest() -> None:

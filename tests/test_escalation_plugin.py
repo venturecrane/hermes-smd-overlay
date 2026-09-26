@@ -759,6 +759,7 @@ def test_register_registers_every_tool(escalation):
         "casework_finish",
         "casework_brief",
         "reply_verdicts",
+        "casework_step_done",
     }
     for r in registered:
         assert "parameters" in r["schema"]  # function shape, not bare JSON-schema
