@@ -48,6 +48,7 @@ from shared.casework_acts import CASEWORK_ACTS, COMPLETED, CaseworkActs, TaskWri
 
 from .casework_reply import reply_verdicts
 from .casework_rules import (
+    _EM_DASH,
     _FINISH,
     _MAX_BRIEF_DONE,
     _MAX_BRIEF_DONE_CHARS,
@@ -359,17 +360,26 @@ def _brief_refusal(reason: str) -> str:
     return json.dumps({"status": "refused", "note": reason}, ensure_ascii=False)
 
 
+def _done_line_problem(index: int, line: object) -> str | None:
+    """Name the done line that fails and why, so the caller can fix that line."""
+    if not isinstance(line, str) or not line.strip():
+        return f"Done line {index} is empty or not text; give each done line as a sentence."
+    if len(line) > _MAX_BRIEF_DONE_CHARS:
+        return f"Done line {index} is {len(line)} characters; the limit is {_MAX_BRIEF_DONE_CHARS}."
+    if _EM_DASH in line:
+        return f"Done line {index} has a long dash; use a comma or period."
+    return None
+
+
 def _check_brief_args(args: dict, envelope: dict) -> str | None:
     done = args.get("done") or []
     decisions = args.get("decisions") or []
     if not isinstance(done, list) or len(done) > _MAX_BRIEF_DONE:
         return f"Give at most {_MAX_BRIEF_DONE} done lines."
-    for line in done:
-        if not _text(line, _MAX_BRIEF_DONE_CHARS):
-            return (
-                f"Each done line must be plain text of at most {_MAX_BRIEF_DONE_CHARS} "
-                "characters, with no long dashes."
-            )
+    for index, line in enumerate(done, start=1):
+        problem = _done_line_problem(index, line)
+        if problem:
+            return problem
     if not isinstance(decisions, list) or not decisions:
         return "A brief needs at least one decision. With no decision, send nothing."
     if len(decisions) > _MAX_DECISIONS:
