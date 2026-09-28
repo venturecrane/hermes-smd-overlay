@@ -55,8 +55,12 @@ MAX_LABEL = 200
 
 _NUMBERED_LINE = re.compile(r"^(\d{1,3})\.\s+(\S.*?)\s*$")
 _TRAILING_ASIDE = re.compile(r"\s*\([^()]*\)\s*$")
-# Dashes the firm's voice rules refuse as punctuation: em, en, and a spaced hyphen.
-_DASHES = ("—", "–", " - ")
+# Dashes the outbound filter refuses: em and en. A spaced hyphen is NOT one of
+# them: firms title tasks "Serve responses - Chen", the original message carried
+# it through every send check, and refusing it left the pilot's first named
+# confirmation bare ("Leaving 1 as it is.", 2026-09-28). The frame this module
+# writes around a label still never uses one.
+_DASHES = ("—", "–")
 
 
 def _dir() -> Path:
