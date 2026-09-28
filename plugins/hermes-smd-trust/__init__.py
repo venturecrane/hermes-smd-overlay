@@ -39,7 +39,7 @@ from shared.casework_steps import STEP_WITNESS
 from shared.pending_acts import PENDING_ACTS, tool_call_failed
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
-from shared.send_dispatch import DispatchResult, set_sender
+from shared.send_dispatch import CodeFixedRecipients, DispatchResult, set_sender
 from shared.spec_gate import TEMPLATED_BODY_ARG
 from shared.spec_status import SPEC_STATUS
 from shared.tool_registration import register_wrapped_tool
@@ -1020,6 +1020,7 @@ def _dispatch_internal_message(
     cc: list[str] | None = None,
     templated: bool = True,
     audit_extra: dict[str, str] | None = None,
+    code_fixed_recipients: CodeFixedRecipients | None = None,
 ) -> DispatchResult:
     """Send one seat-authored message OUT OF TURN, through the full gate.
 
@@ -1064,10 +1065,36 @@ def _dispatch_internal_message(
     a copy of the stamp that observed the authored one. Both are absent on a
     body-less send; both variants (full and skeleton) get the same treatment
     because both reach the channel through this one function.
+
+    ``code_fixed_recipients`` (Captain decision 2026-09-28) is the date-prep
+    brief's capability: recipients written by the pre_run into its envelope,
+    not by the model. It is honoured only when it is that type AND its ``to``
+    and ``cc`` equal this call's exactly; then the gate is told the recipients
+    are code-fixed, which lifts the taint gate for a send to the firm's own
+    staff and nothing else (see ``enforce._evaluate_tool_call``). A send that
+    went out on a tainted turn this way carries ``taint_exempt`` in its audit
+    extra. A capability that does not match is refused outright rather than
+    ignored, because a mismatch means a caller is not the code path it claims.
     """
     recipients = tuple(a for a in (to or ()) if isinstance(a, str) and a.strip())
     if not recipients:
         return DispatchResult(sent=False, reason="no recipient")
+    code_fixed = False
+    if code_fixed_recipients is not None:
+        if not (
+            isinstance(code_fixed_recipients, CodeFixedRecipients)
+            and code_fixed_recipients.matches(list(to or ()), list(cc or ()))
+        ):
+            logger.warning(
+                "hermes-smd-trust: code-fixed recipient capability does not match the send; "
+                "NOT dispatching"
+            )
+            return DispatchResult(
+                sent=False,
+                reason="the recipients differ from the ones code fixed for this send",
+                recipients=recipients,
+            )
+        code_fixed = True
     payload: dict[str, Any] = {
         "to": list(recipients),
         "subject": subject,
@@ -1088,7 +1115,13 @@ def _dispatch_internal_message(
             customer_slug = ""
     try:
         block = enforce.evaluate_tool_call(
-            _SEND_TOOL_NAME, payload, customer_slug, session_id=session_id
+            _SEND_TOOL_NAME,
+            payload,
+            customer_slug,
+            session_id=session_id,
+            # Passed only when verified, so every other sender's call is the
+            # call it always was.
+            **({"code_fixed_recipients": True} if code_fixed else {}),
         )
     except Exception as exc:  # noqa: BLE001 (an indeterminate gate must not send)
         logger.exception("hermes-smd-trust: out-of-turn send gate raised; NOT dispatching")
@@ -1136,6 +1169,12 @@ def _dispatch_internal_message(
     # the gate just allowed, taken BEFORE the html/plain attach mutates it —
     # the console verifier joins this against the pre_run's EMITTED_WAKE stamp.
     send_audit_extra = dict(audit_extra or {})
+    # Only this function states an exemption; a caller cannot pre-stamp one.
+    send_audit_extra.pop("taint_exempt", None)
+    if code_fixed and enforce.session_is_tainted(session_id):
+        # The gate allowed this only because code fixed the recipients
+        # (Captain decision 2026-09-28). Say so on the send's own row.
+        send_audit_extra["taint_exempt"] = enforce.TAINT_EXEMPT_CODE_FIXED
     allowed_text = payload.get("text")
     if isinstance(allowed_text, str) and allowed_text:
         send_audit_extra["rendered_body_sha256"] = prerendered_dispatch.canonical_body_sha256(

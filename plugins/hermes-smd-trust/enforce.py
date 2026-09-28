@@ -49,6 +49,7 @@ returns exactly that shape.
 """
 
 import copy
+import dataclasses
 import enum
 import logging
 import os
@@ -96,6 +97,11 @@ _TAINT_GATED_CLASSES: frozenset[ActionClass] = frozenset(
         ActionClass.CODE_EXECUTION,
     }
 )
+
+#: The audit marker on a send the taint gate let through because code, not the
+#: model, fixed its recipients (Captain decision 2026-09-28; see
+#: ``_evaluate_tool_call``).
+TAINT_EXEMPT_CODE_FIXED = "code_fixed_recipients"
 
 logger = logging.getLogger(__name__)
 
@@ -1059,6 +1065,36 @@ def resolved_send_class(tool_name: str, args: dict, session_id: str) -> ActionCl
         return None
 
 
+def _taint_gate_input(
+    session_taint: str, effective_action: ActionClass, code_fixed_recipients: bool
+) -> str:
+    """The trust class the taint gate reads for this call.
+
+    The session's own, always, with one exception. Captain decision 2026-09-28:
+    the date-prep brief may send on a turn tainted by reading the matter's
+    documents, because ss-console's pre_run writes its recipients into the brief
+    envelope before the turn starts and the model cannot supply or change them;
+    the attack the taint gate defends against (injected text redirecting mail
+    outward) cannot happen through that path. So when the out-of-turn sender has
+    verified that capability (``code_fixed_recipients``) AND the recipients
+    classify as the firm's own staff, the taint gate is not the question. The
+    staff class's own authored ceiling still decides, and every scan and floor
+    after it still runs. Every other send on a tainted turn, including one to an
+    outside, client or vendor recipient under the same capability, stays refused.
+    """
+    if code_fixed_recipients and effective_action is ActionClass.EXTERNAL_SEND_INTERNAL:
+        return TRUST_CLASS_INTERNAL
+    return session_taint
+
+
+def session_is_tainted(session_id: str) -> bool:
+    """Whether this session ingested untrusted content. Unknown reads as tainted."""
+    try:
+        return SESSION_TAINT.trust_class(session_id) != TRUST_CLASS_INTERNAL
+    except Exception:  # noqa: BLE001 — unknown taint reads as tainted (strictest)
+        return True
+
+
 def _resolve_send_recipients(tool_name: str, args: dict, session_id: str) -> set[str]:
     """Normalized recipient set for a proactive send — the confirm-approval
     match key (ADR 0071 #1806). Empty when the recipient is unresolvable (a
@@ -1281,6 +1317,8 @@ def evaluate_tool_call(
     session_id: str = "",
     tool_call_id: str = "",
     session_match: str = "",
+    *,
+    code_fixed_recipients: bool = False,
 ) -> dict | None:
     """Decide whether a tool call may proceed (see :func:`_evaluate_tool_call`).
 
@@ -1305,7 +1343,13 @@ def evaluate_tool_call(
         )
         return {"action": "block", "message": f"Refused: {replay.refusal}"}
     verdict = _evaluate_tool_call(
-        tool_name, args, customer_slug, session_id, tool_call_id, session_match
+        tool_name,
+        args,
+        customer_slug,
+        session_id,
+        tool_call_id,
+        session_match,
+        code_fixed_recipients=code_fixed_recipients,
     )
     if replay.act is not None and verdict is not None:
         CASEWORK_ACTS.blocked(session_id, str(verdict.get("message") or "refused"))
@@ -1319,6 +1363,8 @@ def _evaluate_tool_call(
     session_id: str = "",
     tool_call_id: str = "",
     session_match: str = "",
+    *,
+    code_fixed_recipients: bool = False,
 ) -> dict | None:
     """Decide whether a tool call may proceed.
 
@@ -1350,6 +1396,12 @@ def _evaluate_tool_call(
     Exception safety: any exception here is caught at the hook boundary; this
     function may raise internally and the caller's try/except in ``__init__.py``
     translates a raise into a fail-closed block.
+
+    ``code_fixed_recipients`` is a keyword only the trust plugin's out-of-turn
+    sender passes, and only after checking the date-prep brief's capability
+    against the exact recipients (``_dispatch_internal_message``). The
+    pre_tool_call hook never passes it, so no model-callable tool reaches it.
+    What it changes is stated at the one place it is read, below.
     """
     if not tool_name:
         # Defensive: an empty tool name is a malformed pre-hook kwarg, not a
@@ -1481,8 +1533,11 @@ def _evaluate_tool_call(
                 args or {},
                 classification.action_class,
                 session_id,
-                tainted=session_taint != TRUST_CLASS_INTERNAL,
+                # A code-fixed recipient did not come from tainted content, so
+                # its provenance is not tainted even when the turn is.
+                tainted=session_taint != TRUST_CLASS_INTERNAL and not code_fixed_recipients,
             )
+        gate_trust_class = _taint_gate_input(session_taint, effective_action, code_fixed_recipients)
 
         # Confirm-approval round-trip (ADR 0071 #1806). A send withheld at the
         # confirm ceiling is CAPTURED below (on await_approval); a matching
@@ -1547,8 +1602,17 @@ def _evaluate_tool_call(
             persona_slug=persona_slug,
             current_turn_approval=approved_replay or _resolve_current_turn_approval(args),
             vertical_floors=vertical_floors,
-            inbound_trust_class=session_taint,
+            inbound_trust_class=gate_trust_class,
         )
+        if gate_trust_class != session_taint:
+            decision = dataclasses.replace(
+                decision,
+                reason=(
+                    f"{decision.reason} | TAINT_EXEMPT: {TAINT_EXEMPT_CODE_FIXED} "
+                    f"(turn trust_class={session_taint}; recipients fixed by the pre_run "
+                    "envelope, Captain decision 2026-09-28)"
+                ),
+            )
     except Exception:  # noqa: BLE001
         if classification.action_class == ActionClass.READ:
             logger.warning(
