@@ -439,14 +439,25 @@ def casework_brief(
     }
     if envelope.get("routing_leg"):
         audit_extra["routing_leg"] = envelope["routing_leg"]
+    to = list(envelope["recipients"])
+    cc = list(envelope.get("cc") or [])
     result = dispatch(
-        to=list(envelope["recipients"]),
+        to=to,
         subject=subject,
         text=body,
         session_id=session_id,
-        cc=list(envelope.get("cc") or []),
+        cc=cc,
         templated=False,
         audit_extra=audit_extra,
+        # Captain decision 2026-09-28: this brief may send on a turn tainted by
+        # reading the matter's documents, because its recipients come from the
+        # pre_run's envelope (loaded and validated by brief_state above), never
+        # from the model. The capability is minted here, from that envelope,
+        # and nowhere a tool argument can reach. It lifts the taint gate only;
+        # see shared.send_dispatch.CodeFixedRecipients.
+        code_fixed_recipients=send_dispatch.CodeFixedRecipients(
+            to=tuple(to), cc=tuple(cc), source=f"{state['skill']} brief envelope"
+        ),
     )
     if not getattr(result, "sent", False):
         return json.dumps(

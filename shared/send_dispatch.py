@@ -58,6 +58,40 @@ class DispatchResult:
     recipients: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class CodeFixedRecipients:
+    """A caller's statement that CODE, not a model, fixed this send's recipients.
+
+    Captain decision 2026-09-28: the date-prep brief may send on a turn tainted
+    by reading the matter's documents, because its recipients are written by
+    ss-console's pre_run into the tamper-fenced brief envelope before the turn
+    starts and the model cannot supply or change them. The attack the taint
+    gate defends against, injected text redirecting mail outward, cannot happen
+    through that path.
+
+    This is a Python object handed to :func:`dispatch` as a keyword, never a
+    payload key and never a tool argument, so nothing a model-callable tool
+    passes can carry it. Its only minter is ``casework_brief``, from the
+    envelope ``brief_state`` loaded and validated. The trust plugin's sender
+    honours it only when ``to`` and ``cc`` equal the payload's exactly, only to
+    set aside the TAINT gate (every ceiling, scan and floor still runs), and
+    only for a send whose recipients classify as the firm's own staff.
+    ``source`` names the envelope, for the log.
+    """
+
+    to: tuple[str, ...]
+    cc: tuple[str, ...] = ()
+    source: str = ""
+
+    def matches(self, to: list[str] | tuple[str, ...], cc: list[str] | tuple[str, ...]) -> bool:
+        """True only when ``to`` and ``cc`` are exactly this capability's lists."""
+        return (
+            bool(self.to)
+            and tuple(to or ()) == tuple(self.to)
+            and tuple(cc or ()) == tuple(self.cc)
+        )
+
+
 #: ``(payload, session_id) -> DispatchResult``. Published by the trust plugin.
 Sender = Callable[..., DispatchResult]
 
@@ -134,4 +168,4 @@ def dispatch(
         )
 
 
-__all__ = ["DispatchResult", "Sender", "available", "dispatch", "set_sender"]
+__all__ = ["CodeFixedRecipients", "DispatchResult", "Sender", "available", "dispatch", "set_sender"]
