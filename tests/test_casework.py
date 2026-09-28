@@ -24,6 +24,7 @@ from tests.conftest import load_plugin
 
 plugin = load_plugin("hermes-smd-escalation")
 casework = plugin.casework
+rules = plugin.casework_rules
 reply_items = plugin.reply_items
 
 SESSION = "cron_job-tlk_20260928_080500"
@@ -848,8 +849,38 @@ def test_no_rendered_text_carries_an_em_dash(tmp_path, rows):
         _brief_envelope(), ["done"], [{"catalog_id": "x", "question": "q"}]
     )
     review = casework.render_review(_review_envelope()["messages"][0], [], [])
-    for text in (subject, body, review, casework.FINISH_DESCRIPTION, casework.REPLY_DESCRIPTION):
+    texts = (subject, body, review, casework.FINISH_DESCRIPTION, casework.REPLY_DESCRIPTION)
+    for text in texts + tuple(rules.ROUTING_NOTES.values()):
         assert "—" not in text
+
+
+def test_a_fallback_brief_says_why_it_came_to_you_first():
+    envelope = {**_brief_envelope(), "routing_leg": "fallback", "routing_why": "no_owner_in_record"}
+    _, body = casework.render_brief(envelope, ["done"], [{"catalog_id": "x", "question": "q"}])
+    blocks = body.split("\n\n")
+    assert blocks[0] == (
+        "No attorney or paralegal is set on this matter in Smokeball, so this comes to you."
+    )
+    assert blocks[1].startswith("Done:")
+
+
+def test_a_brief_without_routing_why_carries_no_note():
+    _, body = casework.render_brief(
+        _brief_envelope(), ["done"], [{"catalog_id": "x", "question": "q"}]
+    )
+    assert body == "\n\n".join(
+        ["Done:\n- done", "Needs you:\n1. q", "Reply here and I'll take it from there."]
+    )
+
+
+@pytest.mark.parametrize("why", ["no_owner_in_record", "owner_not_on_roster", "staff_unread"])
+def test_each_known_routing_why_is_accepted(why):
+    assert casework.valid_brief_envelope({**_brief_envelope(), "routing_why": why})
+
+
+def test_an_unknown_routing_why_refuses_the_envelope():
+    assert casework.valid_brief_envelope(_brief_envelope())
+    assert not casework.valid_brief_envelope({**_brief_envelope(), "routing_why": "vacation"})
 
 
 def test_the_published_sender_is_the_default_dispatch():

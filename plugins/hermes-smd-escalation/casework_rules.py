@@ -45,6 +45,20 @@ _EM_DASH = "\u2014"
 DEFAULT_FOOTER = 'Reply here in words, for example "yes to all", "all except 3" or "leave 2".'
 BRIEF_FOOTER = "Reply here and I'll take it from there."
 
+#: Why a date-prep brief went to the firm's fallback contact instead of the
+#: matter's owner (ss-console date-prep-brief ``brief_envelope.recipients``).
+#: Closed vocabulary, rendered in code as the brief's first line: a great case
+#: manager tells the office why a question landed on their desk.
+ROUTING_NOTES = {
+    "no_owner_in_record": (
+        "No attorney or paralegal is set on this matter in Smokeball, so this comes to you."
+    ),
+    "owner_not_on_roster": (
+        "The attorney on this matter is not set up to receive these yet, so this comes to you."
+    ),
+    "staff_unread": "I could not read who is assigned to this matter today, so this comes to you.",
+}
+
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
@@ -425,6 +439,7 @@ def valid_brief_envelope(payload: dict) -> bool:
         and _addresses(payload.get("recipients"), required=True)
         and _addresses(payload.get("cc"), required=False)
         and _optional_id(payload.get("routing_leg"))
+        and (payload.get("routing_why") is None or payload.get("routing_why") in ROUTING_NOTES)
         and _valid_done_since(payload.get("done_since"))
     )
 
@@ -484,6 +499,9 @@ def render_brief(envelope: dict, done: list[str], decisions: list[dict]) -> tupl
     """``(subject, body)`` for a date-prep brief."""
     subject = f"{envelope['subject_label']}, {_COUNT_WORDS[len(decisions)]} for you"
     blocks: list[str] = []
+    note = ROUTING_NOTES.get(envelope.get("routing_why"))
+    if note:
+        blocks.append(note)
     if done:
         blocks.append("\n".join(["Done:", *(f"- {line.strip()}" for line in done)]))
     since = _done_since_line(envelope.get("done_since") or [])
