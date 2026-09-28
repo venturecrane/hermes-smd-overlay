@@ -247,8 +247,10 @@ def test_review_then_reply_every_row_is_one_the_broker_accepts(tmp_path, broker)
         {"task_id": "t-3", "staff_id": "staff-atty", "assignee_ids": ["staff-para"]},
     ]
     final = answer()
+    # Each number carries its line as the review sent it (shared/sent_lines.py).
     assert final["confirmation_text"] == (
-        "Got it. Closed 1. Reassigned 3. Leaving 2 and 4 as they are."
+        "Got it. Closed 1 (Task t-1). Reassigned 3 (Task t-3). "
+        "Leaving 2 (Task t-2) and 4 (Task t-4) as they are."
     )
 
     assert broker.refused == []
@@ -369,7 +371,9 @@ def test_a_brief_and_its_answer_are_rows_the_broker_accepts(tmp_path, broker):
         )
     )
     assert broker.refused == []
-    assert out["confirmation_text"] == "Got it. Starting on 2 now."
+    assert out["confirmation_text"] == (
+        "Got it. Starting on 2 (2026-PI-105: status conference Fri Oct 2) now."
+    )
     assert [s["catalog_id"] for s in out["steps_to_run"]] == ["records_refresh:reyes"]
     assert [r["event"] for r in broker.rows] == ["briefed", "briefed", "approved", "step_started"]
     started = broker.rows[-1]

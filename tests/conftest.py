@@ -41,6 +41,13 @@ class FakePluginContext:
         self.tools[name] = {"name": name, **kwargs}
 
 
+@pytest.fixture(autouse=True)
+def _sent_lines_dir(monkeypatch, tmp_path_factory) -> None:
+    """Every test keeps sent-line labels (``shared.sent_lines``) in its own
+    directory, never under a real ``HERMES_HOME``."""
+    monkeypatch.setenv("SMD_SENT_LINES_DIR", str(tmp_path_factory.mktemp("sent_lines")))
+
+
 @pytest.fixture
 def fake_ctx() -> FakePluginContext:
     """Return a fresh ``FakePluginContext`` for each test."""

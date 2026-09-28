@@ -89,6 +89,7 @@ from shared import (
     pre_run_handoff,
     provenance,
     send_dispatch,
+    sent_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -421,6 +422,16 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     routine.skill, entry.get("appends") or [], resolved, dispatch_ref
                 )
                 appended_total += written
+                # What each numbered line said, so a reply's confirmation can
+                # name what it quieted (shared/sent_lines.py).
+                numbers = {
+                    a.get("n")
+                    for a in entry.get("appends") or []
+                    if isinstance(a, dict) and digest_reply_ref.valid_digest_number(a.get("n"))
+                }
+                sent_lines.record(
+                    dispatch_ref, sent_lines.numbered_lines(entry["full_body"], numbers)
+                )
                 # Case-manager seats: the "Done since last time" line this body
                 # carried is told once (shared/casework_mentions.py).
                 casework_mentions.write(

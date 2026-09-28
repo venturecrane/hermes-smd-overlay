@@ -43,7 +43,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from shared import digest_reply_ref, send_dispatch
+from shared import digest_reply_ref, send_dispatch, sent_lines
 from shared.casework_acts import CASEWORK_ACTS, COMPLETED, CaseworkActs, TaskWrite
 
 from .casework_reply import reply_verdicts
@@ -276,6 +276,15 @@ def _send_reviews(
         }
         if report["sent"]:
             report["raises_written"] = _write_raises(append, skill, session_id, dispatch_ref, items)
+            # Each numbered line as sent, so a reply's confirmation names it.
+            sent_lines.record(
+                dispatch_ref,
+                {
+                    item["n"]: label
+                    for item in items
+                    if (label := sent_lines.line_label(item["line"], item.get("group")))
+                },
+            )
             # What this body told a person about is not told again (Job 3).
             _write_mentions(
                 append, skill, session_id, [*(message.get("done_since") or []), *closed]
@@ -487,6 +496,12 @@ def casework_brief(
         )
         digest_reply_ref.stamp_casework_raise(event, n, dispatch_ref)
         written += 1 if _append(append, event) else 0
+    # The brief's numbered lines are questions the turn wrote, so a reply's
+    # confirmation names them by the brief's own code-rendered subject label
+    # (the matter and the date), never by the question text.
+    label = envelope["subject_label"]
+    if sent_lines.usable(label):
+        sent_lines.record(dispatch_ref, {n: label for n in range(1, len(decisions) + 1)})
     told = [*(envelope.get("done_since") or []), *recorded_mentions(state)]
     _write_mentions(append, state["skill"], session_id, told)
     return json.dumps(
