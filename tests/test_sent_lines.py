@@ -102,13 +102,20 @@ def test_line_label(line, group, label):
 
 @pytest.mark.parametrize(
     "label",
-    ["x" * (sent_lines.MAX_LABEL + 1), "Chen — letter", "Chen – letter", "Chen - letter"],
+    ["x" * (sent_lines.MAX_LABEL + 1), "Chen — letter", "Chen – letter"],
 )
 def test_a_long_or_dashed_line_is_not_a_label(label):
     assert sent_lines.line_label(label) is None
     assert sent_lines.usable(label) is False
     # ...and its number renders bare.
     assert sent_lines.name_numbers([1], {1: label}) == "1"
+
+
+def test_a_task_title_with_a_spaced_hyphen_is_still_named():
+    # The pilot's 2026-09-28 review line: the firm's own task title.
+    label = "Send preservation letter to Sunrise Plaza for incident-date surveillance video - Chen"
+    assert sent_lines.usable(label) is True
+    assert sent_lines.name_numbers([1], {1: label}) != "1"
 
 
 def test_numbered_lines_names_only_the_numbers_the_rows_carry():
