@@ -597,10 +597,31 @@ def test_the_brief_is_framed_in_code(tmp_path, rows):
         ),
         (
             {
-                "done": ["x" * 121],
+                "done": ["ok", "x" * 201],
                 "decisions": [{"catalog_id": "witness_list_finalize", "question": "q"}],
             },
-            "at most 120",
+            "Done line 2 is 201 characters; the limit is 200.",
+        ),
+        (
+            {
+                "done": ["Binder staged \u2014 gaps remain."],
+                "decisions": [{"catalog_id": "witness_list_finalize", "question": "q"}],
+            },
+            "Done line 1 has a long dash; use a comma or period.",
+        ),
+        (
+            {
+                "done": ["ok", "   "],
+                "decisions": [{"catalog_id": "witness_list_finalize", "question": "q"}],
+            },
+            "Done line 2 is empty or not text",
+        ),
+        (
+            {
+                "done": [42],
+                "decisions": [{"catalog_id": "witness_list_finalize", "question": "q"}],
+            },
+            "Done line 1 is empty or not text",
         ),
         (
             {"decisions": [{"catalog_id": "witness_list_finalize", "question": "Final — yes?"}]},
@@ -615,6 +636,28 @@ def test_a_bad_brief_is_refused_and_sends_nothing(tmp_path, rows, args, phrase):
     out = _brief(tmp_path, args, dispatched, broker)
     assert out["status"] == "refused" and phrase in out["note"]
     assert dispatched == [] and broker == []
+
+
+_REAL_DONE_LINE = (
+    "Trial binder index refreshed 2026-09-28. Draft staged; gaps remain: exhibit list "
+    "absent, deposition summaries absent, Dept. 47 deadlines not captured."
+)
+
+
+def test_a_real_case_manager_sentence_fits_a_done_line(tmp_path, rows):
+    assert 150 <= len(_REAL_DONE_LINE) <= 200
+    _write_envelope(tmp_path, "brief", _brief_envelope(), "date-prep-brief")
+    dispatched: list = []
+    broker: list = []
+    args = {**_ARGS, "done": [_REAL_DONE_LINE]}
+    out = _brief(tmp_path, args, dispatched, broker)
+    assert out["status"] == "sent", out
+    assert f"- {_REAL_DONE_LINE}\n" in dispatched[0]["text"]
+
+
+def test_the_schema_limit_matches_the_check():
+    items = casework.BRIEF_SCHEMA["properties"]["done"]["items"]
+    assert items["maxLength"] == 200
 
 
 # ---------------------------------------------------------------------------
