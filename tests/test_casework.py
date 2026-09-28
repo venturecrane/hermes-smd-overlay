@@ -964,3 +964,116 @@ def test_a_close_may_carry_its_payload_whole(tmp_path, rows):
     broker: list = []
     assert _finish(tmp_path, [], broker)["status"] == "writes_queued"
     assert broker[0]["payload"] == close["payload"]
+
+
+# ---------------------------------------------------------------------------
+# A reply's confirmation names what it closed or started (shared/sent_lines.py)
+# ---------------------------------------------------------------------------
+
+VERIFICATION_LINE = (
+    '"Get client verification signed for RFP Set Two responses", due 2026-09-20. '
+    "It is 8 days overdue and a signed verification is on file. Close it?"
+)
+
+
+def _threaded(broker: list, event: str) -> list[dict]:
+    """The raises a send wrote, as the broker would stamp them on the thread."""
+    return [
+        {**e, "ts": "2026-09-28T15:07:00Z", "thread_ref": THREAD}
+        for e in broker
+        if e["event"] == event
+    ]
+
+
+def _labelled_review() -> dict:
+    envelope = _review_envelope()
+    message = envelope["messages"][0]
+    message["closes"] = []
+    message["items"][0].update(group="matter 2026-PI-101", line=VERIFICATION_LINE)
+    message["items"][1].update(group="matter 2026-PI-101")
+    return envelope
+
+
+def _close_one(path, broker):
+    CASEWORK_ACTS.replay(REPLY_SESSION, casework_acts.UPDATE_TASK_TOOL, {})
+    CASEWORK_ACTS.on_post_tool(casework_acts.UPDATE_TASK_TOOL, REPLY_SESSION, {"tool_call_id": "t"})
+    return _answer(path, broker)
+
+
+def test_a_task_close_confirmation_names_the_task_as_it_was_sent(tmp_path, rows):
+    _write_envelope(tmp_path, "casework", _labelled_review(), "task-list-keeper")
+    dispatched: list = []
+    sent: list = []
+    assert _finish(tmp_path, dispatched, sent)["status"] == "sent"
+    assert "1. " + VERIFICATION_LINE in dispatched[0]["text"]
+    path = _ledger(tmp_path, _threaded(sent, "proposed"))
+    _reply_origin("Yes to all.")
+    broker: list = []
+    assert _answer(path, broker)["status"] == "writes_queued"
+    final = _close_one(path, broker)
+    # Before: "Got it. Closed 1. Leaving 2 as it is."
+    assert final["confirmation_text"] == (
+        'Got it. Closed 1 (matter 2026-PI-101: "Get client verification signed for RFP Set '
+        'Two responses", due 2026-09-20). Leaving 2 (matter 2026-PI-101: Records request) '
+        "as it is."
+    )
+
+
+def test_a_brief_approval_names_the_date_by_the_briefs_own_subject(tmp_path, rows):
+    _write_envelope(tmp_path, "brief", _brief_envelope(), "date-prep-brief")
+    sent: list = []
+    assert _brief(tmp_path, _ARGS, [], sent)["status"] == "sent"
+    path = _ledger(tmp_path, _threaded(sent, "briefed"))
+    _reply_origin("yes on 1, leave 2")
+    out = _answer(path, [])
+    # Before: "Got it. I'll prepare 1 and send it to you for review. Leaving 2 as it is."
+    # The questions are the turn's words, so they are never used as the name.
+    assert out["confirmation_text"] == (
+        "Got it. I'll prepare 1 (2026-PI-105: status conference Fri Oct 2) and send it to "
+        "you for review. Leaving 2 (2026-PI-105: status conference Fri Oct 2) as it is."
+    )
+    assert "witness list" not in out["confirmation_text"]
+
+
+def test_a_brief_yes_to_both_names_the_date_on_each_part(tmp_path, rows):
+    _write_envelope(tmp_path, "brief", _brief_envelope(), "date-prep-brief")
+    sent: list = []
+    _brief(tmp_path, _ARGS, [], sent)
+    path = _ledger(tmp_path, _threaded(sent, "briefed"))
+    _reply_origin("yes to all")
+    out = _answer(path, [])
+    assert out["confirmation_text"] == (
+        "Got it. Starting on 2 (2026-PI-105: status conference Fri Oct 2) now. I'll prepare "
+        "1 (2026-PI-105: status conference Fri Oct 2) and send it to you for review."
+    )
+
+
+def test_a_legacy_list_with_no_kept_labels_confirms_by_number(tmp_path, rows):
+    # Rows written before labels were kept: nothing under their dispatch_ref.
+    path = _three(tmp_path)
+    _reply_origin("yes on 1")
+    broker: list = []
+    _answer(path, broker)
+    assert _close_one(path, broker)["confirmation_text"] == "Got it. Closed 1."
+
+
+def test_a_named_confirmation_passes_the_identifier_gate_on_a_turn_that_read_nothing(
+    tmp_path, rows
+):
+    from shared import identifier_filter, provenance
+
+    _write_envelope(tmp_path, "casework", _labelled_review(), "task-list-keeper")
+    sent: list = []
+    _finish(tmp_path, [], sent)
+    path = _ledger(tmp_path, _threaded(sent, "proposed"))
+    _reply_origin("yes on 1")
+    broker: list = []
+    _answer(path, broker)
+    text = _close_one(path, broker)["confirmation_text"]
+    assert "2026-PI-101" in text and "2026-09-20" in text
+    # Unseeded, the gate would see a matter number and a date nobody read.
+    assert identifier_filter.check(text, identifier_filter.ProvenanceRegister()).unverified
+    register = provenance.register_for(REPLY_SESSION)
+    assert not identifier_filter.check(text, register).unverified
+    # Only the rendered names were seeded, never anything else.
+    assert identifier_filter.check("matter 2026-PI-999", register).unverified

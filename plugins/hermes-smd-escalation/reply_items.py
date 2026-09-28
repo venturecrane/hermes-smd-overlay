@@ -43,7 +43,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from shared import escalation_ledger, inbound
+from shared import escalation_ledger, inbound, sent_lines
 from shared.digest_reply_ref import RAISE_EVENTS, valid_digest_number, valid_snooze_days
 
 logger = logging.getLogger(__name__)
@@ -313,28 +313,39 @@ def render_confirmation(
     valid: list[int] | None = None,
     all_selected: bool = False,
     snooze_days: int | None = None,
+    names: dict[int, str] | None = None,
 ) -> str:
     """The sentence the seat sends back. Empty means send nothing: an auto-reply,
     an unverified sender and a sender off the roster get no answer at all.
     ``snooze_days`` comes off the raise rows (the skill's own interval); without
-    one the sentence says "for now" rather than invent a number."""
+    one the sentence says "for now" rather than invent a number.
+
+    ``names`` maps a number to the label its line carried in the digest the
+    reply answers (:mod:`shared.sent_lines`), so the sentence says what went
+    quiet: "Got it: 1 (2026-PI-101 Chen: Send preservation letter, Mon Sep 21,
+    2026) is quiet for 7 days." A number with no label renders bare."""
     acked = acked or []
     still_open = still_open or []
+    names = names or {}
     if status == STATUS_ACKED:
         if valid_snooze_days(snooze_days):
             period = f"for {snooze_days} day" + ("" if snooze_days == 1 else "s")
         else:
             period = "for now"
-        if all_selected and len(acked) > 1 and not failed:
+        named = any(n in names for n in acked)
+        if all_selected and len(acked) > 1 and not failed and not named:
             text = f"Got it: all {len(acked)} are quiet {period}."
         else:
             verb = "is" if len(acked) == 1 else "are"
-            text = f"Got it: {_join(acked)} {verb} quiet {period}."
+            text = f"Got it: {sent_lines.name_numbers(acked, names)} {verb} quiet {period}."
         if still_open:
-            text += f" Still open: {_join(still_open)}."
+            text += f" Still open: {sent_lines.name_numbers(still_open, names)}."
         if failed:
             pronoun = "it" if len(failed) == 1 else "them"
-            text += f" I couldn't record {_join(failed)} just now; please send {pronoun} again."
+            text += (
+                f" I couldn't record {sent_lines.name_numbers(failed, names)} just now; "
+                f"please send {pronoun} again."
+            )
         return text
     if status == NOTHING_PARSED:
         return "Which numbers do you have? Reply with the numbers from the list, or say all."
@@ -354,10 +365,13 @@ def render_confirmation(
     return ""
 
 
-def _result(status: str, *, acked=None, still_open=None, **render: Any) -> str:
+def _result(
+    status: str, *, acked=None, still_open=None, session_id: str = "", **render: Any
+) -> str:
     acked = sorted(acked or [])
     still_open = sorted(still_open or [])
     text = render_confirmation(status, acked=acked, still_open=still_open, **render)
+    sent_lines.seed_provenance(session_id, text, render.get("names") or {})
     return json.dumps(
         {
             "status": status,
@@ -500,6 +514,8 @@ def escalation_reply_ack(
     if not acked:
         return _result(NOT_RECORDED, still_open=open_now)
     still_open = sorted({n for n in open_now if n not in acked} | set(failed))
+    # The one dispatch this thread's rows carry (two were refused above).
+    dispatch_ref = next(iter(_dispatch_refs(events, thread_ref)), None)
     return _result(
         STATUS_ACKED,
         acked=acked,
@@ -507,6 +523,8 @@ def escalation_reply_ack(
         failed=failed,
         all_selected=parsed["all"],
         snooze_days=_one_snooze(digest, acked),
+        names=sent_lines.labels(dispatch_ref),
+        session_id=session_id,
     )
 
 

@@ -21,7 +21,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from shared import casework_ledger, digest_reply_ref, inbound
+from shared import casework_ledger, digest_reply_ref, inbound, sent_lines
 from shared.casework_acts import CASEWORK_ACTS, COMPLETED, CaseworkActs, TaskWrite
 
 from . import reply_items
@@ -104,7 +104,18 @@ def _reply(status: str, text: str, **extra: Any) -> str:
 
 
 def render_reply_confirmation(state: dict, outcomes: dict[str, str]) -> str:
-    """The sentence the seat sends back once every queued write has an outcome."""
+    """The sentence the seat sends back once every queued write has an outcome.
+
+    Each number carries the label its line had in the message the reply answers
+    (``state["names"]``, from :mod:`shared.sent_lines`), so the reader learns
+    what was closed or started without opening that email: "Got it. Closed 1
+    (matter 2026-PI-101: "Get client verification signed", due 2026-09-20)." A
+    number with no label renders bare."""
+    names = state.get("names") or {}
+
+    def _named(values: list[int], conjunction: str = "and") -> str:
+        return sent_lines.name_numbers(sorted(values), names, conjunction)
+
     closed, reassigned, failed = [], [], []
     for number, write in state["writes"]:
         status = outcomes.get(write.item_key)
@@ -114,31 +125,31 @@ def render_reply_confirmation(state: dict, outcomes: dict[str, str]) -> str:
             failed.append(number)
     parts: list[str] = []
     if closed:
-        parts.append(f"Closed {_numbers(closed)}.")
+        parts.append(f"Closed {_named(closed)}.")
     if reassigned:
-        parts.append(f"Reassigned {_numbers(reassigned)}.")
+        parts.append(f"Reassigned {_named(reassigned)}.")
     if state["steps_handles"]:
-        parts.append(f"Starting on {_numbers(state['steps_handles'])} now.")
+        parts.append(f"Starting on {_named(state['steps_handles'])} now.")
     if state["steps_prep"]:
         verb = "it" if len(state["steps_prep"]) == 1 else "them"
         parts.append(
-            f"I'll prepare {_numbers(state['steps_prep'])} and send {verb} to you for review."
+            f"I'll prepare {_named(state['steps_prep'])} and send {verb} to you for review."
         )
     if state["left"]:
         tail = "as it is" if len(state["left"]) == 1 else "as they are"
-        parts.append(f"Leaving {_numbers(state['left'])} {tail}.")
+        parts.append(f"Leaving {_named(state['left'])} {tail}.")
     if state["answered"]:
-        parts.append(f"I already had your answer on {_numbers(state['answered'])}.")
+        parts.append(f"I already had your answer on {_named(state['answered'])}.")
     if failed:
         pronoun, verb = ("it", "is") if len(failed) == 1 else ("them", "are")
         parts.append(
-            f"I couldn't update {_numbers(failed)} in Smokeball just now, so {pronoun} {verb} "
+            f"I couldn't update {_named(failed)} in Smokeball just now, so {pronoun} {verb} "
             "unchanged."
         )
     if state["not_recorded"]:
         pronoun = "it" if len(state["not_recorded"]) == 1 else "them"
         parts.append(
-            f"I couldn't record {_numbers(state['not_recorded'])} just now; please send "
+            f"I couldn't record {_named(state['not_recorded'])} just now; please send "
             f"{pronoun} again."
         )
     return " ".join(["Got it.", *parts])
@@ -252,7 +263,7 @@ def reply_verdicts(
         _REPLIES.pop(session_id)
         outcomes = {o.write.item_key: o.status for o in acts.outcomes(session_id)}
         acts.clear(session_id)
-        return _reply(DONE, render_reply_confirmation(state, outcomes), steps_to_run=state["steps"])
+        return _confirmed(session_id, state, outcomes)
 
     origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id) if session_id else None
     thread_ref = (getattr(origin, "conversation_id", "") or "") if origin is not None else ""
@@ -294,6 +305,10 @@ def reply_verdicts(
         "left": [],
         "answered": [],
         "not_recorded": [],
+        # The one dispatch this thread's rows carry (two were refused above).
+        "names": sent_lines.labels(
+            next(row.get("dispatch_ref") for group in listing.values() for row in group)
+        ),
     }
     for number in sorted(approve | holds):
         group = listing[number]
@@ -322,7 +337,13 @@ def reply_verdicts(
         _REPLIES.put(session_id, state)
         count = len(state["writes"])
         return _reply(WRITES_QUEUED, "", writes=count, note=_queued_note(count, "reply_verdicts"))
-    return _reply(DONE, render_reply_confirmation(state, {}), steps_to_run=state["steps"])
+    return _confirmed(session_id, state, {})
+
+
+def _confirmed(session_id: str, state: dict, outcomes: dict[str, str]) -> str:
+    text = render_reply_confirmation(state, outcomes)
+    sent_lines.seed_provenance(session_id, text, state.get("names") or {})
+    return _reply(DONE, text, steps_to_run=state["steps"])
 
 
 __all__ = ["render_reply_confirmation", "reply_verdicts"]
