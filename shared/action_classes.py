@@ -319,6 +319,18 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # READ for the same reason: a scratch file on the seat's own volume, and
     # the matter write it enables is file_attachment_to_matter's, classed there.
     "mail_spool_message": ActionClass.READ,
+    # The overlay's record-store trio (plugins/hermes-smd-record-store,
+    # 2026-09-29, ss-console#2793). A seat authors ``record_stores`` in
+    # customer.yaml, and these are the only way an inbound-email turn can keep
+    # a record: the model names a store and a file, never a path, and the
+    # write lands inside the authored directory or is refused. list/read are
+    # READ; the write is INTERNAL_WRITE, so it sits behind the same ceiling as
+    # any other write into the seat's own records, and the plugin's own
+    # pre_tool_call hook refuses it on a tainted turn. Registered only on a
+    # seat that authors a store; every other seat's surface is unchanged.
+    "record_store_list": ActionClass.READ,
+    "record_store_read": ActionClass.READ,
+    "record_store_write": ActionClass.INTERNAL_WRITE,
     # Native web search (WebSearch capability, ADR 0070). Hermes' bundled web
     # providers (plugins/web/*, e.g. brave-free) expose ONE native tool,
     # `web_search` (tools/web_tools.py) — NOT an MCP tool, so the runtime name is

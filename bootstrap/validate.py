@@ -248,6 +248,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_outbound_roster(cfg, errors)
     _validate_staff_send_as(cfg, errors)
     _validate_device_senders(cfg, errors)
+    _validate_record_stores(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
     _validate_email_seam(cfg, errors)
@@ -1202,6 +1203,57 @@ def _validate_one_device_sender(
         )
         return None
     return address
+
+
+def _validate_record_stores(cfg: dict[str, Any], errors: list[str]) -> None:
+    """Validate top-level ``record_stores``: the directories an inbound turn may
+    write into, by name (plugins/hermes-smd-record-store, ss-console#2793).
+
+    Each entry is ``{name, path}``, exactly those two keys. The rules, each a
+    way a store could otherwise reach past its own directory:
+
+    * ``name`` is kebab-case, and unique, because the skill text and the model
+      name a store by it and the tool resolves nothing else;
+    * ``path`` is an absolute, normalized directory under ``/opt/data`` and
+      outside the runtime-owned prefixes (profile homes, the attachment spool,
+      the extraction cache, ``.smd``, medchron). A store on a profile home
+      would put a cron store or a skill body one record name away.
+
+    The path rule is ``shared.record_store.path_problem`` itself, so the
+    provisioning-time check and the runtime check cannot drift. Absent is valid:
+    no store, no tools, and the seat's inbound surface is unchanged.
+    """
+    from shared.record_store import STORE_NAME_RE, path_problem
+
+    raw = cfg.get("record_stores")
+    if raw is None:
+        return
+    if not isinstance(raw, list):
+        _err(f"record_stores must be a list; got {type(raw).__name__}", errors)
+        return
+    seen: set[str] = set()
+    for i, entry in enumerate(raw):
+        prefix = f"record_stores[{i}]"
+        if not isinstance(entry, dict):
+            _err(f"{prefix}: must be a mapping with name and path", errors)
+            continue
+        extra = sorted(str(k) for k in entry if k not in {"name", "path"})
+        if extra:
+            _err(f"{prefix}: unknown key(s) {extra}; only name and path", errors)
+        name = entry.get("name")
+        if not isinstance(name, str) or not STORE_NAME_RE.match(name):
+            _err(f"{prefix}.name: must be kebab-case (a-z, 0-9, -), got {name!r}", errors)
+        elif name in seen:
+            _err(f"{prefix}.name: {name!r} is authored twice", errors)
+        else:
+            seen.add(name)
+        path = entry.get("path")
+        if not isinstance(path, str) or not path.startswith("/"):
+            _err(f"{prefix}.path: must be an absolute path, got {path!r}", errors)
+            continue
+        problem = path_problem(path)
+        if problem:
+            _err(f"{prefix}.path: {problem}", errors)
 
 
 def _validate_google_auth_entitlements(cfg: dict[str, Any], errors: list[str]) -> None:

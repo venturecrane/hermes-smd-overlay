@@ -123,6 +123,23 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         # Operator's mailbox is.
         "mcp_msgraph_mail_list_staff_messages",
         "mcp_msgraph_mail_read_staff_message",
+        # The seat's authored record stores (plugins/hermes-smd-record-store,
+        # 2026-09-29). A store IS the tenant's system of record for the
+        # vertical that authors one: the open-house visitor store holds what a
+        # rostered agent dictated, kept verbatim, and no other record of that
+        # conversation exists anywhere. It is a source because of how it is
+        # written, not where it lives: the only writer is record_store_write,
+        # which lands inside the authored directory or refuses, and which the
+        # plugin's own hook blocks on any turn that read content from outside
+        # the firm. So nothing an outsider sent can reach a store and be read
+        # back as provenance. The residual, stated: cadence dates the skill
+        # computed at write time become traceable once read back. They are
+        # follow-up reminders the product sets, not legal deadlines, and the
+        # skill text forbids computing anything else into a record.
+        # ``read_file`` on the same directory still does NOT seed; only the
+        # store tools do.
+        "record_store_list",
+        "record_store_read",
         # Generic connector surface (mail, SMS, calendar, practice management).
         "email_list_messages",
         "email_get_message",

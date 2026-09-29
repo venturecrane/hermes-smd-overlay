@@ -462,6 +462,31 @@ def test_every_initiation_tool_is_classified() -> None:
     )
 
 
+def _record_store_tools() -> frozenset[str]:
+    plugin = load_plugin("hermes-smd-record-store")
+    return frozenset(plugin.TOOLS)
+
+
+def test_every_record_store_tool_is_classified_and_the_write_is_a_write() -> None:
+    """Every tool hermes-smd-record-store registers must be decided, and the
+    one that writes must be classed as a write.
+
+    Unclassified means REFUSED, and the capture turn this trio exists for
+    (ss-console#2793) would again end with "the record could not be written"
+    and every other test green. A write classed READ would execute under no
+    ceiling at all, which is the other way this surface could go wrong."""
+    names = _record_store_tools()
+    assert names, "no record-store tools discovered; this guard would pass vacuously"
+    undecided = sorted(t for t in names if not _is_decided(t))
+    assert undecided == [], (
+        f"record store tool(s) not classified: {undecided}. "
+        f"Add each to TOOL_ACTION_CLASS_MAP or BANNED_TOOLS."
+    )
+    assert TOOL_ACTION_CLASS_MAP["record_store_write"] is ActionClass.INTERNAL_WRITE
+    assert TOOL_ACTION_CLASS_MAP["record_store_read"] is ActionClass.READ
+    assert TOOL_ACTION_CLASS_MAP["record_store_list"] is ActionClass.READ
+
+
 def test_every_mail_attachment_tool_is_classified() -> None:
     """Every tool hermes-smd-mail-attachments registers must be decided.
 
