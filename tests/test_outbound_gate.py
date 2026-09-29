@@ -360,6 +360,22 @@ def test_establishment_staging_is_exempt_but_submission_is_not() -> None:
     assert "establish_submit" in ob.GATED_DRAFT_TOOLS
 
 
+def test_the_record_store_write_is_exempt_and_the_reads_never_were() -> None:
+    """ss-console#2793 (live, 2026-09-29): the first capture wrote a visitor record
+    whose follow-up schedule (day 2, 7, 30 after the visit) the identifier gate
+    refused seven times as "dates not traceable to a read", and its refusal text
+    sent the model to re-fetch the email through a fenced read, which tainted the
+    turn and closed the write. The schedule is computed by design; the store is
+    never outbound; every draft composed FROM a record stays gated. Both
+    directions asserted: the write is exempt, and the draft tools that carry a
+    record's contents outward are not."""
+    ob = load_plugin("hermes-smd-trust").outbound
+    assert "record_store_write" not in ob.GATED_DRAFT_TOOLS
+    assert "record_store_read" not in ob.GATED_DRAFT_TOOLS  # a read was never gated
+    assert "email_create_draft" in ob.GATED_DRAFT_TOOLS
+    assert "mcp_agentmail_create_draft" in ob.GATED_DRAFT_TOOLS
+
+
 def test_draft_gate_scans_html_key(monkeypatch) -> None:
     """EFF-01: a draft whose body is under the AgentMail `html` key must be
     scanned (previously only html_body/text were recognized, so an html-only
