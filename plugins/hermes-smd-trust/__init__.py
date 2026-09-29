@@ -1219,9 +1219,12 @@ def _dispatch_internal_message(
     gate_session = _resolved_session({"session_id": session_id})
     for outbound_check in (outbound.check_outbound_draft, outbound.check_outbound_send):
         try:
-            scan_block = outbound_check(
-                tool_name=_SEND_TOOL_NAME, args=payload, session_id=gate_session
-            )
+            # A withheld notice raised by this scan inherits the capability only
+            # when it was verified above (see outbound.code_fixed_scope).
+            with outbound.code_fixed_scope(code_fixed_recipients if code_fixed else None):
+                scan_block = outbound_check(
+                    tool_name=_SEND_TOOL_NAME, args=payload, session_id=gate_session
+                )
         except Exception:  # noqa: BLE001 — an indeterminate scan must not send
             logger.exception("hermes-smd-trust: out-of-turn outbound scan raised; NOT dispatching")
             return DispatchResult(

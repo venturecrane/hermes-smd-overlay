@@ -261,3 +261,36 @@ def test_a_full_counter_evicts_only_its_oldest_slot():
 
 def test_the_known_caps_list_holds_no_word_shorter_than_the_floor():
     assert all(len(word) >= 4 and word.isupper() for word in oc.KNOWN_CAPS)
+
+
+# ---------------------------------------------------------------------------
+# Machine-read marker lines on a file note (MEMO_MACHINE_LINES, debt)
+# ---------------------------------------------------------------------------
+
+_G = "a1b2c3d4-1111-2222-3333-444455556666"
+_G2 = "b1b2c3d4-1111-2222-3333-444455556666"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"fileId {_G} recorded",
+        f"fileId {_G} recorded.",
+        f"op-mmou:{_G}:638609288928990639",
+        f"Package job: job-42; covered document ids: {_G}, {_G2}",
+        "Package job: job-42; covered document ids: covered set unrecorded",
+    ],
+)
+def test_a_whole_marker_line_passes_on_a_memo(line):
+    body = f"[Operator] Service confirmation as of Oct 7\nService confirmed.\n{line}"
+    assert _rules(body, oc.MEMO) == []
+
+
+def test_the_same_id_inside_prose_on_a_memo_fails():
+    assert _rules(f"Service confirmed, fileId {_G} recorded.", oc.MEMO) == ["internal_id"]
+    assert _rules(f"Note: op-mmou:{_G}:638609288928990639", oc.MEMO) == ["internal_id"]
+
+
+def test_a_marker_line_on_a_staff_send_fails():
+    assert _rules(f"fileId {_G} recorded", oc.STAFF_SEND) == ["internal_id"]
+    assert _rules(f"op-mmou:{_G}:638609288928990639", oc.EXTERNAL_REPLY) == ["internal_id"]

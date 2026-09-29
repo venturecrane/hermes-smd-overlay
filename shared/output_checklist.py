@@ -120,6 +120,34 @@ _ULID = re.compile(r"\b[0-7][0-9A-HJKMNP-TV-Z]{25}\b")
 # The retired escalation ack code (``shared/escalation_ledger.py`` ``token_for``).
 _ACK = re.compile(r"\bACK-[0-9A-Z]{6}\b")
 
+_GUID_BODY = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+#: File-note lines a routine reads BACK as its dedup record, exempt from the
+#: internal-id rule on the MEMO surface only, and only when the WHOLE line is the
+#: marker (anchored; surrounding whitespace aside, nothing else on the line).
+#: Refusing them would break dedup and write duplicate notes, a worse checklist
+#: failure than the id itself.
+#:
+#: * ``fileId <GUID> recorded``: served-watch and service-confirmation captures,
+#:   read back by ss-console ``pre_run_gate._captured_file_ids``;
+#: * ``op-mmou:<matter GUID>:<ticks>``: matter-memo-on-update's change key;
+#: * ``Package job: <job id>; covered document ids: <GUID, ...>``: the medical
+#:   chronology delivery ledger's covered set (or "covered set unrecorded").
+#:
+#: DEBT: these markers belong in a ledger, not in a note a paralegal reads. When
+#: they move, this exemption goes, and nothing else may be added to it.
+MEMO_MACHINE_LINES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^fileId " + _GUID_BODY + r" recorded\.?$"),
+    re.compile(r"^op-mmou:" + _GUID_BODY + r":\d+$"),
+    re.compile(
+        r"^Package job: [A-Za-z0-9._:-]+; covered document ids: (?:"
+        + _GUID_BODY
+        + r"(?:,\s*"
+        + _GUID_BODY
+        + r")*|covered set unrecorded)\.?$"
+    ),
+)
+
 _ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?")
 _UTC = re.compile(
     r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:Z|UTC|GMT|\+00:?00)(?![A-Za-z0-9])|\b(?:UTC|GMT)\b"
@@ -271,6 +299,22 @@ def _mask_all(pattern: re.Pattern[str], text: str) -> tuple[str, re.Match[str] |
     return text, first
 
 
+def _blank_machine_lines(text: str) -> str:
+    """``text`` with every whole-line MEMO_MACHINE_LINES marker blanked.
+
+    The marker's shape is fully anchored, so a blanked line held nothing but the
+    marker and no other rule had anything on it to find.
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped and any(p.match(stripped) for p in MEMO_MACHINE_LINES):
+            out.append(" " * len(line))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _is_cite(text: str, match: re.Match[str]) -> bool:
     """True when this H:MM is a deposition page:line cite rather than a clock."""
     if match.group(3) is not None:
@@ -388,6 +432,8 @@ def check(body: str, surface: str) -> list[Violation]:
     # The act/rule/ops tag is a thing a person replies to by design
     # (``shared/rule_confirm.py``); it is blanked before any rule reads the text.
     text, _ = _mask_all(RULE_TAG, text)
+    if surface == MEMO:
+        text = _blank_machine_lines(text)
 
     found: list[Violation] = []
     local_time = (
@@ -607,6 +653,7 @@ __all__ = [
     "HOLD_AFTER",
     "KNOWN_CAPS",
     "MEMO",
+    "MEMO_MACHINE_LINES",
     "REPORT_ONLY_RULES",
     "STAFF_SEND",
     "SURFACES",

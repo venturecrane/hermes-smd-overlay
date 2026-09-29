@@ -1364,6 +1364,34 @@ _NOTICE_SUBJECT_MAX = 120
 _NOTICE_GUARD = threading.local()
 
 
+class code_fixed_scope:  # noqa: N801 - reads as a phrase at the call site
+    """The out-of-turn dispatcher's verified code-fixed capability, for this block.
+
+    The date-prep brief is composed by the model but its recipients are fixed by
+    code (``shared.send_dispatch.CodeFixedRecipients``), which lifts the taint
+    gate for it. It is also the message most likely to carry a bad clock. If
+    its withheld notice met the taint gate without that capability, the notice
+    would be refused and the person would hear nothing: the 2026-08-19 failure
+    again. So the dispatcher opens this scope around its outbound scans ONLY
+    when it has verified the capability, and a notice raised inside it goes to
+    exactly the capability's recipients, carrying the capability, so the
+    dispatcher stamps the same ``taint_exempt`` marker on its row. The reasoning
+    that justifies the exemption holds unchanged: the recipients are the
+    code-fixed ones byte for byte and the body is fixed text. A send that never
+    had the capability (every in-turn send) never opens this scope.
+    """
+
+    def __init__(self, capability: send_dispatch.CodeFixedRecipients | None) -> None:
+        self._capability = capability
+
+    def __enter__(self) -> None:
+        self._prior = getattr(_NOTICE_GUARD, "code_fixed", None)
+        _NOTICE_GUARD.code_fixed = self._capability
+
+    def __exit__(self, *_exc: object) -> None:
+        _NOTICE_GUARD.code_fixed = self._prior
+
+
 class notices_suppressed:  # noqa: N801 - reads as a phrase at the call site
     """Within this block the checklist sends no withheld notice of its own.
 
@@ -1420,7 +1448,13 @@ def _recipients(value: object) -> list[str]:
 
 
 def _send_withheld_notice(
-    *, to: list[str], cc: list[str], subject: str, rules: list[str], session_id: str
+    *,
+    to: list[str],
+    cc: list[str],
+    subject: str,
+    rules: list[str],
+    session_id: str,
+    code_fixed_recipients: send_dispatch.CodeFixedRecipients | None = None,
 ) -> send_dispatch.DispatchResult:
     """Dispatch the fixed withheld notice. Never raises; never recurses."""
     if getattr(_NOTICE_GUARD, "active", False):
@@ -1434,6 +1468,11 @@ def _send_withheld_notice(
             text=_notice_body(rules),
             session_id=session_id,
             templated=True,
+            **(
+                {"code_fixed_recipients": code_fixed_recipients}
+                if code_fixed_recipients is not None
+                else {}
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - dispatch is already exception-safe
         logger.warning("outbound gate: withheld notice raised (%s)", exc)
@@ -1510,12 +1549,19 @@ def _check_checklist(
         told = ""
         suppressed = getattr(_NOTICE_GUARD, "suppressed", False)
         if notice and first_exhaustion and notice.get("to") and not suppressed:
+            capability = getattr(_NOTICE_GUARD, "code_fixed", None)
+            if capability is not None:
+                # Exactly the code-fixed recipients, so the capability matches.
+                notice_to, notice_cc = list(capability.to), list(capability.cc)
+            else:
+                notice_to, notice_cc = notice["to"], notice.get("cc") or []
             result = _send_withheld_notice(
-                to=notice["to"],
-                cc=notice.get("cc") or [],
+                to=notice_to,
+                cc=notice_cc,
                 subject=notice.get("subject") or "",
                 rules=[v.rule for v in blocking],
                 session_id=session_id,
+                code_fixed_recipients=capability,
             )
             told = (
                 " A short internal notice that a message was withheld went to "
@@ -1552,7 +1598,8 @@ def _send_output_class(tool_name: str, args: dict, session_id: str) -> str | Non
     try:
         from . import enforce  # local: avoids an import cycle at package load
 
-        resolved = enforce.resolved_send_class(tool_name, args, session_id)
+        code_fixed = getattr(_NOTICE_GUARD, "code_fixed", None) is not None
+        resolved = enforce.resolved_send_class(tool_name, args, session_id, code_fixed=code_fixed)
         if resolved is None:
             return None
         return spec_gate.resolve_output_class(resolved.value)
