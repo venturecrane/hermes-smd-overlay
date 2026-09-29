@@ -365,6 +365,11 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # proposed rule is still a number nobody read from the firm's records.
         "establish_pending",
         "escalation_state",
+        # A rostered sender's voice memo as text (hermes-smd-voice-notes,
+        # 2026-09-29). Dictation, not a record: the open-house skill writes it
+        # into a record store, and THAT read (record_store_read) is the source.
+        # A number spoken into a phone has not been read from anything yet.
+        "voice_note_transcribe",
         "job_status",
         # ss-console #2614: broker-authored counts and states of the chronology
         # runner's jobs (documents read, pages, cents, a folder id). Not a

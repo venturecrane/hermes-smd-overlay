@@ -95,6 +95,15 @@ UNFENCED_READ_BY_DESIGN: frozenset[str] = frozenset(
         # firm itself dictated. The list returns names the seat chose.
         "record_store_list",
         "record_store_read",
+        # A rostered sender's voice memo as text (hermes-smd-voice-notes,
+        # 2026-09-29). The tool refuses any sender not on scope.inbound_allow_from
+        # BEFORE reading a byte, so the only content it can return is the words
+        # of a person whose email body the router already marks internal. Fencing
+        # it would taint the capture turn and the record-store write it exists
+        # to feed would be refused; a voice memo could then never become a
+        # record. The filenames it returns are that same sender's, reduced by
+        # safe_filename.
+        "voice_note_transcribe",
     }
 )
 
@@ -206,7 +215,12 @@ def test_unfenced_by_design_has_no_stale_entries() -> None:
     entries are checked against their plugin registries; AgentMail
     (``mcp_agentmail_*``) entries against the action-class map (their registry)."""
     registered = set(_workspace_tools())
-    for plugin_dir in ("hermes-smd-jobs", "hermes-smd-escalation", "hermes-smd-record-store"):
+    for plugin_dir in (
+        "hermes-smd-jobs",
+        "hermes-smd-escalation",
+        "hermes-smd-record-store",
+        "hermes-smd-voice-notes",
+    ):
         registered |= set(load_plugin(plugin_dir).TOOLS)
     classified = set(TOOL_ACTION_CLASS_MAP)
     stale = {

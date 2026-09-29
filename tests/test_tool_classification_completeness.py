@@ -487,6 +487,17 @@ def test_every_record_store_tool_is_classified_and_the_write_is_a_write() -> Non
     assert TOOL_ACTION_CLASS_MAP["record_store_list"] is ActionClass.READ
 
 
+def test_the_voice_note_tool_is_classified_as_a_read() -> None:
+    """hermes-smd-voice-notes registers one tool; unclassified means REFUSED
+    and a voice memo would again be answered as if it had not arrived."""
+    plugin = load_plugin("hermes-smd-voice-notes")
+    names = frozenset(plugin.TOOLS)
+    assert names == {"voice_note_transcribe"}
+    undecided = sorted(t for t in names if not _is_decided(t))
+    assert undecided == [], f"voice note tool(s) not classified: {undecided}"
+    assert TOOL_ACTION_CLASS_MAP["voice_note_transcribe"] is ActionClass.READ
+
+
 def test_every_mail_attachment_tool_is_classified() -> None:
     """Every tool hermes-smd-mail-attachments registers must be decided.
 
