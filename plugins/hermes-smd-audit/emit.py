@@ -336,12 +336,11 @@ def build_per_tool_metadata(
                             the ids the listing exposed, capped, with
                             ``document_ids_truncated`` set when it stopped short.
     - memo_id:              str — ``mcp_smokeball_create_memo``, when the write
-                            echoes one; ``mcp_smokeball_update_memo``, from the
-                            echo or else the ``memo_id`` arg it rewrote.
+                            echoes one.
     - draft_id:             str — the mail ``create_draft``/``update_draft``
                             tools, via the same extractor the send gate uses.
     - written_body_sha256:  str — sha256 of the body a WRITE actually wrote
-                            (``create_memo``'s or ``update_memo``'s ``text``, ``smd_deliver_draft``'s
+                            (``create_memo``'s ``text``, ``smd_deliver_draft``'s
                             ``body``, a draft's body). Never the body itself: the
                             digest proves the artifact in the firm's system is
                             the one this row describes, and holds no content.
