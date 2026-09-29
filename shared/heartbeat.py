@@ -96,6 +96,11 @@ class AuditLedgerFacts(NamedTuple):
     send_refusals: int | None = None
     send_refusals_last_ts: str | None = None
     send_refusals_json: list[dict] | None = None
+    #: ss-console#2793 follow-on: per watched tool, the run of consecutive
+    #: failures ending at its newest call (``count_tool_failures``). ``None``
+    #: when the seat cannot answer; ``{}`` when no watched tool ran in the
+    #: window. The console holds on the first and on an absent key.
+    tool_failures: dict[str, dict] | None = None
 
 
 class SendRefusalFacts(NamedTuple):
@@ -480,6 +485,122 @@ def _event(*, ts: str, kind: str, routine, tool, reason) -> dict:
     }
 
 
+#: Tools whose failure a person outside the seat cannot otherwise see.
+#:
+#: WHY A LIST OF TOOLS, NOT A METER. The sticky-stop ladder counts failures
+#: across every tool and halts the seat at eight in ten minutes; nothing pages
+#: before that, and a tool that fails three times a day never reaches it. These
+#: are the tools where three failures in a row is already the whole product
+#: dark for the person using it, and where that person only ever sees a polite
+#: refusal in their own thread (ss-console#2793: a real estate agent emails a
+#: voice memo; the transcriber refuses; the agent reads "could not transcribe"
+#: and nobody at SMD knows). A record-store write that keeps refusing is the
+#: same shape: the capture the person just made is not being kept.
+#:
+#: Adding a tool here is the whole act of watching it. The console keys its
+#: alert on the tool NAME (``tool_failing:<tool>``), so nothing on that side
+#: needs to know the tool exists.
+WATCHED_TOOLS: tuple[str, ...] = ("voice_note_transcribe", "record_store_write")
+
+#: Trailing window for the watched-tool read, and the reason it is the same
+#: day the send-refusal read uses: a failure run older than this is a run the
+#: person has already worked around or reported, and re-describing it every
+#: beat is what trains an inbox to ignore the pager. Inside the window the
+#: count is CONSECUTIVE from the newest call back, never a total.
+TOOL_FAILURE_WINDOW_HOURS = 24
+
+#: Rows read per tool per beat. The run only needs to be counted up to the
+#: first success; a hundred is far past any threshold the console applies,
+#: and it bounds the per-beat cost on a 1-vCPU gate process.
+_TOOL_FAILURE_SCAN_CAP = 100
+
+
+def count_tool_failures(conn: sqlite3.Connection, now: datetime) -> dict[str, dict]:
+    """For each watched tool, its run of consecutive failures ending now.
+
+    THE PURE QUERY, like ``count_send_refusals``: the beat calls exactly this,
+    so a number on a page and a number recomputed from a ledger copy cannot
+    come from two definitions.
+
+    Per tool, the trailing day's ``TOOL_CALL_COMPLETED`` rows newest first, and
+    the count walks back from the newest until the first ``ok``. The result is
+    a map keyed by tool name, in the connectors-map shape the console already
+    knows how to hold on:
+
+    * ``{"consecutive_failures": 0, "last_ok_ts": ...}`` — the newest call
+      succeeded. This is the entry that RESOLVES an open alert, so it must be
+      emitted, not dropped as boring.
+    * ``{"consecutive_failures": n, "first_error_ts", "last_error_ts",
+      "last_error"}`` — the newest ``n`` calls all failed. ``last_error`` is
+      the ledger's own ``error_type`` (the tool's refusal text, or its outcome
+      word when there is none), bounded like a send-refusal reason.
+    * key absent — the tool made no call in the window. Absence is a HOLD at
+      the console, never a verdict: a seat nobody has spoken to today has
+      neither failed nor recovered.
+
+    A failure is any outcome that is not ``ok``: an ``error`` (the tool raised
+    or returned an error shape) and a ``blocked`` (a hook refused it) both
+    leave the person without the thing they asked for, and the alert is about
+    that, not about whose fault it was.
+
+    Raises on a ledger this query cannot run against (no ``metadata`` column,
+    no JSON1). The caller runs it in its own try and omits the field, so a seat
+    that cannot answer holds rather than reporting a reassuring empty map.
+    """
+    cutoff = _iso_floor(_as_utc(now).isoformat())
+    horizon = _iso_floor((_as_utc(now) - timedelta(hours=TOOL_FAILURE_WINDOW_HOURS)).isoformat())
+    out: dict[str, dict] = {}
+    for tool in WATCHED_TOOLS:
+        rows = conn.execute(
+            "SELECT ts,"
+            " json_extract(metadata,'$.outcome') AS outcome,"
+            " json_extract(metadata,'$.error_type') AS error_type"
+            " FROM audit_log"
+            " WHERE action_type = 'TOOL_CALL_COMPLETED'"
+            " AND json_extract(metadata,'$.tool') = ?"
+            " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+            " ORDER BY ts DESC LIMIT ?",
+            (tool, horizon, cutoff, _TOOL_FAILURE_SCAN_CAP),
+        ).fetchall()
+        if not rows:
+            continue
+        entry = _tool_failure_entry(rows)
+        if entry is not None:
+            out[tool] = entry
+    return out
+
+
+def _tool_failure_entry(rows: list[tuple]) -> dict | None:
+    """One tool's entry from its rows, newest first.
+
+    A row with no ``outcome`` at all is a pre-v2 audit row (the always-"ok"
+    era, ``_OUTCOME_SEMANTICS_VERSION``) and says nothing about success or
+    failure; the walk stops there without counting it either way, and if it is
+    the newest row the tool has nothing to report.
+    """
+    ts0, outcome0, _ = rows[0]
+    if outcome0 is None:
+        return None
+    if outcome0 == "ok":
+        return {"consecutive_failures": 0, "last_ok_ts": str(ts0)}
+    run = 0
+    first_error_ts = str(ts0)
+    last_error = ""
+    for ts, outcome, error_type in rows:
+        if outcome is None or outcome == "ok":
+            break
+        run += 1
+        first_error_ts = str(ts)
+        if not last_error:
+            last_error = str(error_type or outcome or "")[:_MAX_REASON_CHARS]
+    return {
+        "consecutive_failures": run,
+        "first_error_ts": first_error_ts,
+        "last_error_ts": str(ts0),
+        "last_error": last_error,
+    }
+
+
 def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
@@ -543,6 +664,12 @@ def read_audit_facts(db_path: str | None) -> AuditLedgerFacts:
             refusals = count_send_refusals(conn, datetime.now(timezone.utc))
         except (sqlite3.Error, ValueError) as exc:
             logger.debug("heartbeat: send-refusal read unavailable: %s", exc)
+        # Watched-tool failure runs, in their own try for the same reason.
+        tool_failures: dict[str, dict] | None = None
+        try:
+            tool_failures = count_tool_failures(conn, datetime.now(timezone.utc))
+        except (sqlite3.Error, ValueError) as exc:
+            logger.debug("heartbeat: watched-tool read unavailable: %s", exc)
         return AuditLedgerFacts(
             last_audit,
             last_skill,
@@ -551,6 +678,7 @@ def read_audit_facts(db_path: str | None) -> AuditLedgerFacts:
             refusals.count if refusals is not None else None,
             refusals.last_ts if refusals is not None else None,
             refusals.events if refusals is not None else None,
+            tool_failures,
         )
     except sqlite3.Error:
         # DB exists but audit_log table not created yet, or a transient lock.
@@ -602,6 +730,7 @@ def build_payload(
     send_refusals: int | None = None,
     send_refusals_last_ts: str | None = None,
     send_refusals_json: list[dict] | None = None,
+    tool_failures: dict[str, dict] | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -729,6 +858,13 @@ def build_payload(
         payload["send_refusals_last_ts"] = send_refusals_last_ts
     if send_refusals_json is not None:
         payload["send_refusals_json"] = send_refusals_json
+    # ss-console#2793 follow-on: the watched-tool map. Same is-not-None
+    # discipline as the connectors map, and for the same reason: an entry with
+    # consecutive_failures=0 is the one that RESOLVES an open tool_failing
+    # alert, and an empty map is a real "watched, nothing ran today" state.
+    # None (the seat cannot read its ledger) stays absent so the console holds.
+    if tool_failures is not None:
+        payload["tool_failures"] = tool_failures
     return payload
 
 
@@ -1118,6 +1254,7 @@ class HeartbeatEmitter:
             send_refusals=ledger.send_refusals,
             send_refusals_last_ts=ledger.send_refusals_last_ts,
             send_refusals_json=ledger.send_refusals_json,
+            tool_failures=ledger.tool_failures,
         )
         import json
 
@@ -1240,9 +1377,12 @@ def emitter_from_env(audit_db_path_fn) -> HeartbeatEmitter:
 
 
 __all__ = [
+    "WATCHED_TOOLS",
     "AuditLedgerFacts",
     "HeartbeatEmitter",
     "build_payload",
+    "count_send_refusals",
+    "count_tool_failures",
     "emitter_from_env",
     "read_audit_facts",
     "read_audit_timestamps",

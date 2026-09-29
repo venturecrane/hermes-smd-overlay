@@ -1588,3 +1588,175 @@ def test_an_ordinary_emitted_wake_is_not_degraded(tmp_path):
 
     facts = _facts(tmp_path, build)
     assert facts.degraded == 0
+
+
+# ---------------------------------------------------------------------------
+# Watched-tool failure runs on the wire (ss-console#2793 follow-on)
+#
+# A rostered agent emails a voice memo; the transcriber refuses; the agent
+# reads "could not transcribe" in their own thread and nobody at SMD knows.
+# The ladder never trips on three failures a day. This field is what makes a
+# tool that keeps failing for one person visible to the people who can fix it.
+# ---------------------------------------------------------------------------
+
+VOICE = "voice_note_transcribe"
+STORE = "record_store_write"
+
+
+def _tool_call(led, ts, tool, outcome, error_type=None):
+    meta = {"tool": tool, "outcome": outcome, "resolved_action_class": "read"}
+    if error_type is not None:
+        meta["error_type"] = error_type
+    led.add(ts, "TOOL_CALL_COMPLETED", meta)
+
+
+def _tool_facts(tmp_path, build):
+    global _facts_seq
+    _facts_seq += 1
+    db = tmp_path / f"audit-tools-{_facts_seq}.db"
+    ledger = _Ledger(db)
+    build(ledger)
+    ledger.conn.close()
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return hb.count_tool_failures(conn, _NOW)
+    finally:
+        conn.close()
+
+
+def test_watched_tools_name_the_two_open_house_tools():
+    assert VOICE in hb.WATCHED_TOOLS
+    assert STORE in hb.WATCHED_TOOLS
+
+
+def test_tool_failures_a_tool_that_never_ran_is_absent_and_the_map_is_emitted(tmp_path):
+    """Absence is a HOLD at the console; an empty map is still a real answer."""
+    facts = _tool_facts(tmp_path, lambda led: led.ok_tool_call(_ts(1)))
+    assert facts == {}
+    payload = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        tool_failures=facts,
+    )
+    assert payload["tool_failures"] == {}
+
+
+def test_tool_failures_counts_the_run_from_the_newest_call_back(tmp_path):
+    def build(led):
+        _tool_call(led, _ts(5), VOICE, "ok")
+        _tool_call(led, _ts(3), VOICE, "error", "could not transcribe memo.m4a: no provider")
+        _tool_call(led, _ts(2), VOICE, "error", "could not transcribe memo.m4a: no provider")
+        _tool_call(led, _ts(1), VOICE, "error", "could not transcribe again.m4a: no provider")
+
+    facts = _tool_facts(tmp_path, build)
+    entry = facts[VOICE]
+    assert entry["consecutive_failures"] == 3
+    assert entry["first_error_ts"] == _ts(3)
+    assert entry["last_error_ts"] == _ts(1)
+    assert entry["last_error"] == "could not transcribe again.m4a: no provider"
+
+
+def test_tool_failures_a_success_at_the_head_resolves_with_a_zero_entry(tmp_path):
+    """The zero entry is what closes an open alert; it must not be dropped."""
+
+    def build(led):
+        _tool_call(led, _ts(3), VOICE, "error", "boom")
+        _tool_call(led, _ts(2), VOICE, "error", "boom")
+        _tool_call(led, _ts(1), VOICE, "ok")
+
+    facts = _tool_facts(tmp_path, build)
+    assert facts[VOICE] == {"consecutive_failures": 0, "last_ok_ts": _ts(1)}
+
+
+def test_tool_failures_a_blocked_call_counts_as_a_failure(tmp_path):
+    """A hook refusal leaves the person without the thing just as an error does."""
+
+    def build(led):
+        _tool_call(led, _ts(2), STORE, "blocked")
+        _tool_call(led, _ts(1), STORE, "blocked")
+
+    facts = _tool_facts(tmp_path, build)
+    assert facts[STORE]["consecutive_failures"] == 2
+    assert facts[STORE]["last_error"] == "blocked"
+
+
+def test_tool_failures_rows_outside_the_window_do_not_count(tmp_path):
+    def build(led):
+        _tool_call(led, _ts(30), VOICE, "error", "old")
+        _tool_call(led, _ts(26), VOICE, "error", "old")
+
+    assert _tool_facts(tmp_path, build) == {}
+
+
+def test_tool_failures_ignores_tools_that_are_not_watched(tmp_path):
+    def build(led):
+        _tool_call(led, _ts(2), "read_file", "error", "boom")
+        _tool_call(led, _ts(1), "read_file", "error", "boom")
+
+    assert _tool_facts(tmp_path, build) == {}
+
+
+def test_tool_failures_each_watched_tool_is_counted_on_its_own(tmp_path):
+    def build(led):
+        _tool_call(led, _ts(2), VOICE, "error", "no provider")
+        _tool_call(led, _ts(1), STORE, "ok")
+
+    facts = _tool_facts(tmp_path, build)
+    assert facts[VOICE]["consecutive_failures"] == 1
+    assert facts[STORE]["consecutive_failures"] == 0
+
+
+def test_tool_failures_a_row_with_no_outcome_stops_the_walk(tmp_path):
+    """A pre-v2 row (the always-ok era) says nothing either way."""
+
+    def build(led):
+        _tool_call(led, _ts(3), VOICE, "error", "boom")
+        led.add(_ts(2), "TOOL_CALL_COMPLETED", {"tool": VOICE})
+        _tool_call(led, _ts(1), VOICE, "error", "boom")
+
+    facts = _tool_facts(tmp_path, build)
+    assert facts[VOICE]["consecutive_failures"] == 1
+    assert facts[VOICE]["first_error_ts"] == _ts(1)
+    facts = _tool_facts(
+        tmp_path, lambda led: led.add(_ts(1), "TOOL_CALL_COMPLETED", {"tool": VOICE})
+    )
+    assert facts == {}
+
+
+def test_tool_failures_last_error_is_bounded(tmp_path):
+    def build(led):
+        _tool_call(led, _ts(1), VOICE, "error", "x" * 500)
+
+    facts = _tool_facts(tmp_path, build)
+    assert len(facts[VOICE]["last_error"]) == 200
+
+
+def test_read_audit_facts_carries_the_tool_failures(tmp_path):
+    db = tmp_path / "audit.db"
+    ledger = _Ledger(db)
+    _tool_call(ledger, datetime.now(timezone.utc).isoformat(), VOICE, "error", "no provider")
+    ledger.conn.close()
+    facts = hb.read_audit_facts(str(db))
+    assert facts.tool_failures[VOICE]["consecutive_failures"] == 1
+
+
+def test_read_audit_facts_on_a_pre_metadata_ledger_holds_the_tool_failures(tmp_path):
+    db = tmp_path / "audit.db"
+    _make_audit_db(str(db), [("01A", "2026-08-01T10:00:00+00:00", "escalator")])
+    facts = hb.read_audit_facts(str(db))
+    assert facts.tool_failures is None  # cannot answer — the console HOLDS
+
+
+def test_payload_omits_tool_failures_when_the_seat_cannot_answer():
+    p = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        tool_failures=None,
+    )
+    assert "tool_failures" not in p
