@@ -331,6 +331,14 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "record_store_list": ActionClass.READ,
     "record_store_read": ActionClass.READ,
     "record_store_write": ActionClass.INTERNAL_WRITE,
+    # A rostered sender's voice memo as text (plugins/hermes-smd-voice-notes,
+    # 2026-09-29, ss-console#2793). READ: it spools the seat's own mail
+    # attachment to the scratch spool and runs the seat's speech-to-text on
+    # it; nothing is created in a tenant system and nothing is sent. Unlike
+    # the attachment pair it is NOT fenced: the tool refuses any sender who is
+    # not on the roster before reading a byte, so its result can only ever be
+    # the words of a person the seat already treats as internal.
+    "voice_note_transcribe": ActionClass.READ,
     # Native web search (WebSearch capability, ADR 0070). Hermes' bundled web
     # providers (plugins/web/*, e.g. brave-free) expose ONE native tool,
     # `web_search` (tools/web_tools.py) — NOT an MCP tool, so the runtime name is

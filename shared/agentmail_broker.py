@@ -271,6 +271,40 @@ def own_inbox() -> str:
     return _own_inbox_cache
 
 
+def message_sender(message_id: str) -> str:
+    """The bare address the vendor records as the sender of one message.
+
+    Read for ONE purpose: to ask the seat's own roster whether the person who
+    sent a voice note is someone the seat answers (``hermes-smd-voice-notes``).
+    Nothing else about the message is returned, so this read carries no
+    sender-authored prose. The ``from`` field arrives as ``Name <addr>`` or a
+    bare address; the angle-bracket form is reduced to the address, lowercased.
+    An unreadable or absent sender raises, so the caller refuses rather than
+    treating "could not tell" as "rostered".
+    """
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise AgentMailReadError("message_id is required")
+    body, _ = _get(_message_path(own_inbox(), message_id.strip()), accept="application/json")
+    try:
+        parsed = json.loads(body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AgentMailReadError("agentmail returned a message that is not JSON") from exc
+    raw = parsed.get("from") if isinstance(parsed, dict) else None
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    if isinstance(raw, dict):
+        raw = raw.get("address") or raw.get("email")
+    if not isinstance(raw, str) or not raw.strip():
+        raise AgentMailReadError("agentmail returned a message with no sender")
+    text = raw.strip()
+    if "<" in text and text.endswith(">"):
+        text = text[text.rfind("<") + 1 : -1]
+    address = text.strip().lower()
+    if "@" not in address:
+        raise AgentMailReadError("agentmail returned a sender that is not an address")
+    return address
+
+
 def list_attachments(message_id: str) -> list[dict[str, Any]]:
     """Every attachment the vendor holds for one message.
 

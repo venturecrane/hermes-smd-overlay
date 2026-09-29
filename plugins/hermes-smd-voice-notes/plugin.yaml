@@ -1,0 +1,8 @@
+name: hermes-smd-voice-notes
+version: "0.1.0"
+description: "One tool, voice_note_transcribe: turns the audio attachments on a message from a ROSTERED sender into text, through the seat's speech-to-text provider, without the attachment listing or the bytes ever reaching the model. Refuses any other sender before touching the bytes, which is what lets its result stay unfenced."
+author: VentureCrane
+# Empty on purpose: the gate is register(), which asks whether the seat has a
+# mailbox. A failing requires_env would drop the tool SILENTLY and a voice note
+# would be answered "your message arrived without any attachments" again.
+requires_env: []
