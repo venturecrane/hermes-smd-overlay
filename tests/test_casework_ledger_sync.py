@@ -45,7 +45,11 @@ _COPY = _REPO_ROOT / "shared" / "casework_ledger.py"
 # 2026-09-25c: restamped. _validate_payload splits its two kind-shape checks
 # into _check_kind_shape (ss-console's function-complexity ceiling); rules and
 # refusal text unchanged.
-CANONICAL_SHA256 = "228f5a20366e6260ca0069dbf148b7b1e6841cfe428936b4d974ac6fd15b8b02"
+#
+# 2026-09-29: restamped from ss-console feat/operator-one-note-per-routine
+# 5ffb0ba0. STEP_WITNESS_TOOLS = (create_memo, update_memo) and WITNESS_TOOLS
+# values are tuples, so a routine's note updated in place witnesses a step.
+CANONICAL_SHA256 = "b1b8aa52f9e36c9f70ce1c0be942c2c85dc93399e7e03e50240602be43ef0b68"
 
 
 def test_copy_matches_the_pinned_canonical_digest() -> None:

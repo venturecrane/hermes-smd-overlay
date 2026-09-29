@@ -38,6 +38,9 @@ from shared.pending_acts import tool_call_failed
 logger = logging.getLogger(__name__)
 
 MEMO_TOOL = casework_ledger.STEP_WITNESS_TOOL
+#: Every memo write that witnesses a step: a routine's note is updated in place
+#: since 2026-09-29, so update_memo is a step's write as much as create_memo is.
+MEMO_TOOLS: tuple[str, ...] = casework_ledger.STEP_WITNESS_TOOLS
 _TTL_SECONDS = 1800.0
 _MAX_SESSIONS = 64
 _MAX_PER_SESSION = 20
@@ -87,9 +90,9 @@ class StepWitness:
         return seen
 
     def on_post_tool(self, tool_name: str, session_id: str, kwargs: dict[str, Any]) -> None:
-        """Keep a successful create_memo call. Never raises."""
+        """Keep a successful memo write (create_memo or update_memo). Never raises."""
         try:
-            if tool_name != MEMO_TOOL or not session_id:
+            if tool_name not in MEMO_TOOLS or not session_id:
                 return
             call_id = str(kwargs.get("tool_call_id") or "")
             matter_id = str(_args(kwargs.get("args")).get("matter_id") or "").strip()
@@ -134,4 +137,4 @@ class StepWitness:
 STEP_WITNESS = StepWitness()
 
 
-__all__ = ["MEMO_TOOL", "Memo", "STEP_WITNESS", "StepWitness"]
+__all__ = ["MEMO_TOOL", "MEMO_TOOLS", "Memo", "STEP_WITNESS", "StepWitness"]
