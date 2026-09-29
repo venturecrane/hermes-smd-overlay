@@ -1223,7 +1223,7 @@ def _validate_record_stores(cfg: dict[str, Any], errors: list[str]) -> None:
     provisioning-time check and the runtime check cannot drift. Absent is valid:
     no store, no tools, and the seat's inbound surface is unchanged.
     """
-    from shared.record_store import STORE_NAME_RE, path_problem
+    from shared.record_store import POLICY_KEYS, STORE_NAME_RE, path_problem, policy_problems
 
     raw = cfg.get("record_stores")
     if raw is None:
@@ -1237,9 +1237,14 @@ def _validate_record_stores(cfg: dict[str, Any], errors: list[str]) -> None:
         if not isinstance(entry, dict):
             _err(f"{prefix}: must be a mapping with name and path", errors)
             continue
-        extra = sorted(str(k) for k in entry if k not in {"name", "path"})
+        extra = sorted(str(k) for k in entry if k not in {"name", "path", *POLICY_KEYS})
         if extra:
-            _err(f"{prefix}: unknown key(s) {extra}; only name and path", errors)
+            _err(
+                f"{prefix}: unknown key(s) {extra}; only name, path, {', '.join(POLICY_KEYS)}",
+                errors,
+            )
+        for fault in policy_problems(entry):
+            _err(f"{prefix}.{fault}", errors)
         name = entry.get("name")
         if not isinstance(name, str) or not STORE_NAME_RE.match(name):
             _err(f"{prefix}.name: must be kebab-case (a-z, 0-9, -), got {name!r}", errors)

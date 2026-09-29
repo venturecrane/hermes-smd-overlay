@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -105,8 +106,191 @@ def _clean_stores(raw: Any) -> list[dict[str, str]]:
         problem = path_problem(path)
         if problem:
             raise RecordStoreError(f"{CONFIG_KEY}[{i}].path: {problem}")
-        out.append({"name": name, "path": path})
+        for fault in policy_problems(entry):
+            raise RecordStoreError(f"{CONFIG_KEY}[{i}].{fault}")
+        cleaned: dict[str, Any] = {"name": name, "path": path}
+        for key in POLICY_KEYS:
+            if key in entry:
+                cleaned[key] = entry[key]
+        out.append(cleaned)
     return out
+
+
+#: The keys a store may carry beyond name and path, and what each authors.
+#:
+#: ``owner_field``  the frontmatter key that names the person a record belongs
+#:                  to (the open-house store uses ``agent``). Present = the
+#:                  store is PRIVATE PER OWNER: on an inbound turn a person reads
+#:                  and rewrites only records stamped with their own address.
+#:                  Absent = the store is shared by everyone on the roster.
+#: ``readers``      addresses that may READ every owner's records (a broker).
+#:                  Read only: a reader never rewrites another owner's record.
+#:                  Needs ``owner_field``; a shared store has nothing to grant.
+#: ``index``        frontmatter keys the LISTING exposes for every record, so a
+#:                  capture can notice a duplicate visitor across owners without
+#:                  opening a colleague's notes. ``status`` is always exposed.
+POLICY_KEYS: tuple[str, ...] = ("owner_field", "readers", "index")
+FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+ALWAYS_INDEXED: tuple[str, ...] = ("status",)
+
+
+def policy_problems(entry: dict[str, Any]) -> list[str]:
+    """Every fault in an entry's policy keys, as ``key: reason`` strings.
+
+    Shared with ``bootstrap.validate`` so the provisioning-time rule and the
+    runtime rule cannot drift. Name and path are judged by the caller.
+    """
+    faults: list[str] = []
+    owner = entry.get("owner_field")
+    if "owner_field" in entry and (not isinstance(owner, str) or not FIELD_RE.match(owner)):
+        faults.append("owner_field: must be a frontmatter key (a-z, 0-9, _)")
+    for key in ("readers", "index"):
+        if key not in entry:
+            continue
+        value = entry[key]
+        if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+            faults.append(f"{key}: must be a list of non-empty strings")
+            continue
+        if key == "readers":
+            if "owner_field" not in entry:
+                faults.append("readers: needs owner_field (a shared store has nothing to grant)")
+            for v in value:
+                if "@" not in v or v.strip() != v:
+                    faults.append(f"readers: {v!r} is not an email address")
+        else:
+            for v in value:
+                if not FIELD_RE.match(v):
+                    faults.append(f"index: {v!r} is not a frontmatter key (a-z, 0-9, _)")
+    return faults
+
+
+@dataclass(frozen=True)
+class StorePolicy:
+    """One store's root and its authored access posture."""
+
+    root: Path
+    owner_field: str | None = None
+    readers: frozenset[str] = frozenset()
+    index: tuple[str, ...] = ()
+
+    @property
+    def private(self) -> bool:
+        return self.owner_field is not None
+
+
+def authored_policies(config: CustomerConfig | None = None) -> dict[str, StorePolicy]:
+    """``{store name: StorePolicy}`` for the seat. Same faults as
+    :func:`authored_stores`; readers are compared case-insensitively."""
+    if config is None:
+        try:
+            config = CustomerConfig.from_volume()
+        except CustomerConfigError as exc:
+            raise RecordStoreError(f"customer.yaml unreadable: {exc}") from exc
+    out: dict[str, StorePolicy] = {}
+    for entry in _clean_stores(config.raw.get(CONFIG_KEY)):
+        out[entry["name"]] = StorePolicy(
+            root=Path(entry["path"]),
+            owner_field=entry.get("owner_field"),
+            readers=frozenset(r.strip().lower() for r in entry.get("readers", [])),
+            index=tuple(entry.get("index", [])),
+        )
+    return out
+
+
+#: A record's frontmatter is read from at most this many bytes: the index is
+#: the head of the file, and the listing must stay cheap over a whole store.
+_FRONTMATTER_BYTES = 4096
+
+
+def read_frontmatter(text: str) -> dict[str, str]:
+    """The scalar ``key: value`` lines between the first ``---`` pair.
+
+    Deliberately not a YAML parser: a record's frontmatter is written by the
+    seat in the shape the skill documents (one scalar per line), and a listing
+    that ran a full parser over every record on every turn would be paying for
+    shapes no record carries. Quotes around a value are stripped; a list item
+    or a nested key is skipped, never guessed.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    out: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if not line or line[0] in " \t-#":
+            continue
+        key, sep, value = line.partition(":")
+        key = key.strip()
+        if not sep or not FIELD_RE.match(key):
+            continue
+        value = value.split(" #", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def record_owner(text: str, policy: StorePolicy) -> str | None:
+    """The address a record is stamped with, lower-cased, or ``None``."""
+    if policy.owner_field is None:
+        return None
+    value = read_frontmatter(text).get(policy.owner_field)
+    if not isinstance(value, str):
+        return None
+    return value.strip().lower() or None
+
+
+def access_problem(
+    policy: StorePolicy,
+    *,
+    action: str,
+    viewer: str | None,
+    existing: str | None,
+    content: str | None = None,
+) -> str | None:
+    """Why ``viewer`` may not ``action`` this record, or ``None``.
+
+    ``viewer`` is the verified inbound sender of the turn (lower-cased), or
+    ``None`` on a turn that has none: a scheduled wake or the principal on a
+    channel of their own. Those are the seat's own turns and are never fenced;
+    the fence is between the PEOPLE who write in. ``existing`` is the record's
+    current text when it exists.
+
+    * A shared store (no owner field) fences nothing.
+    * read: another owner's record is refused unless the viewer is a reader.
+    * write: the content must be stamped with the viewer's own address, and an
+      existing record that belongs to someone else is never rewritten, reader
+      or not. A reader reads; the owner corrects.
+
+    An unstamped record in a private store is nobody's: readable by all, and
+    rewritable only by stamping it with the writer's own address.
+    """
+    if not policy.private or viewer is None:
+        return None
+    viewer = viewer.strip().lower()
+    owner = record_owner(existing, policy) if existing is not None else None
+    if action == "read":
+        if owner and owner != viewer and viewer not in policy.readers:
+            return (
+                f"that record belongs to another person ({policy.owner_field}: {owner}); "
+                "only they, or a reader the store authors, may open it"
+            )
+        return None
+    if action == "write":
+        if owner and owner != viewer:
+            return (
+                f"that record belongs to another person ({policy.owner_field}: {owner}) "
+                "and only they may change it; keep your own account as a record of your own"
+            )
+        stamped = record_owner(content or "", policy)
+        if stamped != viewer:
+            return (
+                f"a record you write must carry {policy.owner_field}: {viewer} in its "
+                "frontmatter (yours, exactly), so it is yours to find again"
+            )
+        return None
+    return None
 
 
 def path_problem(path: str) -> str | None:
@@ -170,11 +354,27 @@ def _record_path(root: Path, name: Any) -> Path:
     return candidate
 
 
-def list_records(store: str, *, stores: dict[str, Path] | None = None) -> list[dict[str, Any]]:
-    """Every record in the store, newest first: name, size, modified (UTC ISO)."""
+def list_records(
+    store: str,
+    *,
+    stores: dict[str, Path] | None = None,
+    policy: StorePolicy | None = None,
+) -> list[dict[str, Any]]:
+    """Every record in the store, newest first: name, size, modified (UTC ISO).
+
+    With a policy, each entry also carries ``index`` (the authored index keys
+    plus ``status``, read from the frontmatter) and, on a private store,
+    ``owner`` (the address the record is stamped with). The listing is what
+    every rostered person may see: enough to notice that a colleague already
+    has this visitor, never the notes. The notes are behind ``read_record``
+    and its fence.
+    """
     from datetime import datetime, timezone
 
-    root = _store_root(stores if stores is not None else authored_stores(), store)
+    if policy is not None:
+        root = policy.root
+    else:
+        root = _store_root(stores if stores is not None else authored_stores(), store)
     if not root.exists():
         return []
     out: list[dict[str, Any]] = []
@@ -184,15 +384,30 @@ def list_records(store: str, *, stores: dict[str, Path] | None = None) -> list[d
         if not RECORD_NAME_RE.match(entry.name):
             continue
         stat = entry.stat()
-        out.append(
-            {
-                "name": entry.name,
-                "size": stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            }
-        )
+        row: dict[str, Any] = {
+            "name": entry.name,
+            "size": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        }
+        if policy is not None and (policy.private or policy.index):
+            row.update(_index_entry(entry, policy))
+        out.append(row)
     out.sort(key=lambda r: (r["modified"], r["name"]), reverse=True)
     return out
+
+
+def _index_entry(path: Path, policy: StorePolicy) -> dict[str, Any]:
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(_FRONTMATTER_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return {"index": {}}
+    fm = read_frontmatter(head)
+    keys = tuple(dict.fromkeys((*policy.index, *ALWAYS_INDEXED)))
+    row: dict[str, Any] = {"index": {k: fm[k] for k in keys if k in fm}}
+    if policy.private:
+        row["owner"] = record_owner(head, policy)
+    return row
 
 
 def read_record(store: str, name: str, *, stores: dict[str, Path] | None = None) -> str:
@@ -260,10 +475,17 @@ __all__ = [
     "RECORD_NAME_RE",
     "RESERVED_PREFIXES",
     "STORE_NAME_RE",
+    "POLICY_KEYS",
     "RecordStoreError",
+    "StorePolicy",
+    "access_problem",
+    "authored_policies",
     "authored_stores",
     "list_records",
     "path_problem",
+    "policy_problems",
+    "read_frontmatter",
     "read_record",
+    "record_owner",
     "write_record",
 ]

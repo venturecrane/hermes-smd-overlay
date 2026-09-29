@@ -87,3 +87,53 @@ def test_a_store_cannot_be_authored_past_its_own_directory(
     errors = _validate(tmp_path, block)
     assert errors, "expected a record_stores error"
     assert any(fragment in e for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# the access posture keys (ss-console#2793 follow-on: the broker view)
+# ---------------------------------------------------------------------------
+
+
+def test_a_private_store_with_a_reader_and_an_index_validates(tmp_path: Path) -> None:
+    block = (
+        "record_stores:\n"
+        "  - name: open-house-visitors\n"
+        "    path: /opt/data/open-house/visitors\n"
+        "    owner_field: agent\n"
+        "    readers:\n      - tim@thebrokery.com\n"
+        "    index: [visitor, property, visit_date, contact]\n"
+    )
+    assert _validate(tmp_path, block) == []
+
+
+@pytest.mark.parametrize(
+    ("block", "fragment"),
+    [
+        (
+            "record_stores:\n  - name: s\n    path: /opt/data/s\n    readers: [tim@x.example]\n",
+            "readers: needs owner_field",
+        ),
+        (
+            "record_stores:\n  - name: s\n    path: /opt/data/s\n    owner_field: agent\n"
+            "    readers: [tim]\n",
+            "is not an email address",
+        ),
+        (
+            "record_stores:\n  - name: s\n    path: /opt/data/s\n    owner_field: Agent Name\n",
+            "owner_field: must be a frontmatter key",
+        ),
+        (
+            "record_stores:\n  - name: s\n    path: /opt/data/s\n    index: [Visitor Name]\n",
+            "is not a frontmatter key",
+        ),
+        (
+            "record_stores:\n  - name: s\n    path: /opt/data/s\n    viewers: [x@y.example]\n",
+            "unknown key(s) ['viewers']",
+        ),
+    ],
+)
+def test_a_bad_posture_key_is_refused_at_provisioning(
+    tmp_path: Path, block: str, fragment: str
+) -> None:
+    errors = _validate(tmp_path, block)
+    assert any(fragment in e for e in errors), errors
