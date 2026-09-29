@@ -150,6 +150,16 @@ _REASON_BODY_INDETERMINATE = "body_indeterminate"
 #: 2026-07-31 "trust-ceiling evaluation failed" wording.
 _REASON_STRUCTURE_FLOOR = "structure_floor"
 
+#: The output checklist refused or reported a message (``shared/output_checklist``,
+#: ss-console Option B, 2026-09-29). Its own reason for the same misattribution
+#: argument as the structure floor above: the firm authored nothing here.
+REASON_OUTPUT_CHECKLIST = "output_checklist"
+
+#: The same message was refused by the checklist for the third time and was
+#: withheld instead of refused again. A row with this reason is a loop the
+#: breaker caught; its ``rules`` say which skill output to fix.
+REASON_OUTPUT_CHECKLIST_EXHAUSTED = "output_checklist_exhausted"
+
 #: Per-property control states. The question is not "what is installed" but
 #: "what can this process PROVE about what is installed" — see
 #: ``shared.spec_manifest.manifest_state``.
@@ -663,7 +673,39 @@ def check_spec_gate(
     return {"action": "block", "message": _draft_message(output_class, reason)}
 
 
-__all__ = ["TEMPLATED_BODY_ARG", "check_spec_gate", "resolve_output_class"]
+def audit_output_checklist(
+    *,
+    tool_name: str,
+    output_class: str,
+    rules: str,
+    session_id: str = "",
+    tool_call_id: str = "",
+    exhausted: bool = False,
+) -> None:
+    """Write the ``SPEC_GATE_TRIGGERED`` row for an output-checklist finding.
+
+    ``rules`` is the comma-joined rule NAMES from ``output_checklist.rule_names``
+    and nothing else: never a fragment of the text, for the reason
+    :func:`_emit_spec_gate_audit` gives. Best-effort; never raises.
+    """
+    _emit_spec_gate_audit(
+        tool_name=tool_name,
+        output_class=output_class,
+        reason=REASON_OUTPUT_CHECKLIST_EXHAUSTED if exhausted else REASON_OUTPUT_CHECKLIST,
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        detail=rules,
+    )
+
+
+__all__ = [
+    "REASON_OUTPUT_CHECKLIST",
+    "REASON_OUTPUT_CHECKLIST_EXHAUSTED",
+    "TEMPLATED_BODY_ARG",
+    "audit_output_checklist",
+    "check_spec_gate",
+    "resolve_output_class",
+]
 
 
 def check_structure_floor(

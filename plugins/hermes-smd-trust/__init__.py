@@ -336,6 +336,13 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         # model-composed tool args.
         args.pop("_current_turn_approval", None)
 
+        # The same forgery class for the templated-body key. Only the out-of-turn
+        # dispatcher sets it, on a body this repo rendered, and that dispatcher
+        # never crosses this hook, so a value present here came from the model.
+        # Left in place it would let a model skip the output checklist (and the
+        # spec gate's templated posture) by naming its own prose a template.
+        args.pop(TEMPLATED_BODY_ARG, None)
+
         # Operator-pause wall (ss#2003). While the sticky-stop ladder is at
         # HARD_STOP — a system trip OR an operator-initiated pause — every
         # tool call refuses, whatever woke the agent. The gate already 503s

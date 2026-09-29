@@ -81,9 +81,11 @@ from shared import (
     inbound,
     matter_gate,
     msgraph_broker,
+    output_checklist,
     provenance,
     report_render,
     send_policy,
+    spec_gate,
 )
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
@@ -385,6 +387,10 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
     # body cites pass it; everyone else lets ``_emit_reply_event`` resolve the
     # session's own (ss-console#2497).
     matter_ref = extra.pop("_matter_ref", None)
+    # ``_detail`` is the same kind of control argument: the model-facing text of
+    # what to correct, fragments included. It goes to the hold notice the model
+    # reads and NEVER into the row, which records rule names only.
+    detail = extra.pop("_detail", "")
     recipient, device = _reply_recipient(origin)
     _emit_reply_event(
         action_type="REPLY_HELD",
@@ -410,9 +416,40 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
             reason=reason,
             recipient=recipient,
             message_id=origin.message_id,
+            detail=detail if isinstance(detail, str) else "",
         )
     except Exception as exc:  # noqa: BLE001 — telling must never break the hook
         logger.warning("hermes-smd-reply: hold notice not recorded (%s)", exc)
+
+
+def _checklist_violations(
+    text: str, *, internal: bool, tool_name: str, session_id: str
+) -> tuple[str, str] | None:
+    """``(rule names, model-facing detail)`` when the checklist holds the reply.
+
+    Report-only rules write their ``SPEC_GATE_TRIGGERED`` row and let the reply
+    go. A scanner fault lets it go too: the safety floors above already passed
+    it, and a quality check that cannot run is not evidence about the text.
+    """
+    surface = output_checklist.STAFF_SEND if internal else output_checklist.EXTERNAL_REPLY
+    try:
+        found = output_checklist.check(text or "", surface)
+    except Exception:  # noqa: BLE001 - see docstring
+        logger.exception("hermes-smd-reply: output checklist raised; relaying unchecked")
+        return None
+    if not found:
+        return None
+    rules = output_checklist.rule_names(found)
+    blocking = output_checklist.refusing(found)
+    if not blocking:
+        spec_gate.audit_output_checklist(
+            tool_name=tool_name,
+            output_class="staff" if internal else "reply_external",
+            rules=rules,
+            session_id=session_id,
+        )
+        return None
+    return rules, output_checklist.describe(blocking)
 
 
 def _current_reply_to() -> str:
@@ -762,6 +799,27 @@ def on_post_tool_call(**kwargs: Any) -> None:
         )
         if not gate.allowed:
             _held(gate.reason, origin, categories=list(gate.categories))
+            return
+
+        # (c1) The output checklist (ss-console Option B, 2026-09-29): would a
+        # good paralegal have sent this reply as is? A colleague's reply meets
+        # the staff set; a reply to anyone outside the firm meets ids and ISO/UTC
+        # times only, so a client's own words quoted back cannot hold it. HELD,
+        # not refused: the draft stands, and the notice tells the model exactly
+        # what to correct.
+        checklist_hold = _checklist_violations(
+            send_text or report_render.html_text_content(send_html),
+            internal=internal,
+            tool_name=str(kwargs.get("tool_name") or ""),
+            session_id=session_id,
+        )
+        if checklist_hold is not None:
+            _held(
+                spec_gate.REASON_OUTPUT_CHECKLIST,
+                origin,
+                rules=checklist_hold[0],
+                _detail=checklist_hold[1],
+            )
             return
 
         if not (send_text or send_html):

@@ -32,7 +32,8 @@ the lane declares what it has, and the existing connector performs the seam.
 
 THE LIMIT, STATED RATHER THAN BURIED
 ------------------------------------
-A drafter could skip this tool and call ``mcp_smokeball_create_memo`` directly,
+A drafter could skip this tool and call ``mcp_smokeball_create_memo`` (or its
+in-place twin ``mcp_smokeball_update_memo``) directly,
 delivering an ungated artifact. That path is visible in the audit log and is not
 prevented here.
 

@@ -208,6 +208,7 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_smokeball_list_folders",
             # writes (mapped)
             "mcp_smokeball_create_memo",
+            "mcp_smokeball_update_memo",
             "mcp_smokeball_patch_matter",
             "mcp_smokeball_create_contact",
             "mcp_smokeball_create_task",

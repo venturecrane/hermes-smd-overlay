@@ -521,6 +521,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_list_events": ActionClass.READ,
     "mcp_smokeball_list_folders": ActionClass.READ,
     "mcp_smokeball_create_memo": ActionClass.INTERNAL_WRITE,
+    # The in-place twin of create_memo (ss-console Option B, 2026-09-29): one
+    # file note per routine per matter, updated rather than appended, so a
+    # paralegal reads one current note instead of a stack of dated repeats. The
+    # same write to the same record as create_memo, so the same class.
+    "mcp_smokeball_update_memo": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_patch_matter": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_contact": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_task": ActionClass.INTERNAL_WRITE,

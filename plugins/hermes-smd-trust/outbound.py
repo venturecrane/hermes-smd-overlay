@@ -34,7 +34,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from shared import identifier_filter, provenance, spec_gate
+from shared import identifier_filter, output_checklist, provenance, report_render, spec_gate
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
 from shared.audit_contract import CANONICAL_TOOL_CALL_KEY, agent_event_params
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
@@ -915,6 +915,16 @@ def check_outbound_draft(
                 )
                 if directive is not None:
                     return directive
+            markdown = args.get("draft_markdown") if isinstance(args, dict) else None
+            if tool_name in CHECKLIST_DOCX_TOOLS and isinstance(markdown, str):
+                return _check_checklist(
+                    tool_name=tool_name,
+                    texts=[markdown],
+                    surface=output_checklist.DOCX,
+                    output_class="work_product",
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                )
             return None
         # A BODY-REQUIRED draft tool with no recognizable / empty body. We
         # cannot scan what we can't find — BLOCK rather than skip (fail-closed).
@@ -962,7 +972,7 @@ def check_outbound_draft(
         # read this session (ss #2171). Scans the concatenated draft surface
         # (prose body PLUS structured args, #2132) — a wider net than the
         # evaluate() call above, which deliberately stays prose-only.
-        return _check_identifiers(
+        directive = _check_identifiers(
             body=_extract_draft_scan_text(args) or body,
             gate="draft",
             session_id=session_id,
@@ -971,6 +981,20 @@ def check_outbound_draft(
             vertical=vertical,
             cohort=cohort,
         )
+        if directive is not None:
+            return directive
+        if tool_name in CHECKLIST_MEMO_TOOLS:
+            # The file note, raw: the connector normalizes headings, emphasis
+            # and quotes after this hook, so the MEMO set does not refuse them.
+            return _check_checklist(
+                tool_name=tool_name,
+                texts=[body],
+                surface=output_checklist.MEMO,
+                output_class="record",
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+            )
+        return None
 
     _emit_fabrication_audit(
         tool_name=tool_name,
@@ -1199,7 +1223,7 @@ def check_outbound_send(
         # A1 identifier gate on the send surface — NO empty-register carve
         # here: an autonomous external send composed with nothing read is
         # exactly "cannot verify", and no human sits downstream (ss #2171).
-        return _check_identifiers(
+        directive = _check_identifiers(
             body=body,
             gate="send",
             session_id=session_id,
@@ -1207,6 +1231,11 @@ def check_outbound_send(
             tool_call_id=tool_call_id,
             vertical=vertical,
             cohort=cohort,
+        )
+        if directive is not None:
+            return directive
+        return _check_send_checklist(
+            tool_name=tool_name, args=args, session_id=session_id, tool_call_id=tool_call_id
         )
     _emit_fabrication_audit(
         tool_name=tool_name,
@@ -1217,6 +1246,200 @@ def check_outbound_send(
         cohort=cohort,
     )
     return {"action": "block", "message": decision.reason}
+
+
+# ---------------------------------------------------------------------------
+# The output checklist (ss-console Option B, 2026-09-29)
+#
+# The standard is one question: would a good paralegal have sent, filed or
+# handed this over as is? ``shared/output_checklist`` decides the part of it a
+# machine can decide (local times, no internal ids, plain sentences, length);
+# this is where each surface meets it, after the fabrication and identifier
+# gates have allowed the text:
+#
+#   * every send, at ``check_outbound_send``, which the in-turn hook, the
+#     out-of-turn dispatcher and send_as all reach. A code-rendered body
+#     (``TEMPLATED_BODY_ARG``) is skipped: the repo wrote it, not the model, and
+#     the model can no longer set that key (``on_pre_tool_call`` pops it).
+#   * a file note (create_memo / update_memo), raw, on the MEMO set;
+#   * a Word document (render_docx_draft), on ``draft_markdown``, ids and
+#     ISO/UTC stamps only.
+#
+# DISPOSITION. Refuse with the reason, then the remedy, quoting the fragment:
+# the model holds the text, so the quote discloses nothing. The report-only
+# rules write a row and proceed. The THIRD refusal of the same text in one
+# session holds it instead: the message is withheld, never sent, and the turn is
+# told to say so. A wrong court time sent on the third try is the 2026-09-29
+# defect itself, and a scheduled turn refused forever is the 2026-08-19 loop;
+# holding is the one answer that is neither.
+# ---------------------------------------------------------------------------
+
+#: The file-note writes. ``update_memo`` is the in-place twin of ``create_memo``
+#: (one note per routine per matter, checklist item 11) and meets the same rules.
+CHECKLIST_MEMO_TOOLS: frozenset[str] = frozenset(
+    {"mcp_smokeball_create_memo", "mcp_smokeball_update_memo"}
+)
+
+#: The Word-document write whose markdown source is a whole filed document.
+CHECKLIST_DOCX_TOOLS: frozenset[str] = frozenset({"mcp_smokeball_render_docx_draft"})
+
+#: Send fields a reader sees as text. The html fields are scanned for their
+#: visible text (tags removed), since a reader never sees the tags.
+_CHECKLIST_TEXT_KEYS: tuple[str, ...] = (
+    "subject",
+    "text",
+    "body",
+    "body_text",
+    "body_plain",
+    "content",
+    "message",
+    "note",
+)
+_CHECKLIST_HTML_KEYS: tuple[str, ...] = ("html", "html_body")
+
+_CHECKLIST_COUNTER = output_checklist.RefusalCounter()
+
+#: Plain names for the rules, for the withheld notice the run output repeats.
+_RULE_PLAIN: dict[str, str] = {
+    "internal_id": "an internal id",
+    "iso_timestamp": "a machine timestamp",
+    "utc_time": "a UTC time",
+    "bare_clock": "a clock time with no a.m. or p.m.",
+    "pipe_table": "a table",
+    "heading_marks": "pound-sign headings",
+    "emphasis_marks": "asterisk or backtick markup",
+    "html_tag": "an html tag",
+    "em_dash": "a dash",
+    "exclamation": "an exclamation mark",
+    "caps_emphasis": "capitals for emphasis",
+    "max_lines": "too many lines",
+}
+
+_NOUNS: dict[str, tuple[str, str]] = {
+    output_checklist.MEMO: ("file note", "written"),
+    output_checklist.DOCX: ("document", "written"),
+}
+
+
+def _merge(
+    violations_per_text: list[list[output_checklist.Violation]],
+) -> list[output_checklist.Violation]:
+    """One violation per rule across the scanned fields, the first one found."""
+    seen: dict[str, output_checklist.Violation] = {}
+    for violations in violations_per_text:
+        for violation in violations:
+            seen.setdefault(violation.rule, violation)
+    return list(seen.values())
+
+
+def _check_checklist(
+    *,
+    tool_name: str,
+    texts: list[str],
+    surface: str,
+    output_class: str,
+    session_id: str,
+    tool_call_id: str,
+) -> dict | None:
+    """Scan ``texts`` on ``surface``; refuse, hold, or record and proceed.
+
+    A scanner fault allows loudly, as the identifier scan does: the checklist is
+    a quality gate that runs after the safety gates have already allowed the
+    text, so an infra fault in it is not evidence about the text.
+    """
+    try:
+        found = _merge([output_checklist.check(text, surface) for text in texts if text])
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.error("outbound gate: output checklist CRASHED (tool=%s err=%s)", tool_name, exc)
+        return None
+    if not found:
+        return None
+    blocking = output_checklist.refusing(found)
+    exhausted = False
+    if blocking:
+        key = output_checklist.fingerprint("\x00".join(texts))
+        exhausted = _CHECKLIST_COUNTER.bump(session_id, key) >= output_checklist.HOLD_AFTER
+    spec_gate.audit_output_checklist(
+        tool_name=tool_name,
+        output_class=output_class,
+        rules=output_checklist.rule_names(found),
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        exhausted=exhausted,
+    )
+    if not blocking:
+        return None
+    noun, verb = _NOUNS.get(surface, ("message", "sent"))
+    detail = output_checklist.describe(blocking)
+    if exhausted:
+        plain = ", ".join(_RULE_PLAIN.get(v.rule, v.rule) for v in blocking)
+        return {
+            "action": "block",
+            "message": (
+                f"Withheld: this {noun} was refused {output_checklist.HOLD_AFTER} times "
+                f"with the same text and has not been {verb}. It will not go out. Do not "
+                f"call {tool_name} with it again. In your run output, say that the {noun} "
+                f"was withheld because it still carried {plain}, so a person can correct "
+                f"what produced it. {detail}"
+            ),
+        }
+    return {
+        "action": "block",
+        "message": (
+            f"Refused: this {noun} would reach a person with {len(blocking)} thing(s) a "
+            f"paralegal would correct, and nothing was {verb}. {detail} Correct each one "
+            f"and call {tool_name} again with the corrected text."
+        ),
+    }
+
+
+def _send_output_class(tool_name: str, args: dict, session_id: str) -> str | None:
+    """The send's output class ("staff", "outbound_client", ...) or ``None``.
+
+    The same resolution ``_normalize_staff_dashes`` makes; ``None`` means the
+    class could not be resolved and the stricter every-output set applies.
+    """
+    try:
+        from . import enforce  # local: avoids an import cycle at package load
+
+        resolved = enforce.resolved_send_class(tool_name, args, session_id)
+        if resolved is None:
+            return None
+        return spec_gate.resolve_output_class(resolved.value)
+    except Exception:  # noqa: BLE001 - unresolved reads as the stricter set
+        logger.debug("outbound gate: send class unresolved for %s", tool_name, exc_info=True)
+        return None
+
+
+def _check_send_checklist(
+    *, tool_name: str, args: dict | None, session_id: str, tool_call_id: str
+) -> dict | None:
+    """The checklist on a send: STAFF_SEND for staff, EVERY_OUTPUT otherwise."""
+    if not isinstance(args, dict) or args.get(spec_gate.TEMPLATED_BODY_ARG):
+        return None
+    texts: list[str] = []
+    for key in _CHECKLIST_TEXT_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value)
+    for key in _CHECKLIST_HTML_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(report_render.html_text_content(value))
+    if not texts:
+        return None
+    output_class = _send_output_class(tool_name, args, session_id)
+    surface = (
+        output_checklist.STAFF_SEND if output_class == "staff" else output_checklist.EVERY_OUTPUT
+    )
+    return _check_checklist(
+        tool_name=tool_name,
+        texts=texts,
+        surface=surface,
+        output_class=output_class or "unresolved",
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+    )
 
 
 __all__ = [

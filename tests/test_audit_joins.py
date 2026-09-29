@@ -323,3 +323,16 @@ def test_extraction_never_raises_on_a_malformed_result():
     obligation and this is decoration on it."""
     for bad in (None, 3, [], object(), '{"value": "not a list"}', "{"):
         assert isinstance(object_identity.extract("mcp_smokeball_read_document", {}, bad), dict)
+
+
+def test_update_memo_names_the_note_it_rewrote_and_hashes_the_new_text():
+    """The in-place twin of create_memo: the note already exists, so its id is
+    the arg when the write echoes none, and the hash is of the text now in it."""
+    out = object_identity.extract(
+        "mcp_smokeball_update_memo",
+        {"matter_id": _M_A, "memo_id": "memo-7", "text": "the new note body"},
+        '{"status": "accepted"}',
+    )
+    assert out["memo_id"] == "memo-7"
+    assert out["written_body_sha256"] == hashlib.sha256(b"the new note body").hexdigest()
+    assert out["written_body_field"] == "text"

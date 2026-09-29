@@ -32,7 +32,12 @@ WHAT IT DOES NOT DO
 -------------------
 * It never carries the draft body, and never any inbound text. The only
   non-constant strings are the closed-vocabulary hold reason and the verified
-  inbound sender's address (sanitized here anyway).
+  inbound sender's address (sanitized here anyway), with one bounded exception:
+  an output-checklist hold carries ``detail``, the checklist's own short quote
+  of the offending fragment ("'16:30'"), because a model told "fix the time"
+  without being shown which time cannot reliably fix it. The model composed
+  that fragment itself, so the quote hands it nothing it did not already hold,
+  and the audit row still records rule names only.
 * It says nothing when the reply is durably queued for automatic release: a
   rate-held reply that WILL go out on its own is not silence, and telling the
   agent "not delivered" there would provoke a redraft that duplicates it.
@@ -83,6 +88,10 @@ _REASON_HINTS: dict[str, str] = {
         "autonomously. The draft stands; a person has to take it from here."
     ),
     "empty_body": "The draft carried no body to relay. A subject alone is not a reply.",
+    "output_checklist": (
+        "The reply carried something a paralegal would correct before sending it. "
+        "Correct exactly what is listed and draft the reply again."
+    ),
     "no_inbox_id": "No inbox was recorded for the original message, so there is nothing to thread into.",
 }
 
@@ -92,6 +101,7 @@ _GENERIC_HINT = (
 )
 
 _MAX_REASON_LEN = 120
+_MAX_DETAIL_LEN = 800
 _MAX_RECIPIENT_LEN = 254
 
 
@@ -113,6 +123,9 @@ class HoldNotice:
     recipient: str
     message_id: str
     attempt: int = 1
+    #: What to correct, fragments included (the output checklist's describe()).
+    #: Model-facing only: it is rendered into this notice and never into a row.
+    detail: str = ""
 
 
 def render(notice: HoldNotice) -> str:
@@ -125,11 +138,15 @@ def render(notice: HoldNotice) -> str:
         guidance = _REDRAFT_GUIDANCE
     else:
         guidance = _REASON_HINTS.get(reason, _GENERIC_HINT)
-    return (
+    text = (
         "[reply-channel] YOUR REPLY WAS NOT SENT. The draft was created, but the "
         f"reply channel held it: {reason}. Nobody has been told, and {recipient} "
         f"is still waiting. {guidance}"
     )
+    detail = _sanitize(notice.detail, _MAX_DETAIL_LEN)
+    if detail:
+        text += f" What to correct: {detail}"
+    return text
 
 
 def append_notice(result: str, notice: HoldNotice) -> str:
@@ -160,7 +177,15 @@ class HoldNoticeStore:
         self._counts: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def record(self, *, tool_call_id: str, reason: str, recipient: str, message_id: str) -> None:
+    def record(
+        self,
+        *,
+        tool_call_id: str,
+        reason: str,
+        recipient: str,
+        message_id: str,
+        detail: str = "",
+    ) -> None:
         key = tool_call_id if isinstance(tool_call_id, str) else ""
         msg = message_id if isinstance(message_id, str) else ""
         with self._lock:
@@ -176,6 +201,7 @@ class HoldNoticeStore:
                 recipient=recipient or "",
                 message_id=msg,
                 attempt=attempt,
+                detail=detail if isinstance(detail, str) else "",
             )
 
     def take(self, tool_call_id: str) -> HoldNotice | None:

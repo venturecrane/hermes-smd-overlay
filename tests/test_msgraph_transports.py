@@ -219,6 +219,13 @@ def test_msgraph_reply_escapes_model_authored_markup(monkeypatch, tmp_path):
     """Escape-by-default is the property that makes rendering safe on this path;
     it is inherited from report_render, and inheriting it silently is how it gets
     lost in a later refactor."""
+    # The output checklist now HOLDS a colleague's reply carrying a tag, before
+    # it reaches a transport. The property under test is the transport's own
+    # escape, which a reply outside the firm still relies on (the external set
+    # checks ids and times only), so the checklist is stood down here.
+    from shared import output_checklist
+
+    monkeypatch.setattr(output_checklist, "check", lambda *_a, **_k: [])
     mod, _d1 = _reply_mod(monkeypatch, tmp_path)
     fake = _FakeGraphBroker()
     monkeypatch.setattr(mod.msgraph_broker, "send_reply", fake.send_reply)

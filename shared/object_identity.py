@@ -39,6 +39,14 @@ logger = logging.getLogger(__name__)
 #: is ``text`` (``operator/connectors/smokeball/smokeball_connector/server.py``).
 TOOL_CREATE_MEMO = "mcp_smokeball_create_memo"
 
+#: Its in-place twin: ``update_memo(matter_id, memo_id, text)`` rewrites one
+#: existing note (one note per routine per matter). The memo id is an ARG here,
+#: since the note already exists; a result that echoes one still wins.
+TOOL_UPDATE_MEMO = "mcp_smokeball_update_memo"
+
+#: The two memo writes, which record the same two facts.
+MEMO_WRITE_TOOLS: frozenset[str] = frozenset({TOOL_CREATE_MEMO, TOOL_UPDATE_MEMO})
+
 #: Server-side text extraction for one matter document. The result echoes the
 #: ids; ``hermes-smd-establishment``'s read capture reads exactly these
 #: spellings off the live payload, which is where they were observed.
@@ -175,11 +183,13 @@ def extract(tool_name: str, args: Any, result: Any) -> dict[str, Any]:
                     # Says so rather than reporting a short list as complete.
                     out["document_ids_truncated"] = True
 
-        elif tool_name == TOOL_CREATE_MEMO:
+        elif tool_name in MEMO_WRITE_TOOLS:
             memo_id = _first_str(payload, "id", "memoId", "memo_id")
             if not memo_id:
                 nested = payload.get("memo") if payload else None
                 memo_id = _first_str(nested if isinstance(nested, dict) else None, "id", "memo_id")
+            if not memo_id and tool_name == TOOL_UPDATE_MEMO:
+                memo_id = _first_str(arguments, "memo_id", "memoId")
             if memo_id:
                 out["memo_id"] = memo_id
             digest = body_sha256(arguments.get("text"))
@@ -218,10 +228,12 @@ def extract(tool_name: str, args: Any, result: Any) -> dict[str, Any]:
 
 __all__ = [
     "DRAFT_TOOLS",
+    "MEMO_WRITE_TOOLS",
     "TOOL_CREATE_MEMO",
     "TOOL_DELIVER_DRAFT",
     "TOOL_GET_FILES",
     "TOOL_READ_DOCUMENT",
+    "TOOL_UPDATE_MEMO",
     "body_sha256",
     "extract",
 ]
