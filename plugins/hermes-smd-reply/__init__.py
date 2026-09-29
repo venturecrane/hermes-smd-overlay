@@ -444,7 +444,7 @@ def _checklist_violations(
     if not blocking:
         spec_gate.audit_output_checklist(
             tool_name=tool_name,
-            output_class="staff" if internal else "reply_external",
+            output_class="staff" if internal else output_checklist.EXTERNAL_REPLY,
             rules=rules,
             session_id=session_id,
         )

@@ -918,6 +918,57 @@ def _smd_send_message(args: dict[str, Any], **kwargs: Any) -> str:
     return f"Sent (message {message_id})."
 
 
+def _scan_approved_send(rec: Any, payload: dict, session_id: str) -> str | None:
+    """The outbound scans on an approved send. ``None`` to send, else the context.
+
+    See the DECISION comment at the call site in :func:`_dispatch_approved_send`.
+    Fails safe: a scan that raises does not send.
+    """
+    recipients = ", ".join(sorted(rec.recipients)) or "(unresolved)"
+    try:
+        with outbound.notices_suppressed():
+            block = outbound.check_outbound_send(
+                tool_name=rec.tool_name, args=payload, session_id=session_id
+            )
+    except Exception:  # noqa: BLE001 - an indeterminate scan must not send
+        logger.exception("hermes-smd-trust: approved send scan raised; NOT dispatching")
+        return (
+            f"[Your approved send to {recipients} was not dispatched: the seat could not scan it]"
+        )
+    if block is None:
+        return None
+    reason = block.get("message", "withheld") if isinstance(block, dict) else "withheld"
+    notice_to: list[str] = []
+    source = rec.approval_source or ""
+    if "@" in source:
+        notice_to.append(source.split(":", 1)[-1].strip())
+    if outbound.send_is_staff(rec.tool_name, payload, session_id):
+        for key in ("to", "cc"):
+            for address in outbound._recipients(payload.get(key)):
+                if address not in notice_to:
+                    notice_to.append(address)
+    told = ""
+    if notice_to:
+        subject = payload.get("subject") if isinstance(payload.get("subject"), str) else ""
+        result = outbound._send_withheld_notice(
+            to=notice_to,
+            cc=[],
+            subject=subject,
+            rules=outbound.send_checklist_rules(rec.tool_name, payload, session_id),
+            session_id=session_id,
+        )
+        told = (
+            f" A short internal notice that it was withheld went to {', '.join(notice_to)}."
+            if result.sent
+            else f" The internal notice that it was withheld did not go ({result.reason})."
+        )
+    logger.info("hermes-smd-trust: approved send to %s refused by outbound scan", recipients)
+    return (
+        f"[Your approved send to {recipients} was not dispatched: {reason}{told} The "
+        "approval was used; a corrected send needs a fresh approval.]"
+    )
+
+
 def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     """Execute an approved confirm send OUT OF BAND (ADR 0071 #1806 harden).
 
@@ -961,6 +1012,23 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
         )
         return f"[Your approved send to {recipients} was not dispatched: {reason}]"
     # Gate allowed + consumed the approval; `payload` now holds the approved payload.
+    #
+    # DECISION (overlay PR #399, closing the question PR #309 left open): an
+    # approved send meets the SAME outbound scans as every other send, run here
+    # after evaluate_tool_call exactly as the out-of-turn dispatcher runs them.
+    # evaluate_tool_call alone never ran the fabrication scan, the identifier
+    # gate or the output checklist, which live in outbound.check_outbound_send
+    # and fire from a hook this lane never crosses. A person approving a send
+    # approves its recipients and its intent; they did not read it for a UTC
+    # clock or an internal id, and an approval must not launder one. A refusal
+    # here sends nothing, the scan writes its own audit rows, and a fixed
+    # withheld notice goes to the approver (when the approval named an address)
+    # and to the send's own recipients when they are staff, so nobody who was
+    # waiting on it hears silence. The approval is already consumed; the model
+    # is told, and a corrected send needs a fresh approval.
+    scan_block = _scan_approved_send(rec, payload, session_id)
+    if scan_block is not None:
+        return scan_block
     # Same post-gate html attach as the tool path. This path needs its own call:
     # the pending record was stored by the gate BEFORE the tool path's attach ran,
     # so a withheld-then-approved report arrives here as markdown-only.

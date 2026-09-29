@@ -1831,3 +1831,62 @@ def test_an_external_reply_meets_ids_and_stamps_only(relay_mod, monkeypatch) -> 
     ]
     assert len(held) == 1 and held[0]["rules"] == "internal_id"
     assert held[0]["message_id"] == "msg_ck_ext"
+
+
+@pytest.fixture
+def checklist_rows(monkeypatch):
+    """The report-only SPEC_GATE_TRIGGERED writer, wired to a fake."""
+    from shared import spec_gate
+
+    calls: list = []
+
+    class _Fake:
+        def execute(self, _sql, *params):
+            calls.append(params)
+            return 1
+
+    monkeypatch.setattr(spec_gate, "_AUDIT_CLIENT", _Fake())
+    monkeypatch.setattr(spec_gate, "_AUDIT_CUSTOMER_SLUG", "acme")
+    monkeypatch.setattr(spec_gate, "_AUDIT_WIRED", True)
+    return lambda: [json.loads(p[-1]) for p in calls if "SPEC_GATE_TRIGGERED" in p]
+
+
+def test_the_report_row_names_the_surface_for_each_class(
+    relay_mod, monkeypatch, checklist_rows
+) -> None:
+    """Report-only rows group with the surface name: "staff" for a colleague,
+    ``output_checklist.EXTERNAL_REPLY`` for anyone outside the firm."""
+    from shared import output_checklist
+    from shared.recipient_classifier import RecipientClass
+
+    mod, _d1, _sent = relay_mod
+    _record_origin(message_id="msg_ck_rep_in")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text="URGENT: the Garcia file needs you."),
+        session_id="s1",
+    )
+    # The external set holds no report-only rule, so its row comes from the
+    # helper directly with the classification the relay would pass.
+    monkeypatch.setattr(mod, "classify_recipients_typed", lambda *a, **k: RecipientClass.CLIENT)
+    monkeypatch.setattr(
+        output_checklist,
+        "REPORT_ONLY_RULES",
+        output_checklist.REPORT_ONLY_RULES | {"exclamation"},
+    )
+    monkeypatch.setattr(
+        output_checklist,
+        "_SURFACES",
+        {
+            **output_checklist._SURFACES,
+            output_checklist.EXTERNAL_REPLY: (("exclamation",), None, True),
+        },
+    )
+    _record_origin(message_id="msg_ck_rep_ex", session="s3")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text="Thanks, we will help!"),
+        session_id="s3",
+    )
+    classes = [r["output_class"] for r in checklist_rows()]
+    assert classes == ["staff", output_checklist.EXTERNAL_REPLY]

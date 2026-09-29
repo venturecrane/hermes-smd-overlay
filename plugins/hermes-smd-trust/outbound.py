@@ -1364,6 +1364,21 @@ _NOTICE_SUBJECT_MAX = 120
 _NOTICE_GUARD = threading.local()
 
 
+class notices_suppressed:  # noqa: N801 - reads as a phrase at the call site
+    """Within this block the checklist sends no withheld notice of its own.
+
+    For a caller that sends its own notice to a wider set of people (the
+    approved-send lane adds the approver), so one refusal is one notice.
+    """
+
+    def __enter__(self) -> None:
+        self._prior = getattr(_NOTICE_GUARD, "suppressed", False)
+        _NOTICE_GUARD.suppressed = True
+
+    def __exit__(self, *_exc: object) -> None:
+        _NOTICE_GUARD.suppressed = self._prior
+
+
 def _notice_body(rules: list[str]) -> str:
     phrases: list[str] = []
     for rule in rules:
@@ -1493,7 +1508,8 @@ def _check_checklist(
     if exhausted:
         plain = ", ".join(_RULE_PLAIN.get(v.rule, v.rule) for v in blocking)
         told = ""
-        if notice and first_exhaustion and notice.get("to"):
+        suppressed = getattr(_NOTICE_GUARD, "suppressed", False)
+        if notice and first_exhaustion and notice.get("to") and not suppressed:
             result = _send_withheld_notice(
                 to=notice["to"],
                 cc=notice.get("cc") or [],
@@ -1545,12 +1561,8 @@ def _send_output_class(tool_name: str, args: dict, session_id: str) -> str | Non
         return None
 
 
-def _check_send_checklist(
-    *, tool_name: str, args: dict | None, session_id: str, tool_call_id: str
-) -> dict | None:
-    """The checklist on a send: STAFF_SEND for staff, EVERY_OUTPUT otherwise."""
-    if not isinstance(args, dict) or args.get(spec_gate.TEMPLATED_BODY_ARG):
-        return None
+def _send_texts(args: dict) -> list[str]:
+    """The reader-visible text fields of a send, html reduced to its words."""
     texts: list[str] = []
     for key in _CHECKLIST_TEXT_KEYS:
         value = args.get(key)
@@ -1560,6 +1572,42 @@ def _check_send_checklist(
         value = args.get(key)
         if isinstance(value, str) and value.strip():
             texts.append(report_render.html_text_content(value))
+    return texts
+
+
+def send_checklist_rules(tool_name: str, args: dict | None, session_id: str) -> list[str]:
+    """The refusing checklist rules a send carries, read only (no count, no row).
+
+    For a caller that already has a refusal in hand and needs to say, in plain
+    words, what the refused message carried (the approved-send lane's notice).
+    Empty when the send meets the checklist, or when the refusal came from a
+    different gate.
+    """
+    if not isinstance(args, dict):
+        return []
+    output_class = _send_output_class(tool_name, args, session_id)
+    surface = (
+        output_checklist.STAFF_SEND if output_class == "staff" else output_checklist.EVERY_OUTPUT
+    )
+    try:
+        found = _merge([output_checklist.check(t, surface) for t in _send_texts(args)])
+    except Exception:  # noqa: BLE001 - a naming aid, never a decision
+        return []
+    return [v.rule for v in output_checklist.refusing(found)]
+
+
+def send_is_staff(tool_name: str, args: dict | None, session_id: str) -> bool:
+    """True when this send resolves to the staff output class."""
+    return isinstance(args, dict) and _send_output_class(tool_name, args, session_id) == "staff"
+
+
+def _check_send_checklist(
+    *, tool_name: str, args: dict | None, session_id: str, tool_call_id: str
+) -> dict | None:
+    """The checklist on a send: STAFF_SEND for staff, EVERY_OUTPUT otherwise."""
+    if not isinstance(args, dict) or args.get(spec_gate.TEMPLATED_BODY_ARG):
+        return None
+    texts = _send_texts(args)
     if not texts:
         return None
     output_class = _send_output_class(tool_name, args, session_id)
