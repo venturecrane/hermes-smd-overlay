@@ -83,14 +83,8 @@ CLASSES: tuple[str, ...] = ("open", "done", "stale", "at_stake")
 UPDATE_TASK_TOOL = "mcp_smokeball_update_task"
 #: The write every prep routine makes when it runs a step: its ``[Operator]`` memo.
 STEP_WITNESS_TOOL = "mcp_smokeball_create_memo"
-#: Either memo write witnesses a step: since 2026-09-29 a routine's note is
-#: updated in place (create_memo upserts; update_memo names the memo).
-STEP_WITNESS_TOOLS: tuple[str, ...] = (STEP_WITNESS_TOOL, "mcp_smokeball_update_memo")
-#: The successful tool calls, any one of which witnesses each call-backed event.
-WITNESS_TOOLS: dict[str, tuple[str, ...]] = {
-    "completed": (UPDATE_TASK_TOOL,),
-    "step_ran": STEP_WITNESS_TOOLS,
-}
+#: The successful tool call that witnesses each call-backed event.
+WITNESS_TOOLS: dict[str, str] = {"completed": UPDATE_TASK_TOOL, "step_ran": STEP_WITNESS_TOOL}
 
 DEFAULT_LEDGER_PATH = "/opt/data/audit/casework-ledger.jsonl"
 LEDGER_PATH_ENV = "SMD_CASEWORK_LEDGER_PATH"
@@ -513,7 +507,7 @@ def _check_answer(kind: str, event: dict, state: ItemState | None) -> None:
 def _check_call(kind: str, event: dict, existing_events, audit_witness) -> None:
     """A call-backed row names one successful tool call of its own session, and
     no call backs two rows."""
-    tool = " or ".join(WITNESS_TOOLS[kind])
+    tool = WITNESS_TOOLS[kind]
     call_id = event.get("tool_call_id")
     if not _short_str(call_id, _MAX_ID_CHARS):
         raise ValueError(f"{kind} carries tool_call_id, the id of the {tool} call")

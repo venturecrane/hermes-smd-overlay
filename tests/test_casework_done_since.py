@@ -418,26 +418,3 @@ def test_the_trust_hook_feeds_the_step_witness():
     [memo] = STEP_WITNESS.unclaimed(provenance.resolve_session(session), MATTER)
     assert memo.call_id == "toolu_wired" and memo.raw_session == session
     STEP_WITNESS.clear(provenance.resolve_session(session))
-
-
-def test_an_update_memo_witnesses_a_step_as_create_memo_does():
-    """A routine's note is updated in place since 2026-09-29: the twin's
-    STEP_WITNESS_TOOLS carries both memo writes, and the witness keeps either."""
-    from shared import casework_ledger
-    from shared.casework_steps import MEMO_TOOLS
-
-    assert casework_ledger.WITNESS_TOOLS["step_ran"] == MEMO_TOOLS
-    assert "mcp_smokeball_update_memo" in MEMO_TOOLS
-    witness = StepWitness()
-    witness.on_post_tool(
-        "mcp_smokeball_update_memo",
-        SESSION,
-        {
-            "tool_call_id": "call-upd-1",
-            "session_id": SESSION,
-            "args": {"matter_id": MATTER, "memo_id": "memo-1", "text": "note"},
-            "result": '{"confirmed": true}',
-        },
-    )
-    [memo] = witness.unclaimed(SESSION, MATTER)
-    assert memo.call_id == "call-upd-1"
