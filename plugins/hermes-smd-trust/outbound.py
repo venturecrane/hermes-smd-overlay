@@ -31,10 +31,18 @@ not the row.
 import logging
 import os
 import re
+import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from shared import identifier_filter, output_checklist, provenance, report_render, spec_gate
+from shared import (
+    identifier_filter,
+    output_checklist,
+    provenance,
+    report_render,
+    send_dispatch,
+    spec_gate,
+)
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
 from shared.audit_contract import CANONICAL_TOOL_CALL_KEY, agent_event_params
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
@@ -1315,6 +1323,110 @@ _RULE_PLAIN: dict[str, str] = {
     "max_lines": "too many lines",
 }
 
+# ---------------------------------------------------------------------------
+# The withheld notice: a held staff message is never silence
+#
+# Two rulings meet here. 2026-08-19 (ss-console#2547): the escalator's last
+# warning about a court date was refused over a dash and the person heard
+# nothing, so staff mail must not go silent. 2026-09-29: a wrong court time must
+# never go out. Holding the model's text satisfies the second; this notice
+# satisfies the first. When a STAFF message is withheld on its third refusal, a
+# fixed, code-rendered note goes to the same staff recipients saying a message
+# was withheld and why, in plain words, with none of the model's text in it.
+#
+# It goes through the seat's own out-of-turn sender (``shared.send_dispatch``,
+# the trust plugin's ``_dispatch_internal_message``), so the ceiling, the taint
+# gate and the transport's CONFIRM_SEND_DISPATCHED row are the ones any internal
+# dispatch gets. It is marked templated, so the checklist never rescans it and it
+# can never itself be held. A thread-local guard means a notice being dispatched
+# can never produce another notice. It is sent once per message per session: on
+# the refusal that exhausts the count, not on any later one.
+# ---------------------------------------------------------------------------
+
+#: What each rule looked like to the person, for the notice body. Every phrase
+#: passes the staff checklist itself (pinned by a test).
+_NOTICE_PLAIN: dict[str, str] = {
+    "internal_id": "an internal reference code",
+    "iso_timestamp": "a time that was not in the firm's local clock",
+    "utc_time": "a time that was not in the firm's local clock",
+    "bare_clock": "a time that was not in the firm's local clock",
+    "pipe_table": "a table",
+    "heading_marks": "formatting marks",
+    "emphasis_marks": "formatting marks",
+    "html_tag": "formatting marks",
+    "em_dash": "a dash",
+    "exclamation": "an exclamation mark",
+}
+
+_NOTICE_SUBJECT_FALLBACK = "an Operator message"
+_NOTICE_SUBJECT_MAX = 120
+
+_NOTICE_GUARD = threading.local()
+
+
+def _notice_body(rules: list[str]) -> str:
+    phrases: list[str] = []
+    for rule in rules:
+        phrase = _NOTICE_PLAIN.get(rule, "something a paralegal would correct")
+        if phrase not in phrases:
+            phrases.append(phrase)
+    if len(phrases) > 1:
+        carried = ", ".join(phrases[:-1]) + " and " + phrases[-1]
+    else:
+        carried = phrases[0] if phrases else "something a paralegal would correct"
+    return (
+        "The Operator prepared a message about this and withheld it.\n"
+        f"It carried {carried}.\n"
+        "Please check the matter's calendar entry or task directly.\n"
+        "This is an internal note; no client was contacted."
+    )
+
+
+def _notice_subject(original: str) -> str:
+    """``Withheld: <original subject>``, unless the subject itself would not pass.
+
+    The notice is never rescanned, so a subject that carries the very time the
+    body was withheld for is replaced rather than repeated.
+    """
+    flat = " ".join(original.split()) if isinstance(original, str) else ""
+    if flat and not output_checklist.refusing(
+        output_checklist.check(flat, output_checklist.STAFF_SEND)
+    ):
+        return ("Withheld: " + flat)[:_NOTICE_SUBJECT_MAX]
+    return "Withheld: " + _NOTICE_SUBJECT_FALLBACK
+
+
+def _recipients(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, str) and v.strip()]
+    return []
+
+
+def _send_withheld_notice(
+    *, to: list[str], cc: list[str], subject: str, rules: list[str], session_id: str
+) -> send_dispatch.DispatchResult:
+    """Dispatch the fixed withheld notice. Never raises; never recurses."""
+    if getattr(_NOTICE_GUARD, "active", False):
+        return send_dispatch.DispatchResult(sent=False, reason="a notice cannot raise a notice")
+    _NOTICE_GUARD.active = True
+    try:
+        return send_dispatch.dispatch(
+            to=to,
+            cc=cc,
+            subject=_notice_subject(subject),
+            text=_notice_body(rules),
+            session_id=session_id,
+            templated=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - dispatch is already exception-safe
+        logger.warning("outbound gate: withheld notice raised (%s)", exc)
+        return send_dispatch.DispatchResult(sent=False, reason=str(exc))
+    finally:
+        _NOTICE_GUARD.active = False
+
+
 _NOUNS: dict[str, tuple[str, str]] = {
     output_checklist.MEMO: ("file note", "written"),
     output_checklist.DOCX: ("document", "written"),
@@ -1340,8 +1452,12 @@ def _check_checklist(
     output_class: str,
     session_id: str,
     tool_call_id: str,
+    notice: dict | None = None,
 ) -> dict | None:
     """Scan ``texts`` on ``surface``; refuse, hold, or record and proceed.
+
+    ``notice`` (staff sends only) carries ``to``, ``cc`` and ``subject`` for the
+    withheld notice sent when this call exhausts the refusal count.
 
     A scanner fault allows loudly, as the identifier scan does: the checklist is
     a quality gate that runs after the safety gates have already allowed the
@@ -1356,9 +1472,12 @@ def _check_checklist(
         return None
     blocking = output_checklist.refusing(found)
     exhausted = False
+    first_exhaustion = False
     if blocking:
         key = output_checklist.fingerprint("\x00".join(texts))
-        exhausted = _CHECKLIST_COUNTER.bump(session_id, key) >= output_checklist.HOLD_AFTER
+        count = _CHECKLIST_COUNTER.bump(session_id, key)
+        exhausted = count >= output_checklist.HOLD_AFTER
+        first_exhaustion = count == output_checklist.HOLD_AFTER
     spec_gate.audit_output_checklist(
         tool_name=tool_name,
         output_class=output_class,
@@ -1373,14 +1492,29 @@ def _check_checklist(
     detail = output_checklist.describe(blocking)
     if exhausted:
         plain = ", ".join(_RULE_PLAIN.get(v.rule, v.rule) for v in blocking)
+        told = ""
+        if notice and first_exhaustion and notice.get("to"):
+            result = _send_withheld_notice(
+                to=notice["to"],
+                cc=notice.get("cc") or [],
+                subject=notice.get("subject") or "",
+                rules=[v.rule for v in blocking],
+                session_id=session_id,
+            )
+            told = (
+                " A short internal notice that a message was withheld went to "
+                f"{', '.join(result.recipients or notice['to'])}."
+                if result.sent
+                else f" The internal notice that it was withheld did not go ({result.reason})."
+            )
         return {
             "action": "block",
             "message": (
                 f"Withheld: this {noun} was refused {output_checklist.HOLD_AFTER} times "
                 f"with the same text and has not been {verb}. It will not go out. Do not "
-                f"call {tool_name} with it again. In your run output, say that the {noun} "
-                f"was withheld because it still carried {plain}, so a person can correct "
-                f"what produced it. {detail}"
+                f"call {tool_name} with it again.{told} In your run output, say that the "
+                f"{noun} was withheld because it still carried {plain}, so a person can "
+                f"correct what produced it. {detail}"
             ),
         }
     return {
@@ -1432,6 +1566,13 @@ def _check_send_checklist(
     surface = (
         output_checklist.STAFF_SEND if output_class == "staff" else output_checklist.EVERY_OUTPUT
     )
+    notice = None
+    if surface == output_checklist.STAFF_SEND:
+        notice = {
+            "to": _recipients(args.get("to")),
+            "cc": _recipients(args.get("cc")),
+            "subject": args.get("subject") if isinstance(args.get("subject"), str) else "",
+        }
     return _check_checklist(
         tool_name=tool_name,
         texts=texts,
@@ -1439,6 +1580,7 @@ def _check_send_checklist(
         output_class=output_class or "unresolved",
         session_id=session_id,
         tool_call_id=tool_call_id,
+        notice=notice,
     )
 
 

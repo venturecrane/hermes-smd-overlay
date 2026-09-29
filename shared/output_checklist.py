@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from shared import report_render
@@ -126,16 +127,17 @@ _UTC = re.compile(
 _CLOCK = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})(?::(\d{2}))?(?![\d:])")
 _MERIDIEM = r"(?:a\.?\s?m\b\.?|p\.?\s?m\b\.?|noon\b|midnight\b)"
 _MERIDIEM_AFTER = re.compile(r"\s*" + _MERIDIEM, re.IGNORECASE)
-_MERIDIEM_ANY = re.compile(r"\d\s*" + _MERIDIEM + r"|\bnoon\b|\bmidnight\b", re.IGNORECASE)
 # "2:30-4:00 p.m." / "2:30 to 4 p.m.": the left clock takes the right one's meridiem.
 _RANGE_TO_MERIDIEM = re.compile(
     r"\s*(?:-|\u2013|to)\s*\d{1,2}(?::\d{2})?\s*" + _MERIDIEM, re.IGNORECASE
 )
 # A deposition page:line cite: "Smith Depo. 22:14", "Tr. 5:3", "at p. 12:4".
+# The cite WORD is what makes it a cite. A bare "16:30-17:00" has the same shape
+# as "22:14-23:2" and is a UTC hearing window, so shape alone never exempts.
 _CITE_BEFORE = re.compile(r"(?:Depo|Dep\.|Tr\.|Transcript|at p\.|pp\.)")
 _CITE_WINDOW = 12
-_CITE_RANGE_AFTER = re.compile(r"-\d+:\d+")
-_CITE_RANGE_BEFORE = re.compile(r"\d+:\d+-$")
+# The left half of a page:line range, ending where the right half begins.
+_CITE_RANGE_LEFT = re.compile(r"\d+:\d+-$")
 
 _TABLE_ROW = re.compile(r"^\s*\|")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
@@ -143,7 +145,7 @@ _EMPHASIS = re.compile(r"\*\*|`|(?<![\w_])__(?=\S)|(?<![\w*])\*(?=[^\s*])[^*\n]*
 _HTML_TAG = re.compile(r"</?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>\n]*)?/?>")
 _EXCLAMATION = re.compile(r"!(?!=)")
 _CAPS = re.compile(r"\b[A-Z]{4,}\b")
-_CAPTION = re.compile(r"\sv\.\s|\svs\.\s")
+_CAPTION = re.compile(r"\s(?:v|vs)\.\s")
 
 #: Upper-case words a firm writes in capitals because that is their spelling, not
 #: because they are shouting.
@@ -273,16 +275,13 @@ def _is_cite(text: str, match: re.Match[str]) -> bool:
     """True when this H:MM is a deposition page:line cite rather than a clock."""
     if match.group(3) is not None:
         return False  # H:MM:SS is never a cite
-    before = text[max(0, match.start() - _CITE_WINDOW) : match.start()]
-    if _CITE_BEFORE.search(before):
-        return True
-    line = _line_text(text, match.start())
-    if _MERIDIEM_ANY.search(line):
-        return False
-    if _CITE_RANGE_AFTER.match(text, match.end()):
-        return True
-    line_start = text.rfind("\n", 0, match.start()) + 1
-    return bool(_CITE_RANGE_BEFORE.search(text[line_start : match.start()]))
+    start = match.start()
+    # The right half of "22:14-23:20" is judged by the words before its left half.
+    line_start = text.rfind("\n", 0, start) + 1
+    left = _CITE_RANGE_LEFT.search(text[line_start:start])
+    if left:
+        start = line_start + left.start()
+    return bool(_CITE_BEFORE.search(text[max(0, start - _CITE_WINDOW) : start]))
 
 
 def _bare_clock(text: str) -> re.Match[str] | None:
@@ -313,16 +312,57 @@ def _em_dash(text: str) -> tuple[int, str] | None:
     return None
 
 
+def _caption_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans of case captions: the capitalized words touching " v. ".
+
+    Walks outward from each " v. " through words that begin with a capital (or
+    are punctuation-only, "&"), and stops at the first word that does not. So in
+    "URGENT re Garcia v. Smith Trucking deadline" the caption is "Garcia v. Smith
+    Trucking" and URGENT is outside it.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in _CAPTION.finditer(text):
+        start = match.start()
+        while True:
+            prev_end = start
+            while prev_end > 0 and text[prev_end - 1] in " \t":
+                prev_end -= 1
+            if prev_end == 0 or text[prev_end - 1] == "\n":
+                break
+            word_start = prev_end
+            while word_start > 0 and not text[word_start - 1].isspace():
+                word_start -= 1
+            word = text[word_start:prev_end]
+            if not (word[:1].isupper() or not any(c.isalnum() for c in word)):
+                break
+            start = word_start
+        end = match.end()
+        while end < len(text) and text[end] != "\n":
+            word_end = end
+            while word_end < len(text) and not text[word_end].isspace():
+                word_end += 1
+            word = text[end:word_end]
+            if not word or not (word[:1].isupper() or not any(c.isalnum() for c in word)):
+                break
+            end = word_end
+            while end < len(text) and text[end] in " \t":
+                end += 1
+        spans.append((start, end))
+    return spans
+
+
 def _caps(text: str) -> re.Match[str] | None:
+    spans = _caption_spans(text)
     for match in _CAPS.finditer(text):
         word = match.group(0)
         if word in KNOWN_CAPS:
             continue
         before = text[match.start() - 1 : match.start()]
         after = text[match.end() : match.end() + 1]
-        if before.isdigit() or after.isdigit() or before == "-" or after == "-":
+        # A digit neighbour never reaches here: the word boundary excludes it.
+        if before == "-" or after == "-":
             continue
-        if _CAPTION.search(_line_text(text, match.start())):
+        if any(lo <= match.start() < hi for lo, hi in spans):
             continue
         return match
     return None
@@ -531,18 +571,29 @@ class RefusalCounter:
 
     def __init__(self, max_entries: int = 512) -> None:
         self._max = max(1, int(max_entries))
-        self._counts: dict[tuple[str, str], int] = {}
+        self._counts: OrderedDict[tuple[str, str], int] = OrderedDict()
         self._lock = threading.Lock()
 
     def bump(self, session_id: str, key: str) -> int:
-        """Record one refusal and return how many this message has had."""
+        """Record one refusal and return how many this message has had.
+
+        When full, only the least recently bumped slot is evicted. Clearing the
+        whole table would reset every session's near-exhausted count at once
+        under load and reopen the loop this counter exists to close.
+        """
         slot = (session_id or "", key)
         with self._lock:
             if slot not in self._counts and len(self._counts) >= self._max:
-                self._counts.clear()
+                self._counts.popitem(last=False)
             count = self._counts.get(slot, 0) + 1
             self._counts[slot] = count
+            self._counts.move_to_end(slot)
             return count
+
+    def count(self, session_id: str, key: str) -> int:
+        """How many refusals this slot holds now (0 when absent or evicted)."""
+        with self._lock:
+            return self._counts.get((session_id or "", key), 0)
 
     def reset(self) -> None:
         with self._lock:

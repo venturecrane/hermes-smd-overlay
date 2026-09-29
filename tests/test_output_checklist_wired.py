@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from shared import provenance, spec_gate
+from shared import output_checklist, provenance, send_dispatch, spec_gate
 from shared.spec_gate import TEMPLATED_BODY_ARG
 from tests.conftest import load_plugin
 
@@ -40,6 +40,22 @@ def trust_plugin(monkeypatch):
     monkeypatch.setenv("SMD_VERTICAL", "law-firm")
     provenance._reset_for_tests()
     return plugin
+
+
+@pytest.fixture(autouse=True)
+def notices(monkeypatch):
+    """The seat's out-of-turn sender, replaced by a recorder for every test here,
+    so an exhausted staff send can never reach a real transport."""
+    sent: list[dict] = []
+
+    def fake_sender(**kwargs):
+        sent.append(kwargs)
+        return send_dispatch.DispatchResult(
+            sent=True, message_id="m-notice", recipients=tuple(kwargs["to"])
+        )
+
+    monkeypatch.setattr(send_dispatch, "_SENDER", fake_sender)
+    return sent
 
 
 @pytest.fixture
@@ -246,3 +262,119 @@ def test_a_docx_carrying_an_internal_id_is_refused(trust_plugin, rows):
 
 def test_update_memo_is_an_internal_write_the_draft_gate_covers(trust_plugin):
     assert "mcp_smokeball_update_memo" in trust_plugin.outbound.GATED_DRAFT_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# The withheld notice: a held staff message is never silence
+# ---------------------------------------------------------------------------
+
+
+def test_an_exhausted_staff_send_tells_its_recipients_once(trust_plugin, rostered, rows, notices):
+    body = "The Garcia hearing is at 16:30."
+    results = [_send(trust_plugin, body, "s-notice") for _ in range(4)]
+    assert [r["message"].split(":")[0] for r in results] == [
+        "Refused",
+        "Refused",
+        "Withheld",
+        "Withheld",
+    ]
+    assert len(notices) == 1
+    (notice,) = notices
+    assert notice["to"] == [_STAFF]
+    assert notice["subject"] == "Withheld: Garcia hearing"
+    assert notice["templated"] is True
+    assert notice["session_id"] == "s-notice"
+    assert "16:30" not in notice["text"]
+    assert "a time that was not in the firm's local clock" in notice["text"]
+    assert "no client was contacted" in notice["text"]
+    assert "notice that a message was withheld went to" in results[2]["message"]
+
+
+def test_the_notice_passes_the_staff_checklist_itself():
+    ob = load_plugin("hermes-smd-trust").outbound
+    every_rule = list(ob._NOTICE_PLAIN)
+    for rules in [every_rule, ["bare_clock"], ["internal_id", "exclamation"]]:
+        body = ob._notice_body(rules)
+        assert output_checklist.check(body, output_checklist.STAFF_SEND) == []
+        assert len(body.splitlines()) < 8
+    assert output_checklist.check(ob._notice_subject("Garcia hearing"), "staff_send") == []
+
+
+def test_a_subject_that_would_not_pass_is_not_repeated(trust_plugin, rostered, rows, notices):
+    for _ in range(3):
+        trust_plugin.outbound.check_outbound_send(
+            tool_name="smd_send_message",
+            args={"to": [_STAFF], "subject": "Hearing 16:30", "text": "Hearing at 16:30."},
+            session_id="s-subj",
+            tool_call_id="c",
+        )
+    (notice,) = notices
+    assert notice["subject"] == "Withheld: an Operator message"
+
+
+def test_a_different_body_exhausting_later_gets_its_own_notice(
+    trust_plugin, rostered, rows, notices
+):
+    for _ in range(3):
+        _send(trust_plugin, "The Garcia hearing is at 16:30.", "s-two")
+    for _ in range(3):
+        _send(trust_plugin, "The Nguyen call is at 17:15.", "s-two")
+    assert len(notices) == 2
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("mcp_smokeball_create_memo", {"matter_id": "m", "text": "| a | b |\n| 1 | 2 |"}),
+        (
+            "mcp_smokeball_render_docx_draft",
+            {"matter_id": "m", "draft_markdown": "a1b2c3d4-1111-2222-3333-444455556666"},
+        ),
+    ],
+)
+def test_a_note_or_document_withheld_sends_no_notice(trust_plugin, rows, notices, tool, args):
+    results = [
+        trust_plugin.outbound.check_outbound_draft(
+            tool_name=tool, args=dict(args), session_id=f"s-nn-{tool}", tool_call_id="c"
+        )
+        for _ in range(3)
+    ]
+    assert results[2]["message"].startswith("Withheld:")
+    assert notices == []
+
+
+def test_a_client_send_withheld_sends_no_notice(trust_plugin, rostered, rows, notices):
+    for _ in range(3):
+        trust_plugin.outbound.check_outbound_send(
+            tool_name="smd_send_message",
+            args={"to": [_CLIENT], "subject": "Hearing", "text": "Your hearing is at 16:30."},
+            session_id="s-client-nn",
+            tool_call_id="c",
+        )
+    assert notices == []
+
+
+def test_a_notice_can_never_raise_a_notice(monkeypatch):
+    ob = load_plugin("hermes-smd-trust").outbound
+    inner: list = []
+
+    def reentrant(**kwargs):
+        inner.append(
+            ob._send_withheld_notice(
+                to=kwargs["to"], cc=[], subject="x", rules=["bare_clock"], session_id="s"
+            )
+        )
+        return send_dispatch.DispatchResult(sent=True, recipients=tuple(kwargs["to"]))
+
+    monkeypatch.setattr(send_dispatch, "_SENDER", reentrant)
+    outer = ob._send_withheld_notice(
+        to=[_STAFF], cc=[], subject="Garcia", rules=["bare_clock"], session_id="s"
+    )
+    assert outer.sent is True
+    assert len(inner) == 1 and inner[0].sent is False
+
+
+def test_an_undeliverable_notice_is_said_in_the_hold(trust_plugin, rostered, rows, monkeypatch):
+    monkeypatch.setattr(send_dispatch, "_SENDER", None)
+    results = [_send(trust_plugin, "The Garcia hearing is at 16:30.", "s-nowire") for _ in range(3)]
+    assert "did not go (this seat has no send path wired)" in results[2]["message"]

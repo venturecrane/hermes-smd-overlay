@@ -55,7 +55,9 @@ def test_the_act_tag_is_a_thing_a_person_replies_to_and_passes():
         "2026-PI-101 owes $1,250.00.",
         "Smith Depo. 22:14-23:2 covers it.",
         "See Tr. 5:3 for the answer.",
-        "Pages 22:14-23:20 cover the answer.",
+        "Smith Depo. 22:14-23:20 covers it.",
+        "Tr. 105:3-106:12 covers it.",
+        "The MEDI-CAL lien is open.",
         "Sections 1" + _EN + "5 apply.",
         "christa <christa@firm.example> asked for it.",
         "PLAINTIFF filed the motion.",
@@ -94,6 +96,8 @@ def test_an_internal_id_fails(body: str):
         ("The hearing is at 2026-10-07T16:30:00Z.", "iso_timestamp"),
         ("The hearing is at 16:30 UTC.", "utc_time"),
         ("The hearing is at 16:30Z.", "utc_time"),
+        # Same shape as a page:line range, no cite word: a UTC hearing window.
+        ("Hearing runs 16:30-17:00.", "bare_clock"),
     ],
 )
 def test_a_time_the_firm_would_not_write_fails(body: str, rule: str):
@@ -146,6 +150,15 @@ def test_twenty_one_lines_is_a_report_only_violation():
 def test_twenty_lines_is_within_the_ceiling():
     body = "\n\n".join(f"Line {i} of the update." for i in range(20))
     assert _rules(body) == []
+
+
+def test_a_caption_excuses_only_the_capitals_inside_it():
+    assert _rules("URGENT re Garcia v. Smith Trucking deadline") == ["caps_emphasis"]
+    assert _rules("Garcia v. SMITH TRUCKING deadline moved.") == []
+
+
+def test_capitals_touching_a_hyphen_are_a_spelling():
+    assert _rules("The MEDI-CAL lien and the SROG-1 set are open.") == []
 
 
 def test_urgent_in_capitals_is_reported_and_plaintiff_is_not():
@@ -229,6 +242,21 @@ def test_the_counter_is_per_session_and_per_message():
     assert [counter.bump("s1", key) for _ in range(3)] == [1, 2, 3]
     assert counter.bump("s2", key) == 1
     assert counter.bump("s1", oc.fingerprint("Another message at 17:00.")) == 1
+
+
+def test_a_full_counter_evicts_only_its_oldest_slot():
+    """Clearing the whole table under load would reset every session's
+    near-exhausted count and reopen the loop."""
+    counter = oc.RefusalCounter(max_entries=3)
+    counter.bump("s1", "a")
+    counter.bump("s2", "b")
+    counter.bump("s2", "b")
+    counter.bump("s3", "c")
+    counter.bump("s3", "c")
+    assert counter.bump("s4", "d") == 1
+    assert counter.count("s1", "a") == 0
+    assert counter.count("s2", "b") == 2
+    assert counter.count("s3", "c") == 2
 
 
 def test_the_known_caps_list_holds_no_word_shorter_than_the_floor():
