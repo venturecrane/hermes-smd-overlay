@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +109,62 @@ def _is_audio(content_type: str) -> bool:
     return ctype.startswith(AUDIO_PREFIXES) or ctype in AUDIO_EXACT
 
 
+#: The extensions Hermes' transcriber accepts (transcription_tools
+#: SUPPORTED_FORMATS at the pinned ref), and the content types that map onto
+#: them when the sender's filename carries none. iPhone Voice Memos arrive as
+#: audio/x-m4a or audio/mp4; some clients label an m4a video/mp4.
+AUDIO_EXTENSIONS: frozenset[str] = frozenset(
+    {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".aac", ".flac"}
+)
+_CONTENT_TYPE_EXT: dict[str, str] = {
+    "audio/x-m4a": ".m4a",
+    "audio/m4a": ".m4a",
+    "audio/mp4": ".m4a",
+    "video/mp4": ".mp4",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/ogg": ".ogg",
+    "application/ogg": ".ogg",
+    "audio/webm": ".webm",
+    "video/webm": ".webm",
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/x-flac": ".flac",
+}
+
+
+def _audio_suffix(filename: Any, content_type: str) -> str:
+    """The extension to hand the transcriber: the sender's own when it is one
+    Hermes accepts, else the one the content type implies, else ``.m4a`` (the
+    phone default; the decoder sniffs the container anyway)."""
+    name = attachment_spool.safe_filename(filename)
+    ext = Path(name).suffix.lower()
+    if ext in AUDIO_EXTENSIONS:
+        return ext
+    ctype = (content_type or "").split(";", 1)[0].strip().lower()
+    return _CONTENT_TYPE_EXT.get(ctype, ".m4a")
+
+
+def _typed_link(spooled: Path, entry: dict[str, Any]) -> Path:
+    """A hard link to the spooled bytes, in the same directory, with the
+    recording's real extension. No second copy of the audio, no path the model
+    ever sees, and the spool's own prune still owns the bytes."""
+    suffix = _audio_suffix(entry.get("filename"), str(entry.get("content_type") or ""))
+    typed = spooled.with_name(f"{spooled.stem}-audio{suffix}")
+    try:
+        typed.unlink()
+    except OSError:
+        pass
+    try:
+        os.link(spooled, typed)
+    except OSError:
+        shutil.copyfile(spooled, typed)
+    return typed
+
+
 def _sender_is_rostered(message_id: str) -> str:
     """The sender's address, only if the seat answers that address. Raises otherwise."""
     sender = agentmail_broker.message_sender(message_id)
@@ -145,7 +203,19 @@ def transcribe_message(message_id: str) -> dict[str, Any]:
         receipt = agentmail_broker.spool_attachment(message_id, str(entry["attachment_id"]))
         token = str(receipt.get("spool_token") or "")
         path: Path = attachment_spool.resolve(token)
-        result = _transcribe(str(path))
+        # Hermes accepts audio BY FILE EXTENSION (transcription_tools
+        # SUPPORTED_FORMATS) and the spool stores bytes as <token>.bin, so the
+        # spooled path itself would be refused as "Unsupported format: .bin".
+        # Hand the transcriber a same-directory hard link that carries the
+        # recording's real extension, and remove it afterwards whatever happens.
+        typed = _typed_link(path, entry)
+        try:
+            result = _transcribe(str(typed))
+        finally:
+            try:
+                typed.unlink()
+            except OSError:
+                pass
         if not result.get("success"):
             raise VoiceNoteRefused(
                 "could not transcribe "
