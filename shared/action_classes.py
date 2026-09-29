@@ -132,6 +132,13 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # (DRAFT_CREATE); the send path is a hard identity-integrity ban, not
         # a configurable ceiling. Autonomous sending happens only from the
         # Operator's own identity (see the AgentMail note below).
+        # AgentMail's agent_attach_human (surfaced by the vendor, seen unclassified
+        # on the scott seat's tool-surface sweep 2026-09-29). It hands a
+        # conversation to a human on the VENDOR's side. The people who speak
+        # for a seat are its authored roster and admins, never a vendor's
+        # operator, so this is a hard ban rather than a ceiling: nothing an
+        # engagement could author makes it right.
+        "mcp_agentmail_agent_attach_human",
         "email_send",
         "email_send_message",
         "email_reply",

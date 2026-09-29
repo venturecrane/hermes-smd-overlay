@@ -116,6 +116,32 @@ _NON_AUTHORING_INTERNAL_WRITE: frozenset[str] = frozenset(
     }
 )
 
+# The record-store write (plugins/hermes-smd-record-store, ss-console#2793,
+# 2026-09-29). Excluded from this gate, and the reasoning is the opposite of
+# "nothing authored": the record IS composed, and that is the point.
+#
+# A record store is the seat's own system of record for a vertical that has no
+# other (the open-house visitor store). A record carries a rostered person's
+# dictation verbatim plus the fields the product derives from it, and the one
+# thing it must derive is a follow-up schedule: day 2, 7 and 30 after the visit
+# date. Those dates are COMPUTED by design. The identifier gate exists to refuse
+# a computed legal deadline in an outbound letter; here it refused the schedule
+# at the moment of writing it down, seven times on the first live capture, and
+# its refusal text ("re-read the source record") sent the model to re-fetch the
+# inbound email through a fenced read, which tainted the turn and closed the
+# write for good. A gate that cannot be satisfied honestly on the store's own
+# purpose teaches the model to satisfy it dishonestly, the ss #2247 lesson.
+#
+# What still stands, and why this is narrow: the store is never outbound. Every
+# reply, recall answer and follow-up draft composed FROM a record goes through
+# the draft tools, which stay gated, and record_store_read seeds provenance, so
+# a date the seat wrote and read back is traceable while a date it never wrote
+# is not. The write itself is refused on a tainted session by its own hook, so
+# nothing an outsider sent can be written here to launder it. The fabrication
+# marker scan is also skipped: a dictation is the agent's words, and an em dash
+# their phone typed is not shipped copy.
+_RECORD_STORE_WRITES: frozenset[str] = frozenset({"record_store_write"})
+
 # Gated tools that MUST carry a prose body. A missing body on these is a
 # fail-closed BLOCK (a create-draft / create-note with no body is malformed).
 _BODY_REQUIRED_DRAFT_TOOLS: frozenset[str] = frozenset(
@@ -193,6 +219,8 @@ def _is_gated_draft_tool(tool_name: str) -> bool:
         return False
     action = TOOL_ACTION_CLASS_MAP.get(tool_name)
     if action is not ActionClass.INTERNAL_WRITE:
+        return False
+    if tool_name in _RECORD_STORE_WRITES:
         return False
     return tool_name not in _NON_AUTHORING_INTERNAL_WRITE
 
