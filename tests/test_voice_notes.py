@@ -75,9 +75,11 @@ def test_a_rostered_senders_audio_is_transcribed_and_the_pdf_is_skipped(
     # lowercase address (pinned below); the roster check sees only that.
     _wire_vendor(monkeypatch, sender=ROSTERED, spooled=spooled)
     seen_paths: list[str] = []
+    seen_bytes: list[bytes] = []
 
     def fake_transcribe(path: str) -> dict[str, Any]:
         seen_paths.append(path)
+        seen_bytes.append(Path(path).read_bytes())
         return {
             "success": True,
             "transcript": " Tom and Maria, downsizing from Maple. ",
@@ -94,7 +96,48 @@ def test_a_rostered_senders_audio_is_transcribed_and_the_pdf_is_skipped(
     assert entry["transcript"] == "Tom and Maria, downsizing from Maple."
     assert entry["provider"] == "groq"
     assert entry["filename"] == "Open house.m4a"
-    assert seen_paths and Path(seen_paths[0]).exists(), "the transcriber got a real spooled path"
+    # Hermes accepts audio by EXTENSION and the spool stores <token>.bin, so the
+    # transcriber must be handed a path that ends in the recording's real
+    # extension, holding the spooled bytes, and it must be gone afterwards.
+    assert seen_paths and seen_paths[0].endswith(".m4a"), seen_paths
+    assert not Path(seen_paths[0]).exists(), "the typed link is removed after transcription"
+    assert seen_bytes == [b"RIFF fake audio"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "ctype", "suffix"),
+    [
+        ("Open house.m4a", "audio/x-m4a", ".m4a"),
+        ("note", "audio/x-m4a", ".m4a"),
+        ("voice.bin", "audio/mpeg", ".mp3"),
+        ("memo.opus", "audio/ogg", ".ogg"),
+        ("clip", "video/mp4", ".mp4"),
+        ("weird", "audio/unknown", ".m4a"),
+    ],
+)
+def test_the_transcriber_gets_an_extension_hermes_accepts(
+    filename: str, ctype: str, suffix: str
+) -> None:
+    plugin = load_plugin("hermes-smd-voice-notes")
+    assert plugin._audio_suffix(filename, ctype) == suffix
+    assert suffix in plugin.AUDIO_EXTENSIONS
+
+
+def test_the_typed_link_is_removed_even_when_the_transcriber_fails(
+    monkeypatch: pytest.MonkeyPatch, mail_seat: None, tmp_path: Path
+) -> None:
+    plugin = load_plugin("hermes-smd-voice-notes")
+    _wire_vendor(monkeypatch, sender=ROSTERED, spooled=[])
+    seen: list[str] = []
+
+    def boom(path: str) -> dict[str, Any]:
+        seen.append(path)
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(plugin, "_transcribe", boom)
+    with pytest.raises(RuntimeError, match="provider exploded"):
+        plugin.transcribe_message(MESSAGE_ID)
+    assert seen and not Path(seen[0]).exists()
 
 
 def test_a_stranger_is_refused_before_any_byte_is_read(
