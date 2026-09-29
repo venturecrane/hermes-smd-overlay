@@ -436,7 +436,9 @@ def test_internal_recipient_sensitive_body_sends(relay_mod) -> None:
         args=_draft(
             ["greg@whitfield.example"],
             text=(
-                "Acknowledged ACK-6WS08D. The deadline item is snoozed for 7 days; "
+                # No ACK code: the output checklist holds an internal id in a
+                # reply, and the digest stopped asking for codes (#2942).
+                "Acknowledged. The deadline item is snoozed for 7 days; "
                 "the attorney still needs to sign off in Smokeball."
             ),
         ),
@@ -1750,3 +1752,141 @@ def test_a_released_hold_claims_no_session_it_does_not_have(relay_mod) -> None:
     by_col = dict(zip(audit_contract.COLUMNS, row[1], strict=True))
     assert by_col["matter_ref"] is None
     assert "session_id" not in json.loads(row[1][-1])
+
+
+# ---------------------------------------------------------------------------
+# The output checklist on the reply lane (ss-console Option B, 2026-09-29)
+#
+# A reply to a colleague meets the staff set; a reply to anyone outside the firm
+# meets ids and ISO/UTC times only. A checklist finding HOLDS the reply: the
+# draft stands, the row names the rules and never the text, and the notice the
+# model reads says exactly what to correct.
+# ---------------------------------------------------------------------------
+
+
+def test_a_colleague_reply_with_a_bare_clock_is_held_on_the_checklist(relay_mod) -> None:
+    mod, d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    _record_origin(message_id="msg_ck_clock")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text="The Garcia hearing is at 16:30 in Dept 31."),
+        session_id="s1",
+        tool_call_id="tc_ck_clock",
+    )
+    assert sent == []
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert len(held) == 1
+    assert held[0]["reason"] == "output_checklist"
+    assert held[0]["rules"] == "bare_clock"
+    assert "16:30" not in json.dumps(held[0])
+    out = _transform(mod, "tc_ck_clock")
+    assert "WAS NOT SENT" in out
+    assert "output_checklist" in out
+    assert "'16:30'" in out
+    assert "What to correct:" in out
+
+
+def test_a_colleague_reply_in_plain_local_time_is_sent(relay_mod) -> None:
+    mod, d1, sent = relay_mod
+    _record_origin(message_id="msg_ck_ok")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text="The Garcia hearing is at 9:30 a.m."),
+        session_id="s1",
+    )
+    assert len(sent) == 1
+    assert not any(a == "REPLY_HELD" for a, _m in d1.events())
+
+
+def test_an_external_reply_meets_ids_and_stamps_only(relay_mod, monkeypatch) -> None:
+    """A client's own "please help!" quoted back must not hold the reply; an
+    internal id in it still does."""
+    from shared.recipient_classifier import RecipientClass
+
+    mod, d1, _sent = relay_mod
+    monkeypatch.setattr(mod, "classify_recipients_typed", lambda *a, **k: RecipientClass.CLIENT)
+    _record_origin(message_id="msg_ck_ext_ok")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(
+            ["greg@whitfield.example"], text="You wrote: please help! We will call at 16:30."
+        ),
+        session_id="s1",
+    )
+    assert not any(
+        a == "REPLY_HELD" and m.get("reason") == "output_checklist" for a, m in d1.events()
+    )
+    _record_origin(message_id="msg_ck_ext", session="s2")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(
+            ["greg@whitfield.example"],
+            text="You wrote: please help! Matter a1b2c3d4-1111-2222-3333-444455556666.",
+        ),
+        session_id="s2",
+    )
+    held = [
+        m for a, m in d1.events() if a == "REPLY_HELD" and m.get("reason") == "output_checklist"
+    ]
+    assert len(held) == 1 and held[0]["rules"] == "internal_id"
+    assert held[0]["message_id"] == "msg_ck_ext"
+
+
+@pytest.fixture
+def checklist_rows(monkeypatch):
+    """The report-only SPEC_GATE_TRIGGERED writer, wired to a fake."""
+    from shared import spec_gate
+
+    calls: list = []
+
+    class _Fake:
+        def execute(self, _sql, *params):
+            calls.append(params)
+            return 1
+
+    monkeypatch.setattr(spec_gate, "_AUDIT_CLIENT", _Fake())
+    monkeypatch.setattr(spec_gate, "_AUDIT_CUSTOMER_SLUG", "acme")
+    monkeypatch.setattr(spec_gate, "_AUDIT_WIRED", True)
+    return lambda: [json.loads(p[-1]) for p in calls if "SPEC_GATE_TRIGGERED" in p]
+
+
+def test_the_report_row_names_the_surface_for_each_class(
+    relay_mod, monkeypatch, checklist_rows
+) -> None:
+    """Report-only rows group with the surface name: "staff" for a colleague,
+    ``output_checklist.EXTERNAL_REPLY`` for anyone outside the firm."""
+    from shared import output_checklist
+    from shared.recipient_classifier import RecipientClass
+
+    mod, _d1, _sent = relay_mod
+    _record_origin(message_id="msg_ck_rep_in")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text="URGENT: the Garcia file needs you."),
+        session_id="s1",
+    )
+    # The external set holds no report-only rule, so its row comes from the
+    # helper directly with the classification the relay would pass.
+    monkeypatch.setattr(mod, "classify_recipients_typed", lambda *a, **k: RecipientClass.CLIENT)
+    monkeypatch.setattr(
+        output_checklist,
+        "REPORT_ONLY_RULES",
+        output_checklist.REPORT_ONLY_RULES | {"exclamation"},
+    )
+    monkeypatch.setattr(
+        output_checklist,
+        "_SURFACES",
+        {
+            **output_checklist._SURFACES,
+            output_checklist.EXTERNAL_REPLY: (("exclamation",), None, True),
+        },
+    )
+    _record_origin(message_id="msg_ck_rep_ex", session="s3")
+    mod.on_post_tool_call(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"], text="Thanks, we will help!"),
+        session_id="s3",
+    )
+    classes = [r["output_class"] for r in checklist_rows()]
+    assert classes == ["staff", output_checklist.EXTERNAL_REPLY]

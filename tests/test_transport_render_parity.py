@@ -381,6 +381,13 @@ def test_the_msgraph_reply_escapes_model_authored_markup(monkeypatch, tmp_path):
     """Escape-by-default is what makes rendering safe on the transport that
     renders unconditionally. It is inherited from ``report_render``, and
     inheriting a safety property silently is how it gets lost in a refactor."""
+    # The output checklist now HOLDS a colleague's reply carrying a tag, before
+    # it reaches a transport. The property under test is the transport's own
+    # escape, which a reply outside the firm still relies on (the external set
+    # checks ids and times only), so the checklist is stood down here.
+    from shared import output_checklist
+
+    monkeypatch.setattr(output_checklist, "check", lambda *_a, **_k: [])
     _text, html = _reply_html_on(
         monkeypatch, tmp_path, "msgraph", {_BODY_KEY["msgraph"]: "<script>alert(1)</script>"}
     )

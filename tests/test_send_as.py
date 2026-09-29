@@ -375,6 +375,19 @@ def test_a_failing_fabrication_gate_proposes_nothing(gate):
     assert _proposals(calls) == []
 
 
+def test_a_failing_output_checklist_proposes_nothing(gate):
+    """send_as reaches ``check_outbound_send`` itself, so the checklist refuses
+    in-turn before the approver is ever shown the proposal."""
+    _trust, enforce, calls, _ = gate
+    _email_turn()
+    result = _evaluate(
+        enforce, _send_args(text="Please call our office at 16:30 about the claim file.")
+    )
+    assert result is not None and result["action"] == "block"
+    assert "'16:30'" in result["message"]
+    assert _proposals(calls) == []
+
+
 def test_a_failing_matter_gate_proposes_nothing(gate, monkeypatch):
     _trust, enforce, calls, _ = gate
     _email_turn()

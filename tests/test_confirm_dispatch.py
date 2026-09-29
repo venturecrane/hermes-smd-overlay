@@ -135,3 +135,115 @@ def test_pre_llm_call_end_to_end_dispatches(monkeypatch):
     assert isinstance(out, dict) and "Dispatched" in out["context"]
     assert len(sent) == 1 and sent[0]["text"] == "body one"
     assert PENDING_SEND.peek() is None
+
+
+# ---------------------------------------------------------------------------
+# The approved-send lane meets the outbound scans (overlay PR #399)
+#
+# evaluate_tool_call alone never ran the fabrication scan, the identifier gate
+# or the output checklist. An approval approves recipients and intent; it must
+# not launder a UTC clock into a sent email.
+# ---------------------------------------------------------------------------
+
+STAFF = "scott@smd.services"
+
+
+@pytest.fixture
+def checklist_rows(monkeypatch):
+    import json
+
+    from shared import spec_gate
+
+    calls: list = []
+
+    class _Fake:
+        def execute(self, _sql, *params):
+            calls.append(params)
+            return 1
+
+    monkeypatch.setattr(spec_gate, "_AUDIT_CLIENT", _Fake())
+    monkeypatch.setattr(spec_gate, "_AUDIT_CUSTOMER_SLUG", "scott")
+    monkeypatch.setattr(spec_gate, "_AUDIT_WIRED", True)
+
+    def rows():
+        out = []
+        for params in calls:
+            if "SPEC_GATE_TRIGGERED" in params:
+                out.append(json.loads(params[-1]))
+        return out
+
+    return rows
+
+
+@pytest.fixture
+def notices(monkeypatch):
+    from shared import send_dispatch
+
+    sent: list = []
+
+    def fake_sender(**kwargs):
+        sent.append(kwargs)
+        return send_dispatch.DispatchResult(sent=True, recipients=tuple(kwargs["to"]))
+
+    monkeypatch.setattr(send_dispatch, "_SENDER", fake_sender)
+    return sent
+
+
+def _arm_staff(monkeypatch, trust, *, sent):
+    _arm(monkeypatch, trust, sent=sent)
+    enforce = trust.enforce
+    monkeypatch.setattr(
+        enforce,
+        "_resolve_persona_exposure",
+        lambda slug="": {
+            enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.CONFIRM,
+            enforce.ActionClass.EXTERNAL_SEND_INTERNAL: enforce.Ceiling.CONFIRM,
+        },
+    )
+
+
+def _capture_staff(trust, body, approver=f"telegram:{ALLOWED}"):
+    trust.enforce.evaluate_tool_call(
+        "mcp_agentmail_send_message",
+        {"to": [STAFF], "subject": "Garcia hearing", "text": body},
+        "scott",
+        session_id="s1",
+    )
+    assert PENDING_SEND.peek() is not None
+    PENDING_SEND.mark_approved(approver)
+
+
+def test_an_approved_send_carrying_a_utc_clock_is_not_sent(monkeypatch, checklist_rows, notices):
+    trust = _trust()
+    sent = []
+    _arm_staff(monkeypatch, trust, sent=sent)
+    _capture_staff(trust, "The Garcia hearing is at 16:30.")
+    ctx = trust._dispatch_approved_send("s1", "scott")
+    assert sent == []
+    assert ctx is not None and "not dispatched" in ctx and "'16:30'" in ctx
+    assert [r["reason"] for r in checklist_rows()] == ["output_checklist"]
+    assert len(notices) == 1
+    assert notices[0]["to"] == [STAFF]
+    assert notices[0]["subject"] == "Withheld: Garcia hearing"
+    assert "16:30" not in notices[0]["text"]
+
+
+def test_an_approver_with_an_address_is_told_too(monkeypatch, checklist_rows, notices):
+    trust = _trust()
+    _arm_staff(monkeypatch, trust, sent=[])
+    _capture_staff(trust, "The Garcia hearing is at 16:30.", approver="email:christa@firm.example")
+    trust._dispatch_approved_send("s1", "scott")
+    (notice,) = notices
+    assert notice["to"] == ["christa@firm.example", STAFF]
+
+
+def test_an_approved_send_with_a_clean_body_still_goes_out(monkeypatch, checklist_rows, notices):
+    trust = _trust()
+    sent = []
+    _arm_staff(monkeypatch, trust, sent=sent)
+    _capture_staff(trust, "The Garcia hearing is at 9:30 a.m. in Dept 31.")
+    ctx = trust._dispatch_approved_send("s1", "scott")
+    assert ctx is not None and "Dispatched" in ctx
+    assert len(sent) == 1
+    assert checklist_rows() == []
+    assert notices == []

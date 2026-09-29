@@ -1031,7 +1031,9 @@ def _reclassify_send(
     return ActionClass.EXTERNAL_SEND
 
 
-def resolved_send_class(tool_name: str, args: dict, session_id: str) -> ActionClass | None:
+def resolved_send_class(
+    tool_name: str, args: dict, session_id: str, *, code_fixed: bool = False
+) -> ActionClass | None:
     """The recipient-resolved action class for a send, for a NON-enforcing reader.
 
     ``evaluate_tool_call`` computes this on its way to a ceiling decision and
@@ -1056,6 +1058,12 @@ def resolved_send_class(tool_name: str, args: dict, session_id: str) -> ActionCl
         tainted = SESSION_TAINT.trust_class(session_id) != TRUST_CLASS_INTERNAL
     except Exception:  # noqa: BLE001 — unknown taint reads as tainted (strictest)
         tainted = True
+    if code_fixed:
+        # Mirrors evaluate_tool_call: recipients code fixed are classified as
+        # written, not through the taint lens (``tainted=... and not
+        # code_fixed_recipients`` there). Only the out-of-turn dispatcher's
+        # verified capability sets this (outbound.code_fixed_scope).
+        tainted = False
     try:
         return _reclassify_send(
             tool_name, args or {}, classification.action_class, session_id, tainted
