@@ -1,0 +1,8 @@
+name: hermes-smd-record-store
+version: "0.1.0"
+description: "Three tools over the record stores a seat authors in customer.yaml (list, read, write one record by store and name). The only write an inbound-email turn is offered, and it can land nowhere but inside an authored directory. A seat that authors no store gets no tools."
+author: VentureCrane
+# Empty on purpose: the gate is register(), which asks whether the seat authors
+# a record store. A failing requires_env would drop the tools SILENTLY and a
+# capture turn would answer "write_file is not available" with nothing logged.
+requires_env: []

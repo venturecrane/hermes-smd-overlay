@@ -85,6 +85,16 @@ UNFENCED_READ_BY_DESIGN: frozenset[str] = frozenset(
         # item_key/matter_id originate from Smokeball identifiers, not
         # sender-authored prose.
         "escalation_state",
+        # The seat's authored record stores (hermes-smd-record-store,
+        # 2026-09-29). Unfenced because of how a store is written, not where
+        # it lives: the only writer is record_store_write, which the plugin's
+        # own pre_tool_call hook refuses on a tainted turn, so a store can hold
+        # only what a rostered person said on a turn that read nothing from
+        # outside the firm. Fencing the read would withhold every recall reply
+        # (the reply relay does not send on a tainted turn) for content the
+        # firm itself dictated. The list returns names the seat chose.
+        "record_store_list",
+        "record_store_read",
     }
 )
 
@@ -196,7 +206,7 @@ def test_unfenced_by_design_has_no_stale_entries() -> None:
     entries are checked against their plugin registries; AgentMail
     (``mcp_agentmail_*``) entries against the action-class map (their registry)."""
     registered = set(_workspace_tools())
-    for plugin_dir in ("hermes-smd-jobs", "hermes-smd-escalation"):
+    for plugin_dir in ("hermes-smd-jobs", "hermes-smd-escalation", "hermes-smd-record-store"):
         registered |= set(load_plugin(plugin_dir).TOOLS)
     classified = set(TOOL_ACTION_CLASS_MAP)
     stale = {
