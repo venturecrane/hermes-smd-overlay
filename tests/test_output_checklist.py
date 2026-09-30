@@ -294,3 +294,68 @@ def test_the_same_id_inside_prose_on_a_memo_fails():
 def test_a_marker_line_on_a_staff_send_fails():
     assert _rules(f"fileId {_G} recorded", oc.STAFF_SEND) == ["internal_id"]
     assert _rules(f"op-mmou:{_G}:638609288928990639", oc.EXTERNAL_REPLY) == ["internal_id"]
+
+
+def test_a_facts_digest_line_passes_on_a_memo_and_fails_elsewhere():
+    body = "[Operator] Deadlines as of Oct 7\nAnswer due Oct 9.\nfacts 0123456789ab"
+    assert _rules(body, oc.MEMO) == []
+    assert _rules("facts 0123456789ab", oc.STAFF_SEND) == ["internal_id"]
+
+
+def test_a_facts_digest_inside_prose_on_a_memo_fails():
+    assert _rules("facts 0123456789ab and more", oc.MEMO) == ["internal_id"]
+
+
+# ---------------------------------------------------------------------------
+# Short entry ids a routine cites after a naming word
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("surface", [oc.MEMO, oc.STAFF_SEND])
+def test_a_calendar_entry_cited_by_short_id_fails_with_the_entry_remedy(surface):
+    violations = oc.check("Oct 6 at 9:30 a.m., Dept 3 (event cef69a47)", surface)
+    assert [v.rule for v in violations] == ["internal_id"]
+    assert "the internal id 'cef69a47'" in violations[0].detail
+    assert "'event cef69a47'" not in violations[0].detail
+    assert "calendar entry by its subject and date" in violations[0].detail
+    assert "never by id" in violations[0].detail
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "It was reported in task 98570c78.",
+        "Saved as file 3061ca2e.",
+        "Task 223145b9 is open.",
+        "See document: a1b2c3d4e5f6.",
+        "Memo #0a1b2c3d was updated.",
+    ],
+)
+def test_a_short_entry_id_after_a_naming_word_fails(body: str):
+    assert _rules(body) == ["internal_id"]
+    assert _rules(body, oc.MEMO) == ["internal_id"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Case No. 25STCV31844 is set for trial.",
+        "Bates 000123 through 000200.",
+        "Hold the deadbeef release.",
+        "File 20250101 is the firm's number.",
+        "matter 2026-PI-101 is open.",
+        "Job 4 of 5 is done.",
+        "Task: call the client at 10",
+        "See doc 2.",
+        "Use id 12.",
+        "The task list is short.",
+    ],
+)
+def test_a_number_or_word_that_is_not_an_entry_id_passes(body: str):
+    assert _rules(body) == []
+
+
+def test_a_matter_guid_after_the_word_matter_is_one_hit_with_the_matter_remedy():
+    violations = oc.check(f"Matter {_G} is late.", oc.STAFF_SEND)
+    assert [v.rule for v in violations] == ["internal_id"]
+    assert "firm's own matter number" in violations[0].detail

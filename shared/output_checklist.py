@@ -119,6 +119,16 @@ _HEX = re.compile(r"\b[0-9a-f]{32,64}\b", re.IGNORECASE)
 _ULID = re.compile(r"\b[0-7][0-9A-HJKMNP-TV-Z]{25}\b")
 # The retired escalation ack code (``shared/escalation_ledger.py`` ``token_for``).
 _ACK = re.compile(r"\bACK-[0-9A-Z]{6}\b")
+# A shortened entry id the way a routine cites one: "(event cef69a47)", "task
+# 98570c78". Only after a naming word, since a bare 8-hex word ("deadbeef") is
+# too often something else; "facts" is the MEMO digest marker's word, refused
+# wherever its whole-line exemption does not reach. And only with at least one
+# a-f letter, so a firm number or a date in digits ("file 20250101") passes.
+_SHORT_ID = re.compile(
+    r"\b(?:event|task|file|memo|document|doc|job|matter|id|facts)\s*[:#]?\s*"
+    r"(?=[0-9]*[a-f])([0-9a-f]{8,12})\b",
+    re.IGNORECASE,
+)
 
 _GUID_BODY = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
@@ -132,10 +142,14 @@ _GUID_BODY = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a
 #:   read back by ss-console ``pre_run_gate._captured_file_ids``;
 #: * ``op-mmou:<matter GUID>:<ticks>``: matter-memo-on-update's change key;
 #: * ``Package job: <job id>; covered document ids: <GUID, ...>``: the medical
-#:   chronology delivery ledger's covered set (or "covered set unrecorded").
+#:   chronology delivery ledger's covered set (or "covered set unrecorded");
+#: * ``facts <12 hex>``: the facts digest ss-console ``pre_run`` puts on the last
+#:   line of a fact tracker's note, so the connector can tell "unchanged" apart
+#:   from a rewording.
 #:
 #: DEBT: these markers belong in a ledger, not in a note a paralegal reads. When
-#: they move, this exemption goes, and nothing else may be added to it.
+#: they move, this exemption goes, and nothing else may be added to it without
+#: the same debt recorded here.
 MEMO_MACHINE_LINES: tuple[re.Pattern[str], ...] = (
     re.compile(r"^fileId " + _GUID_BODY + r" recorded\.?$"),
     re.compile(r"^op-mmou:" + _GUID_BODY + r":\d+$"),
@@ -146,6 +160,7 @@ MEMO_MACHINE_LINES: tuple[re.Pattern[str], ...] = (
         + _GUID_BODY
         + r")*|covered set unrecorded)\.?$"
     ),
+    re.compile(r"^facts [0-9a-f]{12}$"),
 )
 
 _ISO = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?")
@@ -472,17 +487,29 @@ def check(body: str, surface: str) -> list[Violation]:
             )
 
     if "internal_id" in rules:
+        matter_remedy = "Name the matter by the firm's own matter number and the client's name."
+        entry_remedy = (
+            "Name the calendar entry by its subject and date, a task by its title, "
+            "a document by its file name; never by id."
+        )
         hit = None
         for pattern in (_GUID, _HEX, _ULID, _ACK):
             text, first = _mask_all(pattern, text)
             if first and (hit is None or first.start() < hit[0]):
-                hit = (first.start(), first.group(0))
+                hit = (first.start(), first.group(0), matter_remedy)
+        # After the long ids are blanked, so "matter <GUID>" is one hit, not two.
+        short = None
+        for match in _SHORT_ID.finditer(text):
+            if short is None:
+                short = match
+            text = _blank(text, match.start(1), match.end(1))
+        if short and (hit is None or short.start(1) < hit[0]):
+            hit = (short.start(1), short.group(1), entry_remedy)
         if hit:
             found.append(
                 Violation(
                     "internal_id",
-                    f"{_at(text, hit[0], 'the internal id ' + repr(_fragment(hit[1])))}. "
-                    "Name the matter by the firm's own matter number and the client's name.",
+                    f"{_at(text, hit[0], 'the internal id ' + repr(_fragment(hit[1])))}. " + hit[2],
                 )
             )
 
