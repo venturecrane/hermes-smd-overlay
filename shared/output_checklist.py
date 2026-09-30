@@ -504,7 +504,7 @@ def check(body: str, surface: str) -> list[Violation]:
                 short = match
             text = _blank(text, match.start(1), match.end(1))
         if short and (hit is None or short.start(1) < hit[0]):
-            hit = (short.start(1), short.group(0), entry_remedy)
+            hit = (short.start(1), short.group(1), entry_remedy)
         if hit:
             found.append(
                 Violation(

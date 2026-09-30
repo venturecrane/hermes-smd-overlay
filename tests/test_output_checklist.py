@@ -315,7 +315,8 @@ def test_a_facts_digest_inside_prose_on_a_memo_fails():
 def test_a_calendar_entry_cited_by_short_id_fails_with_the_entry_remedy(surface):
     violations = oc.check("Oct 6 at 9:30 a.m., Dept 3 (event cef69a47)", surface)
     assert [v.rule for v in violations] == ["internal_id"]
-    assert "cef69a47" in violations[0].detail
+    assert "the internal id 'cef69a47'" in violations[0].detail
+    assert "'event cef69a47'" not in violations[0].detail
     assert "calendar entry by its subject and date" in violations[0].detail
     assert "never by id" in violations[0].detail
 
@@ -342,6 +343,11 @@ def test_a_short_entry_id_after_a_naming_word_fails(body: str):
         "Bates 000123 through 000200.",
         "Hold the deadbeef release.",
         "File 20250101 is the firm's number.",
+        "matter 2026-PI-101 is open.",
+        "Job 4 of 5 is done.",
+        "Task: call the client at 10",
+        "See doc 2.",
+        "Use id 12.",
         "The task list is short.",
     ],
 )
