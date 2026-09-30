@@ -1803,19 +1803,20 @@ def test_a_staged_script_whose_skill_or_file_is_gone_is_removed(tmp_path):
 
 @pytest.mark.parametrize("already_staged", [None, "print('old')\n", _CURRENT_PRE_RUN])
 def test_a_managed_jobs_script_is_staged_exactly_once(tmp_path, monkeypatch, already_staged):
-    """The boot refresh and the managed stager share one copy primitive that
-    writes only on a byte difference, so a scheduled skill's script is written
-    once when it is missing or stale and not at all when it is current."""
+    """The boot refresh and the managed stager both copy only on a byte
+    difference, so a scheduled skill's script is written once when it is
+    missing or stale and not at all when it is current. Counted at the copy
+    call itself, so a stager that went back to copying unconditionally fails.
+    (``copytree`` binds its own ``copy2`` at definition, so skill installs are
+    not counted.)"""
     writes: list[Path] = []
-    real = _wh._stage_if_changed
+    real = _wh.shutil.copy2
 
-    def counting(src: Path, dest: Path) -> bool:
-        wrote = real(src, dest)
-        if wrote:
-            writes.append(dest)
-        return wrote
+    def counting(src, dest, *args, **kwargs):
+        writes.append(Path(dest))
+        return real(src, dest, *args, **kwargs)
 
-    monkeypatch.setattr(_wh, "_stage_if_changed", counting)
+    monkeypatch.setattr(_wh.shutil, "copy2", counting)
     staged_before = (
         {} if already_staged is None else {"deadline-miss-escalator/pre_run.py": already_staged}
     )
