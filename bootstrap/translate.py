@@ -1492,6 +1492,67 @@ def _reconcile_profile_homes(profiles_root: Path, authored_slugs: set[str]) -> l
     return removed
 
 
+def _stage_if_changed(src: Path, dest: Path) -> bool:
+    """Copy ``src`` over ``dest`` unless ``dest`` already holds its bytes.
+
+    Returns ``True`` when it copied. Shared by the boot refresh and the
+    managed-job stager so a script both touch is written at most once a boot.
+    """
+    if dest.is_file() and dest.read_bytes() == src.read_bytes():
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shutil.copy2(src, dest)
+    return True
+
+
+def _refresh_staged_scripts(profile_dir: Path) -> tuple[list[str], list[str]]:
+    """Bring every script already staged under ``<profile>/scripts/`` to its source.
+
+    The managed-job stager (:func:`_real_script_stager`) copies a pre-run script
+    only for a skill with a live cron entry. A skill whose cron was removed kept
+    its old copy forever, and an on-demand ``hermes cron create --script
+    <skill>/pre_run.py`` ran that stale code while every skill copy was current
+    (pilot-smokeball, 2026-09-29: six trackers at 749 lines against 892).
+
+    So at every boot, after the persona's skill bodies are installed and before
+    cron is materialized, each ``scripts/<skill>/<file>`` is compared byte for
+    byte with ``skills/<skill>/<file>`` in the same profile, the source the
+    stager copies from. A differing copy is replaced; a copy whose skill or file
+    no longer exists is removed, since no one can run stale code that is gone.
+    Each change is logged.
+
+    Returns ``(refreshed, removed)`` as ``<skill>/<file>`` refs.
+    """
+    scripts_root = profile_dir / "scripts"
+    refreshed: list[str] = []
+    removed: list[str] = []
+    if not scripts_root.is_dir():
+        return refreshed, removed
+    for staged_dir in sorted(scripts_root.iterdir()):
+        if not staged_dir.is_dir() or staged_dir.name.startswith("."):
+            continue
+        skill = staged_dir.name
+        skill_dir = profile_dir / "skills" / skill
+        for staged in sorted(staged_dir.iterdir()):
+            if not staged.is_file():
+                continue
+            ref = f"{skill}/{staged.name}"
+            src = skill_dir / staged.name
+            if src.is_file():
+                if _stage_if_changed(src, staged):
+                    refreshed.append(ref)
+                    logger.info("translate: refreshed staged script %s from its skill", ref)
+            else:
+                staged.unlink()
+                removed.append(ref)
+                logger.warning(
+                    "translate: removed staged script %s (no longer in skill %s)", ref, skill
+                )
+        if not any(staged_dir.iterdir()):
+            staged_dir.rmdir()
+    return refreshed, removed
+
+
 def _write_if_changed(target: Path, content: bytes) -> bool:
     """Write ``content`` to ``target`` only if the current bytes differ.
 
@@ -1756,6 +1817,9 @@ def translate_customer_yaml(
             skills_dir=skills_path,
             spec_block=spec_block,
         )
+        # Every already-staged pre-run script now matches the skill copy just
+        # installed, whether or not its skill still has a cron entry.
+        _refresh_staged_scripts(profile_dir)
         if wrote_config or wrote_soul or wrote_bundles or removed_bundles:
             logger.info(
                 "translate: wrote profile %s (config=%s, soul=%s, "
@@ -1941,7 +2005,9 @@ def _real_script_stager(profiles_root: Path) -> Callable[[str, str, str], str]:
     into ``<profile>/skills/<skill>/`` by the time cron is materialized, so this
     copies the named script from there into ``<profile>/scripts/<skill>/<base>``
     and returns the ref ``<skill>/<base>`` the scheduler resolves under the
-    scripts dir. Idempotent: re-copied each boot so a catalog update propagates.
+    scripts dir. Idempotent: copied each boot only when the bytes differ, so a
+    catalog update propagates and a script :func:`_refresh_staged_scripts`
+    already brought current is not written twice.
     """
 
     def stage(persona_slug: str, skill: str, pre_run: str) -> str:
@@ -1950,9 +2016,7 @@ def _real_script_stager(profiles_root: Path) -> Callable[[str, str, str], str]:
         if not src.is_file():
             raise FileNotFoundError(f"pre_run script not found at {src} (skill body installed?)")
         base = Path(pre_run).name
-        dest_dir = profile_dir / "scripts" / skill
-        dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        shutil.copy2(src, dest_dir / base)
+        _stage_if_changed(src, profile_dir / "scripts" / skill / base)
         return f"{skill}/{base}"
 
     return stage

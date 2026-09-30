@@ -1721,6 +1721,114 @@ def test_translate_stages_pre_run_script_and_registers_ref(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Every staged pre-run script is refreshed from its skill at boot
+# ---------------------------------------------------------------------------
+
+_CURRENT_PRE_RUN = "print('{\"wakeAgent\": false}')  # current\n"
+
+
+def _without_cron_block(text: str) -> str:
+    """``text`` with the persona's ``cron:`` block (up to the next blank line) cut."""
+    kept: list[str] = []
+    cutting = False
+    for line in text.splitlines(keepends=True):
+        if line.strip() == "cron:":
+            cutting = True
+        elif cutting and not line.strip():
+            cutting = False
+        if not cutting:
+            kept.append(line)
+    return "".join(kept)
+
+
+_ESCALATOR_NO_CRON_YAML = _without_cron_block(_ESCALATOR_YAML)
+
+
+def _boot_with_staged(tmp_path, customer_text: str, staged: dict[str, str]):
+    """Translate once with ``staged`` (``<skill>/<file>`` -> text) already on the
+    volume under marcus's scripts dir; return that profile dir and the stores."""
+    customer_yaml = tmp_path / "customer.yaml"
+    customer_yaml.write_text(customer_text)
+    skill = tmp_path / "skills" / "deadline-miss-escalator"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("# escalator\n")
+    (skill / "pre_run.py").write_text(_CURRENT_PRE_RUN)
+    profile = tmp_path / "hermes_home" / "profiles" / "marcus"
+    for ref, text in staged.items():
+        (profile / "scripts" / ref).parent.mkdir(parents=True, exist_ok=True)
+        (profile / "scripts" / ref).write_text(text)
+    stores: dict[str, _RecordingCronStore] = {}
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(tmp_path / "hermes_home"),
+        skills_dir=str(tmp_path / "skills"),
+        cron_store_for=lambda slug: stores.setdefault(slug, _RecordingCronStore()),
+    )
+    return profile, stores
+
+
+def test_a_stale_staged_script_of_an_unscheduled_skill_is_replaced(tmp_path):
+    """The pilot defect: the skill's cron is gone, so the managed stager never
+    touches its script, but the boot refresh brings the old copy current."""
+    assert "cron:" not in _ESCALATOR_NO_CRON_YAML
+    profile, stores = _boot_with_staged(
+        tmp_path,
+        _ESCALATOR_NO_CRON_YAML,
+        {"deadline-miss-escalator/pre_run.py": "print('old')\n"},
+    )
+    staged = profile / "scripts" / "deadline-miss-escalator" / "pre_run.py"
+    assert (
+        staged.read_bytes()
+        == (profile / "skills" / "deadline-miss-escalator" / "pre_run.py").read_bytes()
+    )
+    assert staged.read_text() == _CURRENT_PRE_RUN
+    assert stores.get("marcus") is None or stores["marcus"].creates == []
+
+
+def test_a_staged_script_whose_skill_or_file_is_gone_is_removed(tmp_path):
+    profile, _ = _boot_with_staged(
+        tmp_path,
+        _ESCALATOR_NO_CRON_YAML,
+        {
+            "retired-tracker/pre_run.py": "print('retired')\n",
+            "deadline-miss-escalator/old_helper.py": "print('gone from the skill')\n",
+            "deadline-miss-escalator/pre_run.py": _CURRENT_PRE_RUN,
+        },
+    )
+    scripts = profile / "scripts"
+    assert not (scripts / "retired-tracker").exists()
+    assert not (scripts / "deadline-miss-escalator" / "old_helper.py").exists()
+    assert (scripts / "deadline-miss-escalator" / "pre_run.py").read_text() == _CURRENT_PRE_RUN
+
+
+@pytest.mark.parametrize("already_staged", [None, "print('old')\n", _CURRENT_PRE_RUN])
+def test_a_managed_jobs_script_is_staged_exactly_once(tmp_path, monkeypatch, already_staged):
+    """The boot refresh and the managed stager both copy only on a byte
+    difference, so a scheduled skill's script is written once when it is
+    missing or stale and not at all when it is current. Counted at the copy
+    call itself, so a stager that went back to copying unconditionally fails.
+    (``copytree`` binds its own ``copy2`` at definition, so skill installs are
+    not counted.)"""
+    writes: list[Path] = []
+    real = _wh.shutil.copy2
+
+    def counting(src, dest, *args, **kwargs):
+        writes.append(Path(dest))
+        return real(src, dest, *args, **kwargs)
+
+    monkeypatch.setattr(_wh.shutil, "copy2", counting)
+    staged_before = (
+        {} if already_staged is None else {"deadline-miss-escalator/pre_run.py": already_staged}
+    )
+    profile, stores = _boot_with_staged(tmp_path, _ESCALATOR_YAML, staged_before)
+
+    staged = profile / "scripts" / "deadline-miss-escalator" / "pre_run.py"
+    assert staged.read_text() == _CURRENT_PRE_RUN
+    assert writes == ([] if already_staged == _CURRENT_PRE_RUN else [staged])
+    assert stores["marcus"].creates[0]["script"] == "deadline-miss-escalator/pre_run.py"
+
+
+# ---------------------------------------------------------------------------
 # Cron reconciliation: drop-all orphan removal at the translate layer
 # ---------------------------------------------------------------------------
 
