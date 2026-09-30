@@ -174,18 +174,25 @@ def test_urgent_in_capitals_is_refused_and_plaintiff_is_not():
 def test_a_heading_line_is_layout_not_emphasis():
     assert oc._caps("# TRIAL BINDER INDEX\nTrial is October 13, 2026.", oc.DOCX) is None
     assert oc._caps("TRIAL BINDER INDEX\nTrial is October 13, 2026.", oc.DOCX).group(0) == "TRIAL"
-    assert oc._caps("# TRIAL BINDER INDEX\nCRITICAL: trial is October 13.", oc.DOCX).group(0) == "CRITICAL"
+    assert (
+        oc._caps("# TRIAL BINDER INDEX\nCRITICAL: trial is October 13.", oc.DOCX).group(0)
+        == "CRITICAL"
+    )
 
 
 def test_a_quoted_record_title_keeps_the_firms_capitals():
     # An admin confirmation quotes the calendar entry's own subject.
-    line = 'Delete the entry (2026-11-03 "Depo prep EDITED") and reply "yes, delete them" to proceed.'
+    line = (
+        'Delete the entry (2026-11-03 "Depo prep EDITED") and reply "yes, delete them" to proceed.'
+    )
     assert _rules(line) == []
     assert _rules("Delete the entry EDITED today.") == ["caps_emphasis"]
 
 
 def test_not_captured_in_a_file_note_is_refused():
-    (refused,) = oc.refusing(oc.check("Motions in limine deadline: NOT CAPTURED. Attorney to confirm.", oc.MEMO))
+    (refused,) = oc.refusing(
+        oc.check("Motions in limine deadline: NOT CAPTURED. Attorney to confirm.", oc.MEMO)
+    )
     assert refused.rule == "caps_emphasis"
 
 
