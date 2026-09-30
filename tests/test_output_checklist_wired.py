@@ -133,9 +133,18 @@ def test_a_templated_body_is_not_scanned(trust_plugin, rostered, rows):
 
 
 def test_a_report_only_rule_writes_a_row_and_the_send_proceeds(trust_plugin, rostered, rows):
-    assert _send(trust_plugin, "URGENT: the Garcia file needs you today.", "s-caps") is None
+    body = "\n".join(f"Line {i} of the Garcia update." for i in range(21))
+    assert _send(trust_plugin, body, "s-long") is None
     (row,) = _checklist_rows(rows)
-    assert row["reason"] == "output_checklist" and row["rules"] == "caps_emphasis"
+    assert row["reason"] == "output_checklist" and row["rules"] == "max_lines"
+
+
+def test_capitals_for_emphasis_refuse_a_staff_send(trust_plugin, rostered, rows):
+    # Report-only until 2026-09-30; see output_checklist's module docstring.
+    result = _send(trust_plugin, "URGENT: the Garcia file needs you today.", "s-caps")
+    assert result["action"] == "block" and "URGENT" in result["message"]
+    (row,) = _checklist_rows(rows)
+    assert row["rules"] == "caps_emphasis"
 
 
 def test_the_third_refusal_of_the_same_message_withholds_it(trust_plugin, rostered, rows):

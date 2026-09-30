@@ -27,17 +27,24 @@ SURFACES. Each output kind gets the rules that are true of it:
   connector normalizes those deterministically after this hook runs, and refusing
   them here would refuse every log-memo skill on the day this deploys while
   leaving the normalizer as dead code.
-* ``DOCX``: ids and ISO/UTC stamps only. Markdown is the document's input, so its
-  markup is not a defect, and separate statements and motion packages carry
-  deposition cites like ``22:14-23:2``, so there is no clock rule.
+* ``DOCX``: ids, ISO/UTC stamps, and capitals for emphasis in prose. Markdown is
+  the document's input, so its markup is not a defect, and separate statements
+  and motion packages carry deposition cites like ``22:14-23:2``, so there is no
+  clock rule. A heading line (``# ...``) and a table row (``| ... |``) are exempt
+  from the capitals rule: a court document's title and caption block are set in
+  capitals by convention. A paragraph is not: the pilot binder index of
+  2026-09-29 opened a paragraph with ``CRITICAL:``, which a paralegal corrects.
 * ``EXTERNAL_REPLY``: ids and ISO/UTC stamps only, for a relayed reply to someone
   outside the firm. A client's own "please help!" quoted back must not hold the
   reply, and no read-through of client replies exists yet.
 
-REPORT-ONLY RULES. ``caps_emphasis`` and ``max_lines`` have an unmeasured false
-positive rate (an acronym the allowlist does not know; a long list someone asked
-for). They write an audit row and never refuse until the pilot rate is read, the
-same measure-before-flip doctrine ``outbound.py`` records for the identifier gate.
+REPORT-ONLY RULES. ``max_lines`` has an unmeasured false positive rate (a long
+list someone asked for). It writes an audit row and never refuses until the pilot
+rate is read, the same measure-before-flip doctrine ``outbound.py`` records for
+the identifier gate. ``caps_emphasis`` was report-only until 2026-09-30: the
+pilot's audit held zero capitals rows on notes and staff sends since the gate
+shipped (every row was a real id), while the one surface it did not cover, the
+document, carried ``CRITICAL:`` and ``NOT CAPTURED`` the same day. It refuses.
 """
 
 from __future__ import annotations
@@ -94,7 +101,7 @@ _SURFACES: dict[str, tuple[tuple[str, ...], int | None, bool]] = {
     STAFF_SEND: (_EVERY, 20, True),
     EVERY_OUTPUT: (_EVERY, None, True),
     MEMO: (_MEMO, 15, False),
-    DOCX: (_IDS_AND_STAMPS, None, False),
+    DOCX: ((*_IDS_AND_STAMPS, "caps_emphasis"), None, False),
     EXTERNAL_REPLY: (_IDS_AND_STAMPS, None, True),
 }
 
@@ -102,7 +109,7 @@ SURFACES: frozenset[str] = frozenset(_SURFACES)
 
 #: Rules that write an audit row and proceed, never refuse, until the pilot's
 #: false-positive rate for each has been read.
-REPORT_ONLY_RULES: frozenset[str] = frozenset({"caps_emphasis", "max_lines"})
+REPORT_ONLY_RULES: frozenset[str] = frozenset({"max_lines"})
 
 # ---------------------------------------------------------------------------
 # Patterns
@@ -196,12 +203,14 @@ _CAPTION = re.compile(r"\s(?:v|vs)\.\s")
 #: THE DECISION PROCEDURE, stated so nobody has to reverse-engineer it: a run of
 #: four or more capitals is emphasis UNLESS (a) it is in this list, (b) it touches
 #: a digit or a hyphen (a matter number like ``2026-PI-101``, a discovery set like
-#: ``SROG-1``, ``Medi-Cal`` spelled in capitals), or (c) it sits on a caption line
-#: (one carrying `` v. `` or `` vs. ``). There is no dictionary and no inference:
-#: an acronym this list does not know is a reported row, and the count of those
-#: rows is exactly the measured false-positive rate the report-only posture is
-#: waiting for. Three-letter words are never checked, so MSC, FSC, RFP, MRI and
-#: CCP need no entry.
+#: ``SROG-1``, ``Medi-Cal`` spelled in capitals), (c) it sits on a caption line
+#: (one carrying `` v. `` or `` vs. ``), (d) it sits on a heading line, or on
+#: a document's table row (``_layout_spans``), or (e) it is inside double quotes
+#: on the line, a record's own title quoted back. There is no dictionary and no
+#: inference: an acronym this list does not know is a refusal with the word
+#: named, and the model writes it in ordinary case or the firm adds it here.
+#: Three-letter words are never checked, so MSC, FSC, RFP, MRI and CCP need no
+#: entry.
 KNOWN_CAPS: frozenset[str] = frozenset(
     {
         "PLAINTIFF",
@@ -410,8 +419,35 @@ def _caption_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _caps(text: str) -> re.Match[str] | None:
-    spans = _caption_spans(text)
+_PIPE_ROW = re.compile(r"^\s{0,3}\|.*\|\s*$")
+
+
+def _layout_spans(text: str, surface: str) -> list[tuple[int, int]]:
+    """Lines whose capitals are a document's layout, not emphasis: a heading
+    line on every surface (``# TRIAL BINDER INDEX``), and on the document
+    surface a table row, where the caption block is set in capitals."""
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    for line in text.split("\n"):
+        end = pos + len(line)
+        if _HEADING.match(line) or (surface == DOCX and _PIPE_ROW.match(line)):
+            spans.append((pos, end))
+        pos = end + 1
+    return spans
+
+
+_QUOTED = re.compile(r'"[^"\n]{1,200}"')
+
+
+def _quoted_spans(text: str) -> list[tuple[int, int]]:
+    """Text inside double quotes on one line is someone else's words, quoted
+    back: a calendar entry's subject, a task title, a file name. The firm's
+    spelling of its own records is not the Operator's emphasis."""
+    return [(m.start(), m.end()) for m in _QUOTED.finditer(text)]
+
+
+def _caps(text: str, surface: str = STAFF_SEND) -> re.Match[str] | None:
+    spans = _caption_spans(text) + _layout_spans(text, surface) + _quoted_spans(text)
     for match in _CAPS.finditer(text):
         word = match.group(0)
         if word in KNOWN_CAPS:
@@ -585,7 +621,7 @@ def check(body: str, surface: str) -> list[Violation]:
                 )
             )
     if "caps_emphasis" in rules:
-        caps = _caps(text)
+        caps = _caps(text, surface)
         if caps:
             found.append(
                 Violation(

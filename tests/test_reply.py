@@ -1863,7 +1863,10 @@ def test_the_report_row_names_the_surface_for_each_class(
     _record_origin(message_id="msg_ck_rep_in")
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
-        args=_draft(["greg@whitfield.example"], text="URGENT: the Garcia file needs you."),
+        args=_draft(
+            ["greg@whitfield.example"],
+            text="\n".join(f"Line {i} of the Garcia update." for i in range(21)),
+        ),
         session_id="s1",
     )
     # The external set holds no report-only rule, so its row comes from the
