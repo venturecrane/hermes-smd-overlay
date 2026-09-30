@@ -226,8 +226,8 @@ skills:
       (render.py implements references/output-format.md literally) and
       dispatched out of turn by the overlay's prerendered-dispatch hook to the
       recipient authored in the skill's settings; the model composes nothing,
-      and in_turn declares the skeleton as the only body the woken turn may
-      send. Stamps: body_sha256 pairs on EMITTED_WAKE.
+      and the envelope's in_turn declares the skeleton as the only body the
+      woken turn may send. Stamps: body_sha256 pairs on EMITTED_WAKE.
 
   # ---- scott seat cron rows ----
   status-report-assembler:
