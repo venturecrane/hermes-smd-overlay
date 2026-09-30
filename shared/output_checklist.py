@@ -204,8 +204,9 @@ _CAPTION = re.compile(r"\s(?:v|vs)\.\s")
 #: four or more capitals is emphasis UNLESS (a) it is in this list, (b) it touches
 #: a digit or a hyphen (a matter number like ``2026-PI-101``, a discovery set like
 #: ``SROG-1``, ``Medi-Cal`` spelled in capitals), (c) it sits on a caption line
-#: (one carrying `` v. `` or `` vs. ``), or (d) it sits on a heading line, or on
-#: a document's table row (``_layout_spans``). There is no dictionary and no
+#: (one carrying `` v. `` or `` vs. ``), (d) it sits on a heading line, or on
+#: a document's table row (``_layout_spans``), or (e) it is inside double quotes
+#: on the line, a record's own title quoted back. There is no dictionary and no
 #: inference: an acronym this list does not know is a refusal with the word
 #: named, and the model writes it in ordinary case or the firm adds it here.
 #: Three-letter words are never checked, so MSC, FSC, RFP, MRI and CCP need no
@@ -435,8 +436,18 @@ def _layout_spans(text: str, surface: str) -> list[tuple[int, int]]:
     return spans
 
 
+_QUOTED = re.compile(r'"[^"\n]{1,200}"')
+
+
+def _quoted_spans(text: str) -> list[tuple[int, int]]:
+    """Text inside double quotes on one line is someone else's words, quoted
+    back: a calendar entry's subject, a task title, a file name. The firm's
+    spelling of its own records is not the Operator's emphasis."""
+    return [(m.start(), m.end()) for m in _QUOTED.finditer(text)]
+
+
 def _caps(text: str, surface: str = STAFF_SEND) -> re.Match[str] | None:
-    spans = _caption_spans(text) + _layout_spans(text, surface)
+    spans = _caption_spans(text) + _layout_spans(text, surface) + _quoted_spans(text)
     for match in _CAPS.finditer(text):
         word = match.group(0)
         if word in KNOWN_CAPS:
