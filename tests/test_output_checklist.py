@@ -161,10 +161,25 @@ def test_capitals_touching_a_hyphen_are_a_spelling():
     assert _rules("The MEDI-CAL lien and the SROG-1 set are open.") == []
 
 
-def test_urgent_in_capitals_is_reported_and_plaintiff_is_not():
+def test_urgent_in_capitals_is_refused_and_plaintiff_is_not():
+    # Report-only until 2026-09-30: zero capitals rows on the pilot's notes and
+    # staff sends since the gate shipped, and CRITICAL in a document that day.
     assert _rules("URGENT: the Garcia file needs you.") == ["caps_emphasis"]
-    assert oc.refusing(oc.check("URGENT: the Garcia file needs you.", oc.STAFF_SEND)) == []
+    (refused,) = oc.refusing(oc.check("URGENT: the Garcia file needs you.", oc.STAFF_SEND))
+    assert refused.rule == "caps_emphasis" and "URGENT" in refused.detail
+    assert "caps_emphasis" not in oc.REPORT_ONLY_RULES
     assert _rules("PLAINTIFF: the Garcia file needs you.") == []
+
+
+def test_a_heading_line_is_layout_not_emphasis():
+    assert oc._caps("# TRIAL BINDER INDEX\nTrial is October 13, 2026.", oc.DOCX) is None
+    assert oc._caps("TRIAL BINDER INDEX\nTrial is October 13, 2026.", oc.DOCX).group(0) == "TRIAL"
+    assert oc._caps("# TRIAL BINDER INDEX\nCRITICAL: trial is October 13.", oc.DOCX).group(0) == "CRITICAL"
+
+
+def test_not_captured_in_a_file_note_is_refused():
+    (refused,) = oc.refusing(oc.check("Motions in limine deadline: NOT CAPTURED. Attorney to confirm.", oc.MEMO))
+    assert refused.rule == "caps_emphasis"
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +223,21 @@ def test_a_docx_caption_table_and_a_deposition_cite_pass():
         "**Fact 1.** Smith testified at 22:14-23:2!\n"
     )
     assert _rules(markdown, oc.DOCX) == []
+
+
+def test_a_docx_paragraph_in_capitals_is_refused_but_its_title_and_caption_are_not():
+    # The pilot binder index of 2026-09-29: a caps title and caption block are
+    # convention; "CRITICAL:" opening a paragraph is what a paralegal corrects.
+    markdown = (
+        "# TRIAL BINDER INDEX (DRAFT)\n"
+        "| SUPERIOR COURT OF CALIFORNIA | Case No. 24STCV01234 |\n"
+        "|---|---|\n"
+        "| Motions in limine | NOT CAPTURED |\n"
+        "CRITICAL: FSC is October 2, 2026. Trial is October 13, 2026.\n"
+    )
+    (refused,) = oc.refusing(oc.check(markdown, oc.DOCX))
+    assert refused.rule == "caps_emphasis" and "CRITICAL" in refused.detail
+    assert _rules(markdown.replace("CRITICAL: ", ""), oc.DOCX) == []
 
 
 def test_a_docx_with_an_internal_id_fails():
