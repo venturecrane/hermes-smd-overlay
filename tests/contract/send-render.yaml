@@ -199,6 +199,14 @@ skills:
       dispatch out of turn. The client chase (Shape B) is fail-closed while
       settings.return_link is unauthored; Shapes A/C (prepare-and-route,
       signed-and-close) stay in-turn under SKILL.md's templates.
+  date-prep-brief:
+    render: compositional
+    note: >-
+      Case-manager Job 2. The frame (subject, Done, Needs you, the reply line)
+      is rendered by the overlay's casework_brief; the turn supplies the
+      done lines and at most two questions chosen from the pre_run's closed
+      catalog, because only the turn has read the documents they are about.
+      Recipients come from the envelope pre_run wrote, never from the turn.
   medical-records-chaser:
     render: compositional
     note: Vendor records chase; wave-1 authored state.
@@ -209,7 +217,26 @@ skills:
     render: compositional
     note: Lien payoff chase leg (a reviewer sends); wave-1 authored state.
 
+  # ---- ashton-price cron rows ----
+  statute-watch:
+    render: templated
+    template: operator/skills/statute-watch/render.py
+    note: >-
+      The monthly statute report is rendered deterministically in pre_run
+      (render.py implements references/output-format.md literally) and
+      dispatched out of turn by the overlay's prerendered-dispatch hook to the
+      recipient authored in the skill's settings; the model composes nothing,
+      and the envelope's in_turn declares the skeleton as the only body the
+      woken turn may send. Stamps: body_sha256 pairs on EMITTED_WAKE.
+
   # ---- scott seat cron rows ----
   status-report-assembler:
     render: compositional
     note: Per-client report drafts on the SMD-internal seat; wave-1 authored state.
+  open-house-visitor-capture:
+    render: compositional
+    note: >-
+      Real estate open-house POC. The daily email to the rostered agent lists
+      the follow-up drafts that are due; each draft is composed from the
+      visitor record's name, property, stated intent, and contact. Authored
+      compositional for the POC; a template comes with the vertical pack.
