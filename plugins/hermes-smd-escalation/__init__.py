@@ -692,6 +692,11 @@ def _escalation_reply_ack(args: dict[str, Any], **kwargs: Any) -> str:
         verified_acker=lambda session_id: _verified_acker(session_id),
         broker_request=lambda payload: _broker_request(payload),
         ledger_path=os.environ.get(_LEDGER_PATH_ENV) or escalation_ledger.DEFAULT_LEDGER_PATH,
+        # A completion ("done with 1") closes the task the digest raised as
+        # closable: the approval row goes through the casework verb and the
+        # write through the same queue a task review's "yes" uses.
+        casework_ledger_path=casework.ledger_path(),
+        casework_append=lambda event: _casework_append(event),
     )
 
 

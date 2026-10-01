@@ -90,6 +90,7 @@ from collections import OrderedDict
 
 from shared import (
     casework_mentions,
+    casework_raises,
     cron_attribution,
     digest_reply_ref,
     escalation_ledger,
@@ -193,7 +194,9 @@ def _valid_dispatch(entry: object) -> bool:
             return False
         if not digest_reply_ref.append_digest_fields_ok(append):
             return False
-    return casework_mentions.valid(entry.get("casework_mentions"))
+    return casework_mentions.valid(entry.get("casework_mentions")) and casework_raises.valid(
+        entry.get("casework_raises")
+    )
 
 
 def take_envelope(
@@ -499,16 +502,29 @@ def dispatch_prerendered(session_id: str) -> str | None:
                 appended_total += written
                 # What each numbered line said, so a reply's confirmation can
                 # name what it quieted (shared/sent_lines.py).
-                numbers = {
-                    a.get("n")
+                numbered = [
+                    a
                     for a in entry.get("appends") or []
                     if isinstance(a, dict) and digest_reply_ref.valid_digest_number(a.get("n"))
+                ]
+                numbers = {a["n"] for a in numbered}
+                # ...and what each line IS (a task or a date), so "done with 2"
+                # on a date answers in words (shared/sent_lines.py).
+                kinds = {
+                    a["n"]: a["kind"] for a in numbered if a.get("kind") in sent_lines.LINE_KINDS
                 }
-                sent_lines.record(dispatch_ref, sent_lines.numbered_lines(sent_body, numbers))
+                sent_lines.record(
+                    dispatch_ref, sent_lines.numbered_lines(sent_body, numbers), kinds
+                )
                 # Case-manager seats: the "Done since last time" line this body
                 # carried is told once (shared/casework_mentions.py).
                 casework_mentions.write(
                     routine.skill, entry.get("casework_mentions") or [], resolved
+                )
+                # The task lines a person may answer "done" to: one proposed
+                # complete per line, joined to this send (shared/casework_raises.py).
+                casework_raises.write(
+                    routine.skill, entry.get("casework_raises") or [], resolved, dispatch_ref
                 )
                 note = (
                     f"Your {routine.skill} alert was already delivered to {who} "

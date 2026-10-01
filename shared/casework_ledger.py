@@ -29,7 +29,10 @@ Record shape (one JSON object per line)::
 
 The doors ``validate_append`` keeps shut, each refused by name:
 
-* a close proposed, or closed by record, on an item classed ``at_stake``;
+* a close proposed, or closed by record, on an item classed ``at_stake``
+  (a ``complete``, a person's own word to the deadline digest, is the one
+  write allowed there, and only that routine may raise it, only on a task,
+  only with an owner, and only a named person may approve it);
 * a raise (or a ``mentioned``) the broker did not witness reaching a person;
 * a raise with no thread (the broker could not tie it to its own send);
 * a verdict with no raise on the same thread and number;
@@ -75,10 +78,17 @@ EVENTS: tuple[str, ...] = (
 #: Events that claim a message reached a person, so the broker must witness a send.
 WITNESSED_EVENTS: tuple[str, ...] = (*RAISING_EVENTS, "mentioned")
 
-ACTIONS: tuple[str, ...] = ("close", "keep", "reassign", "step")
+#: ``close`` is the Operator's own proposal, backed by the record and refused on
+#: an at_stake item. ``complete`` is a person's word ("done with 1" to the
+#: deadline digest): it carries no evidence, is accepted on any class because
+#: its authority is the person and not the record, and is written only by the
+#: deadline-miss-escalator; approving it requires a named person (``decided_by``).
+ACTIONS: tuple[str, ...] = ("close", "complete", "keep", "reassign", "step")
 LEVELS: tuple[str, ...] = ("surfaces", "prepares", "handles")
 #: The actions an approval turns into an update_task write (a step runs a skill).
-WRITE_ACTIONS: tuple[str, ...] = ("close", "reassign")
+WRITE_ACTIONS: tuple[str, ...] = ("close", "complete", "reassign")
+#: The one routine that may raise a ``complete``: the digest a person answers.
+COMPLETE_SKILL = "deadline-miss-escalator"
 CLASSES: tuple[str, ...] = ("open", "done", "stale", "at_stake")
 UPDATE_TASK_TOOL = "mcp_smokeball_update_task"
 #: The write every prep routine makes when it runs a step: its ``[Operator]`` memo.
@@ -361,7 +371,7 @@ def _validate_step(step) -> None:
         )
 
 
-def _validate_payload(kind: str, payload, item: str) -> None:
+def _validate_payload(kind: str, payload, item: str, skill: str | None = None) -> None:
     if not isinstance(payload, dict):
         raise ValueError(f"a {kind} row requires a payload object")
     unknown = sorted(set(payload) - _PAYLOAD_KEYS)
@@ -381,6 +391,18 @@ def _validate_payload(kind: str, payload, item: str) -> None:
             "reassign, "
             "or leave it with the escalator. Retrying will fail identically."
         )
+    if action == "complete":
+        if skill != COMPLETE_SKILL:
+            raise ValueError(
+                f"a complete is a person's answer to the deadline digest; only {COMPLETE_SKILL} "
+                "raises one. Propose a close instead."
+            )
+        if item != "task":
+            raise ValueError("a complete names a task; a court date clears when it passes")
+        if not _short_str(payload.get("staff_id"), _MAX_ID_CHARS):
+            raise ValueError(
+                "a complete carries payload.staff_id, the staff member the close is written under"
+            )
     for key in ("staff_id", "to_staff_id"):
         if not _short_str(payload.get(key), _MAX_ID_CHARS, allow_none=True):
             raise ValueError(f"payload.{key} must be a staff id read off the record, or null")
@@ -500,6 +522,16 @@ def _check_answer(kind: str, event: dict, state: ItemState | None) -> None:
             raise ValueError("a step starts only on an approved step line")
         return
     _validate_decided_by(event.get("decided_by"))
+    if (
+        kind == "approved"
+        and decision.payload.get("action") == "complete"
+        and event.get("decided_by") is None
+    ):
+        raise ValueError(
+            "refusing to approve a complete with nobody named: a person's word closes a task "
+            "only under that person's authored name (decided_by). Write nothing; quiet the "
+            "item instead."
+        )
     if decision.verdict is not None:
         raise ValueError(f"line {slot[1]} on this thread was already answered ({decision.verdict})")
 
@@ -541,8 +573,7 @@ def _check_followup(kind: str, state: ItemState | None) -> None:
         raise ValueError("kept records a person's hold; this item has no held line")
     if kind == "mentioned" and (state is None or not (state.completed or state.unmentioned_steps)):
         raise ValueError(
-            "mentioned records telling someone a task was closed or a step was run; "
-            "this item has neither"
+            "mentioned records telling someone a task was closed or a step was run; this item has neither"
         )
 
 
@@ -561,7 +592,7 @@ def validate_append(existing_events, new_event: dict, *, send_witness, audit_wit
     _validate_identity(new_event)
     kind = new_event["event"]
     if "payload" in _ALLOWED[kind]:
-        _validate_payload(kind, new_event.get("payload"), new_event["kind"])
+        _validate_payload(kind, new_event.get("payload"), new_event["kind"], new_event.get("skill"))
     if kind in WITNESSED_EVENTS:
         _witnessed(kind, send_witness, new_event)
     key = new_event["item_key"]

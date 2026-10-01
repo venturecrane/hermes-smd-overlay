@@ -45,7 +45,10 @@ _COPY = _REPO_ROOT / "shared" / "casework_ledger.py"
 # 2026-09-25c: restamped. _validate_payload splits its two kind-shape checks
 # into _check_kind_shape (ss-console's function-complexity ceiling); rules and
 # refusal text unchanged.
-CANONICAL_SHA256 = "228f5a20366e6260ca0069dbf148b7b1e6841cfe428936b4d974ac6fd15b8b02"
+# 2026-10-01 (completion by reply): restamped from ss-console. Adds the
+# ``complete`` action (a person's word to the deadline digest), accepted on an
+# at_stake task from the escalator only, approved only under a named person.
+CANONICAL_SHA256 = "5206308bd1e4cf4757d1aefebbc0c835457ce06e8b1ac4fa20183a9fb32a98a3"
 
 
 def test_copy_matches_the_pinned_canonical_digest() -> None:

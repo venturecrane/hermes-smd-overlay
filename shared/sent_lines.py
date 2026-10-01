@@ -144,29 +144,71 @@ def _prune(directory: Path, now: float) -> None:
             continue
 
 
-def record(dispatch_ref: object, labels: dict[int, str]) -> bool:
-    """Keep the labels one successful send carried. Never raises."""
+#: What a numbered digest line is, as the send knew it: a task a person may say
+#: is done, or a calendar date that clears when it passes. Read back by the
+#: digest reply so "done with 2" on a date answers in words instead of closing
+#: nothing silently. A number absent here is simply unknown.
+LINE_KINDS = frozenset({"task", "date"})
+
+
+def _valid_number(n: object) -> bool:
+    return isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= 999
+
+
+def record(
+    dispatch_ref: object, labels: dict[int, str], kinds: dict[int, str] | None = None
+) -> bool:
+    """Keep the labels (and line kinds) one successful send carried. Never raises."""
     try:
         if not (isinstance(dispatch_ref, str) and _REF_RE.match(dispatch_ref)):
             return False
         kept = {
             str(n): label
             for n, label in sorted(labels.items())[:_MAX_LINES]
-            if isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= 999 and usable(label)
+            if _valid_number(n) and usable(label)
         }
-        if not kept:
+        kept_kinds = {
+            str(n): kind
+            for n, kind in sorted((kinds or {}).items())[:_MAX_LINES]
+            if _valid_number(n) and kind in LINE_KINDS
+        }
+        if not kept and not kept_kinds:
             return False
         directory = _dir()
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         target = directory / f"{dispatch_ref}.json"
         tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({"labels": kept}, ensure_ascii=False), encoding="utf-8")
+        payload: dict = {"labels": kept}
+        if kept_kinds:
+            payload["kinds"] = kept_kinds
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, target)
         _prune(directory, time.time())
         return True
     except Exception as exc:  # noqa: BLE001 — losing a name must never lose a send
         logger.warning("sent_lines: labels not kept for a dispatch (%s)", exc)
         return False
+
+
+def kinds(dispatch_ref: object) -> dict[int, str]:
+    """The line kinds a dispatch carried, ``{}`` when none were kept. Never raises."""
+    try:
+        if not (isinstance(dispatch_ref, str) and _REF_RE.match(dispatch_ref)):
+            return {}
+        raw = json.loads((_dir() / f"{dispatch_ref}.json").read_text(encoding="utf-8"))
+        rows = raw.get("kinds") if isinstance(raw, dict) else None
+        if not isinstance(rows, dict):
+            return {}
+        return {
+            int(key): kind
+            for key, kind in rows.items()
+            if isinstance(key, str) and key.isdigit() and kind in LINE_KINDS
+        }
+    except (OSError, ValueError):
+        return {}
+    except Exception as exc:  # noqa: BLE001 — a bad file loses kinds, never the reply
+        logger.warning("sent_lines: kinds unreadable (%s)", exc)
+        return {}
 
 
 def labels(dispatch_ref: object) -> dict[int, str]:
@@ -247,7 +289,9 @@ def seed_provenance(session_id: str, text: str, names: dict[int, str]) -> None:
 
 
 __all__ = [
+    "LINE_KINDS",
     "MAX_LABEL",
+    "kinds",
     "labels",
     "line_label",
     "name_numbers",
