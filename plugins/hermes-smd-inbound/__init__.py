@@ -317,6 +317,17 @@ _FENCED_READ_TOOLS: frozenset[str] = frozenset(
         "mcp_smokeball_list_prompts",
         "mcp_smokeball_list_resources",
         "mcp_smokeball_read_resource",
+        # The same four primitives on the msgraph-mail server (2026-10-01), the
+        # unclassified survivors the ashton-price sweep named on every boot
+        # after the Smokeball four were decided. Same direction for the same
+        # reason, and the mailbox case is stronger: a resource body served by
+        # a MAIL server would be sender-authored text, the fence's whole
+        # subject. The connector declares no prompts and no resources, so all
+        # four answer empty today.
+        "mcp_msgraph_mail_get_prompt",
+        "mcp_msgraph_mail_list_prompts",
+        "mcp_msgraph_mail_list_resources",
+        "mcp_msgraph_mail_read_resource",
         # The overlay's own attachment pair (hermes-smd-mail-attachments,
         # 2026-09-18). Neither returns the attachment's BODY, and both are
         # fenced anyway, because both return the vendor's FILENAME — text an
