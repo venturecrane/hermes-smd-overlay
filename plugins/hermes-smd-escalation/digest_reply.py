@@ -90,6 +90,23 @@ def _answered(states: dict, row: dict) -> bool:
     return decision is not None and decision.verdict is not None
 
 
+def _awaiting_write(states: dict, row: dict) -> bool:
+    """This line was approved and its write never landed or failed: a turn
+    that lost its tools (a connector that did not come back after a restart,
+    2026-10-01 on the pilot) left the authorization open. A second "done" then
+    runs the same write again rather than answering "I already had your
+    answer" over a task Smokeball still shows open. The broker still consumes
+    the one authorization with the one outcome, so this cannot write twice."""
+    state = states.get(row.get("item_key"))
+    decision = state.authorized_decision if state is not None else None
+    return (
+        state is not None
+        and state.authorization == "approved"
+        and decision is not None
+        and (decision.thread_ref, decision.n) == (row.get("thread_ref"), row.get("n"))
+    )
+
+
 def _owner_name(row: dict) -> str:
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
     match = _OWNER_RE.search(str(payload.get("reason") or ""))
@@ -328,10 +345,11 @@ def handle(
         raised = raises.get(number)
         group = len(digest[number]) > 1
         if raised and not group and acker is not None:
-            if all(_answered(cw_states, row) for row in raised):
+            pending = all(_awaiting_write(cw_states, row) for row in raised)
+            if not pending and all(_answered(cw_states, row) for row in raised):
                 state["answered"].append(number)
                 continue
-            if not _approve(
+            if not pending and not _approve(
                 raised,
                 number,
                 session_id=session_id,
