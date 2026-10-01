@@ -26,8 +26,15 @@ which re-authorizes through the same ``evaluate_tool_call`` a model's own
 send faces (ceiling, taint gate, content floor, fabrication scan, identifier
 gate). The fallback ladder per dispatch:
 
+0. an entry carrying a workbook (``attachments``, :mod:`shared.outbound_attachment`)
+   sends it with the full body; if the ATTACHMENT alone is refused (its scan,
+   or a transport that refused it: ``DispatchResult.attachment_refused``), the
+   same message goes again without it, using the pre_run's
+   ``body_without_attachment`` when present (``body_variant``
+   ``full_no_attachment``). A malformed attachment is stripped up front and
+   never invalidates the entry;
 1. full body refused by a gate -> dispatch the authored skeleton (still
-   ``templated=True``, still the full gate);
+   ``templated=True``, still the full gate, never an attachment);
 2. skeleton also refused, or transport failure -> NOTHING sends; the context
    note tells the turn to follow its skill's failure instruction, and the
    heartbeat's no-send pager is the backstop.
@@ -86,6 +93,7 @@ from shared import (
     cron_attribution,
     digest_reply_ref,
     escalation_ledger,
+    outbound_attachment,
     pre_run_handoff,
     provenance,
     send_dispatch,
@@ -170,6 +178,9 @@ def _valid_dispatch(entry: object) -> bool:
         isinstance(skeleton, str) and len(skeleton) <= _MAX_BODY_CHARS
     ):
         return False
+    # ``attachments`` and ``body_without_attachment`` are deliberately NOT
+    # checked here: a malformed attachment is stripped at dispatch and never
+    # invalidates the entry (see _attachment_plan).
     appends = entry.get("appends", [])
     if not isinstance(appends, list) or len(appends) > _MAX_APPENDS:
         return False
@@ -357,6 +368,37 @@ def _recipients_phrase(recipients) -> str:
     return ", ".join(recipients) if recipients else "(no recipient)"
 
 
+def _attachment_plan(entry: dict, skill: str) -> tuple[list[dict], str, int]:
+    """(attachments to send on rung 1, the rung-2 body, how many were stripped).
+
+    A malformed attachment is stripped and logged, never fatal: the body is the
+    delivery and the workbook its companion. ``body_without_attachment`` is the
+    body the pre_run wrote for a message that goes without its workbook (it says
+    so); it is used only when it is bounded like ``full_body`` and, if the
+    envelope stamps ``body_sha256_without_attachment``, matches it. Otherwise
+    rung 2 sends ``full_body``.
+    """
+    attachments, stripped = outbound_attachment.sanitize(entry.get("attachments"))
+    for reason in stripped:
+        logger.warning("prerendered_dispatch: %s attachment stripped (%s)", skill, reason)
+    rung2 = str(entry["full_body"])
+    alt = entry.get("body_without_attachment")
+    if alt is not None:
+        stamp = entry.get("body_sha256_without_attachment")
+        if not (isinstance(alt, str) and alt.strip() and len(alt) <= _MAX_BODY_CHARS):
+            logger.warning(
+                "prerendered_dispatch: %s body_without_attachment malformed; ignored", skill
+            )
+        elif stamp is not None and stamp != canonical_body_sha256(alt):
+            logger.warning(
+                "prerendered_dispatch: %s body_without_attachment does not match its stamp; ignored",
+                skill,
+            )
+        else:
+            rung2 = alt
+    return attachments, rung2, len(stripped)
+
+
 def dispatch_prerendered(session_id: str) -> str | None:
     """Dispatch this cron session's pre-rendered envelope, if one binds.
 
@@ -387,6 +429,7 @@ def dispatch_prerendered(session_id: str) -> str | None:
         lines: list[str] = []
         appended_total = 0
         confirm_withheld = 0
+        stripped_total = 0
         for entry in envelope.get("dispatches") or []:
             recipients = [str(r) for r in entry["recipients"]]
             # ``skill_name`` (ss-console claims review 2026-09-04, B3): the
@@ -407,15 +450,47 @@ def dispatch_prerendered(session_id: str) -> str | None:
             audit_base = {"skill_name": routine.skill, "dispatch_ref": dispatch_ref}
             if isinstance(entry.get("routing_leg"), str) and entry["routing_leg"]:
                 audit_base["routing_leg"] = entry["routing_leg"]
+            # Rung 1 carries the workbook (when one survived validation); the
+            # sender stamps attachment_sha256 on the row from the bytes it sent.
+            attachments, rung2_body, stripped = _attachment_plan(entry, routine.skill)
+            stripped_total += stripped
+            # Every attachment stripped: the full body would say "attached" over
+            # nothing, so the first send is already the no-attachment body.
+            without_attachment = bool(stripped) and not attachments
+            sent_body = rung2_body if without_attachment else str(entry["full_body"])
             result = send_dispatch.dispatch(
                 to=recipients,
                 subject=str(entry["subject"]),
-                text=str(entry["full_body"]),
+                text=sent_body,
                 session_id=session_id,
                 cc=[str(c) for c in (entry.get("cc") or []) if isinstance(c, str)],
                 templated=True,
-                audit_extra={**audit_base, "body_variant": "full"},
+                audit_extra={
+                    **audit_base,
+                    "body_variant": "full_no_attachment" if without_attachment else "full",
+                },
+                **({"attachments": attachments} if attachments else {}),
             )
+            if not result.sent and attachments and result.attachment_refused:
+                # Rung 2: the attachment, and only the attachment, was refused.
+                # The body already passed every gate; send it without the
+                # workbook (the pre_run's body_without_attachment says so).
+                logger.info(
+                    "prerendered_dispatch: %s attachment refused (%s); sending without it",
+                    routine.skill,
+                    result.reason,
+                )
+                sent_body = rung2_body
+                without_attachment = True
+                result = send_dispatch.dispatch(
+                    to=recipients,
+                    subject=str(entry["subject"]),
+                    text=sent_body,
+                    session_id=session_id,
+                    cc=[str(c) for c in (entry.get("cc") or []) if isinstance(c, str)],
+                    templated=True,
+                    audit_extra={**audit_base, "body_variant": "full_no_attachment"},
+                )
             who = _recipients_phrase(result.recipients or tuple(recipients))
             if result.sent:
                 written, attempted = _write_appends(
@@ -429,9 +504,7 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     for a in entry.get("appends") or []
                     if isinstance(a, dict) and digest_reply_ref.valid_digest_number(a.get("n"))
                 }
-                sent_lines.record(
-                    dispatch_ref, sent_lines.numbered_lines(entry["full_body"], numbers)
-                )
+                sent_lines.record(dispatch_ref, sent_lines.numbered_lines(sent_body, numbers))
                 # Case-manager seats: the "Done since last time" line this body
                 # carried is told once (shared/casework_mentions.py).
                 casework_mentions.write(
@@ -441,6 +514,8 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     f"Your {routine.skill} alert was already delivered to {who} "
                     f"(message {result.message_id})"
                 )
+                if without_attachment:
+                    note += " without its attachment"
                 if attempted:
                     note += f"; {written} of {attempted} item record(s) written"
                 lines.append(note + ". Do not send this alert and do not record these items again.")
@@ -506,6 +581,11 @@ def dispatch_prerendered(session_id: str) -> str | None:
                 "Only the most recently held alert remains queued for approval; "
                 "the earlier held alerts were superseded and their items will "
                 "surface again on the next run."
+            )
+        if stripped_total:
+            lines.append(
+                f"{stripped_total} attachment(s) prepared for this alert could not be "
+                "included and were left off. Do not try to attach anything yourself."
             )
         memo_matters = [
             str(m) for m in (envelope.get("memo_matters") or []) if isinstance(m, str) and m

@@ -299,3 +299,70 @@ def test_canon_vectors_mirror_is_wellformed_and_arbitrated():
     assert len(vectors) >= 8
     for vector in vectors:
         assert prerendered_dispatch.canonical_body_sha256(vector["input"]) == vector["sha256"]
+
+
+# ---------------------------------------------------------------------------
+# msgraph variant, with and without the workbook attachment (statute-watch v2)
+# ---------------------------------------------------------------------------
+
+
+def _arm_msgraph(monkeypatch, trust, captured):
+    _arm(monkeypatch, trust, [])
+    monkeypatch.setattr(trust, "_seat_email_adapter", lambda: "msgraph")
+
+    def fake_graph(payload, *, session_id="", matter_ref=None, audit_extra=None, **kwargs):
+        captured.append(
+            {"payload": dict(payload), "audit_extra": dict(audit_extra or {}), **kwargs}
+        )
+        return "<m@firm.example>"
+
+    monkeypatch.setattr(trust.outbound_send, "send_via_msgraph", fake_graph)
+
+
+def test_msgraph_variant_stamps_the_same_body_hashes(monkeypatch):
+    trust = _trust()
+    captured: list[dict] = []
+    _arm_msgraph(monkeypatch, trust, captured)
+    result = trust._dispatch_internal_message(
+        to=["ops@firm.example"],
+        subject="s",
+        text=REPORT_BODY,
+        session_id="s1",
+        audit_extra={"body_variant": "full"},
+    )
+    assert result.sent
+    [call] = captured
+    assert call["audit_extra"]["rendered_body_sha256"] == (
+        prerendered_dispatch.canonical_body_sha256(REPORT_BODY)
+    )
+    assert call["audit_extra"]["plain_body_sha256"]
+    assert "attachments" not in call
+    assert "attachment_sha256" not in call["audit_extra"]
+
+
+def test_msgraph_variant_with_attachment_stamps_attachment_sha256(monkeypatch):
+    from tests.test_attachment_scan import descriptor
+
+    trust = _trust()
+    captured: list[dict] = []
+    _arm_msgraph(monkeypatch, trust, captured)
+    monkeypatch.setattr(trust.outbound, "check_outbound_attachment", lambda text, **k: None)
+    att = descriptor()
+    result = trust._dispatch_internal_message(
+        to=["ops@firm.example"],
+        subject="s",
+        text=REPORT_BODY,
+        session_id="s1",
+        audit_extra={"body_variant": "full"},
+        attachments=[att],
+    )
+    assert result.sent
+    [call] = captured
+    assert call["attachments"] == [att]
+    assert call["audit_extra"]["attachment_sha256"] == att["sha256"]
+    # The body stamps are unchanged by the attachment.
+    assert call["audit_extra"]["rendered_body_sha256"] == (
+        prerendered_dispatch.canonical_body_sha256(REPORT_BODY)
+    )
+    # The attachment never rides the message payload itself.
+    assert "attachments" not in call["payload"]

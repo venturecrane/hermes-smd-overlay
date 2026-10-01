@@ -73,7 +73,9 @@ def test_send_takes_no_credential_and_no_inbox():
     # audit_extra (WS-RENDER) is attribution FOR the broker's row, filtered
     # broker-side through a closed allowlist — not an identity or credential
     # channel, so the control below still holds.
-    assert params == {"payload", "sender", "session_id", "matter_ref", "audit_extra"}
+    # attachments (statute-watch v2) exists only to be REFUSED on this transport
+    # (see test_agentmail_refuses_an_attachment_loudly).
+    assert params == {"payload", "sender", "session_id", "matter_ref", "audit_extra", "attachments"}
     # The control is what is ABSENT: no way to name the From or hand over a key.
     assert not params & {"from", "sender_address", "inbox_id", "api_key", "token"}
 
@@ -157,3 +159,36 @@ def test_an_unreachable_broker_is_not_reported_as_a_refusal():
 
     with pytest.raises(mod.AgentMailSendError, match="unavailable"):
         mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=_down)
+
+
+# ---------------------------------------------------------------------------
+# Attachments: refused loudly on AgentMail (statute-watch v2)
+# ---------------------------------------------------------------------------
+
+
+def test_agentmail_refuses_an_attachment_loudly():
+    """No silent drop: a message whose body says "attached" must not go out
+    with nothing attached. The refusal is typed so the caller retries without."""
+    from tests.test_attachment_scan import descriptor
+
+    mod = _load()
+    captured: list = []
+    with pytest.raises(mod.AttachmentSendError):
+        mod.send_message(
+            payload={"to": "a@b.com", "text": "hi"},
+            sender=_sender(captured),
+            attachments=[descriptor()],
+        )
+    assert captured == []
+    # And the refusal is still an AgentMail send error for older callers.
+    assert issubclass(mod.AgentMailAttachmentError, mod.AgentMailSendError)
+
+
+def test_agentmail_payload_attachments_field_is_never_forwarded():
+    mod = _load()
+    captured: list = []
+    mod.send_message(
+        payload={"to": "a@b.com", "text": "hi", "attachments": [{"name": "x.xlsx"}]},
+        sender=_sender(captured),
+    )
+    assert "attachments" not in captured[0]

@@ -25,6 +25,7 @@ from shared import (
     cron_attribution,
     matter_binding,
     matter_gate,
+    outbound_attachment,
     pre_run_handoff,
     prerendered_dispatch,
     provenance,
@@ -1096,6 +1097,7 @@ def _dispatch_internal_message(
     templated: bool = True,
     audit_extra: dict[str, str] | None = None,
     code_fixed_recipients: CodeFixedRecipients | None = None,
+    attachments: list[dict[str, str]] | None = None,
 ) -> DispatchResult:
     """Send one seat-authored message OUT OF TURN, through the full gate.
 
@@ -1150,10 +1152,39 @@ def _dispatch_internal_message(
     went out on a tainted turn this way carries ``taint_exempt`` in its audit
     extra. A capability that does not match is refused outright rather than
     ignored, because a mismatch means a caller is not the code path it claims.
+
+    ``attachments`` (statute-watch v2) are pinned-shape workbook descriptors
+    (:mod:`shared.outbound_attachment`) from a pre_run envelope, never from a
+    payload. Each is re-validated, its text extracted, and that text scanned by
+    ``outbound.check_outbound_attachment`` AFTER the body has passed every gate,
+    on the same session register. Any invalid descriptor, extraction failure,
+    scan refusal or scan raise refuses the whole send with
+    ``attachment_refused=True``, and so does a transport that refuses the
+    attachment; the caller may then send the message again without it. The
+    send's row carries ``attachment_sha256``, stamped here from the validated
+    bytes (a caller cannot pre-stamp it).
     """
     recipients = tuple(a for a in (to or ()) if isinstance(a, str) and a.strip())
     if not recipients:
         return DispatchResult(sent=False, reason="no recipient")
+    validated_attachments: list[tuple[dict[str, str], bytes]] = []
+    if attachments:
+        try:
+            if not isinstance(attachments, list) or len(attachments) > (
+                outbound_attachment.MAX_ATTACHMENTS
+            ):
+                raise outbound_attachment.AttachmentError("too many attachments")
+            validated_attachments = [outbound_attachment.validate(a) for a in attachments]
+        except outbound_attachment.AttachmentError as exc:
+            logger.warning(
+                "hermes-smd-trust: out-of-turn attachment invalid (%s); NOT dispatching", exc
+            )
+            return DispatchResult(
+                sent=False,
+                reason="the attachment could not be sent",
+                recipients=recipients,
+                attachment_refused=True,
+            )
     code_fixed = False
     if code_fixed_recipients is not None:
         if not (
@@ -1240,6 +1271,32 @@ def _dispatch_internal_message(
             )
             logger.info("hermes-smd-trust: out-of-turn send blocked by outbound scan (%s)", reason)
             return DispatchResult(sent=False, reason=str(reason), recipients=recipients)
+    # The attachment scan, AFTER the body has passed: a refusal here is about
+    # the attachment alone, which is what lets the caller resend without it.
+    for _descriptor, data in validated_attachments:
+        try:
+            attachment_text = outbound_attachment.extract_xlsx_text(data)
+            attachment_block = outbound.check_outbound_attachment(
+                attachment_text, session_id=gate_session
+            )
+        except Exception:  # noqa: BLE001 — an unreadable or unscannable attachment must not send
+            logger.exception(
+                "hermes-smd-trust: out-of-turn attachment scan failed; NOT dispatching"
+            )
+            attachment_block = {"action": "block", "message": "the attachment could not be checked"}
+        if attachment_block is not None:
+            reason = (
+                attachment_block.get("message", "withheld")
+                if isinstance(attachment_block, dict)
+                else "withheld"
+            )
+            logger.info("hermes-smd-trust: out-of-turn attachment refused by scan (%s)", reason)
+            return DispatchResult(
+                sent=False,
+                reason=str(reason),
+                recipients=recipients,
+                attachment_refused=True,
+            )
     # The gate may have rewritten the payload (it consumes approvals and stores
     # its own copy); everything below reads what the gate allowed.
     payload.pop(TEMPLATED_BODY_ARG, None)
@@ -1249,6 +1306,12 @@ def _dispatch_internal_message(
     send_audit_extra = dict(audit_extra or {})
     # Only this function states an exemption; a caller cannot pre-stamp one.
     send_audit_extra.pop("taint_exempt", None)
+    # Likewise the attachment hash: stamped from the validated bytes or absent.
+    send_audit_extra.pop("attachment_sha256", None)
+    if validated_attachments:
+        send_audit_extra["attachment_sha256"] = ",".join(
+            d["sha256"] for d, _ in validated_attachments
+        )
     if code_fixed and enforce.session_is_tainted(session_id):
         # The gate allowed this only because code fixed the recipients
         # (Captain decision 2026-09-28). Say so on the send's own row.
@@ -1282,6 +1345,11 @@ def _dispatch_internal_message(
     send_matter_ref = matter_gate.matter_ref_for(
         send_session_id, _send_cited_matters(send_session_id, payload)
     )
+    # Passed only when present, so a transport double that predates the keyword
+    # is called exactly as before on every send without an attachment.
+    attachment_kwargs: dict[str, Any] = (
+        {"attachments": [d for d, _ in validated_attachments]} if validated_attachments else {}
+    )
     try:
         if _seat_email_adapter() == _ADAPTER_MSGRAPH:
             message_id = outbound_send.send_via_msgraph(
@@ -1289,6 +1357,7 @@ def _dispatch_internal_message(
                 session_id=send_session_id,
                 matter_ref=send_matter_ref,
                 audit_extra=send_audit_extra,
+                **attachment_kwargs,
             )
         else:
             message_id = outbound_send.send_message(
@@ -1296,7 +1365,13 @@ def _dispatch_internal_message(
                 session_id=send_session_id,
                 matter_ref=send_matter_ref,
                 audit_extra=send_audit_extra,
+                **attachment_kwargs,
             )
+    except outbound_send.AttachmentSendError as exc:
+        logger.error("hermes-smd-trust: out-of-turn send refused its attachment (%s)", exc)
+        return DispatchResult(
+            sent=False, reason=str(exc), recipients=recipients, attachment_refused=True
+        )
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: out-of-turn send failed (%s)", exc)
         return DispatchResult(sent=False, reason=str(exc), recipients=recipients)
