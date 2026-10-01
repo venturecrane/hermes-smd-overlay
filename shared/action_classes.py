@@ -552,6 +552,18 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # write: filing a bundle of several clients' letters as one document on one
     # client's matter is a confidentiality event the filing turn cannot undo.
     "mcp_smokeball_file_attachment_pages_to_matter": ActionClass.INTERNAL_WRITE,
+    # The Medicals tab write (ss-console, 2026-10-01): one provider row on the
+    # matter's personal-injury settlement layout, from a medical bill the SAME
+    # run filed on that matter from a page range of the scanned post. Opened
+    # by the connector's filed-document ledger (the fileId the filing
+    # returned), not by a resolution token, so a row cannot be written on a
+    # matter the run did not file the bill on. Internal write for
+    # file_attachment_pages_to_matter's reason: the firm's own record, nothing
+    # sent outside. It never creates a contact and never changes a row already
+    # on the tab; the connector refuses both. Carries no prose argument (the
+    # row's note is composed in the connector), so the draft gate's scan has
+    # nothing to read and allows it, which is the intended posture.
+    "mcp_smokeball_add_medicals_row": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches
