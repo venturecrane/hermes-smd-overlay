@@ -278,9 +278,8 @@ def test_a_failed_write_is_named_and_the_task_is_unchanged(env):
     assert "in Smokeball just now, so it is unchanged." in text
 
 
-def test_an_already_answered_line_is_not_closed_twice(env):
-    raise_row = _complete_raise()
-    approved = {
+def _approved(raise_row: dict) -> dict:
+    return {
         **{k: raise_row[k] for k in ("v", "skill", "matter_id", "kind", "source_id", "item_key")},
         "ts": "2026-10-01T15:00:00Z",
         "id": "cw-approved",
@@ -290,12 +289,41 @@ def test_an_already_answered_line_is_not_closed_twice(env):
         "session_id": "sess-earlier",
         "decided_by": {"name": NAME, "key": "k" * 64},
     }
-    env.write_cw([raise_row, approved])
+
+
+def test_an_already_closed_line_is_not_closed_twice(env):
+    raise_row = _complete_raise()
+    approved = _approved(raise_row)
+    completed = {
+        **{k: raise_row[k] for k in ("v", "skill", "matter_id", "kind", "source_id", "item_key")},
+        "ts": "2026-10-01T15:00:05Z",
+        "id": "cw-completed",
+        "event": "completed",
+        "session_id": "sess-earlier",
+        "tool_call_id": "toolu_earlier",
+    }
+    env.write_cw([raise_row, approved, completed])
     _reply("done with 1")
     out = _ack_call(env)
     assert out["status"] == "done"
     assert _rows(env, "casework_event_append") == []
     assert "I already had your answer on 1 (" in out["confirmation_text"]
+
+
+def test_an_approval_whose_write_never_ran_is_written_on_the_next_done(env):
+    """Pilot, 2026-10-01: the Smokeball connector did not come back after a
+    restart, so the reply turn that approved line 1 had no update_task to call
+    and the authorization stayed open. A second "done with 1" must run that
+    write, not answer "I already had your answer" over an open task."""
+    raise_row = _complete_raise()
+    env.write_cw([raise_row, _approved(raise_row)])
+    _reply("done with 1")
+    out = _ack_call(env)
+    assert out["status"] == "writes_queued" and out["writes"] == 1
+    # No second approval: the open one authorizes this write.
+    assert _rows(env, "casework_event_append") == []
+    _land(env)
+    assert _ack_call(env)["confirmation_text"].startswith("Got it. Closed 1 (")
 
 
 # ---------------------------------------------------------------------------
