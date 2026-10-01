@@ -48,7 +48,7 @@ _COPY = _REPO_ROOT / "shared" / "casework_ledger.py"
 # 2026-10-01 (completion by reply): restamped from ss-console. Adds the
 # ``complete`` action (a person's word to the deadline digest), accepted on an
 # at_stake task from the escalator only, approved only under a named person.
-CANONICAL_SHA256 = "5206308bd1e4cf4757d1aefebbc0c835457ce06e8b1ac4fa20183a9fb32a98a3"
+CANONICAL_SHA256 = "f7f47ee64e5b86e3499c97ba6329fed6f9b290d55b343f8fabd060130ca46c2c"
 
 
 def test_copy_matches_the_pinned_canonical_digest() -> None:
