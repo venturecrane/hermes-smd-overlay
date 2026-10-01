@@ -371,6 +371,22 @@ def _validate_step(step) -> None:
         )
 
 
+def _check_complete(payload: dict, item: str, skill: str | None) -> None:
+    """A ``complete`` is a person's word to the deadline digest: raised by that
+    one routine, on a task, written under a named owner."""
+    if skill != COMPLETE_SKILL:
+        raise ValueError(
+            f"a complete is a person's answer to the deadline digest; only {COMPLETE_SKILL} "
+            "raises one. Propose a close instead."
+        )
+    if item != "task":
+        raise ValueError("a complete names a task; a court date clears when it passes")
+    if not _short_str(payload.get("staff_id"), _MAX_ID_CHARS):
+        raise ValueError(
+            "a complete carries payload.staff_id, the staff member the close is written under"
+        )
+
+
 def _validate_payload(kind: str, payload, item: str, skill: str | None = None) -> None:
     if not isinstance(payload, dict):
         raise ValueError(f"a {kind} row requires a payload object")
@@ -392,17 +408,7 @@ def _validate_payload(kind: str, payload, item: str, skill: str | None = None) -
             "or leave it with the escalator. Retrying will fail identically."
         )
     if action == "complete":
-        if skill != COMPLETE_SKILL:
-            raise ValueError(
-                f"a complete is a person's answer to the deadline digest; only {COMPLETE_SKILL} "
-                "raises one. Propose a close instead."
-            )
-        if item != "task":
-            raise ValueError("a complete names a task; a court date clears when it passes")
-        if not _short_str(payload.get("staff_id"), _MAX_ID_CHARS):
-            raise ValueError(
-                "a complete carries payload.staff_id, the staff member the close is written under"
-            )
+        _check_complete(payload, item, skill)
     for key in ("staff_id", "to_staff_id"):
         if not _short_str(payload.get(key), _MAX_ID_CHARS, allow_none=True):
             raise ValueError(f"payload.{key} must be a staff id read off the record, or null")
@@ -573,7 +579,8 @@ def _check_followup(kind: str, state: ItemState | None) -> None:
         raise ValueError("kept records a person's hold; this item has no held line")
     if kind == "mentioned" and (state is None or not (state.completed or state.unmentioned_steps)):
         raise ValueError(
-            "mentioned records telling someone a task was closed or a step was run; this item has neither"
+            "mentioned records telling someone a task was closed or a step was run; "
+            "this item has neither"
         )
 
 
