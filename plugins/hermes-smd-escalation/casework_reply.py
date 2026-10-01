@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
-from shared import casework_ledger, digest_reply_ref, inbound, sent_lines
+from shared import casework_ledger, digest_reply_ref, escalation_ledger, inbound, sent_lines
 from shared.casework_acts import CASEWORK_ACTS, COMPLETED, CaseworkActs, TaskWrite
 
 from . import reply_items
@@ -34,6 +35,10 @@ HELD = "held"
 WRITES_QUEUED = "writes_queued"
 DONE = "done"
 CONFLICT = "conflict"
+
+
+def _escalation_ledger_path() -> str:
+    return os.environ.get("SMD_ESCALATION_LEDGER_PATH") or escalation_ledger.DEFAULT_LEDGER_PATH
 
 
 def _thread_rows(rows: list[dict], thread_ref: str) -> dict[int, list[dict]]:
@@ -80,6 +85,11 @@ def _write_for(row: dict) -> TaskWrite | None:
         "n": row.get("n"),
     }
     if action == "close" and payload.get("class") != "at_stake":
+        return TaskWrite(is_completed=True, **common)
+    if action == "complete":
+        # A person's word to the deadline digest: closes on any class (the
+        # broker accepted the raise only from the escalator, with an owner,
+        # and the approval only under a named person).
         return TaskWrite(is_completed=True, **common)
     if action == "reassign" and isinstance(payload.get("to_staff_id"), str):
         return TaskWrite(assignee_ids=(payload["to_staff_id"],), **common)
@@ -247,13 +257,21 @@ def reply_verdicts(
     fallthrough: Callable[[], str],
     casework_ledger_path: str,
     acts: CaseworkActs = CASEWORK_ACTS,
+    escalation_ledger_path: str | None = None,
 ) -> str:
     """Resolve this turn's verified reply to its casework rows and act on it.
 
     The second call in a turn (after the queued writes) returns the final
-    confirmation, rendered from the recorded outcomes. A thread with no
-    casework rows is handed to ``escalation_reply_ack`` unchanged."""
+    confirmation, rendered from the recorded outcomes. A thread that carries a
+    deadline digest goes to ``escalation_reply_ack`` whole, even though it now
+    also holds casework raises (the lines a person may say are done): on a
+    digest a bare "1" quiets, and only a completion closes. A thread with no
+    casework rows is handed there unchanged too."""
+    from . import digest_reply
+
     state = _REPLIES.get(session_id) if session_id else None
+    if isinstance(state, dict) and state.get("kind") == digest_reply.DIGEST:
+        return fallthrough()
     if state is not None:
         remaining = acts.pending(session_id)
         if remaining:
@@ -267,6 +285,10 @@ def reply_verdicts(
 
     origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id) if session_id else None
     thread_ref = (getattr(origin, "conversation_id", "") or "") if origin is not None else ""
+    if thread_ref and reply_items.thread_has_digest(
+        escalation_ledger_path or _escalation_ledger_path(), thread_ref
+    ):
+        return fallthrough()
     rows = casework_ledger.read_ledger(casework_ledger_path) if thread_ref else []
     listing = _thread_rows(rows, thread_ref) if thread_ref else {}
     if not listing:

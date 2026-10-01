@@ -381,6 +381,29 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_msgraph_mail_create_draft": ActionClass.INTERNAL_WRITE,
     "mcp_msgraph_mail_send_message": ActionClass.EXTERNAL_SEND,
     "mcp_msgraph_mail_reply_message": ActionClass.EXTERNAL_SEND,
+    # The four MCP protocol primitives the Hermes client synthesizes from the
+    # msgraph-mail server's prompts/resources capabilities. Same shape as the
+    # Smokeball four below (overlay#365-#368): not connector verbs, absent from
+    # the connector source and from its manifest tool_classes, so the manifest
+    # conformance probe (declared subset of map) is untouched by their presence
+    # here. They read the server's own catalog, which this connector does not
+    # populate, so they answer empty.
+    #
+    # Classified rather than left refusing for the reason the Smokeball block
+    # records: the tool-surface sweep logs an unclassified tool at ERROR, and
+    # since 2026-09-19 every boot of the ashton-price seat has fired a Sentry
+    # event naming exactly these four (the top issue in the 09-18..09-25 weekly
+    # report, 21 events). A safety signal that fires on a known-good boot is one
+    # people learn to ignore.
+    #
+    # NOT added to TENANT_SOURCE_READ_TOOLS: server metadata, not firm mail. If
+    # the connector ever declares a resource carrying mailbox content,
+    # read_resource becomes a tenant-source read and must move in the same
+    # change that declares it.
+    "mcp_msgraph_mail_get_prompt": ActionClass.READ,
+    "mcp_msgraph_mail_list_prompts": ActionClass.READ,
+    "mcp_msgraph_mail_list_resources": ActionClass.READ,
+    "mcp_msgraph_mail_read_resource": ActionClass.READ,
     # --- capability-contract aliases (colon form) — never emitted at runtime,
     #     retained so audit prose / TS-side references still resolve.
     "agentmail:send_message": ActionClass.EXTERNAL_SEND,

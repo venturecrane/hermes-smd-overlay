@@ -568,3 +568,25 @@ def test_msgraph_mail_tools_mirror_the_manifest_oracle():
         resolved = classify_tool(name)
         assert resolved.action_class is cls, name
         assert resolved.unmapped is False, name
+
+
+def test_msgraph_mail_mcp_primitives_are_classified_read():
+    """The Hermes client synthesizes get_prompt / list_prompts / list_resources /
+    read_resource from the msgraph-mail server's capabilities. They are not in
+    the manifest (not connector verbs) and were never in this map, so the
+    tool-surface sweep logged them at ERROR on every ashton-price boot from
+    2026-09-19 to 2026-10-01 and each boot fired a Sentry event. Same fix as
+    the Smokeball four (overlay#366-#368): READ, and not a tenant source."""
+    from shared.action_classes import ActionClass, classify_tool
+    from shared.provenance import TENANT_SOURCE_READ_TOOLS
+
+    for name in (
+        "mcp_msgraph_mail_get_prompt",
+        "mcp_msgraph_mail_list_prompts",
+        "mcp_msgraph_mail_list_resources",
+        "mcp_msgraph_mail_read_resource",
+    ):
+        resolved = classify_tool(name)
+        assert resolved.unmapped is False, name
+        assert resolved.action_class is ActionClass.READ, name
+        assert name not in TENANT_SOURCE_READ_TOOLS, name

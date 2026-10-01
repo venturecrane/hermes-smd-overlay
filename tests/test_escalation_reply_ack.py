@@ -172,11 +172,28 @@ def test_got_it_on_1_acks_exactly_item_1(env):
 
 
 def test_several_numbers_ack_each(env):
-    _reply("Done with 1 and 2, thanks!")
+    _reply("Got it on 1 and 2, thanks!")
     out = _call(env)
     assert out["acked"] == [1, 2]
     assert out["still_open"] == [3]
     assert out["confirmation_text"] == "Got it: 1 and 2 are quiet for now. Still open: 3."
+    assert {e["item_key"] for e in _acked(env)} == {"aaaaaa", "bbbbbb"}
+
+
+def test_done_on_lines_the_digest_did_not_raise_quiets_them_and_says_why(env):
+    """2026-10-01: "done" used to be a plain ack. On a digest whose send raised
+    no closable line (no owner resolved, or an older send), it still quiets the
+    items, and the reply says in words why nothing closed."""
+    _reply("Done with 1 and 2, thanks!")
+    out = _call(env)
+    assert out["status"] == "done"
+    assert out["acked"] == [1, 2]
+    assert out["still_open"] == [3]
+    assert out["confirmation_text"] == (
+        "Got it. I can't close 1 from here: nobody is set on the matter in Smokeball and I have "
+        "no staff record for you. Quiet for now. I can't close 2 from here: nobody is set on the "
+        "matter in Smokeball and I have no staff record for you. Quiet for now. Still open: 3."
+    )
     assert {e["item_key"] for e in _acked(env)} == {"aaaaaa", "bbbbbb"}
 
 
