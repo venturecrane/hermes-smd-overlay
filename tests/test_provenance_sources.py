@@ -395,6 +395,15 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         "mcp_smokeball_list_prompts",
         "mcp_smokeball_list_resources",
         "mcp_smokeball_read_resource",
+        # The same four primitives on the msgraph-mail server (2026-10-01):
+        # the sweep on every ashton-price boot named them as the unclassified
+        # survivors after the Smokeball four were classified. Same reasoning,
+        # same caveat: a declared resource carrying mailbox content would move
+        # read_resource to TENANT_SOURCE_READ_TOOLS in the same change.
+        "mcp_msgraph_mail_get_prompt",
+        "mcp_msgraph_mail_list_prompts",
+        "mcp_msgraph_mail_list_resources",
+        "mcp_msgraph_mail_read_resource",
         # The agent's own UNSENT drafts. A committed memo is the firm's record;
         # a draft is the Operator's sentence, and reading one back must not
         # certify the numbers in it.
