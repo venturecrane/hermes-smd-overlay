@@ -779,11 +779,16 @@ def _check_identifiers(
     tool_call_id: str,
     vertical: str | None,
     cohort: str | None,
+    fail_closed: bool = False,
 ) -> dict | None:
     """Identifier-integrity check: block directive on an unverified identifier.
 
     ``gate`` is ``"draft"`` or ``"send"`` — the empty-register carve applies to
     the draft gate only (see the section comment above).
+
+    ``fail_closed`` turns a scanner crash into a refusal instead of an allow.
+    The attachment scan passes it: a workbook is a surface no person composed
+    in front of the model, and "could not look" must not send it.
 
     Three zones, deliberately separated:
       1. scan   — guarded: a scanner CRASH is an infra fault, not evidence of
@@ -809,6 +814,13 @@ def _check_identifiers(
         seat_register = provenance.seat_sourced_for(session_id)
         seat_sourced_hits = [h for h in unverified if seat_register.verifies(h)]
     except Exception as exc:  # noqa: BLE001 — infra fault, not fabrication evidence
+        if fail_closed:
+            logger.error(
+                "outbound gate: identifier scan CRASHED (tool=%s err=%s); refusing",
+                tool_name,
+                exc,
+            )
+            return {"action": "block", "message": "The attachment could not be checked."}
         logger.error(
             "outbound gate: identifier scan CRASHED (tool=%s err=%s); allowing",
             tool_name,
@@ -1254,6 +1266,70 @@ def check_outbound_send(
         cohort=cohort,
     )
     return {"action": "block", "message": decision.reason}
+
+
+# ---------------------------------------------------------------------------
+# The outbound attachment scan (statute-watch v2, 2026-10-01)
+#
+# A workbook attached to an out-of-turn send is read by a person exactly like
+# the body is, so its text meets the same two send-gate questions: does it carry
+# a fabrication marker or an unread legal citation, and is every identifier in it
+# (file numbers, dates, the pairs a row puts side by side) traceable to a source
+# this session read. The output checklist is NOT run: it governs prose shape
+# (local times, sentence form, length), and a table of records is not prose.
+#
+# The text arrives already extracted (``shared.outbound_attachment``), dates
+# rendered as the ISO dates a reader sees. Everything here fails CLOSED: the
+# caller refuses the attachment on a raise as well as on a block.
+# ---------------------------------------------------------------------------
+
+#: The audit tool name for an attachment scan: the send it rides.
+ATTACHMENT_SCAN_TOOL = "smd_send_message"
+
+
+def check_outbound_attachment(text: str, *, session_id: str, tool_call_id: str = "") -> dict | None:
+    """Scan an outbound attachment's extracted ``text`` on the send gate.
+
+    Returns ``{"action": "block", "message": ...}`` to refuse the attachment,
+    else ``None``. Same register, same citation/fabrication policy and the same
+    identifier gate (``gate="send"``, no empty-register carve) as
+    :func:`check_outbound_send`, minus the prose checklist; the identifier scan
+    fails closed here.
+    """
+    if not isinstance(text, str):
+        return {"action": "block", "message": "The attachment could not be read."}
+    if not text.strip():
+        return None
+    vertical = _resolve_vertical()
+    cohort = _resolve_cohort()
+    register = provenance.register_for(session_id)
+    decision = evaluate(
+        text,
+        cohort,
+        vertical,
+        allowed_case_names=register.captions(),
+        allowed_money=register.money(),
+    )
+    if not decision.allowed:
+        _emit_fabrication_audit(
+            tool_name=ATTACHMENT_SCAN_TOOL,
+            decision=decision,
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            vertical=vertical,
+            cohort=cohort,
+        )
+        return {"action": "block", "message": decision.reason}
+    return _check_identifiers(
+        body=text,
+        gate="send",
+        session_id=session_id,
+        tool_name=ATTACHMENT_SCAN_TOOL,
+        tool_call_id=tool_call_id,
+        vertical=vertical,
+        cohort=cohort,
+        fail_closed=True,
+    )
 
 
 # ---------------------------------------------------------------------------

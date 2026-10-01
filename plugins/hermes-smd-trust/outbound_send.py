@@ -27,7 +27,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from shared import agentmail_broker, msgraph_broker
+from shared import agentmail_broker, msgraph_broker, outbound_attachment
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,36 @@ class AgentMailSendError(OutboundSendError):
 
 class MsGraphSendError(OutboundSendError):
     """A Microsoft Graph confirm-dispatch send failed (bad creds or a Graph 4xx/5xx)."""
+
+
+class AttachmentSendError(OutboundSendError):
+    """The send was refused BECAUSE of its attachment: the transport cannot carry
+    one, or the broker refused the attachment itself. The caller may retry the
+    same message without it; any other :class:`OutboundSendError` it must not,
+    since a transport failure after the vendor accepted could double-send."""
+
+
+class AgentMailAttachmentError(AgentMailSendError, AttachmentSendError):
+    """AgentMail carries no outbound attachment on this overlay (refused loudly)."""
+
+
+class MsGraphAttachmentError(MsGraphSendError, AttachmentSendError):
+    """The broker refused the attachment on a Graph send."""
+
+
+def _attachment_copies(attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Validated four-key copies of ``attachments``; raises on any bad entry, so
+    the transport never forwards a descriptor the shared validator rejects."""
+    if len(attachments) > outbound_attachment.MAX_ATTACHMENTS:
+        raise MsGraphAttachmentError("refusing to send: too many attachments")
+    copies: list[dict[str, str]] = []
+    for item in attachments:
+        try:
+            descriptor, _ = outbound_attachment.validate(item)
+        except outbound_attachment.AttachmentError as exc:
+            raise MsGraphAttachmentError(f"refusing to send: {exc}") from exc
+        copies.append(descriptor)
+    return copies
 
 
 # ss#2258: `_request_json`, `resolve_inbox_id` and `seat_inbox_address` were
@@ -78,6 +108,7 @@ def send_message(
     session_id: str = "",
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Ask the broker to send a fresh message; return the new message id.
 
@@ -104,7 +135,16 @@ def send_message(
     ``audit_extra`` (WS-RENDER) rides the same seam: the caller's
     body-conformance stamps for the row (routing_leg / rendered_body_sha256 /
     body_variant), filtered broker-side through a closed allowlist.
+
+    ``attachments`` are REFUSED here, loudly (:class:`AgentMailAttachmentError`):
+    the AgentMail verb carries none, and dropping one silently would deliver a
+    message that says "attached" with nothing attached. The caller retries
+    without it.
     """
+    if attachments:
+        raise AgentMailAttachmentError(
+            "refusing to send: this seat's mail transport carries no attachments"
+        )
     body = _send_body(payload)
     if not body.get("to"):
         raise AgentMailSendError("refusing to send: payload has no recipient")
@@ -164,6 +204,7 @@ def send_via_msgraph(
     session_id: str = "",
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Ask the broker to send an approved message via Graph ``/sendMail``.
 
@@ -184,12 +225,22 @@ def send_via_msgraph(
 
     ``session_id`` / ``matter_ref`` are ss-console#2497, forwarded to the broker
     for the CONFIRM_SEND_* row it writes. See the twin note on ``send_message``.
+
+    ``attachments`` is a KEYWORD, never a payload field: ``attachments`` is not
+    in :data:`_MSGRAPH_SEND_FIELDS`, so a model's tool-call args carrying one are
+    not forwarded. Only the trust plugin's out-of-turn sender passes it, from a
+    pre_run envelope the model cannot write. Each entry is re-validated here and
+    forwarded as the pinned four-key descriptor; the broker maps it to a Graph
+    ``fileAttachment``. A broker refusal that names the attachment raises
+    :class:`MsGraphAttachmentError` so the caller can retry without it.
     """
     body = {
         k: payload.get(k) for k in _MSGRAPH_SEND_FIELDS if payload.get(k) not in (None, "", [], {})
     }
     if not body.get("to"):
         raise MsGraphSendError("refusing to send: payload has no recipient")
+    if attachments:
+        body["attachments"] = _attachment_copies(attachments)
     send = sender or msgraph_broker.send_message
     kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
     if audit_extra:
@@ -201,6 +252,8 @@ def send_via_msgraph(
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
         # to the operator than a generic delivery failure.
+        if attachments and "attachment" in str(exc).lower():
+            raise MsGraphAttachmentError(f"broker refused the send: {exc}") from exc
         raise MsGraphSendError(f"broker refused the send: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
         raise MsGraphSendError(f"broker transmit unavailable: {exc}") from exc

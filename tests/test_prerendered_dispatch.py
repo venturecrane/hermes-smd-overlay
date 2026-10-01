@@ -606,3 +606,224 @@ def test_a_malformed_snooze_days_refuses_the_whole_envelope(monkeypatch, tmp_pat
     send_dispatch.set_sender(sender)
     assert prerendered_dispatch.dispatch_prerendered(SESSION) is None
     assert sender.calls == []
+
+
+# ---------------------------------------------------------------------------
+# The workbook attachment (statute-watch v2): the three-rung ladder
+#
+# Rung 1 sends the full body WITH the workbook; if the attachment alone is
+# refused (``attachment_refused``) rung 2 sends body_without_attachment with no
+# workbook; then the existing skeleton. A malformed attachment is stripped up
+# front and never invalidates the entry.
+# ---------------------------------------------------------------------------
+
+_NO_ATT_BODY = (
+    "## Needs you today (1)\n\n1. matter 2026-PI-101, task-deadline 2026-08-29 "
+    "(overdue by 2 days) [ACK-AAAAAA]\n\nThe workbook could not be attached this month.\n"
+)
+
+
+def _attachment():
+    from tests.test_attachment_scan import descriptor
+
+    return descriptor()
+
+
+def _attachment_entry(**overrides):
+    entry = _dispatch_entry(
+        attachments=[_attachment()],
+        body_without_attachment=_NO_ATT_BODY,
+        body_sha256_without_attachment=prerendered_dispatch.canonical_body_sha256(_NO_ATT_BODY),
+    )
+    entry.update(overrides)
+    return entry
+
+
+def test_rung1_forwards_the_attachment_as_a_keyword(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    _write_envelope(tmp_path, dispatches=[_attachment_entry()])
+    written = _appends_recorder(monkeypatch)
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    [call] = sender.calls
+    assert call["attachments"] == [_attachment()]
+    assert call["text"].startswith("## Needs you today")
+    assert call["audit_extra"]["body_variant"] == "full"
+    assert "attachment" not in note.lower()
+    assert len(written) == 1
+
+
+def test_an_attachment_refusal_sends_body_without_attachment(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    _write_envelope(tmp_path, dispatches=[_attachment_entry()])
+    written = _appends_recorder(monkeypatch)
+    sender = _Sender(
+        [
+            DispatchResult(sent=False, reason="unverified date", attachment_refused=True),
+            DispatchResult(sent=True, message_id="m2"),
+        ]
+    )
+    send_dispatch.set_sender(sender)
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    first, second = sender.calls
+    assert first["attachments"]
+    assert "attachments" not in second
+    assert second["text"] == _NO_ATT_BODY
+    assert second["audit_extra"]["body_variant"] == "full_no_attachment"
+    assert second["audit_extra"]["dispatch_ref"] == first["audit_extra"]["dispatch_ref"]
+    assert "already delivered" in note and "without its attachment" in note
+    # The full content reached a person: the items are recorded.
+    assert len(written) == 1
+
+
+def test_rung2_without_an_authored_alternative_sends_full_body(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    entry = _attachment_entry()
+    del entry["body_without_attachment"]
+    del entry["body_sha256_without_attachment"]
+    _write_envelope(tmp_path, dispatches=[entry])
+    _appends_recorder(monkeypatch)
+    sender = _Sender(
+        [
+            DispatchResult(sent=False, reason="x", attachment_refused=True),
+            DispatchResult(sent=True, message_id="m2"),
+        ]
+    )
+    send_dispatch.set_sender(sender)
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    assert sender.calls[1]["text"] == entry["full_body"]
+
+
+def test_a_mismatched_body_stamp_is_ignored_for_rung2(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    entry = _attachment_entry(body_sha256_without_attachment="c" * 64)
+    _write_envelope(tmp_path, dispatches=[entry])
+    _appends_recorder(monkeypatch)
+    sender = _Sender(
+        [
+            DispatchResult(sent=False, reason="x", attachment_refused=True),
+            DispatchResult(sent=True, message_id="m2"),
+        ]
+    )
+    send_dispatch.set_sender(sender)
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    assert sender.calls[1]["text"] == entry["full_body"]
+
+
+def test_rung2_refused_falls_to_the_skeleton_without_attachment(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    _write_envelope(tmp_path, dispatches=[_attachment_entry()])
+    written = _appends_recorder(monkeypatch)
+    sender = _Sender(
+        [
+            DispatchResult(sent=False, reason="x", attachment_refused=True),
+            DispatchResult(sent=False, reason="refused: content"),
+            DispatchResult(sent=True, message_id="m3"),
+        ]
+    )
+    send_dispatch.set_sender(sender)
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    skeleton = sender.calls[2]
+    assert skeleton["audit_extra"]["body_variant"] == "skeleton"
+    assert "attachments" not in skeleton
+    assert "reduced" in note and written == []
+
+
+def test_a_body_refusal_skips_rung2_and_goes_to_the_skeleton(monkeypatch, tmp_path):
+    """Only an ATTACHMENT refusal earns rung 2; a refused body is still refused
+    without its workbook, so resending it would only be refused again."""
+    _routine(monkeypatch)
+    _write_envelope(tmp_path, dispatches=[_attachment_entry()])
+    _appends_recorder(monkeypatch)
+    sender = _Sender(
+        [
+            DispatchResult(sent=False, reason="refused: content"),
+            DispatchResult(sent=True, message_id="m2"),
+        ]
+    )
+    send_dispatch.set_sender(sender)
+    prerendered_dispatch.dispatch_prerendered(SESSION)
+    assert [c["audit_extra"]["body_variant"] for c in sender.calls] == ["full", "skeleton"]
+    assert "attachments" not in sender.calls[1]
+
+
+def test_a_malformed_attachment_is_stripped_and_the_body_still_sends(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    bad = {**_attachment(), "sha256": "0" * 64}
+    _write_envelope(tmp_path, dispatches=[_attachment_entry(attachments=[bad])])
+    written = _appends_recorder(monkeypatch)
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    [call] = sender.calls
+    assert "attachments" not in call
+    # The full body would claim an attachment that is not there.
+    assert call["text"] == _NO_ATT_BODY
+    assert call["audit_extra"]["body_variant"] == "full_no_attachment"
+    assert "1 attachment(s)" in note and "could not be included" in note
+    assert len(written) == 1
+
+
+@pytest.mark.parametrize("value", ["not a list", [{"name": "x"}], [{"k": 1}], "TWO"])
+def test_no_attachment_shape_invalidates_the_entry(monkeypatch, tmp_path, value):
+    _routine(monkeypatch)
+    if value == "TWO":
+        value = [_attachment(), _attachment()]
+    _write_envelope(tmp_path, dispatches=[_attachment_entry(attachments=value)])
+    _appends_recorder(monkeypatch)
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    [call] = sender.calls
+    assert "attachments" not in call
+    assert "already delivered" in note
+
+
+def test_a_malformed_body_without_attachment_does_not_invalidate_the_entry(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    entry = _attachment_entry(body_without_attachment=12345)
+    _write_envelope(tmp_path, dispatches=[entry])
+    _appends_recorder(monkeypatch)
+    sender = _Sender([DispatchResult(sent=True, message_id="m1")])
+    send_dispatch.set_sender(sender)
+    assert "already delivered" in prerendered_dispatch.dispatch_prerendered(SESSION)
+    assert sender.calls[0]["attachments"]
+
+
+def test_attachment_notes_name_no_gates_or_rules(monkeypatch, tmp_path):
+    _routine(monkeypatch)
+    bad = {**_attachment(), "sha256": "0" * 64}
+    _write_envelope(
+        tmp_path, dispatches=[_attachment_entry(), _attachment_entry(attachments=[bad])]
+    )
+    _appends_recorder(monkeypatch)
+    send_dispatch.set_sender(
+        _Sender(
+            [
+                DispatchResult(
+                    sent=False, reason="identifier gate refused", attachment_refused=True
+                ),
+                DispatchResult(sent=True, message_id="m2"),
+                DispatchResult(sent=True, message_id="m3"),
+            ]
+        )
+    )
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    for banned in ("gate", "rule", "ceiling", "taint", "floor", "fabricat", "scan"):
+        assert banned not in note.lower()
+
+
+def test_send_dispatch_forwards_attachments_only_when_present():
+    """A sender that predates the keyword is called exactly as before."""
+    calls: list[dict] = []
+
+    def legacy_sender(*, to, subject, text, session_id, cc, templated, **extra):
+        calls.append(extra)
+        return DispatchResult(sent=True, message_id="m")
+
+    send_dispatch.set_sender(legacy_sender)
+    send_dispatch.dispatch(to=["a@x"], subject="s", text="t")
+    send_dispatch.dispatch(to=["a@x"], subject="s", text="t", attachments=[])
+    send_dispatch.dispatch(to=["a@x"], subject="s", text="t", attachments=[{"name": "x"}])
+    assert calls == [{}, {}, {"attachments": [{"name": "x"}]}]

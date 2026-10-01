@@ -658,3 +658,104 @@ def test_the_broker_client_prefers_the_resolved_id_over_the_empty_call_result():
     assert msgraph_broker._vendor_id({}) == ""
     # A non-string is not an id. The broker is trusted, the wire is not.
     assert msgraph_broker._vendor_id({"vendor_message_id": 7}) == ""
+
+
+# ---------------------------------------------------------------------------
+# The workbook attachment (statute-watch v2): a keyword, never a payload field
+# ---------------------------------------------------------------------------
+
+
+def _att():
+    from tests.test_attachment_scan import descriptor
+
+    return descriptor()
+
+
+def test_send_via_msgraph_forwards_an_attachment_passed_by_keyword(monkeypatch):
+    trust = load_plugin("hermes-smd-trust")
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", fake.send_message)
+    att = {**_att(), "smuggled": "dropped"}
+    trust.outbound_send.send_via_msgraph(
+        {"to": ["a@x.example"], "subject": "S", "body_text": "B"}, attachments=[att]
+    )
+    [sent] = fake.sends
+    # The pinned four-key descriptor, beside (not inside) the closed body fields.
+    assert sent["attachments"] == [
+        {k: att[k] for k in ("name", "content_type", "content_b64", "sha256")}
+    ]
+    assert sent["body_text"] == "B"
+
+
+def test_a_payload_attachments_field_is_never_forwarded(monkeypatch):
+    """A model's tool-call args carrying ``attachments`` do not reach the broker:
+    the key is not in the closed allowlist, and only the keyword attaches."""
+    trust = load_plugin("hermes-smd-trust")
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", fake.send_message)
+    assert "attachments" not in trust.outbound_send._MSGRAPH_SEND_FIELDS
+    trust.outbound_send.send_via_msgraph(
+        {"to": ["a@x.example"], "subject": "S", "body_text": "B", "attachments": [_att()]}
+    )
+    [sent] = fake.sends
+    assert "attachments" not in sent
+
+
+def test_send_via_msgraph_refuses_an_invalid_attachment_before_the_broker(monkeypatch):
+    trust = load_plugin("hermes-smd-trust")
+    fake = _FakeGraphBroker()
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", fake.send_message)
+    with pytest.raises(trust.outbound_send.MsGraphAttachmentError):
+        trust.outbound_send.send_via_msgraph(
+            {"to": ["a@x.example"], "body_text": "B"},
+            attachments=[{**_att(), "sha256": "0" * 64}],
+        )
+    with pytest.raises(trust.outbound_send.MsGraphAttachmentError):
+        trust.outbound_send.send_via_msgraph(
+            {"to": ["a@x.example"], "body_text": "B"}, attachments=[_att(), _att()]
+        )
+    assert fake.sends == []
+
+
+def test_a_broker_refusal_naming_the_attachment_is_an_attachment_error(monkeypatch):
+    trust = load_plugin("hermes-smd-trust")
+
+    def _refuse(_payload, **_kwargs):
+        raise trust.outbound_send.msgraph_broker.BrokerError("attachment refused: too large")
+
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)
+    with pytest.raises(trust.outbound_send.AttachmentSendError):
+        trust.outbound_send.send_via_msgraph(
+            {"to": ["a@x.example"], "body_text": "B"}, attachments=[_att()]
+        )
+
+
+def test_other_broker_refusals_with_an_attachment_stay_plain_send_errors(monkeypatch):
+    """A recipient refusal must not read as "retry without the workbook"."""
+    trust = load_plugin("hermes-smd-trust")
+
+    def _refuse(_payload, **_kwargs):
+        raise trust.outbound_send.msgraph_broker.BrokerError("not on the authored surface")
+
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)
+    with pytest.raises(trust.outbound_send.MsGraphSendError) as excinfo:
+        trust.outbound_send.send_via_msgraph(
+            {"to": ["a@x.example"], "body_text": "B"}, attachments=[_att()]
+        )
+    assert not isinstance(excinfo.value, trust.outbound_send.AttachmentSendError)
+
+
+def test_an_unreachable_broker_with_an_attachment_is_not_retried_without_it(monkeypatch):
+    """The broker may have transmitted before the socket dropped; a retry could
+    deliver the message twice."""
+    trust = load_plugin("hermes-smd-trust")
+
+    def _down(_payload, **_kwargs):
+        raise trust.outbound_send.msgraph_broker.MsGraphBrokerUnavailable("attachment timeout")
+
+    monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _down)
+    with pytest.raises(trust.outbound_send.MsGraphSendError) as excinfo:
+        trust.outbound_send.send_via_msgraph(
+            {"to": ["a@x.example"], "body_text": "B"}, attachments=[_att()]
+        )
+    assert not isinstance(excinfo.value, trust.outbound_send.AttachmentSendError)

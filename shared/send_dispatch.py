@@ -56,6 +56,10 @@ class DispatchResult:
     message_id: str = ""
     reason: str = ""
     recipients: tuple[str, ...] = field(default_factory=tuple)
+    #: True only when the send was refused BECAUSE of its attachment (the
+    #: attachment scan, or a transport that refused the attachment). The one
+    #: refusal after which the same message may go again without it.
+    attachment_refused: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,9 +130,15 @@ def dispatch(
     session_id: str = "",
     cc: list[str] | None = None,
     templated: bool = True,
+    attachments: list[dict[str, str]] | None = None,
     **extra: Any,
 ) -> DispatchResult:
     """Send one message through the seat's own gate. Never raises.
+
+    ``attachments`` (statute-watch v2) is a keyword from code, never a payload
+    key: see :mod:`shared.outbound_attachment`. Forwarded only when non-empty,
+    so a sender that predates it is called exactly as before on every send
+    that carries none.
 
     ``templated`` says the body is a FIXED template this repo authored, not
     prose a model composed. It reaches ``shared.spec_gate`` and skips exactly
@@ -149,6 +159,8 @@ def dispatch(
         )
     if not to:
         return DispatchResult(sent=False, reason="no recipient")
+    if attachments:
+        extra["attachments"] = list(attachments)
     try:
         return sender(
             to=list(to),
