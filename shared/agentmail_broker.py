@@ -186,6 +186,11 @@ class AgentMailReadError(RuntimeError):
     """An attachment read could not be performed. Never a policy refusal."""
 
 
+class AgentMailOverSize(AgentMailReadError, attachment_spool.SpoolOverSizeError):
+    """Over the spool ceiling: both an AgentMail read error and the spool's
+    named over-size refusal, so a caller can catch either."""
+
+
 def _read_key() -> str:
     try:
         key = get_secret(READ_KEY_ENV)
@@ -373,7 +378,7 @@ def _download(url: str) -> bytes:
     except Exception as exc:  # noqa: BLE001 - the reason is reported, never a credential
         raise AgentMailReadError(f"attachment download failed: {exc.__class__.__name__}") from exc
     if len(blob) > attachment_spool.MAX_SPOOL_BYTES:
-        raise AgentMailReadError(
+        raise AgentMailOverSize(
             f"attachment is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; it is not spooled"
         )
     return blob

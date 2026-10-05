@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from shared.result_unwrap import unwrap_inbound  # noqa: F401 — re-exported
+
 logger = logging.getLogger(__name__)
 
 
@@ -320,42 +322,9 @@ def wrap_inbound(content: str, envelope: InboundEnvelope, *, nonce: str | None =
     return f"[{_header_for(envelope)}]\n[{attribution}]\n{begin}\n{safe}\n{end}"
 
 
-# The inverse of :func:`wrap_inbound`. The nonce is matched as a BACKREFERENCE so
-# a body containing a forged or prior sentinel cannot terminate the real fence —
-# the same unguessable-nonce property the wrap relies on, read in reverse.
-_FENCE_RE = re.compile(
-    r"<<<INBOUND_DATA_BEGIN (?P<nonce>[^>]+)>>>\n(?P<body>.*)\n<<<INBOUND_DATA_END (?P=nonce)>>>",
-    re.DOTALL,
-)
-
-
-def unwrap_inbound(text: str) -> str:
-    """Return the content inside a quarantine fence, or ``text`` unchanged.
-
-    WHY THIS EXISTS (ss#2444, live-caught on hermes-ashton-price 2026-08-20).
-    Hermes v0.20.4 INVERTED the order two hooks fire in. On v0.18 the order was
-    ``pre_tool_call -> post_tool_call -> transform_tool_result``; on v0.20.4 it
-    is ``pre_tool_call -> transform_tool_result -> post_tool_call``, observed on
-    five consecutive tool calls on the same seat and log
-    (``vfy_01M0G7DYTBHAGDRQYXX02DKMZJ``).
-
-    ``hermes-smd-inbound`` applies the fence at ``transform_tool_result``, so an
-    ``on_post_tool_call`` consumer that used to receive the connector's raw text
-    now receives the FENCED text. ``hermes-smd-establishment`` parsed that with
-    ``json.loads`` and threw on 100% of document reads — char 0 is ``[``, char 1
-    is ``U`` of ``UNTRUSTED``, which is exactly
-    ``JSONDecodeError: Expecting value: line 1 column 2 (char 1)``.
-
-    Pass-through on unfenced input is deliberate and load-bearing: it makes the
-    consumer correct under BOTH hook orders, so this does not become a second
-    invariant to break the next time upstream reorders. Callers must not use the
-    return value to decide whether content was untrusted — the envelope, not the
-    absence of a fence, is what carries provenance.
-    """
-    if not isinstance(text, str) or "<<<INBOUND_DATA_BEGIN " not in text:
-        return text
-    m = _FENCE_RE.search(text)
-    return m.group("body") if m else text
+# The inverse of :func:`wrap_inbound` (``unwrap_inbound``) lives in
+# :mod:`shared.result_unwrap` with the other post-hook unwrapping, and is
+# re-exported from this module's imports under its original name.
 
 
 # ---------------------------------------------------------------------------
