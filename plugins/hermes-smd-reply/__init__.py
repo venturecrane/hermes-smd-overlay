@@ -12,13 +12,22 @@ Attaches to two hooks at the pinned Hermes ref (v2026.5.16):
   dispatch. The relay acts only on the AgentMail draft-creation tool, which
   reaches the hook under its live Hermes MCP runtime name
   ``mcp_agentmail_create_draft`` (``mcp_<server>_<tool>``).
-- ``transform_tool_result`` (``model_tools.py:847-857``) — fires immediately
-  after ``post_tool_call`` for the SAME ``tool_call_id``, and its first ``str``
-  return REPLACES the tool result. This is how a hold becomes something the
-  agent can act on (ss-console#2367): ``post_tool_call`` returns are collected
-  and ignored by the firing site, so before this the agent's turn saw
-  ``create_draft -> ok`` while the reply sat undelivered, and no authored
-  recovery could fire against a signal that never arrived.
+- ``transform_tool_result`` (``model_tools.py:847-857``) — fires for the SAME
+  ``tool_call_id``, and its first ``str`` return REPLACES the tool result. This
+  is how a hold becomes something the agent can act on (ss-console#2367):
+  ``post_tool_call`` returns are collected and ignored by the firing site, so
+  before this the agent's turn saw ``create_draft -> ok`` while the reply sat
+  undelivered, and no authored recovery could fire against a signal that never
+  arrived.
+
+THE TWO HOOKS' ORDER IS NOT AN INVARIANT (2026-10-05). The relay used to decide
+in ``post_tool_call`` on the premise that it fires first. At the pinned Hermes
+the agent executor suppresses the inner post hook and fires its own terminal
+``post_tool_call`` AFTER ``transform_tool_result`` (``agent/tool_executor.py``
+~1535, ``model_tools.py`` ~944-945), so a held reply's notice was recorded after
+the seam that carries it had passed and the agent was told nothing. The relay
+now decides in whichever hook reaches the call first, once per ``tool_call_id``
+(:class:`relay.DecidedOnce`). Do not reintroduce an ordering assumption.
 
 What it does:
 
@@ -296,6 +305,11 @@ def _send_msgraph_reply(
 # plugin's register-time state; bounded and thread-safe (see notice.py).
 _HOLD_NOTICES = notice.HoldNoticeStore()
 
+# Which draft calls the relay has already decided, so the decision happens in
+# whichever of post_tool_call / transform_tool_result fires first and never
+# twice (see relay.DecidedOnce for the hook-order defect this closes).
+_DECIDED = relay.DecidedOnce()
+
 # The tool_call_id of the dispatch this thread is inside. ``_held`` is called
 # from eight sites with a signature that predates the notice, so the id rides
 # a thread-local rather than eight touched call sites. Set at hook entry and
@@ -571,11 +585,32 @@ def _enqueue_hold(
 
 
 def on_post_tool_call(**kwargs: Any) -> None:
-    """Relay the agent's governed draft back to a verified, rostered inbound sender.
+    """Relay the draft here unless ``transform_tool_result`` already did.
 
     Returns ``None`` always — ``post_tool_call`` cannot block (the draft is
-    already created); the relay performs an out-of-band send and never alters
-    the tool result. Exception-safe: any failure is logged and swallowed.
+    already created) and its return is ignored. Under the pinned Hermes this
+    hook fires AFTER ``transform_tool_result`` for the same call, so on the live
+    path the relay has normally already decided and this is a no-op; it still
+    decides when it is first (an older or future Hermes, or a call whose
+    transform never fired) or when the call carries no id. See
+    :class:`relay.DecidedOnce`.
+    """
+    if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
+        return
+    if _DECIDED.claim(kwargs.get("tool_call_id")) is False:
+        return
+    _relay_draft(**kwargs)
+
+
+def _relay_draft(**kwargs: Any) -> None:
+    """Relay the agent's governed draft back to a verified, rostered inbound sender.
+
+    The single relay decision for one draft call. Reached from whichever of
+    ``post_tool_call`` / ``transform_tool_result`` claims the call first, never
+    from both. A hold records its notice under the call id; the transform hook
+    drains it, so when the transform hook is the decider the notice it takes is
+    the one this call just recorded. Never alters the tool result itself.
+    Exception-safe: any failure is logged and swallowed.
     """
     if not _INFRA_READY:
         return
@@ -1080,11 +1115,12 @@ def on_transform_tool_result(**kwargs: Any) -> str | None:
     """Tell the agent, in this turn, that its reply was held (ss-console#2367).
 
     Hermes contract (``model_tools.py:847-861``): the first hook return that is
-    a ``str`` REPLACES the tool result, and this hook fires immediately after
-    ``post_tool_call`` for the same ``tool_call_id``
-    (``plugins/hermes-smd-hook-probe/README.md:67``). So the hold reaches the
-    model attached to the very call that produced it, in-band, before the turn
-    can end.
+    a ``str`` REPLACES the tool result. This hook makes the relay decision
+    itself when it is the first hook to reach the call (the pinned Hermes fires
+    it BEFORE the terminal ``post_tool_call``), then drains whatever hold that
+    decision, or an earlier ``post_tool_call``'s, recorded for this call. So the
+    hold reaches the model attached to the very call that produced it, in-band,
+    before the turn can end, under either hook order.
 
     Returns ``None`` — leaving the result untouched — for every tool that is not
     a draft creation and for every draft that was relayed, held for automatic
@@ -1100,6 +1136,16 @@ def on_transform_tool_result(**kwargs: Any) -> str | None:
         if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
             return None
         tool_call_id = kwargs.get("tool_call_id")
+        # Decide here when this hook is first for the call. At the pinned Hermes
+        # it always is: the executor's terminal post_tool_call fires after this
+        # hook, so a relay that waited for it recorded its hold notice after the
+        # only seam that could carry it had already passed (REPLY_HELD with the
+        # agent told nothing). The claim keeps it to one decision per call under
+        # either order. A call with no id keeps the legacy shape (post decides),
+        # because without a key a second call is indistinguishable from the
+        # second hook of the first.
+        if _DECIDED.claim(tool_call_id) is True:
+            _relay_draft(**kwargs)
         held = _HOLD_NOTICES.take(tool_call_id if isinstance(tool_call_id, str) else "")
         if held is None:
             return None

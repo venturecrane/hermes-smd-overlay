@@ -8,6 +8,7 @@ load-bearing property, so it gets explicit coverage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -2227,3 +2228,132 @@ def test_every_shortfall_timestamp_carries_an_explicit_zone(tmp_path):
     # Ordered by instant across spellings: +00:00 at 14:00 before Z at 15:00.
     order = [e["code"] for e in facts.events]
     assert order.index("error") < order.index("too_long")
+
+
+# ---------------------------------------------------------------------------
+# A held reply is a shortfall (2026-10-05). The relay held a reply on the output
+# checklist, the agent was never told, and SMD heard nothing either: the only
+# record was a REPLY_HELD row. These pin that the row now pages as ``failed``,
+# that a hold the person was made whole on does not, and that nothing the row
+# carries about the person (address, message id, text) reaches the wire.
+# ---------------------------------------------------------------------------
+
+_SYNTH_ADDRESS = "pat.example@firm.example"
+_SYNTH_MESSAGE = "<msg-held-0001@firm.example>"
+
+
+def _reply_row(led, ts, action_type, *, message_id=_SYNTH_MESSAGE, **meta):
+    led.add(
+        ts,
+        action_type,
+        {
+            "customer": "acme",
+            "reply_channel": True,
+            "recipient": _SYNTH_ADDRESS,
+            "message_id": message_id,
+            "session_id": _PERSON_SESSION,
+            **meta,
+        },
+    )
+
+
+def test_a_held_reply_is_a_failed_shortfall(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _reply_row(
+            led, _ts(2), "REPLY_HELD", reason="output_checklist", rules="caps_emphasis"
+        ),
+    )
+    assert facts.count == 1 and facts.failed == 1
+    event = facts.events[0]
+    assert set(event) == SHORTFALL_EVENT_KEYS
+    assert event["class"] == "failed"
+    assert event["code"] == "reply_held:output_checklist"
+    assert event["tool"] == hb.REPLY_RELAY_TOOL
+    assert event["ts"] == _ts(2)
+    assert _ZONED_ISO.match(event["ts"])
+
+    assert event["key"] == "failed:" + hashlib.sha256(b"row0001").hexdigest()[:32]
+
+
+def test_a_reply_hold_never_puts_the_person_on_the_wire(tmp_path):
+    """Address, inbound message id, the checklist's quoted fragment and any body
+    text the row might carry: none of it reaches the payload."""
+    body = "URGENT: the Testclient hearing file needs you"
+
+    def build(led):
+        _reply_row(
+            led,
+            _ts(3),
+            "REPLY_HELD",
+            reason="output_checklist",
+            rules="caps_emphasis",
+            detail="'URGENT'",
+            body=body,
+            draft_to=[_SYNTH_ADDRESS],
+        )
+        _reply_row(led, _ts(2), "REPLY_FAILED", message_id="<m2@firm.example>", reason=body)
+
+    facts = _shortfalls(tmp_path, build)
+    assert [e["code"] for e in facts.events] == [
+        "reply_held:output_checklist",
+        "reply_failed:send_error",
+    ]
+    payload = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        shortfalls=facts.count,
+        shortfalls_last_ts=facts.last_ts,
+        shortfalls_json=facts.events,
+    )
+    wire = json.dumps(payload)
+    for leaked in (_SYNTH_ADDRESS, "firm.example", "msg-held", "m2@", "URGENT", "Testclient"):
+        assert leaked not in wire
+
+
+def test_an_unknown_hold_reason_rides_as_other_not_as_written(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _reply_row(led, _ts(1), "REPLY_HELD", reason="something new: with text"),
+    )
+    assert [e["code"] for e in facts.events] == ["reply_held:other"]
+
+
+def test_reply_holds_the_person_was_made_whole_on_are_not_shortfalls(tmp_path):
+    """Queued for automatic release; a duplicate of a reply already sent; a hold
+    the agent redrafted past (a LATER REPLY_SENT for the same inbound)."""
+
+    def build(led):
+        _reply_row(led, _ts(5), "REPLY_HELD", reason="rate_limited", held_for_release=True)
+        _reply_row(led, _ts(4), "REPLY_HELD", reason="duplicate_reply", message_id="<m-dup>")
+        _reply_row(led, _ts(3), "REPLY_HELD", reason="output_checklist", message_id="<m-fix>")
+        led.add(_ts(2.9), "REPLY_SENT", {"in_reply_to": "<m-fix>", "recipient": _SYNTH_ADDRESS})
+
+    assert _shortfalls(tmp_path, build).count == 0
+
+
+def test_a_send_before_the_hold_does_not_clear_it(tmp_path):
+    def build(led):
+        led.add(_ts(4), "REPLY_SENT", {"in_reply_to": _SYNTH_MESSAGE})
+        _reply_row(led, _ts(3), "REPLY_HELD", reason="sender_not_on_roster")
+
+    facts = _shortfalls(tmp_path, build)
+    assert [e["code"] for e in facts.events] == ["reply_held:sender_not_on_roster"]
+
+
+def test_reply_failed_codes_are_closed(tmp_path):
+    def build(led):
+        _reply_row(led, _ts(3), "REPLY_FAILED", message_id="<a>", reason="hold_expired")
+        _reply_row(
+            led, _ts(2), "REPLY_FAILED", message_id="<b>", reason="act_line_undelivered: boom"
+        )
+
+    facts = _shortfalls(tmp_path, build)
+    assert [e["code"] for e in facts.events] == [
+        "reply_failed:hold_expired",
+        "reply_failed:act_line_undelivered",
+    ]
+    assert facts.failed == 2

@@ -64,7 +64,7 @@ grep '"event": "hermes_smd_hook_probe"' ~/.hermes/logs/hermes.log | jq -s 'sort_
 After a test scenario runs, the sorted output must satisfy all of the following:
 
 - `pre_tool_call` MUST fire before `post_tool_call` for the same `tool_call_id`.
-- `post_tool_call` MUST fire before `transform_tool_result` for the same `tool_call_id`.
+- `post_tool_call` and `transform_tool_result` BOTH fire for the same `tool_call_id`, in EITHER order. This used to read "post MUST fire before transform"; on the agent executor's path at the pinned Hermes the terminal `post_tool_call` fires after `transform_tool_result` (probe, 2026-10-05: transform seq 23, post seq 24), so no plugin may depend on the order.
 - `pre_llm_call` MUST fire before `post_llm_call` for the same `session_id` within a turn.
 - `on_session_end` MAY fire from either the primary site (per-turn, `run_agent.py:16016-16024`) or the safety-net site (interrupted CLI exit, `cli.py:13831-13839`) but NOT both for the same turn.
 

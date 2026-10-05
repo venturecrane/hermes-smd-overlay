@@ -254,6 +254,57 @@ class RepliedOnce:
             self._index.clear()
 
 
+class DecidedOnce:
+    """One relay decision per ``tool_call_id``, whichever hook reaches it first.
+
+    The relay used to decide only in ``post_tool_call`` and tell the agent in
+    ``transform_tool_result``, on the documented premise that post fires first.
+    At the pinned Hermes the agent executor suppresses the inner post hook and
+    fires its own terminal ``post_tool_call`` AFTER ``handle_function_call`` has
+    already run ``transform_tool_result`` (``agent/tool_executor.py`` ~1535,
+    ``model_tools.py`` ~944-945). So the hold notice was recorded after the only
+    seam that could carry it had already passed, and the agent closed its turn
+    telling the person the reply was on its way.
+
+    Both hooks now ask this register before relaying. The first to ask for a
+    call id decides; every later ask for that id is told no, so a reply is never
+    held twice, sent twice, or audited twice, under either hook order.
+
+    An EMPTY call id is never claimed (``claim`` returns ``None``): with no key
+    there is no way to tell one call's second hook from a second call, and a
+    false "already decided" would silently drop a real reply. The caller treats
+    ``None`` as the legacy single-decider path.
+
+    Bounded and thread-safe. Entries persist after both hooks fire (rather than
+    being popped by the second) so a third firing, a retried dispatch or a
+    second registrant, still cannot decide again.
+    """
+
+    def __init__(self, max_entries: int = 1024) -> None:
+        self._max = max(1, int(max_entries))
+        self._seen: deque[str] = deque(maxlen=self._max)
+        self._index: set[str] = set()
+        self._lock = threading.Lock()
+
+    def claim(self, tool_call_id: Any) -> bool | None:
+        """True: this caller decides. False: already decided. None: no key."""
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return None
+        with self._lock:
+            if tool_call_id in self._index:
+                return False
+            if len(self._seen) == self._max and self._seen:
+                self._index.discard(self._seen[0])
+            self._seen.append(tool_call_id)
+            self._index.add(tool_call_id)
+            return True
+
+    def _reset_for_tests(self) -> None:
+        with self._lock:
+            self._seen.clear()
+            self._index.clear()
+
+
 def gate_body(
     scan_text: str,
     *,
@@ -555,6 +606,7 @@ def authored_digests(*, text: str, html: str) -> dict[str, str]:
 
 __all__ = [
     "AGENTMAIL_API_BASE",
+    "DecidedOnce",
     "GateResult",
     "RateLimiter",
     "RelaySendError",
