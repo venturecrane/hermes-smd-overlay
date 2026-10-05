@@ -35,10 +35,12 @@ key out of the agent.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -101,6 +103,11 @@ class AuditLedgerFacts(NamedTuple):
     #: when the seat cannot answer; ``{}`` when no watched tool ran in the
     #: window. The console holds on the first and on an absent key.
     tool_failures: dict[str, dict] | None = None
+    #: ss-console shortfall notifications (``count_shortfalls``). All three
+    #: ``None`` when the seat cannot answer, so the console holds.
+    shortfalls: int | None = None
+    shortfalls_last_ts: str | None = None
+    shortfalls_json: list[dict] | None = None
 
 
 class SendRefusalFacts(NamedTuple):
@@ -275,7 +282,7 @@ def _refused_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list
         " AND ("
         "   (action_type = 'TOOL_CALL_COMPLETED'"
         "    AND json_extract(metadata,'$.outcome') IS NOT NULL"
-        "    AND json_extract(metadata,'$.outcome') <> 'ok'"
+        "    AND json_extract(metadata,'$.outcome') NOT IN ('ok', 'shortfall')"
         "    AND json_extract(metadata,'$.resolved_action_class') LIKE 'external\\_send%' ESCAPE '\\'"
         "    AND (json_extract(metadata,'$.cron_job_id') IS NOT NULL"
         "         OR json_extract(metadata,'$.session_id') LIKE 'cron\\_%' ESCAPE '\\'))"
@@ -538,10 +545,12 @@ def count_tool_failures(conn: sqlite3.Connection, now: datetime) -> dict[str, di
       the console, never a verdict: a seat nobody has spoken to today has
       neither failed nor recovered.
 
-    A failure is any outcome that is not ``ok``: an ``error`` (the tool raised
-    or returned an error shape) and a ``blocked`` (a hook refused it) both
-    leave the person without the thing they asked for, and the alert is about
-    that, not about whose fault it was.
+    A failure is any outcome that is not ``ok`` or ``shortfall``: an ``error``
+    (the tool raised or returned an error shape) and a ``blocked`` (a hook
+    refused it) both leave the person without the thing they asked for, and the
+    alert is about that, not about whose fault it was. A ``shortfall`` (v3: the
+    tool answered with a refusal or an unreadable verdict) scored ``ok`` before
+    v3 and still ends the run here; it is ``count_shortfalls``' to report.
 
     Raises on a ledger this query cannot run against (no ``metadata`` column,
     no JSON1). The caller runs it in its own try and omits the field, so a seat
@@ -570,6 +579,12 @@ def count_tool_failures(conn: sqlite3.Connection, now: datetime) -> dict[str, di
     return out
 
 
+#: Outcomes that end a failure run. ``shortfall`` is the tool answering (a
+#: refusal, an unreadable verdict): it was ``ok`` before outcome semantics v3,
+#: and the watched-tool pager keeps the meaning it was built with.
+_NOT_A_FAILURE = frozenset({"ok", "shortfall"})
+
+
 def _tool_failure_entry(rows: list[tuple]) -> dict | None:
     """One tool's entry from its rows, newest first.
 
@@ -581,13 +596,13 @@ def _tool_failure_entry(rows: list[tuple]) -> dict | None:
     ts0, outcome0, _ = rows[0]
     if outcome0 is None:
         return None
-    if outcome0 == "ok":
+    if outcome0 in _NOT_A_FAILURE:
         return {"consecutive_failures": 0, "last_ok_ts": str(ts0)}
     run = 0
     first_error_ts = str(ts0)
     last_error = ""
     for ts, outcome, error_type in rows:
-        if outcome is None or outcome == "ok":
+        if outcome is None or outcome in _NOT_A_FAILURE:
             break
         run += 1
         first_error_ts = str(ts)
@@ -599,6 +614,411 @@ def _tool_failure_entry(rows: list[tuple]) -> dict | None:
         "last_error_ts": str(ts0),
         "last_error": last_error,
     }
+
+
+class ShortfallFacts(NamedTuple):
+    """A day of a seat's shortfalls: every time the Operator could not give the
+    person what they asked for (ss-console shortfall notifications).
+
+    ``count`` is every event in the window, uncapped; ``last_ts`` the newest
+    one's (the console's paging marker, the same role ``send_refusals_last_ts``
+    plays); ``events`` the OLDEST ``_SHORTFALL_EVENT_CAP`` in wire shape. The
+    per-class integers are for the retro-falsifier, not the wire.
+    """
+
+    count: int
+    last_ts: str | None
+    events: list[dict]
+    not_allowed: int = 0
+    limit: int = 0
+    failed: int = 0
+    partial: int = 0
+
+
+#: Trailing window, a day, for the reason ``SEND_REFUSAL_WINDOW_HOURS`` gives.
+SHORTFALL_WINDOW_HOURS = 24
+
+#: How many events ride the beat. The console keys each on ``key`` and upserts,
+#: so an event that misses this beat's cap rides a later one; twenty is enough
+#: to show a pattern without making the beat heavy.
+_SHORTFALL_EVENT_CAP = 20
+
+#: The four classes. "not_allowed" is policy saying no (a weekly digest);
+#: "limit" is a cap the person can act on; "failed" is the tool breaking;
+#: "partial" is a run that read more than it accounted for. The last three page.
+SHORTFALL_CLASSES = ("not_allowed", "limit", "failed", "partial")
+
+#: Codes that are a CAP rather than a breakage. Each is a token a tool or gate
+#: writes: the connector's vision and read caps (ss-console
+#: ``smokeball_connector/extract.py``, ``letter_tools.py``), the read-volume
+#: gate's prefix, medchron's spent allowance, and the mail spool's size cap.
+SHORTFALL_LIMIT_CODES = frozenset(
+    {
+        "over_page_cap",
+        "over_byte_cap",
+        "too_long",
+        "READ_VOLUME_GATE",
+        "allowance_spent",
+        "over_size_cap",
+        "over_attachment_cap",
+        "too_many_attachments",
+    }
+)
+
+#: The one routine whose runs are checked for pages read and not accounted
+#: for. The mail routine is reached by the router reading its procedure inside
+#: a webhook turn (``emit.skill_procedure`` stamps that read), or as a routine
+#: (``skill_name``). A person asking the Operator to read one letter reads a
+#: bundle too, and is not a run that owes a filing for every page.
+MAIL_ROUTINE_SKILL = "combined-post-intake"
+
+#: A mail session with no closing turn row is judged this long after its last
+#: call; before then it may still be filing, and a page for a run mid-turn
+#: would be a page for nothing.
+_PARTIAL_IDLE_SECONDS = 30 * 60
+
+_CODE_SAFE_RE = re.compile(r"[^A-Za-z0-9_:. -]")
+_CODE_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
+_GATE_PREFIX_RE = re.compile(r"^([A-Z][A-Z0-9_]{2,79}):")
+_FIELD_MAX = 80
+
+
+def _clip(value: object, limit: int = _FIELD_MAX) -> str:
+    return str(value or "")[:limit]
+
+
+def _safe_code(value: object) -> str:
+    return _CODE_SAFE_RE.sub("", str(value or ""))[:_FIELD_MAX]
+
+
+def _token(value: object) -> str | None:
+    if isinstance(value, str) and _CODE_TOKEN_RE.match(value.strip()):
+        return value.strip()
+    return None
+
+
+def _event_key(cls: str, row_id: object) -> str:
+    return f"{cls}:" + hashlib.sha256(str(row_id).encode("utf-8")).hexdigest()[:32]
+
+
+_ZONED_TS_RE = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
+
+
+def _zoned_ts(value: object) -> str:
+    """The audit row's own ``ts``, with an explicit zone.
+
+    The console's ingest refuses a zone-less ISO timestamp, so this is the raw
+    row ``ts`` (``...123Z`` from ``shared.ids.iso_utc``, ``...+00:00`` from
+    older writers), the same value ``send_refusals`` carries, never the
+    19-character comparison prefix. Every audit ``ts`` is UTC by construction,
+    so a row written without a zone is stamped ``Z`` rather than sent bare.
+    """
+    text = str(value or "").strip()
+    return text if _ZONED_TS_RE.search(text) else text + "Z"
+
+
+def _shortfall_event(*, ts, cls, tool, routine, code, key) -> dict:
+    """One wire-shaped event: exactly the six contract keys, all bounded.
+
+    ``ts`` is zoned ISO-8601 (``_zoned_ts``); ``tool`` is never empty;
+    ``routine`` is ``None`` when nothing names one.
+    """
+    return {
+        "ts": _zoned_ts(ts),
+        "class": cls,
+        "tool": _clip(tool) or "unknown_tool",
+        "routine": _clip(routine) if routine else None,
+        "code": _safe_code(code),
+        "key": _clip(key, 128),
+    }
+
+
+def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
+    """Every time in the trailing day the Operator could not give a person what
+    they asked for. THE PURE QUERY: the ticker and the retro-falsifier
+    (``tests/tools/shortfalls_retro.py``) both call exactly this.
+
+    ALL sessions, person and cron alike, unlike ``_refused_events``: the person
+    who saw a polite refusal in their own thread is exactly who SMD otherwise
+    never hears about.
+
+    * ``not_allowed`` — the trust gate refused the call (``trust_decision =
+      'refuse'``), a plugin blocked it (``plugin_block``), or a banned tool
+      reached the post seam. Code: the gate's prefix token, else
+      ``trust_refuse`` / ``plugin_block`` / ``banned_tool``. A read-volume
+      refusal is a commercial CAP, so it is filed under ``limit`` instead.
+    * ``limit`` / ``failed`` — a ``shortfall`` or ``error`` row with NO later
+      ``ok`` call of the same tool on the same object (``object_digest``) in
+      the same session. A refusal the model then retried successfully left the
+      person with what they asked for, and is not an event. ``limit`` when the
+      code is in ``SHORTFALL_LIMIT_CODES``; ``failed`` otherwise, including a
+      pre-call callback that timed out.
+    * ``partial`` — a mail-routine session (``MAIL_ROUTINE_SKILL``) that has
+      CLOSED (a turn completed after its last call, or ``_PARTIAL_IDLE_SECONDS``
+      of quiet) and read a bundle whose pages filed plus pages held for approval
+      are fewer than its ``bundle_page_count``. Filed and pending pages are
+      unioned across every session in the window, keyed on the bundle's
+      sha256, so a held page approved and filed in a later turn still counts.
+      Code: ``filed N of M``. Key: ``partial:<bundle sha256>``.
+
+    Raises on a ledger this query cannot run against; the caller omits the
+    fields so the console holds rather than reading a reassuring zero.
+    """
+    cutoff = _iso_floor(_as_utc(now).isoformat())
+    horizon = _iso_floor((_as_utc(now) - timedelta(hours=SHORTFALL_WINDOW_HOURS)).isoformat())
+    rows = conn.execute(
+        "SELECT id, ts, action_type, skill_name,"
+        " json_extract(metadata,'$.tool') AS tool,"
+        " json_extract(metadata,'$.outcome') AS outcome,"
+        " json_extract(metadata,'$.error_type') AS error_type,"
+        " json_extract(metadata,'$.shortfall_code') AS shortfall_code,"
+        " json_extract(metadata,'$.trust_decision') AS trust_decision,"
+        " json_extract(metadata,'$.trust_reason') AS trust_reason,"
+        " json_extract(metadata,'$.plugin_block') AS plugin_block,"
+        " json_extract(metadata,'$.callback_timeout') AS callback_timeout,"
+        " json_extract(metadata,'$.banned_tool') AS banned_tool,"
+        " json_extract(metadata,'$.session_id') AS session_id,"
+        " json_extract(metadata,'$.object_digest') AS object_digest,"
+        " json_extract(metadata,'$.routine') AS routine,"
+        " json_extract(metadata,'$.skill') AS skill,"
+        " json_extract(metadata,'$.skill_procedure') AS procedure,"
+        " json_extract(metadata,'$.bundle_sha256') AS bundle_sha256,"
+        " json_extract(metadata,'$.bundle_page_count') AS bundle_page_count,"
+        " json_extract(metadata,'$.bundle_pages_filed') AS bundle_pages_filed,"
+        " json_extract(metadata,'$.bundle_pages_pending') AS bundle_pages_pending"
+        " FROM audit_log"
+        " WHERE action_type IN ('TOOL_CALL_COMPLETED', 'INVARIANT_VIOLATION')"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+        " ORDER BY ts, id",
+        (horizon, cutoff),
+    ).fetchall()
+    calls = [_CallRow(*row) for row in rows]
+
+    # The procedure each session was running, for an event's ``routine`` when
+    # the row itself names none (a webhook turn has no cron routine).
+    procedure_by_session: dict[str, str] = {}
+    for call in calls:
+        if call.session_id and call.procedure and call.session_id not in procedure_by_session:
+            procedure_by_session[call.session_id] = call.procedure
+
+    events: list[dict] = []
+    tally = {cls: 0 for cls in SHORTFALL_CLASSES}
+    for index, call in enumerate(calls):
+        verdict = _classify_call(call, calls, index)
+        if verdict is None:
+            continue
+        cls, code = verdict
+        tally[cls] += 1
+        events.append(
+            _shortfall_event(
+                ts=call.ts,
+                cls=cls,
+                tool=call.tool,
+                routine=(
+                    call.routine
+                    or call.skill
+                    or call.skill_name
+                    or procedure_by_session.get(call.session_id or "")
+                ),
+                code=code,
+                key=_event_key(cls, call.row_id),
+            )
+        )
+    for event in _partial_events(conn, calls, cutoff):
+        tally["partial"] += 1
+        events.append(event)
+
+    # Ordered by INSTANT (the fixed-width prefix), not by spelling: ``Z`` and
+    # ``+00:00`` rows sort differently as strings.
+    events.sort(key=lambda e: (_iso_floor(e["ts"]), e["key"]))
+    return ShortfallFacts(
+        count=len(events),
+        last_ts=events[-1]["ts"] if events else None,
+        events=events[:_SHORTFALL_EVENT_CAP],
+        not_allowed=tally["not_allowed"],
+        limit=tally["limit"],
+        failed=tally["failed"],
+        partial=tally["partial"],
+    )
+
+
+class _CallRow(NamedTuple):
+    row_id: str
+    ts: str
+    action_type: str
+    skill_name: str | None
+    tool: str | None
+    outcome: str | None
+    error_type: str | None
+    shortfall_code: str | None
+    trust_decision: str | None
+    trust_reason: str | None
+    plugin_block: object
+    callback_timeout: object
+    banned_tool: object
+    session_id: str | None
+    object_digest: str | None
+    routine: str | None
+    skill: str | None
+    procedure: str | None
+    bundle_sha256: str | None
+    bundle_page_count: object
+    bundle_pages_filed: str | None
+    bundle_pages_pending: str | None
+
+
+def _classify_call(call: _CallRow, calls: list[_CallRow], index: int) -> tuple[str, str] | None:
+    """``(class, code)`` for one call row, or ``None`` when it is not an event."""
+    if call.action_type == "INVARIANT_VIOLATION":
+        return ("not_allowed", "banned_tool") if call.banned_tool else None
+    if call.trust_decision == "refuse":
+        reason = call.trust_reason if isinstance(call.trust_reason, str) else ""
+        prefix = _GATE_PREFIX_RE.match(reason)
+        if prefix and prefix.group(1) in SHORTFALL_LIMIT_CODES:
+            if _retried_ok(call, calls, index):
+                return None
+            return ("limit", prefix.group(1))
+        return ("not_allowed", prefix.group(1) if prefix else "trust_refuse")
+    if call.plugin_block:
+        return ("not_allowed", "plugin_block")
+    if call.callback_timeout:
+        return None if _retried_ok(call, calls, index) else ("failed", "callback_timeout")
+    if call.outcome not in ("shortfall", "error"):
+        return None
+    if _retried_ok(call, calls, index):
+        return None
+    if call.outcome == "shortfall":
+        code = _token(call.shortfall_code) or "shortfall"
+    else:
+        code = _token(call.error_type) or "error"
+    return ("limit" if code in SHORTFALL_LIMIT_CODES else "failed", code)
+
+
+def _retried_ok(call: _CallRow, calls: list[_CallRow], index: int) -> bool:
+    """A LATER ``ok`` call of the same tool on the same object in the same
+    session: the model recovered, and the person got what they asked for.
+
+    No session id means no way to say which later call was the retry, so
+    nothing clears it: an unjoinable row pages rather than vanishing.
+    """
+    if not call.session_id:
+        return False
+    for later in calls[index + 1 :]:
+        if (
+            later.session_id == call.session_id
+            and later.tool == call.tool
+            and later.object_digest == call.object_digest
+            and later.outcome == "ok"
+            and later.trust_decision != "refuse"
+        ):
+            return True
+    return False
+
+
+def _page_ranges(raw: object) -> list[tuple[int, int]]:
+    """``[[first, last], ...]`` as stored by ``emit.bundle_stamps``; anything
+    else contributes no pages."""
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    out: list[tuple[int, int]] = []
+    if not isinstance(value, list):
+        return out
+    for item in value:
+        if (
+            isinstance(item, list)
+            and len(item) == 2
+            and all(isinstance(n, int) and not isinstance(n, bool) for n in item)
+            and 1 <= item[0] <= item[1]
+        ):
+            out.append((item[0], item[1]))
+    return out
+
+
+def _is_mail_session(calls: list[_CallRow], session_id: str) -> bool:
+    for call in calls:
+        if call.session_id != session_id:
+            continue
+        if MAIL_ROUTINE_SKILL in (call.procedure, call.skill, call.skill_name) or (
+            isinstance(call.routine, str) and call.routine.endswith(MAIL_ROUTINE_SKILL)
+        ):
+            return True
+    return False
+
+
+def _session_closed(
+    conn: sqlite3.Connection, session_id: str, last_call_ts: str, cutoff: str
+) -> bool:
+    if _plus_seconds(last_call_ts, _PARTIAL_IDLE_SECONDS) <= cutoff:
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM audit_log WHERE action_type = 'LLM_TURN_COMPLETED'"
+        " AND json_extract(metadata,'$.session_id') = ?"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ? LIMIT 1",
+        (session_id, last_call_ts, cutoff),
+    ).fetchone()
+    return row is not None
+
+
+def _partial_events(conn: sqlite3.Connection, calls: list[_CallRow], cutoff: str) -> list[dict]:
+    """One ``partial`` per bundle a closed mail-routine session read and did not
+    account for page by page."""
+    accounted: dict[str, set[int]] = {}
+    for call in calls:
+        if not call.bundle_sha256:
+            continue
+        pages = accounted.setdefault(call.bundle_sha256, set())
+        for first, last in _page_ranges(call.bundle_pages_filed) + _page_ranges(
+            call.bundle_pages_pending
+        ):
+            pages.update(range(first, last + 1))
+
+    last_ts_by_session: dict[str, str] = {}
+    for call in calls:
+        if call.session_id:
+            last_ts_by_session[call.session_id] = call.ts
+
+    # bundle sha -> (page count, read row) from mail-session reads, newest read wins
+    reads: dict[str, tuple[int, _CallRow]] = {}
+    mail_sessions: dict[str, bool] = {}
+    for call in calls:
+        count = call.bundle_page_count
+        if (
+            not call.bundle_sha256
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 1
+            or not call.session_id
+        ):
+            continue
+        if call.session_id not in mail_sessions:
+            mail_sessions[call.session_id] = _is_mail_session(calls, call.session_id)
+        if not mail_sessions[call.session_id]:
+            continue
+        if not _session_closed(
+            conn, call.session_id, _iso_floor(last_ts_by_session[call.session_id]), cutoff
+        ):
+            continue
+        previous = reads.get(call.bundle_sha256)
+        reads[call.bundle_sha256] = (max(count, previous[0]) if previous else count, call)
+
+    out: list[dict] = []
+    for sha, (count, read) in reads.items():
+        done = len({p for p in accounted.get(sha, set()) if 1 <= p <= count})
+        if done >= count:
+            continue
+        out.append(
+            _shortfall_event(
+                ts=last_ts_by_session[read.session_id or ""],
+                cls="partial",
+                tool=read.tool,
+                routine=MAIL_ROUTINE_SKILL,
+                code=f"filed {done} of {count}",
+                key=f"partial:{sha}",
+            )
+        )
+    return out
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -670,6 +1090,13 @@ def read_audit_facts(db_path: str | None) -> AuditLedgerFacts:
             tool_failures = count_tool_failures(conn, datetime.now(timezone.utc))
         except (sqlite3.Error, ValueError) as exc:
             logger.debug("heartbeat: watched-tool read unavailable: %s", exc)
+        # Shortfalls, in their own try for the same reason again: "could not
+        # look" omits all three fields, and is never reported as zero.
+        shortfalls: ShortfallFacts | None = None
+        try:
+            shortfalls = count_shortfalls(conn, datetime.now(timezone.utc))
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            logger.debug("heartbeat: shortfall read unavailable: %s", exc)
         return AuditLedgerFacts(
             last_audit,
             last_skill,
@@ -679,6 +1106,9 @@ def read_audit_facts(db_path: str | None) -> AuditLedgerFacts:
             refusals.last_ts if refusals is not None else None,
             refusals.events if refusals is not None else None,
             tool_failures,
+            shortfalls.count if shortfalls is not None else None,
+            shortfalls.last_ts if shortfalls is not None else None,
+            shortfalls.events if shortfalls is not None else None,
         )
     except sqlite3.Error:
         # DB exists but audit_log table not created yet, or a transient lock.
@@ -731,6 +1161,9 @@ def build_payload(
     send_refusals_last_ts: str | None = None,
     send_refusals_json: list[dict] | None = None,
     tool_failures: dict[str, dict] | None = None,
+    shortfalls: int | None = None,
+    shortfalls_last_ts: str | None = None,
+    shortfalls_json: list[dict] | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -865,6 +1298,16 @@ def build_payload(
     # None (the seat cannot read its ledger) stays absent so the console holds.
     if tool_failures is not None:
         payload["tool_failures"] = tool_failures
+    # ss-console shortfall notifications. The send-refusal discipline exactly:
+    # 0 is the value that says "nothing fell short today" and must reach the
+    # wire; the timestamp is the paging marker; the events carry class, tool,
+    # routine and a closed-vocabulary code, never a word of anyone's document.
+    if shortfalls is not None:
+        payload["shortfalls"] = shortfalls
+    if shortfalls_last_ts:
+        payload["shortfalls_last_ts"] = shortfalls_last_ts
+    if shortfalls_json is not None:
+        payload["shortfalls_json"] = shortfalls_json
     return payload
 
 
@@ -1255,6 +1698,9 @@ class HeartbeatEmitter:
             send_refusals_last_ts=ledger.send_refusals_last_ts,
             send_refusals_json=ledger.send_refusals_json,
             tool_failures=ledger.tool_failures,
+            shortfalls=ledger.shortfalls,
+            shortfalls_last_ts=ledger.shortfalls_last_ts,
+            shortfalls_json=ledger.shortfalls_json,
         )
         import json
 
@@ -1380,8 +1826,13 @@ __all__ = [
     "WATCHED_TOOLS",
     "AuditLedgerFacts",
     "HeartbeatEmitter",
+    "MAIL_ROUTINE_SKILL",
+    "SHORTFALL_CLASSES",
+    "SHORTFALL_LIMIT_CODES",
+    "ShortfallFacts",
     "build_payload",
     "count_send_refusals",
+    "count_shortfalls",
     "count_tool_failures",
     "emitter_from_env",
     "read_audit_facts",

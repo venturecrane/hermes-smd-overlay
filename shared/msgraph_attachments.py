@@ -48,6 +48,11 @@ class MsGraphAttachmentError(RuntimeError):
     """
 
 
+class MsGraphAttachmentOverSize(MsGraphAttachmentError, attachment_spool.SpoolOverSizeError):
+    """Over the spool ceiling: both a Graph attachment error and the spool's
+    named over-size refusal, so a caller can catch either."""
+
+
 #: The ``@odata.type`` values whose bytes are a document.
 #:
 #: ``fileAttachment`` is a file someone attached. The other two are not, and
@@ -260,7 +265,7 @@ def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
 
     stated = meta.get("size")
     if isinstance(stated, int) and stated > attachment_spool.MAX_SPOOL_BYTES:
-        raise MsGraphAttachmentError(
+        raise MsGraphAttachmentOverSize(
             f"Graph says the attachment is {stated} bytes, over the "
             f"{attachment_spool.MAX_SPOOL_BYTES}-byte spool limit; it is not spooled"
         )
@@ -271,7 +276,7 @@ def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
     except msgraph_client.MsGraphApiError as exc:
         raise MsGraphAttachmentError(f"the attachment's bytes could not be fetched: {exc}") from exc
     if len(blob) > attachment_spool.MAX_SPOOL_BYTES:
-        raise MsGraphAttachmentError(
+        raise MsGraphAttachmentOverSize(
             f"the attachment is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; it is not spooled"
         )
     if isinstance(stated, int) and len(blob) > stated:
@@ -353,7 +358,7 @@ def spool_message(message_id: str, mailbox: Any = None) -> dict[str, Any]:
     except msgraph_client.MsGraphApiError as exc:
         raise MsGraphAttachmentError(f"the message's bytes could not be fetched: {exc}") from exc
     if len(blob) > attachment_spool.MAX_SPOOL_BYTES:
-        raise MsGraphAttachmentError(
+        raise MsGraphAttachmentOverSize(
             f"the message is over the {attachment_spool.MAX_SPOOL_BYTES}-byte limit; "
             "it is not spooled"
         )

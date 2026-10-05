@@ -33,8 +33,10 @@ Substrate invariants preserved across the port:
     dispatcher is never destabilized by an unloggable action.
 """
 
+import hashlib
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -58,6 +60,7 @@ from shared.cron_attribution import resolve_routine
 from shared.ids import iso_utc as _iso_utc
 from shared.ids import sha256 as _sha256
 from shared.ids import ulid as _ulid
+from shared.result_unwrap import parse_tool_result, peel_envelopes, unwrap_inbound
 from shared.trust_decision import MATCH_NONE, TRUST_DECISIONS, TrustDecision
 
 from .schemas import (
@@ -301,7 +304,9 @@ def build_per_tool_metadata(
     - action_class:         str (HookActionClass value) — the COARSE class, from
                             the tool name alone
     - ceiling_level:        str | None (the EFFECTIVE ceiling actually applied)
-    - outcome:              str ("ok" | "error" | "blocked")
+    - outcome:              str ("ok" | "error" | "blocked" | "shortfall")
+    - shortfall_code:       str — set when outcome is "shortfall" (v3): the
+                            closed-vocabulary reason token, never prose.
     - error_type:           str | None
     - duration_ms:          float | None
     - tool_call_id:         str | None — THE tool-call correlation key. audit_log
@@ -446,47 +451,48 @@ def build_per_tool_metadata(
 # Tools that surface a failure do so through one of these conventional shapes;
 # anything else is treated as success. We never FABRICATE an error — absence of
 # a recognized error signal yields "ok".
-_OUTCOME_SEMANTICS_VERSION = 2  # 1 = always-"ok" (bug); 2 = error-detecting.
+#
+# 1 = always-"ok" (bug); 2 = error-detecting; 3 = sees through the inbound
+# fence and the dispatcher envelope, and reports a tool that ANSWERED but did
+# not give the person what they asked for as "shortfall" (ss-console shortfall
+# notifications). A v3 "shortfall" row would have been "ok" under v2.
+_OUTCOME_SEMANTICS_VERSION = 3
+
+#: ``status`` values that mean the tool answered and did not do the thing. Each
+#: is a closed enum token a connector writes (ss-console
+#: ``operator/connectors/smokeball``: ``letter_tools._refused``,
+#: ``medicals_tools``), never prose.
+_SHORTFALL_STATUSES = frozenset(
+    {"refused", "needs_contact", "readback_mismatch", "link_not_visible"}
+)
+
+#: A token a shortfall ``code`` may carry: an enum word, never a sentence. A
+#: reason that is not token-shaped is prose (a refusal message, an exception
+#: string) and is replaced by the status word next to it, because prose can
+#: quote a client's name, a document's words, or an address.
+_CODE_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
+
+#: medchron's ``accepted: false`` carries a prose ``reason`` (the broker's
+#: sentence for the person). The refusals that are LIMITS rather than breakages
+#: are mapped to tokens here by phrase; every other refusal is
+#: ``not_accepted``. The phrases are the broker's own wording in ss-console
+#: ``operator/workspace_broker/medchron_verbs.py``.
+_MEDCHRON_REASON_CODES: tuple[tuple[str, str], ...] = (
+    ("allowance is spent", "allowance_spent"),
+    ("no page allowance is authored", "allowance_unauthored"),
+)
 
 
-def _outcome_from_result(result: Any) -> tuple[str, str | None]:
-    """Infer ``(outcome, error_type)`` from a Hermes tool result.
+def _code_token(value: Any) -> str | None:
+    """``value`` when it is an enum-shaped token, else ``None``."""
+    if isinstance(value, str) and _CODE_TOKEN_RE.match(value.strip()):
+        return value.strip()
+    return None
 
-    Hermes' ``post_tool_call`` passes ``result`` as a str (usually JSON).
-    Recording every call as ``"ok"`` — the prior behavior — makes the audit
-    ledger unable to distinguish a failed tool call from a successful one, which
-    is unacceptable for a compliance ledger. This helper now recognizes the
-    conventional structured-error shapes and reports ``"error"`` with the
-    upstream error type when present, while staying conservative: an
-    unparseable or unrecognized result is reported as ``"ok"`` (we never
-    fabricate an error). Outcome semantics are versioned
-    (``_OUTCOME_SEMANTICS_VERSION``) and stamped into metadata so an auditor can
-    tell error-detecting rows (v2+) from the legacy always-"ok" rows (v1)
-    without any historical row being rewritten.
 
-    Recognized error shapes (JSON object at the top level):
-      * ``{"error": <truthy>}``           → error_type from ``error_type``/
-        ``code``/``type`` if present, else the stringified ``error``.
-      * ``{"is_error": true}`` / ``{"isError": true}``
-      * ``{"status": "error"|"failure"|"failed"}`` /
-        ``{"ok": false}`` / ``{"success": false}``
-    """
-    if not isinstance(result, str) or not result:
-        # No inspectable payload — do not assert failure; the duration +
-        # registry carry the load-bearing signal. (Matches prior conservatism.)
-        return ("ok", None)
-
-    stripped = result.lstrip()
-    if not stripped.startswith("{"):
-        return ("ok", None)  # not a JSON object; nothing structured to read.
-
-    try:
-        parsed = json.loads(stripped)
-    except (ValueError, TypeError):
-        return ("ok", None)  # unparseable — fail toward "ok", never fabricate.
-
-    if not isinstance(parsed, dict):
-        return ("ok", None)
+def _error_shape(parsed: dict) -> tuple[str, str | None] | None:
+    """``("error", error_type)`` when ``parsed`` carries a recognized error
+    shape, else ``None``. The v2 rules, unchanged."""
 
     def _error_type(default: str | None) -> str | None:
         for key in ("error_type", "code", "type"):
@@ -505,8 +511,329 @@ def _outcome_from_result(result: Any) -> tuple[str, str | None]:
         return ("error", _error_type(status))
     if parsed.get("ok") is False or parsed.get("success") is False:
         return ("error", _error_type(None))
+    return None
 
+
+def _shortfall_code(parsed: dict) -> str | None:
+    """The closed-vocabulary code for a tool that answered and did not deliver,
+    or ``None`` when the answer is not a shortfall.
+
+    PROTOCOL IS NOT A SHORTFALL. ``read_attachment_pages`` answers a whole-bundle
+    read of a long bundle with ``windowRequired`` and refuses a malformed window
+    with a ``window_*`` reason; both are the tool telling the model how to ask,
+    and the model asking again is the expected next step.
+    """
+    status = parsed.get("status")
+    if isinstance(status, str) and status.strip().lower() in _SHORTFALL_STATUSES:
+        word = status.strip().lower()
+        if word == "refused":
+            return _code_token(parsed.get("reason")) or word
+        return word
+    if parsed.get("readable") is False:
+        reason = parsed.get("reason")
+        if isinstance(reason, str) and reason.startswith("window_"):
+            return None
+        return _code_token(reason) or "unreadable"
+    if parsed.get("accepted") is False:
+        reason = parsed.get("reason")
+        text = reason.lower() if isinstance(reason, str) else ""
+        for phrase, code in _MEDCHRON_REASON_CODES:
+            if phrase in text:
+                return code
+        return "not_accepted"
+    if parsed.get("needsHumanRead") is True:
+        return _code_token(parsed.get("extractionReason")) or "needs_human_read"
+    return None
+
+
+def _outcome_from_result(result: Any) -> tuple[str, str | None]:
+    """Infer ``(outcome, code)`` from a Hermes tool result.
+
+    Hermes' ``post_tool_call`` passes ``result`` as a str (usually JSON).
+    Recording every call as ``"ok"`` — the v1 behavior — makes the audit
+    ledger unable to distinguish a failed tool call from a successful one, which
+    is unacceptable for a compliance ledger. Outcome semantics are versioned
+    (``_OUTCOME_SEMANTICS_VERSION``) and stamped into metadata so an auditor can
+    tell the eras apart without any historical row being rewritten.
+
+    Outcomes:
+
+    * ``"error"`` — a recognized structured-error shape, with the upstream error
+      type as the second element:
+      ``{"error": <truthy>}`` → ``error_type``/``code``/``type`` if present,
+      else the stringified ``error``; ``{"is_error": true}`` /
+      ``{"isError": true}``; ``{"status": "error"|"failure"|"failed"}``;
+      ``{"ok": false}`` / ``{"success": false}``.
+    * ``"shortfall"`` (v3) — the tool ANSWERED and did not give the person what
+      they asked for: ``status`` in ``_SHORTFALL_STATUSES``, ``readable:
+      false``, ``accepted: false``, ``needsHumanRead: true``. The second
+      element is a closed-vocabulary CODE (``_shortfall_code``), never prose.
+    * ``"ok"`` — anything else, including an unparseable or unrecognized
+      result: we never fabricate a failure.
+
+    v3 READS THROUGH THE WRAPPERS FIRST (``shared.result_unwrap``). On Hermes
+    v0.20.4 ``transform_tool_result`` runs before ``post_tool_call``
+    (``hermes-smd-establishment`` ``on_post_tool_call``), so a fenced read
+    tool's result reached this function inside the quarantine fence, did not
+    start with ``{``, and scored ``ok``; an enveloped ``{"result": "<json>"}``
+    parsed to an object with no error keys and scored ``ok``. The OUTER object
+    is still checked for an error shape before the peel, so a wrapper that
+    itself reports failure (``{"ok": false, "result": ...}``) keeps the v2
+    verdict.
+    """
+    if isinstance(result, str) and result:
+        text = unwrap_inbound(result).lstrip()
+        if not text.startswith("{"):
+            return ("ok", None)  # not a JSON object; nothing structured to read.
+        try:
+            outer = json.loads(text)
+        except (ValueError, TypeError):
+            return ("ok", None)  # unparseable — fail toward "ok", never fabricate.
+    elif isinstance(result, dict):
+        outer = result
+    else:
+        # No inspectable payload — do not assert failure; the duration +
+        # registry carry the load-bearing signal.
+        return ("ok", None)
+
+    if not isinstance(outer, dict):
+        return ("ok", None)
+
+    error = _error_shape(outer)
+    if error is not None:
+        return error
+    inner = peel_envelopes(outer)
+    if not isinstance(inner, dict):
+        return ("ok", None)
+    if inner is not outer:
+        error = _error_shape(inner)
+        if error is not None:
+            return error
+    code = _shortfall_code(inner)
+    if code is not None:
+        return ("shortfall", code)
     return ("ok", None)
+
+
+# ---------------------------------------------------------------------------
+# Bundle stamps (ss-console shortfall notifications, the "partial" class)
+#
+# A day's post arrives as ONE scanned PDF. The mail routine reads it
+# (``read_attachment_pages``: ``sha256`` + ``pageCount``) and files it a page
+# range at a time (``file_attachment_pages_to_matter``, or
+# ``stage_vendor_invoice`` for a bill). On 2026-10-01 a 52-page bundle was read
+# and nothing was filed, and every call scored "ok": the pages that were never
+# filed had no row to be counted from. These stamps put the bundle's identity
+# and page arithmetic on the rows, so the heartbeat can compare pages read
+# against pages filed or held for approval. Hashes and integers only — never a
+# file name, a matter, or a word of the document.
+# ---------------------------------------------------------------------------
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+#: The connector tool names (after the ``mcp_<server>_`` prefix) that FILE a
+#: page range out of a read bundle.
+_FILING_TOOL_SUFFIXES = ("file_attachment_pages_to_matter", "stage_vendor_invoice")
+
+#: The success ``status`` each filing tool returns. Anything else filed nothing.
+_FILING_SUCCESS_STATUSES = frozenset({"filed", "staged"})
+
+#: The bundle READ tool. Its result names the bundle's ``sha256`` and
+#: ``pageCount`` on every answer, windowed or refused.
+_BUNDLE_READ_SUFFIX = "read_attachment_pages"
+
+
+def _tool_suffix_is(tool_name: str, suffix: str) -> bool:
+    return tool_name == suffix or tool_name.endswith("_" + suffix)
+
+
+def _sha_arg(args: dict | None) -> str | None:
+    if not isinstance(args, dict):
+        return None
+    value = args.get("sha256")
+    if isinstance(value, str) and _SHA256_RE.match(value.strip().lower()):
+        return value.strip().lower()
+    return None
+
+
+def _page_range_arg(args: dict | None) -> list[int] | None:
+    """``[first, last]`` from the filing args, or ``None`` when absent or not a
+    range. Normalized to ints; never trusted beyond being a range."""
+    if not isinstance(args, dict):
+        return None
+    try:
+        first = int(args.get("first_page"))  # type: ignore[arg-type]
+        last = int(args.get("last_page"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if first < 1 or last < first:
+        return None
+    return [first, last]
+
+
+def bundle_stamps(
+    tool_name: str,
+    args: dict | None,
+    result: Any,
+    *,
+    outcome: str,
+    trust_decision: str | None,
+) -> dict[str, Any]:
+    """The bundle metadata for one tool call, possibly empty.
+
+    * A bundle READ stamps ``bundle_sha256`` + ``bundle_page_count`` from the
+      RESULT (the connector's count, not the model's).
+    * A filing call that SUCCEEDED stamps ``bundle_sha256`` +
+      ``bundle_pages_filed`` (``[[first, last]]``) from the args the connector
+      verified the bytes against. A refused filing filed nothing and stamps
+      nothing.
+    * A filing call the trust gate HELD for approval stamps
+      ``bundle_pages_pending``: those pages are not lost, they are waiting on a
+      person, and a run that held them is not a run that dropped them.
+    """
+    out: dict[str, Any] = {}
+    if _tool_suffix_is(tool_name, _BUNDLE_READ_SUFFIX):
+        parsed = parse_tool_result(result)
+        if isinstance(parsed, dict):
+            sha = parsed.get("sha256")
+            count = parsed.get("pageCount")
+            if (
+                isinstance(sha, str)
+                and _SHA256_RE.match(sha.lower())
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+                and count > 0
+            ):
+                out["bundle_sha256"] = sha.lower()
+                out["bundle_page_count"] = count
+        return out
+    if not any(_tool_suffix_is(tool_name, s) for s in _FILING_TOOL_SUFFIXES):
+        return out
+    sha = _sha_arg(args)
+    pages = _page_range_arg(args)
+    if sha is None or pages is None:
+        return out
+    if trust_decision == "await_approval":
+        out["bundle_sha256"] = sha
+        out["bundle_pages_pending"] = [pages]
+        return out
+    if outcome != "ok":
+        return out
+    parsed = parse_tool_result(result)
+    status = parsed.get("status") if isinstance(parsed, dict) else None
+    if isinstance(status, str) and status.strip().lower() in _FILING_SUCCESS_STATUSES:
+        out["bundle_sha256"] = sha
+        out["bundle_pages_filed"] = [pages]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Object + procedure identity (the shortfall query's joins)
+# ---------------------------------------------------------------------------
+
+#: Args that name WHAT a call acted on, for "was this refused call retried on
+#: the same thing, and did it work then". ``download_url`` only stands in when
+#: there is no ``sha256``: a re-spool mints a fresh token for the same bytes.
+_OBJECT_ARG_KEYS = (
+    "sha256",
+    "file_id",
+    "fileId",
+    "document_id",
+    "attachment_id",
+    "message_id",
+    "job_id",
+    "matter_id",
+    "first_page",
+    "last_page",
+)
+
+
+def object_digest(args: dict | None) -> str | None:
+    """A 32-hex digest of the identifying args, or ``None`` when there are none.
+
+    A digest, not the values: the shortfall query only needs EQUALITY between a
+    refused call and a later one, and the values include URLs and ids that have
+    no business riding a heartbeat.
+    """
+    if not isinstance(args, dict):
+        return None
+    parts: list[str] = []
+    for key in _OBJECT_ARG_KEYS:
+        value = args.get(key)
+        if value is None or value == "":
+            continue
+        parts.append(f"{key}={str(value).strip().lower()}")
+    if not args.get("sha256"):
+        url = args.get("download_url")
+        if isinstance(url, str) and url.strip():
+            parts.append(f"download_url={url.strip()}")
+    if not parts:
+        return None
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+_SKILL_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_SKILL_PATH_RE = re.compile(r"(?:^|/)skills/([a-z0-9][a-z0-9-]{0,63})/SKILL\.md$")
+
+
+def skill_procedure(tool_name: str, args: dict | None) -> str | None:
+    """The skill whose PROCEDURE this call read, or ``None``.
+
+    The router runs another skill's procedure inside its own session by reading
+    it first (``skill_view`` of the skill, or ``read_file`` of its SKILL.md —
+    ``shared.read_volume`` watches both for the same reason). A webhook turn has
+    no routine, so this read is the only mechanical record of which procedure
+    the session was running. Only a slug-shaped name is kept.
+    """
+    if not isinstance(args, dict):
+        return None
+    if tool_name == "skill_view":
+        for key in ("name", "skill", "slug"):
+            value = args.get(key)
+            if isinstance(value, str) and _SKILL_SLUG_RE.match(value.strip()):
+                return value.strip()
+        return None
+    if tool_name == "read_file":
+        for key in ("path", "file_path", "filename"):
+            value = args.get(key)
+            if isinstance(value, str):
+                m = _SKILL_PATH_RE.search(value.strip())
+                if m:
+                    return m.group(1)
+    return None
+
+
+#: The hook's ``status`` / ``error_type`` vocabularies (docs/hook-surface.md
+#: §2). Stamped only when one of these exact words, so the row never carries an
+#: upstream string this plugin has not read.
+_HOOK_STATUSES = frozenset({"ok", "error", "blocked"})
+_HOOK_ERROR_TYPES = frozenset({"tool_error", "plugin_block"})
+
+#: The host's words for a pre-call callback that did not answer in time; the
+#: same phrase match ``hermes-smd-audit``'s ``_is_callback_timeout`` uses.
+_CALLBACK_TIMEOUT_MARKERS = ("callback timed out", "is still running")
+
+
+def hook_stamps(hook_status: Any, hook_error_type: Any, result: Any) -> dict[str, Any]:
+    """The post-hook's own envelope, in its closed vocabulary.
+
+    A plugin BLOCK is the policy layer saying no, which the shortfall query
+    files under "not allowed"; a callback that never answered is not a no, and
+    is marked so it is filed with failures instead (the same split
+    ``_meter_loop_arms`` draws for the sticky-stop ladder).
+    """
+    out: dict[str, Any] = {}
+    if hook_status in _HOOK_STATUSES:
+        out["hook_status"] = hook_status
+    if hook_error_type in _HOOK_ERROR_TYPES:
+        out["hook_error_type"] = hook_error_type
+    if hook_status == "blocked" and hook_error_type == "plugin_block":
+        text = result.lower() if isinstance(result, str) else ""
+        if text and all(marker in text for marker in _CALLBACK_TIMEOUT_MARKERS):
+            out["callback_timeout"] = True
+        else:
+            out["plugin_block"] = True
+    return out
 
 
 def emit_tool_event(
@@ -524,6 +851,8 @@ def emit_tool_event(
     actor_role: ActorRole = ActorRole.AGENT,
     skill_name: str | None = None,
     hermes_home_for_attribution: str | None = None,
+    hook_status: str | None = None,
+    hook_error_type: str | None = None,
 ) -> str | None:
     """Write one ``TOOL_CALL_COMPLETED`` audit row for a post_tool_call event.
 
@@ -578,6 +907,11 @@ def emit_tool_event(
         banned_reason: str | None = None
         outcome, error_type = _outcome_from_result(result)
         action_type = "TOOL_CALL_COMPLETED"
+        # A shortfall's code is NOT an error type: it lands in its own key so
+        # every consumer that reads ``error_type`` keeps reading only errors.
+        shortfall_code: str | None = None
+        if outcome == "shortfall":
+            shortfall_code, error_type = error_type, None
     except BannedToolError as exc:
         # The dispatch path SHOULD have caught this before the tool ran,
         # but the audit plugin still emits a refusal row if a banned tool
@@ -587,6 +921,7 @@ def emit_tool_event(
         banned_reason = exc.reason
         outcome = "blocked"
         error_type = None
+        shortfall_code = None
         action_type = "INVARIANT_VIOLATION"
 
     metadata = build_per_tool_metadata(
@@ -642,6 +977,27 @@ def emit_tool_event(
         # row to a specific materialization epoch while it lived.
         metadata["routine"] = routine.job_name
         metadata["cron_job_id"] = routine.job_id
+    # ss-console shortfall notifications. Every key below is a closed-vocabulary
+    # token, a hash, or an integer: the heartbeat ships these off the seat, so
+    # nothing here may carry a name, an address, or a word of a document.
+    if shortfall_code is not None:
+        metadata["shortfall_code"] = shortfall_code
+    metadata.update(hook_stamps(hook_status, hook_error_type, result))
+    metadata.update(
+        bundle_stamps(
+            tool_name,
+            args,
+            result,
+            outcome=outcome,
+            trust_decision=trust.audit_action if trust is not None else None,
+        )
+    )
+    digest = object_digest(args)
+    if digest is not None:
+        metadata["object_digest"] = digest
+    procedure = skill_procedure(tool_name, args)
+    if procedure is not None:
+        metadata["skill_procedure"] = procedure
     # Stamp the outcome-semantics version so an auditor can distinguish
     # error-detecting rows (v2+) from the legacy always-"ok" rows (v1). No
     # historical row is ever rewritten — the version is the changepoint marker.

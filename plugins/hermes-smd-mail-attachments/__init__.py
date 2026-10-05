@@ -55,7 +55,7 @@ import json
 import logging
 from typing import Any
 
-from shared import agentmail_broker, email_adapter, msgraph_attachments
+from shared import agentmail_broker, attachment_spool, email_adapter, msgraph_attachments
 from shared.tool_registration import register_wrapped_tool
 
 logger = logging.getLogger(__name__)
@@ -163,11 +163,27 @@ def _list_handler(args: dict[str, Any], **_: Any) -> str:
     return json.dumps({"attachments": found, "count": len(found)}, ensure_ascii=False)
 
 
+#: What an over-size attachment returns instead of raising. A size ceiling is a
+#: LIMIT the person can act on (send it smaller, or split it), not a breakage,
+#: and a raise lands in the ledger as a transport error indistinguishable from
+#: a dead mailbox. The structured refusal is what the audit plugin classifies as
+#: "hit a limit" (``over_size_cap``), and it still tells the model plainly that
+#: nothing was spooled.
+_OVER_SIZE_REFUSAL = {
+    "status": "refused",
+    "reason": "over_size_cap",
+    "max_bytes": attachment_spool.MAX_SPOOL_BYTES,
+}
+
+
 def _spool_handler(args: dict[str, Any], **_: Any) -> str:
-    receipt = _backend().spool_attachment(
-        str(args.get("message_id") or ""),
-        str(args.get("attachment_id") or ""),
-    )
+    try:
+        receipt = _backend().spool_attachment(
+            str(args.get("message_id") or ""),
+            str(args.get("attachment_id") or ""),
+        )
+    except attachment_spool.SpoolOverSizeError:
+        return json.dumps(_OVER_SIZE_REFUSAL, ensure_ascii=False)
     return json.dumps(receipt, ensure_ascii=False)
 
 
@@ -178,7 +194,10 @@ def _spool_message_handler(args: dict[str, Any], **_: Any) -> str:
         raise RuntimeError(
             "this seat's mail vendor cannot hand over a whole email as a file; nothing was spooled"
         )
-    receipt = spool(str(args.get("message_id") or ""), args.get("mailbox") or None)
+    try:
+        receipt = spool(str(args.get("message_id") or ""), args.get("mailbox") or None)
+    except attachment_spool.SpoolOverSizeError:
+        return json.dumps(_OVER_SIZE_REFUSAL, ensure_ascii=False)
     return json.dumps(receipt, ensure_ascii=False)
 
 

@@ -821,8 +821,8 @@ def test_emit_tool_event_records_error_outcome_and_version() -> None:
     md = json.loads(client.rows()[0]["metadata"])
     assert md["outcome"] == "error"
     assert md["error_type"] == "E_RATE"
-    # forward-only changepoint marker (v2 = error-detecting)
-    assert md["outcome_semantics_version"] == 2
+    # forward-only changepoint marker (v3 = reads through the wrappers)
+    assert md["outcome_semantics_version"] == 3
 
 
 def test_emit_tool_event_ok_outcome_carries_version() -> None:
@@ -842,7 +842,7 @@ def test_emit_tool_event_ok_outcome_carries_version() -> None:
     )
     md = json.loads(client.rows()[0]["metadata"])
     assert md["outcome"] == "ok"
-    assert md["outcome_semantics_version"] == 2
+    assert md["outcome_semantics_version"] == 3
 
 
 # ---------------------------------------------------------------------------

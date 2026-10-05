@@ -297,6 +297,7 @@ from shared.output_classes import catalogue as output_class_catalogue
 from shared.output_classes import describe as describe_output_class
 from shared.pending_acts import PENDING_ACTS, ConfirmedAct
 from shared.pending_send import PENDING_SEND
+from shared.result_unwrap import peel_envelopes
 from shared.tool_registration import register_wrapped_tool
 
 from . import sweeper as lapse_sweeper
@@ -4713,61 +4714,11 @@ def _note_status_result(kwargs: dict[str, Any]) -> None:
 def _unwrap_read_result(payload: Any) -> Any:
     """Peel the dispatcher envelopes off a ``post_tool_call`` result.
 
-    LIVE-CAUGHT (pilot-smokeball, 2026-08-11T17:25, first reference-staging run):
-    the hook's ``result`` string is not the connector's JSON — it is
-    ``{"result": "<the connector's JSON, as a string>"}``. The capture parsed
-    the outer object, found no top-level ``text`` key, and returned through the
-    silent no-``text`` guard: no warning, no capture, and every stage in the
-    turn refused ``no_capture`` while the model had genuinely read all four
-    documents. The Operator's report of that failure was exactly honest, which
-    is the one part of the run that worked as designed.
-
-    Two envelope shapes are peeled, at most twice (a wrapper of a wrapper),
-    conservatively — anything unrecognized is returned as-is so the existing
-    guards keep their meaning:
-
-    * ``{"result": <str|dict>}`` — the live dispatcher wrapper. A ``str`` value
-      that parses as JSON is parsed; a dict value is taken directly.
-    * ``{"content": [{"type": "text", "text": <str>}, ...]}`` — the MCP
-      content-block envelope, in case a future Hermes hands the protocol shape
-      through. The first text block that parses as a JSON object wins.
-
-    The unwrap stops as soon as the current object looks like the connector's
-    own read result (a dict carrying ``text``), so a connector that one day
-    returns a field literally named ``result`` alongside ``text`` is not
-    re-unwrapped into garbage.
+    Moved to :func:`shared.result_unwrap.peel_envelopes` (the audit plugin's
+    outcome inference needs the same peel); kept as the name this plugin and
+    its tests use.
     """
-    for _ in range(2):
-        if not isinstance(payload, dict) or "text" in payload:
-            return payload
-        if "result" in payload and len(payload) <= 2:
-            inner = payload["result"]
-            if isinstance(inner, str):
-                try:
-                    payload = json.loads(inner)
-                except (TypeError, ValueError):
-                    return payload
-                continue
-            if isinstance(inner, dict):
-                payload = inner
-                continue
-            return payload
-        blocks = payload.get("content")
-        if isinstance(blocks, list):
-            for block in blocks:
-                if isinstance(block, dict) and isinstance(block.get("text"), str):
-                    try:
-                        candidate = json.loads(block["text"])
-                    except (TypeError, ValueError):
-                        continue
-                    if isinstance(candidate, dict):
-                        payload = candidate
-                        break
-            else:
-                return payload
-            continue
-        return payload
-    return payload
+    return peel_envelopes(payload)
 
 
 def _prepare_reference_stage(session_id: Any, args: dict[str, Any]) -> dict[str, Any] | None:

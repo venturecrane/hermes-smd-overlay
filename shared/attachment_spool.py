@@ -81,6 +81,17 @@ class SpoolError(RuntimeError):
     """A spool entry could not be written, resolved, or read."""
 
 
+class SpoolOverSizeError(SpoolError):
+    """The bytes are over ``MAX_SPOOL_BYTES``, so they were not spooled.
+
+    A named subclass because this one refusal is a LIMIT, not a breakage: the
+    mail tools turn it into a structured ``{"status": "refused", "reason":
+    "over_size_cap"}`` result instead of raising, so the audit ledger can file
+    it as "hit a limit" rather than lose it among transport errors. Every vendor
+    path raises this (or a subclass of it) for an over-size attachment.
+    """
+
+
 def spool_dir() -> Path:
     """The spool directory for this process."""
     return Path(os.environ.get(SPOOL_DIR_ENV, "").strip() or DEFAULT_SPOOL_DIR)
@@ -147,7 +158,7 @@ def write(blob: bytes, *, filename: Any, content_type: Any) -> dict[str, Any]:
     if not blob:
         raise SpoolError("refusing to spool an empty attachment")
     if len(blob) > MAX_SPOOL_BYTES:
-        raise SpoolError(
+        raise SpoolOverSizeError(
             f"attachment is {len(blob)} bytes, over the {MAX_SPOOL_BYTES}-byte spool limit"
         )
     base = spool_dir()

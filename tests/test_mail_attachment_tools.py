@@ -402,3 +402,91 @@ def test_a_link_off_the_vendors_hosts_is_refused(
     monkeypatch.setattr(broker.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(broker.AgentMailReadError, match="not one the vendor serves"):
         broker.spool_attachment("msg_123", "att_1")
+
+
+# ---------------------------------------------------------------------------
+# Over the size cap: a LIMIT, returned as a structured refusal, never a raise
+# (ss-console shortfall notifications: the audit plugin files it as "hit a
+# limit" with code over_size_cap instead of losing it among transport errors)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        broker.AgentMailOverSize("attachment is over the limit; it is not spooled"),
+        msgraph_attachments.MsGraphAttachmentOverSize("over the limit; it is not spooled"),
+        spool.SpoolOverSizeError("attachment is over the spool limit"),
+    ],
+)
+def test_an_over_size_spool_returns_a_refusal_not_a_raise(
+    fake_ctx: Any, mail_seat: None, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    def over(*_: Any, **__: Any) -> dict[str, Any]:
+        raise error
+
+    monkeypatch.setattr(broker, "spool_attachment", over)
+    plugin = load_plugin("hermes-smd-mail-attachments")
+    plugin.register(fake_ctx)
+    handler = fake_ctx.tools["mail_spool_attachment"]["handler"]
+    result = json.loads(handler({"message_id": "m", "attachment_id": "att_1"}))
+    assert result["status"] == "refused"
+    assert result["reason"] == "over_size_cap"
+    assert result["max_bytes"] == spool.MAX_SPOOL_BYTES
+
+
+def test_an_over_size_spool_is_still_both_error_types() -> None:
+    """Callers that caught the vendor error keep catching it."""
+    assert issubclass(broker.AgentMailOverSize, broker.AgentMailReadError)
+    assert issubclass(
+        msgraph_attachments.MsGraphAttachmentOverSize, msgraph_attachments.MsGraphAttachmentError
+    )
+    for cls in (broker.AgentMailOverSize, msgraph_attachments.MsGraphAttachmentOverSize):
+        assert issubclass(cls, spool.SpoolOverSizeError)
+
+
+def test_any_other_spool_failure_still_raises(
+    fake_ctx: Any, mail_seat: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: Any, **__: Any) -> dict[str, Any]:
+        raise broker.AgentMailReadError("attachment download failed: HTTP 500")
+
+    monkeypatch.setattr(broker, "spool_attachment", broken)
+    plugin = load_plugin("hermes-smd-mail-attachments")
+    plugin.register(fake_ctx)
+    with pytest.raises(broker.AgentMailReadError):
+        fake_ctx.tools["mail_spool_attachment"]["handler"](
+            {"message_id": "m", "attachment_id": "a"}
+        )
+
+
+def test_the_real_oversize_path_lands_as_the_refusal(
+    tmp_path: Path, fake_ctx: Any, mail_seat: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through the real AgentMail download path, not a stub of it: the same
+    over-size fixture as the broker test above, driven through the handler."""
+    monkeypatch.setenv(broker.READ_KEY_ENV, "am_read_key")
+    monkeypatch.setenv(spool.SPOOL_DIR_ENV, str(tmp_path / "spool"))
+    big = b"x" * (spool.MAX_SPOOL_BYTES + 1)
+    monkeypatch.setattr(broker, "_own_inbox_cache", None)
+
+    def fake_urlopen(request: Any, timeout: float | None = None) -> _Response:
+        if "/inboxes?" in request.full_url:
+            return _Response(json.dumps({"inboxes": [{"inbox_id": SEAT_INBOX}]}).encode())
+        if request.full_url == DOWNLOAD_URL:
+            return _Response(big, "application/pdf")
+        if request.full_url.endswith("/attachments/att_1"):
+            return _Response(json.dumps({**ATTACHMENT_RECORD, "size": len(big)}).encode())
+        return _Response(json.dumps(MESSAGE).encode())
+
+    monkeypatch.setattr(broker.urllib.request, "urlopen", fake_urlopen)
+    plugin = load_plugin("hermes-smd-mail-attachments")
+    plugin.register(fake_ctx)
+    handler = fake_ctx.tools["mail_spool_attachment"]["handler"]
+    result = json.loads(handler({"message_id": "m", "attachment_id": "att_1"}))
+    assert result == {
+        "status": "refused",
+        "reason": "over_size_cap",
+        "max_bytes": spool.MAX_SPOOL_BYTES,
+    }
+    assert not (tmp_path / "spool").exists() or list((tmp_path / "spool").iterdir()) == []

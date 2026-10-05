@@ -9,6 +9,7 @@ load-bearing property, so it gets explicit coverage.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1760,3 +1761,469 @@ def test_payload_omits_tool_failures_when_the_seat_cannot_answer():
         tool_failures=None,
     )
     assert "tool_failures" not in p
+
+
+# ---------------------------------------------------------------------------
+# Shortfalls (ss-console shortfall notifications): every time the Operator could
+# not give a person what they asked for, in four classes. The 2026-10-01 shape
+# is the reason the "partial" class exists: the mail routine was sent 52 pages,
+# filed none, and every call it made scored "ok".
+# ---------------------------------------------------------------------------
+
+_MAIL_SESSION = "20261001_141502_ab12cd34"
+_PERSON_SESSION = "20261001_151000_ef56ab78"
+_BUNDLE = "a" * 64
+_READ_TOOL = "mcp_smokeball_read_attachment_pages"
+_FILE_TOOL = "mcp_smokeball_file_attachment_pages_to_matter"
+
+#: CONTRACT PIN with ss-console (``workers/fleet-alerts`` + heartbeat ingest):
+#: the three payload keys and the six keys of every event. ss-console's parser
+#: accepts only this shape; a rename on either side must fail a test here.
+SHORTFALL_PAYLOAD_KEYS = ("shortfalls", "shortfalls_last_ts", "shortfalls_json")
+SHORTFALL_EVENT_KEYS = {"ts", "class", "tool", "routine", "code", "key"}
+
+#: CONTRACT PIN: ss-console's ingest refuses a zone-less ISO timestamp. This is
+#: the shape its parser accepts (``Z`` or ``+HH:MM`` at the end).
+_ZONED_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+
+
+def _call(led, ts, tool, outcome, *, session=_MAIL_SESSION, **meta):
+    led.add(
+        ts,
+        "TOOL_CALL_COMPLETED",
+        {"tool": tool, "outcome": outcome, "session_id": session, **meta},
+    )
+
+
+def _mail_procedure(led, ts, session=_MAIL_SESSION):
+    _call(led, ts, "skill_view", "ok", session=session, skill_procedure="combined-post-intake")
+
+
+def _bundle_read(led, ts, pages, *, session=_MAIL_SESSION, outcome="ok", **meta):
+    _call(
+        led,
+        ts,
+        _READ_TOOL,
+        outcome,
+        session=session,
+        bundle_sha256=_BUNDLE,
+        bundle_page_count=pages,
+        **meta,
+    )
+
+
+def _session_turn(led, ts, session=_MAIL_SESSION):
+    led.add(ts, "LLM_TURN_COMPLETED", {"session_id": session})
+
+
+def _shortfalls(tmp_path, build):
+    global _facts_seq
+    _facts_seq += 1
+    db = tmp_path / f"audit-short-{_facts_seq}.db"
+    ledger = _Ledger(db)
+    build(ledger)
+    ledger.conn.close()
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return hb.count_shortfalls(conn, _NOW)
+    finally:
+        conn.close()
+
+
+def test_shortfalls_zero_reaches_the_wire(tmp_path):
+    facts = _shortfalls(tmp_path, lambda led: _call(led, _ts(1), _READ_TOOL, "ok"))
+    assert (facts.count, facts.last_ts, facts.events) == (0, None, [])
+    payload = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        shortfalls=facts.count,
+        shortfalls_last_ts=facts.last_ts,
+        shortfalls_json=facts.events,
+    )
+    assert payload["shortfalls"] == 0
+    assert payload["shortfalls_json"] == []
+    assert "shortfalls_last_ts" not in payload
+
+
+def test_payload_pins_the_shortfall_contract_keys():
+    event = {
+        "ts": "2026-10-01T14:15:02.123Z",
+        "class": "limit",
+        "tool": _READ_TOOL,
+        "routine": None,
+        "code": "over_page_cap",
+        "key": "limit:" + "0" * 32,
+    }
+    payload = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        shortfalls=1,
+        shortfalls_last_ts="2026-10-01T14:15:02.123Z",
+        shortfalls_json=[event],
+    )
+    for key in SHORTFALL_PAYLOAD_KEYS:
+        assert key in payload
+    assert set(payload["shortfalls_json"][0]) == SHORTFALL_EVENT_KEYS
+    assert hb.SHORTFALL_CLASSES == ("not_allowed", "limit", "failed", "partial")
+
+
+def test_payload_omits_shortfalls_when_the_seat_cannot_answer():
+    p = hb.build_payload(
+        heartbeat_ts="t", last_audit_ts=None, last_skill_ts=None, uptime_seconds=None, version=None
+    )
+    for key in SHORTFALL_PAYLOAD_KEYS:
+        assert key not in p
+
+
+def test_a_trust_refusal_is_not_allowed(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _call(
+            led,
+            _ts(2),
+            "smd_send_message",
+            "error",
+            session=_PERSON_SESSION,
+            trust_decision="refuse",
+            trust_reason="the ceiling for external_send_client is refused",
+            plugin_block=True,
+        ),
+    )
+    assert facts.count == 1 and facts.not_allowed == 1
+    event = facts.events[0]
+    assert set(event) == SHORTFALL_EVENT_KEYS
+    assert event["class"] == "not_allowed"
+    assert event["code"] == "trust_refuse"
+    assert event["tool"] == "smd_send_message"
+    assert event["ts"] == _ts(2)
+    assert event["key"].startswith("not_allowed:")
+    assert len(event["key"]) == len("not_allowed:") + 32
+
+
+def test_a_plugin_block_is_not_allowed_and_a_callback_timeout_is_failed(tmp_path):
+    def build(led):
+        _call(led, _ts(3), "establish_stage_document", "error", plugin_block=True)
+        _call(led, _ts(2), "mcp_smokeball_create_memo", "error", callback_timeout=True)
+
+    facts = _shortfalls(tmp_path, build)
+    assert [(e["class"], e["code"]) for e in facts.events] == [
+        ("not_allowed", "plugin_block"),
+        ("failed", "callback_timeout"),
+    ]
+
+
+def test_a_banned_tool_is_not_allowed(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: led.add(
+            _ts(1),
+            "INVARIANT_VIOLATION",
+            {"tool": "send_email", "banned_tool": True, "outcome": "blocked"},
+        ),
+    )
+    assert [(e["class"], e["code"]) for e in facts.events] == [("not_allowed", "banned_tool")]
+
+
+def test_a_read_volume_refusal_is_a_limit_not_a_permission(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _call(
+            led,
+            _ts(1),
+            "mcp_smokeball_read_document",
+            "error",
+            trust_decision="refuse",
+            trust_reason="READ_VOLUME_GATE: at least 412 pages read",
+        ),
+    )
+    assert [(e["class"], e["code"]) for e in facts.events] == [("limit", "READ_VOLUME_GATE")]
+
+
+def test_limit_and_failed_split_on_the_code(tmp_path):
+    def build(led):
+        _call(led, _ts(5), _READ_TOOL, "shortfall", shortfall_code="over_page_cap", session="s-a")
+        _call(led, _ts(4), "mail_spool_attachment", "shortfall", shortfall_code="over_size_cap")
+        _call(led, _ts(3), "mcp_medchron_submit", "shortfall", shortfall_code="allowance_spent")
+        _call(
+            led,
+            _ts(2),
+            "mcp_smokeball_add_medicals_row",
+            "shortfall",
+            shortfall_code="needs_contact",
+        )
+        _call(led, _ts(1), "mcp_smokeball_get_matter", "error", error_type="Smokeball 503 for X")
+
+    facts = _shortfalls(tmp_path, build)
+    assert [(e["class"], e["code"]) for e in facts.events] == [
+        ("limit", "over_page_cap"),
+        ("limit", "over_size_cap"),
+        ("limit", "allowance_spent"),
+        ("failed", "needs_contact"),
+        # A prose error_type never rides: the outcome word stands in for it.
+        ("failed", "error"),
+    ]
+    assert (facts.limit, facts.failed) == (3, 2)
+    assert facts.last_ts == _ts(1)
+
+
+def test_a_refusal_retried_ok_on_the_same_object_is_no_event(tmp_path):
+    def build(led):
+        _call(led, _ts(2), _FILE_TOOL, "shortfall", shortfall_code="refused", object_digest="o1")
+        _call(led, _ts(1.9), _FILE_TOOL, "ok", object_digest="o1")
+
+    assert _shortfalls(tmp_path, build).count == 0
+
+
+def test_a_retry_on_a_different_object_or_session_does_not_clear(tmp_path):
+    def build(led):
+        _call(led, _ts(2), _FILE_TOOL, "shortfall", shortfall_code="refused", object_digest="o1")
+        _call(led, _ts(1.9), _FILE_TOOL, "ok", object_digest="o2")
+        _call(led, _ts(1.8), _FILE_TOOL, "ok", object_digest="o1", session=_PERSON_SESSION)
+
+    facts = _shortfalls(tmp_path, build)
+    assert [(e["class"], e["code"]) for e in facts.events] == [("failed", "refused")]
+
+
+def test_an_ok_call_before_the_refusal_does_not_clear_it(tmp_path):
+    def build(led):
+        _call(led, _ts(2.1), _FILE_TOOL, "ok", object_digest="o1")
+        _call(led, _ts(2), _FILE_TOOL, "shortfall", shortfall_code="refused", object_digest="o1")
+
+    assert _shortfalls(tmp_path, build).count == 1
+
+
+def test_the_october_first_shape_is_a_partial(tmp_path):
+    """The mail routine read a 52-page bundle and filed nothing."""
+
+    def build(led):
+        _mail_procedure(led, _ts(3))
+        _bundle_read(led, _ts(2.9), 52)
+        _session_turn(led, _ts(2.8))
+
+    facts = _shortfalls(tmp_path, build)
+    assert facts.partial == 1 and facts.count == 1
+    event = facts.events[0]
+    assert event["class"] == "partial"
+    assert event["code"] == "filed 0 of 52"
+    assert event["routine"] == "combined-post-intake"
+    assert event["tool"] == _READ_TOOL
+    assert event["key"] == f"partial:{_BUNDLE}"
+
+
+def test_filed_and_pending_pages_account_for_a_bundle(tmp_path):
+    def build(led):
+        _mail_procedure(led, _ts(3))
+        _bundle_read(led, _ts(2.9), 10)
+        _call(led, _ts(2.8), _FILE_TOOL, "ok", bundle_sha256=_BUNDLE, bundle_pages_filed=[[1, 4]])
+        _call(led, _ts(2.7), _FILE_TOOL, "ok", bundle_sha256=_BUNDLE, bundle_pages_pending=[[5, 7]])
+        _session_turn(led, _ts(2.6))
+
+    facts = _shortfalls(tmp_path, build)
+    assert [e["code"] for e in facts.events] == ["filed 7 of 10"]
+
+    def complete(led):
+        build(led)
+        # A held page approved and filed in a LATER turn still accounts.
+        _call(
+            led,
+            _ts(1),
+            _FILE_TOOL,
+            "ok",
+            session=_PERSON_SESSION,
+            bundle_sha256=_BUNDLE,
+            bundle_pages_filed=[[8, 10]],
+        )
+
+    assert _shortfalls(tmp_path, complete).partial == 0
+
+
+def test_a_person_reading_one_letter_is_never_a_partial(tmp_path):
+    def build(led):
+        _bundle_read(led, _ts(2), 6, session=_PERSON_SESSION)
+        _session_turn(led, _ts(1.9), session=_PERSON_SESSION)
+
+    assert _shortfalls(tmp_path, build).count == 0
+
+
+def test_a_mail_session_still_running_is_not_judged_yet(tmp_path):
+    def build(led):
+        _mail_procedure(led, _ts(0.2))
+        _bundle_read(led, _ts(0.1), 52)
+
+    assert _shortfalls(tmp_path, build).partial == 0
+
+    def idle(led):
+        _mail_procedure(led, _ts(0.9))
+        _bundle_read(led, _ts(0.8), 52)
+
+    # Thirty minutes of quiet closes it without a turn row.
+    assert _shortfalls(tmp_path, idle).partial == 1
+
+
+def test_the_mail_routine_as_a_skill_name_also_counts(tmp_path):
+    def build(led):
+        _bundle_read(led, _ts(2), 4, skill="combined-post-intake")
+
+    assert [e["code"] for e in _shortfalls(tmp_path, build).events] == ["filed 0 of 4"]
+
+
+def test_events_ride_oldest_first_capped_while_the_count_is_whole(tmp_path):
+    def build(led):
+        for n in range(25):
+            _call(
+                led,
+                _ts(20 - n * 0.5),
+                _READ_TOOL,
+                "shortfall",
+                shortfall_code="over_page_cap",
+                session=f"s{n}",
+            )
+
+    facts = _shortfalls(tmp_path, build)
+    assert facts.count == 25
+    assert len(facts.events) == 20
+    assert facts.events[0]["ts"] == _ts(20)
+    assert facts.last_ts == _ts(8)
+    assert [e["ts"] for e in facts.events] == sorted(e["ts"] for e in facts.events)
+
+
+def test_a_key_is_stable_across_beats(tmp_path):
+    def build(led):
+        _call(led, _ts(2), _READ_TOOL, "shortfall", shortfall_code="over_page_cap")
+
+    first = _shortfalls(tmp_path, build).events[0]["key"]
+    second = _shortfalls(tmp_path, build).events[0]["key"]
+    assert first == second
+
+
+def test_a_code_never_carries_prose(tmp_path):
+    def build(led):
+        _call(led, _ts(2), _READ_TOOL, "shortfall", shortfall_code="Jane Testclient's letter")
+
+    event = _shortfalls(tmp_path, build).events[0]
+    assert event["code"] == "shortfall"
+    assert "Testclient" not in json.dumps(event)
+
+
+def test_rows_outside_the_window_are_not_shortfalls(tmp_path):
+    def build(led):
+        _call(led, _ts(25), _READ_TOOL, "shortfall", shortfall_code="over_page_cap")
+        _call(led, _ts(-1), _READ_TOOL, "shortfall", shortfall_code="over_page_cap")
+
+    assert _shortfalls(tmp_path, build).count == 0
+
+
+def test_a_shortfall_is_not_a_send_refusal_or_a_tool_failure(tmp_path):
+    """``shortfall`` was ``ok`` before outcome semantics v3, and the two older
+    pagers keep the meaning they were built with."""
+
+    def build(led):
+        led.add(
+            _ts(2),
+            "TOOL_CALL_COMPLETED",
+            {
+                "tool": "smd_send_message",
+                "outcome": "shortfall",
+                "shortfall_code": "refused",
+                "resolved_action_class": "external_send_internal",
+                "cron_job_id": "a726fd5efd24",
+            },
+        )
+
+    assert _facts(tmp_path, build).count == 0
+    tools = _tool_facts(tmp_path, lambda led: _tool_call(led, _ts(1), VOICE, "shortfall"))
+    assert tools[VOICE]["consecutive_failures"] == 0
+
+
+def test_read_audit_facts_carries_the_shortfall_fields(tmp_path):
+    db = tmp_path / "audit.db"
+    ledger = _Ledger(db)
+    _call(
+        ledger,
+        datetime.now(timezone.utc).isoformat(),
+        _READ_TOOL,
+        "shortfall",
+        shortfall_code="over_page_cap",
+    )
+    ledger.conn.close()
+    facts = hb.read_audit_facts(str(db))
+    assert facts.shortfalls == 1
+    assert _ZONED_ISO.match(facts.shortfalls_last_ts)
+    assert facts.shortfalls_json[0]["class"] == "limit"
+
+
+def test_read_audit_facts_on_a_pre_metadata_ledger_holds_the_shortfalls(tmp_path):
+    db = tmp_path / "audit.db"
+    _make_audit_db(str(db), [("01A", "2026-08-01T10:00:00+00:00", "escalator")])
+    facts = hb.read_audit_facts(str(db))
+    assert facts.last_audit_ts == "2026-08-01T10:00:00+00:00"
+    assert facts.shortfalls is None
+    assert facts.shortfalls_last_ts is None
+    assert facts.shortfalls_json is None
+
+
+def test_ticker_puts_the_shortfall_fields_on_the_wire(tmp_path):
+    db = tmp_path / "audit.db"
+    ledger = _Ledger(db)
+    _call(
+        ledger,
+        datetime.now(timezone.utc).isoformat(),
+        "mail_spool_attachment",
+        "shortfall",
+        shortfall_code="over_size_cap",
+    )
+    ledger.conn.close()
+    em, calls = _emitter(audit_db_path_fn=lambda: str(db))
+    em._tick()
+    body = json.loads(calls["posts"][0][2])
+    assert body["shortfalls"] == 1
+    assert body["shortfalls_last_ts"]
+    assert body["shortfalls_json"][0]["code"] == "over_size_cap"
+    assert set(body["shortfalls_json"][0]) == SHORTFALL_EVENT_KEYS
+
+
+def test_every_shortfall_timestamp_carries_an_explicit_zone(tmp_path):
+    """CONTRACT PIN: ``shortfalls_last_ts`` and every event ``ts`` are full
+    ISO-8601 with a zone, the raw audit-row ``ts`` (the way ``send_refusals``
+    carries it), never the 19-character comparison prefix. Both live spellings
+    (``...Z`` and ``+00:00``) pass through; a row written bare is stamped Z.
+    ``tool`` is never empty; ``routine`` may be null."""
+
+    def build(led):
+        _call(led, _ts(5), _READ_TOOL, "shortfall", shortfall_code="over_page_cap", session="s-a")
+        _call(led, "2026-08-21T14:00:00+00:00", "", "error", session="s-bare-tool")
+        _call(
+            led,
+            "2026-08-21T15:00:00",
+            _READ_TOOL,
+            "shortfall",
+            shortfall_code="too_long",
+            session="s-b",
+        )
+        _mail_procedure(led, _ts(3))
+        _bundle_read(led, _ts(2.9), 52)
+        _session_turn(led, _ts(2.8))
+
+    facts = _shortfalls(tmp_path, build)
+    assert facts.count == 4
+    for event in facts.events:
+        assert _ZONED_ISO.match(event["ts"]), event["ts"]
+        assert event["tool"], event
+        assert event["routine"] is None or isinstance(event["routine"], str)
+    assert _ZONED_ISO.match(facts.last_ts)
+    by_code = {e["code"]: e for e in facts.events}
+    assert by_code["over_page_cap"]["ts"] == _ts(5)
+    assert by_code["over_page_cap"]["routine"] is None
+    assert by_code["error"]["ts"] == "2026-08-21T14:00:00+00:00"
+    assert by_code["error"]["tool"] == "unknown_tool"
+    assert by_code["too_long"]["ts"] == "2026-08-21T15:00:00Z"
+    assert by_code["filed 0 of 52"]["ts"] == _ts(2.9)
+    # Ordered by instant across spellings: +00:00 at 14:00 before Z at 15:00.
+    order = [e["code"] for e in facts.events]
+    assert order.index("error") < order.index("too_long")

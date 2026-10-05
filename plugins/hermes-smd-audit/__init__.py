@@ -219,6 +219,8 @@ def on_post_tool_call(**kwargs: Any) -> None:
             session_id=session_id,
             tool_call_id=tool_call_id,
             duration_ms=kwargs.get("duration_ms"),
+            hook_status=kwargs.get("status"),
+            hook_error_type=kwargs.get("error_type"),
         )
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning(
