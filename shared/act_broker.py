@@ -62,6 +62,7 @@ ACT_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
         "matter_type_name",
     ),
     "mcp_smokeball_delete_events": ("events",),
+    "mcp_smokeball_place_records_order": ("order",),
 }
 
 #: Acts whose payload rides on the WITHHELD CALL rather than on the authored
@@ -79,6 +80,12 @@ ACT_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
 #: composed by hand can be shown but never deleted.
 CALL_PAYLOAD_ACTS: dict[str, str] = {
     "mcp_smokeball_delete_events": "destructive",
+    # The medical-records order (ss-console 2026-10-05). Which facilities, which
+    # years and which authorization are the request itself, so the payload is the
+    # order the connector's prepare_records_order built, carried on the call.
+    # The broker re-checks its digest and renders every facility into the line;
+    # the connector re-reads the matter and client before it orders anything.
+    "mcp_smokeball_place_records_order": "commitment",
 }
 
 #: The subset of the payload the TOOL is called with. The authored names are for
@@ -88,6 +95,7 @@ ACT_ARG_KEYS: dict[str, frozenset[str]] = {
         {"description", "matter_type_id", "client_contact_id", "number"}
     ),
     "mcp_smokeball_delete_events": frozenset({"events"}),
+    "mcp_smokeball_place_records_order": frozenset({"order"}),
 }
 
 #: Keys without which the act cannot be proposed at all. ``number`` is optional
@@ -99,6 +107,7 @@ ACT_REQUIRED_KEYS: dict[str, frozenset[str]] = {
         {"description", "matter_type_id", "client_contact_id"}
     ),
     "mcp_smokeball_delete_events": frozenset({"events"}),
+    "mcp_smokeball_place_records_order": frozenset({"order"}),
 }
 
 

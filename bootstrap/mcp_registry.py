@@ -317,6 +317,15 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
             ("SMOKEBALL_VISION_PAGE_CAP", "SMOKEBALL_VISION_PAGE_CAP"),  # connector default
             ("SMOKEBALL_VISION_MAX_BYTES", "SMOKEBALL_VISION_MAX_BYTES"),  # connector default
             ("SMOKEBALL_VISION_DISABLED", "SMOKEBALL_VISION_DISABLED"),  # per-seat kill switch
+            # --- Records orders (ss-console 2026-10-05) ---
+            # The firm's own records-retrieval vendor: its API token, API base
+            # URL and display name, each staged per customer only (ss-console
+            # bin/lib/stage-smokeball.sh, no global fallback). The connector's
+            # records-order tools read them; without the token or the URL they
+            # answer "not connected" and nothing else on the connector changes.
+            ("RECORDS_VENDOR_API_TOKEN", "RECORDS_VENDOR_API_TOKEN"),
+            ("RECORDS_VENDOR_API_URL", "RECORDS_VENDOR_API_URL"),
+            ("RECORDS_VENDOR_NAME", "RECORDS_VENDOR_NAME"),
         ),
         # EMPTY, and a correction worth keeping. overlay#366 listed the four MCP
         # protocol primitives (get_prompt / list_prompts / list_resources /
