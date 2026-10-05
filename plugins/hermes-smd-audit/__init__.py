@@ -26,7 +26,11 @@ import logging
 import os
 from typing import Any
 
-from shared.audit_client import BrokerAuditClient, audit_client_from_env
+from shared.audit_client import (
+    BrokerAuditClient,
+    audit_client_from_env,
+    count_rows_held_by_a_dead_gateway,
+)
 from shared.audit_status import NoAuditWarner, write_audit_status
 from shared.d1_client import D1Client
 from shared.secrets import require
@@ -536,8 +540,22 @@ def register(ctx) -> None:
         # Single selection point for the audit transport: a BrokerAuditClient
         # when SMD_AUDIT_BROKER_SOCKET is set (the ledger file is broker-owned,
         # OP-P1-4), else a direct D1Client on the audit binding (legacy/test).
-        client = audit_client_from_env(customer_slug=_CUSTOMER_SLUG)
+        # These hooks are observational (TOOL_CALL_*, LLM, subagent, skill), so
+        # their rows are held in memory across a broker gap rather than lost
+        # (SMD-OPERATOR-9). The cost breaker and the gates build their own
+        # clients without this, and still fail on the spot.
+        client = audit_client_from_env(customer_slug=_CUSTOMER_SLUG, buffer_on_unreachable=True)
         _broker_mode = isinstance(client, BrokerAuditClient)
+        if _broker_mode:
+            # A previous gateway killed mid-gap (no atexit) left its held count
+            # behind; those rows never reached the ledger, so count them now.
+            held = count_rows_held_by_a_dead_gateway()
+            if held:
+                logger.warning(
+                    "hermes-smd-audit: %d audit row(s) were held by a gateway that died "
+                    "in a broker gap; tallied as lost",
+                    held,
+                )
         _WRITER = AuditLogWriter(client)
         # The Machine's bootstrap does not apply the per-customer migrations, so
         # ensure the audit_log table exists before the first write (ss-console
