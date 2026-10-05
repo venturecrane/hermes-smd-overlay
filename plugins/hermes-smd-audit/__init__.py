@@ -536,7 +536,11 @@ def register(ctx) -> None:
         # Single selection point for the audit transport: a BrokerAuditClient
         # when SMD_AUDIT_BROKER_SOCKET is set (the ledger file is broker-owned,
         # OP-P1-4), else a direct D1Client on the audit binding (legacy/test).
-        client = audit_client_from_env(customer_slug=_CUSTOMER_SLUG)
+        # These hooks are observational (TOOL_CALL_*, LLM, subagent, skill), so
+        # their rows are held in memory across a broker gap rather than lost
+        # (SMD-OPERATOR-9). The cost breaker and the gates build their own
+        # clients without this, and still fail on the spot.
+        client = audit_client_from_env(customer_slug=_CUSTOMER_SLUG, buffer_on_unreachable=True)
         _broker_mode = isinstance(client, BrokerAuditClient)
         _WRITER = AuditLogWriter(client)
         # The Machine's bootstrap does not apply the per-customer migrations, so
