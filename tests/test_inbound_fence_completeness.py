@@ -326,6 +326,12 @@ SMOKEBALL_FIRM_RECORD_READS: frozenset[str] = frozenset(
         # The same calendar entries, shaped as the manifest a deletion act
         # carries (id, matter, matter number, subject, date). Nothing else.
         "mcp_smokeball_prepare_event_deletion",
+        # The records order the connector BUILT (directory ids, the
+        # directory's own custodian names and addresses, dates, a file name) and
+        # the vendor's per-location status rows (id, request number, name, status
+        # word). Structured fields, no free text a sender wrote.
+        "mcp_smokeball_prepare_records_order",
+        "mcp_smokeball_records_orders_for_matter",
         # File and folder METADATA and a presigned URL string. The document
         # BODY is only reachable through read_document, which is fenced.
         "mcp_smokeball_get_files_on_matter",

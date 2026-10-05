@@ -1248,6 +1248,16 @@ _ACT_NO_LIST_REFUSAL = (
     "matters, then call this with its events unchanged. Nothing was deleted."
 )
 
+#: Per call-payload act: what to say when the call arrives without its payload.
+_ACT_NO_PAYLOAD_REFUSAL: dict[str, str] = {
+    "mcp_smokeball_delete_events": _ACT_NO_LIST_REFUSAL,
+    "mcp_smokeball_place_records_order": (
+        "Refused: mcp_smokeball_place_records_order needs the order that "
+        "mcp_smokeball_prepare_records_order returned with status ready. Call "
+        "that first, then call this with its order unchanged. Nothing was ordered."
+    ),
+}
+
 
 def _propose_commitment_act(tool_name: str, session_id: str, args: dict | None = None) -> dict:
     """Start the round trip for a withheld commitment. Always returns a block.
@@ -1271,7 +1281,8 @@ def _propose_commitment_act(tool_name: str, session_id: str, args: dict | None =
         # the vendor before deleting (act_broker.CALL_PAYLOAD_ACTS).
         payload = act_broker.call_payload(tool_name, args)
         if payload is None:
-            return {"action": "block", "message": _ACT_NO_LIST_REFUSAL}
+            refusal = _ACT_NO_PAYLOAD_REFUSAL.get(tool_name, _ACT_NO_LIST_REFUSAL)
+            return {"action": "block", "message": refusal}
     else:
         payload = _resolve_authored_act(tool_name)
         if payload is None:

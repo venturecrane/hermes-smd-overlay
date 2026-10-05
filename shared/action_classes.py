@@ -649,6 +649,20 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # governs an unconfirmed calendar capability, not this act.
     "mcp_smokeball_prepare_event_deletion": ActionClass.READ,
     "mcp_smokeball_delete_events": ActionClass.DESTRUCTIVE,
+    # A medical-records order as an ADMIN-CONFIRMED ACT (ss-console,
+    # 2026-10-05; smokeball_connector/records_*.py). prepare_order READS: it
+    # resolves each facility against the vendor's own custodian directory, finds
+    # the signed HIPAA authorization on the matter, and returns the order (no
+    # client identifier beyond the SSN's last four). place_order is COMMITMENT
+    # with a call-payload act shape (shared/act_broker.py CALL_PAYLOAD_ACTS): at
+    # an authored `commitment: confirm` the gate withholds it, the broker
+    # renders the whole order into the [act ...] line, and only an
+    # administrator's emailed yes replays the stored order. The connector then
+    # re-checks it against Smokeball and reads the client's identifiers in
+    # process. orders_for_matter READS what the vendor holds for the matter.
+    "mcp_smokeball_prepare_records_order": ActionClass.READ,
+    "mcp_smokeball_place_records_order": ActionClass.COMMITMENT,
+    "mcp_smokeball_records_orders_for_matter": ActionClass.READ,
     # ----------------------------------------------------------------------
     # Clio MCP (oktopeak/clio-mcp v2.0.0) — the law wedge's ORIGINAL
     # practice-management system of record. It was bound as `mcp:clio-oktopeak`

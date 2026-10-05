@@ -198,6 +198,10 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         # The deletion manifest: the same calendar entries, and the reply quotes
         # their matter numbers in the [act ...] line.
         "mcp_smokeball_prepare_event_deletion",
+        # The records order and its read-back: the reply quotes the matter
+        # number, the custodians' directory names and the vendor's request numbers.
+        "mcp_smokeball_prepare_records_order",
+        "mcp_smokeball_records_orders_for_matter",
         "mcp_smokeball_list_folders",
         # Clio.
         "mcp_clio_oktopeak_list_matters",
