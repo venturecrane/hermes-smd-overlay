@@ -940,7 +940,7 @@ def _classify_call(call: _CallRow, calls: list[_CallRow], index: int) -> tuple[s
     if call.outcome == "shortfall":
         code = _token(call.shortfall_code) or "shortfall"
     else:
-        code = _token(call.error_type) or "error"
+        code = _token(call.error_type) or _error_code(call.error_type)
     return ("limit" if code in SHORTFALL_LIMIT_CODES else "failed", code)
 
 
@@ -1011,6 +1011,45 @@ def _reply_events(
             )
         )
     return out
+
+
+_HTTP_STATUS_RE = re.compile(r"\b(?:HTTP|status)\s*([1-5]\d{2})\b", re.IGNORECASE)
+_EXCEPTION_NAME_RE = re.compile(r"\b([A-Z][A-Za-z]+(?:Error|Exception|Timeout))\b")
+
+#: Phrase -> token, checked in order. Lower-cased substring match.
+_ERROR_PHRASES: tuple[tuple[str, str], ...] = (
+    ("token mint", "auth_token_rejected"),
+    ("refresh token", "auth_token_rejected"),
+    ("invalid_grant", "auth_token_rejected"),
+    ("timed out", "timeout"),
+    ("timeout", "timeout"),
+    ("connection refused", "connection_refused"),
+)
+
+
+def _error_code(error_type: object) -> str:
+    """A closed-vocabulary code for a PROSE ``error_type``.
+
+    Tools write ``error_type`` as a sentence ("token mint (authorization_code)
+    rejected with HTTP 400 at https://..."), which ``_token`` rightly refuses,
+    so every such event used to ride as the bare word ``error`` and told SMD
+    nothing. This derives a token deterministically, in order: an HTTP status
+    (``http_400``), an exception class name, a known phrase, else ``error``.
+    Only the matched digits or class name, or a fixed token, ever leave here:
+    no other text of the error, which can carry a URL or a client's name.
+    """
+    text = error_type if isinstance(error_type, str) else ""
+    status = _HTTP_STATUS_RE.search(text)
+    if status:
+        return f"http_{status.group(1)}"
+    name = _EXCEPTION_NAME_RE.search(text)
+    if name and len(name.group(1)) <= _FIELD_MAX:
+        return name.group(1)
+    lowered = text.lower()
+    for phrase, token in _ERROR_PHRASES:
+        if phrase in lowered:
+            return token
+    return "error"
 
 
 def _retried_ok(call: _CallRow, calls: list[_CallRow], index: int) -> bool:

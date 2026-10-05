@@ -2357,3 +2357,77 @@ def test_reply_failed_codes_are_closed(tmp_path):
         "reply_failed:act_line_undelivered",
     ]
     assert facts.failed == 2
+
+
+# ---------------------------------------------------------------------------
+# A prose error_type gets an informative code (2026-10-05). A Smokeball token
+# mint rejected with HTTP 400 rode as code "error" eight times: the event said
+# something broke and nothing about what. The code is now derived from the
+# prose, in a fixed order, and only the derived token ever leaves the seat.
+# ---------------------------------------------------------------------------
+
+
+def _error_codes(tmp_path, *error_types):
+    def build(led):
+        for i, error_type in enumerate(error_types):
+            _call(
+                led,
+                _ts(len(error_types) - i),
+                "mcp_smokeball_get_matter",
+                "error",
+                session=f"s-err-{i}",
+                error_type=error_type,
+            )
+
+    return [e["code"] for e in _shortfalls(tmp_path, build).events]
+
+
+def test_a_rejected_token_mint_rides_as_its_http_status(tmp_path):
+    assert _error_codes(
+        tmp_path,
+        "token mint (authorization_code) rejected with HTTP 400 at "
+        "https://auth.example.com/oauth2/token",
+    ) == ["http_400"]
+
+
+def test_prose_error_codes_follow_the_fixed_order(tmp_path):
+    assert _error_codes(
+        tmp_path,
+        "upstream returned status 503",
+        "ReadTimeout while fetching the page",
+        "call failed: ConnectionError(peer reset)",
+        "refresh token rejected by the provider",
+        "the request timed out after 30s",
+        "connection refused by the broker",
+        "Refused: something nobody mapped",
+        "ValueError",
+    ) == [
+        "http_503",
+        "ReadTimeout",
+        "ConnectionError",
+        "auth_token_rejected",
+        "timeout",
+        "connection_refused",
+        "error",
+        # Already token-shaped: rides as written, as it always has.
+        "ValueError",
+    ]
+
+
+def test_only_the_derived_token_survives_a_prose_error(tmp_path):
+    """A client's name and a URL in the error never reach the wire."""
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _call(
+            led,
+            _ts(1),
+            "mcp_smokeball_get_matter",
+            "error",
+            error_type="Testclient Sampleperson matter lookup failed with HTTP 404 at "
+            "https://api.example.com/matters/testclient",
+        ),
+    )
+    assert [e["code"] for e in facts.events] == ["http_404"]
+    wire = json.dumps(facts.events)
+    for leaked in ("Testclient", "Sampleperson", "testclient", "api.example.com", "matters"):
+        assert leaked not in wire
