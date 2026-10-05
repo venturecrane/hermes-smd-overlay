@@ -587,6 +587,21 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # row's note is composed in the connector), so the draft gate's scan has
     # nothing to read and allows it, which is the intended posture.
     "mcp_smokeball_add_medicals_row": ActionClass.INTERNAL_WRITE,
+    # A treating facility on the Medicals tab without a bill (ss-console,
+    # 2026-10-05, a paralegal's emailed list of a client's prior and current
+    # providers): finds the facility's contact by its one exact name, or adds it
+    # as a company when the firm's contacts hold none, links it as a provider
+    # row and writes only the row's description. No money field exists on the
+    # tool. Internal write for add_medicals_row's reason: the firm's own record,
+    # nothing sent outside. Several possible contacts write nothing.
+    "mcp_smokeball_add_medicals_provider": ActionClass.INTERNAL_WRITE,
+    # The firm's own rep-letter form, filled (ss-console, 2026-10-05): the 1st or
+    # 3rd party representation letter rendered from the firm's form in its
+    # Document Library, every value read in the connector from the matter's own
+    # record, and filed on that matter. Internal write for render_docx_draft's
+    # reason: work product saved into the firm's record. Mailing or faxing the
+    # letter stays a person's act; this tool sends nothing.
+    "mcp_smokeball_render_firm_form_letter": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches
