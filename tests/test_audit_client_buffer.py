@@ -51,6 +51,12 @@ class FakeBroker:
     def stop(self) -> None:
         """Close the listener but LEAVE the socket file: connect() now refuses."""
         assert self._sock is not None
+        # Linux does not wake a thread blocked in accept() on close() alone, and
+        # the still-blocked accept keeps the listener answering. shutdown() does.
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # macOS: ENOTCONN on a listener; close() alone suffices there
         self._sock.close()
         self._sock = None
         if self._thread is not None:
