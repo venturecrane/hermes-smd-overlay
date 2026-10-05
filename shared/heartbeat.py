@@ -701,12 +701,32 @@ def _event_key(cls: str, row_id: object) -> str:
     return f"{cls}:" + hashlib.sha256(str(row_id).encode("utf-8")).hexdigest()[:32]
 
 
+_ZONED_TS_RE = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
+
+
+def _zoned_ts(value: object) -> str:
+    """The audit row's own ``ts``, with an explicit zone.
+
+    The console's ingest refuses a zone-less ISO timestamp, so this is the raw
+    row ``ts`` (``...123Z`` from ``shared.ids.iso_utc``, ``...+00:00`` from
+    older writers), the same value ``send_refusals`` carries, never the
+    19-character comparison prefix. Every audit ``ts`` is UTC by construction,
+    so a row written without a zone is stamped ``Z`` rather than sent bare.
+    """
+    text = str(value or "").strip()
+    return text if _ZONED_TS_RE.search(text) else text + "Z"
+
+
 def _shortfall_event(*, ts, cls, tool, routine, code, key) -> dict:
-    """One wire-shaped event: exactly the six contract keys, all bounded."""
+    """One wire-shaped event: exactly the six contract keys, all bounded.
+
+    ``ts`` is zoned ISO-8601 (``_zoned_ts``); ``tool`` is never empty;
+    ``routine`` is ``None`` when nothing names one.
+    """
     return {
-        "ts": _iso_floor(ts),
+        "ts": _zoned_ts(ts),
         "class": cls,
-        "tool": _clip(tool),
+        "tool": _clip(tool) or "unknown_tool",
         "routine": _clip(routine) if routine else None,
         "code": _safe_code(code),
         "key": _clip(key, 128),
@@ -808,7 +828,9 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
         tally["partial"] += 1
         events.append(event)
 
-    events.sort(key=lambda e: (e["ts"], e["key"]))
+    # Ordered by INSTANT (the fixed-width prefix), not by spelling: ``Z`` and
+    # ``+00:00`` rows sort differently as strings.
+    events.sort(key=lambda e: (_iso_floor(e["ts"]), e["key"]))
     return ShortfallFacts(
         count=len(events),
         last_ts=events[-1]["ts"] if events else None,
@@ -955,7 +977,7 @@ def _partial_events(conn: sqlite3.Connection, calls: list[_CallRow], cutoff: str
     last_ts_by_session: dict[str, str] = {}
     for call in calls:
         if call.session_id:
-            last_ts_by_session[call.session_id] = _iso_floor(call.ts)
+            last_ts_by_session[call.session_id] = call.ts
 
     # bundle sha -> (page count, read row) from mail-session reads, newest read wins
     reads: dict[str, tuple[int, _CallRow]] = {}
@@ -974,7 +996,9 @@ def _partial_events(conn: sqlite3.Connection, calls: list[_CallRow], cutoff: str
             mail_sessions[call.session_id] = _is_mail_session(calls, call.session_id)
         if not mail_sessions[call.session_id]:
             continue
-        if not _session_closed(conn, call.session_id, last_ts_by_session[call.session_id], cutoff):
+        if not _session_closed(
+            conn, call.session_id, _iso_floor(last_ts_by_session[call.session_id]), cutoff
+        ):
             continue
         previous = reads.get(call.bundle_sha256)
         reads[call.bundle_sha256] = (max(count, previous[0]) if previous else count, call)

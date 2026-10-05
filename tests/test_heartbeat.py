@@ -9,6 +9,7 @@ load-bearing property, so it gets explicit coverage.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1781,6 +1782,10 @@ _FILE_TOOL = "mcp_smokeball_file_attachment_pages_to_matter"
 SHORTFALL_PAYLOAD_KEYS = ("shortfalls", "shortfalls_last_ts", "shortfalls_json")
 SHORTFALL_EVENT_KEYS = {"ts", "class", "tool", "routine", "code", "key"}
 
+#: CONTRACT PIN: ss-console's ingest refuses a zone-less ISO timestamp. This is
+#: the shape its parser accepts (``Z`` or ``+HH:MM`` at the end).
+_ZONED_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+
 
 def _call(led, ts, tool, outcome, *, session=_MAIL_SESSION, **meta):
     led.add(
@@ -1845,7 +1850,7 @@ def test_shortfalls_zero_reaches_the_wire(tmp_path):
 
 def test_payload_pins_the_shortfall_contract_keys():
     event = {
-        "ts": "2026-10-01T14:15:02",
+        "ts": "2026-10-01T14:15:02.123Z",
         "class": "limit",
         "tool": _READ_TOOL,
         "routine": None,
@@ -1859,7 +1864,7 @@ def test_payload_pins_the_shortfall_contract_keys():
         uptime_seconds=None,
         version=None,
         shortfalls=1,
-        shortfalls_last_ts="2026-10-01T14:15:02",
+        shortfalls_last_ts="2026-10-01T14:15:02.123Z",
         shortfalls_json=[event],
     )
     for key in SHORTFALL_PAYLOAD_KEYS:
@@ -1896,7 +1901,7 @@ def test_a_trust_refusal_is_not_allowed(tmp_path):
     assert event["class"] == "not_allowed"
     assert event["code"] == "trust_refuse"
     assert event["tool"] == "smd_send_message"
-    assert len(event["ts"]) == 19
+    assert event["ts"] == _ts(2)
     assert event["key"].startswith("not_allowed:")
     assert len(event["key"]) == len("not_allowed:") + 32
 
@@ -1942,7 +1947,7 @@ def test_a_read_volume_refusal_is_a_limit_not_a_permission(tmp_path):
 
 def test_limit_and_failed_split_on_the_code(tmp_path):
     def build(led):
-        _call(led, _ts(5), _READ_TOOL, "shortfall", shortfall_code="over_page_cap")
+        _call(led, _ts(5), _READ_TOOL, "shortfall", shortfall_code="over_page_cap", session="s-a")
         _call(led, _ts(4), "mail_spool_attachment", "shortfall", shortfall_code="over_size_cap")
         _call(led, _ts(3), "mcp_medchron_submit", "shortfall", shortfall_code="allowance_spent")
         _call(
@@ -1964,7 +1969,7 @@ def test_limit_and_failed_split_on_the_code(tmp_path):
         ("failed", "error"),
     ]
     assert (facts.limit, facts.failed) == (3, 2)
-    assert facts.last_ts == _ts(1)[:19]
+    assert facts.last_ts == _ts(1)
 
 
 def test_a_refusal_retried_ok_on_the_same_object_is_no_event(tmp_path):
@@ -2083,8 +2088,8 @@ def test_events_ride_oldest_first_capped_while_the_count_is_whole(tmp_path):
     facts = _shortfalls(tmp_path, build)
     assert facts.count == 25
     assert len(facts.events) == 20
-    assert facts.events[0]["ts"] == _ts(20)[:19]
-    assert facts.last_ts == _ts(8)[:19]
+    assert facts.events[0]["ts"] == _ts(20)
+    assert facts.last_ts == _ts(8)
     assert [e["ts"] for e in facts.events] == sorted(e["ts"] for e in facts.events)
 
 
@@ -2149,7 +2154,7 @@ def test_read_audit_facts_carries_the_shortfall_fields(tmp_path):
     ledger.conn.close()
     facts = hb.read_audit_facts(str(db))
     assert facts.shortfalls == 1
-    assert facts.shortfalls_last_ts is not None and len(facts.shortfalls_last_ts) == 19
+    assert _ZONED_ISO.match(facts.shortfalls_last_ts)
     assert facts.shortfalls_json[0]["class"] == "limit"
 
 
@@ -2181,3 +2186,44 @@ def test_ticker_puts_the_shortfall_fields_on_the_wire(tmp_path):
     assert body["shortfalls_last_ts"]
     assert body["shortfalls_json"][0]["code"] == "over_size_cap"
     assert set(body["shortfalls_json"][0]) == SHORTFALL_EVENT_KEYS
+
+
+def test_every_shortfall_timestamp_carries_an_explicit_zone(tmp_path):
+    """CONTRACT PIN: ``shortfalls_last_ts`` and every event ``ts`` are full
+    ISO-8601 with a zone, the raw audit-row ``ts`` (the way ``send_refusals``
+    carries it), never the 19-character comparison prefix. Both live spellings
+    (``...Z`` and ``+00:00``) pass through; a row written bare is stamped Z.
+    ``tool`` is never empty; ``routine`` may be null."""
+
+    def build(led):
+        _call(led, _ts(5), _READ_TOOL, "shortfall", shortfall_code="over_page_cap", session="s-a")
+        _call(led, "2026-08-21T14:00:00+00:00", "", "error", session="s-bare-tool")
+        _call(
+            led,
+            "2026-08-21T15:00:00",
+            _READ_TOOL,
+            "shortfall",
+            shortfall_code="too_long",
+            session="s-b",
+        )
+        _mail_procedure(led, _ts(3))
+        _bundle_read(led, _ts(2.9), 52)
+        _session_turn(led, _ts(2.8))
+
+    facts = _shortfalls(tmp_path, build)
+    assert facts.count == 4
+    for event in facts.events:
+        assert _ZONED_ISO.match(event["ts"]), event["ts"]
+        assert event["tool"], event
+        assert event["routine"] is None or isinstance(event["routine"], str)
+    assert _ZONED_ISO.match(facts.last_ts)
+    by_code = {e["code"]: e for e in facts.events}
+    assert by_code["over_page_cap"]["ts"] == _ts(5)
+    assert by_code["over_page_cap"]["routine"] is None
+    assert by_code["error"]["ts"] == "2026-08-21T14:00:00+00:00"
+    assert by_code["error"]["tool"] == "unknown_tool"
+    assert by_code["too_long"]["ts"] == "2026-08-21T15:00:00Z"
+    assert by_code["filed 0 of 52"]["ts"] == _ts(2.9)
+    # Ordered by instant across spellings: +00:00 at 14:00 before Z at 15:00.
+    order = [e["code"] for e in facts.events]
+    assert order.index("error") < order.index("too_long")
