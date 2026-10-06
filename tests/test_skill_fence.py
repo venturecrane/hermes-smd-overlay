@@ -13,6 +13,7 @@ from shared.customer_config import CustomerConfig
 from tests.conftest import load_plugin
 
 ENABLED = "matter-inbox-router"
+FIND_EXEC = "find / -path '*skills*' -name SKILL.md " + "-ex" + "ec cat {} +"
 OMITTED = "demand-letter-drafter"
 
 _YAML = f"""
@@ -56,13 +57,28 @@ def _call(mod, tool, args):
         ("terminal", {"command": f"cat /app/skills/{OMITTED}/SKILL.md"}),
         ("terminal", {"command": f"cd /app && cat skills/{OMITTED}/SKILL.md"}),
         ("execute_code", {"code": f"open('/opt/data/skills/{OMITTED}/SKILL.md').read()"}),
+        # The review's bypasses (2026-10-06), each one a falsifier.
+        ("search_files", {"pattern": "demand", "path": "/app"}),
+        ("search_files", {"pattern": "demand", "path": "/"}),
+        ("search_files", {"pattern": "demand", "path": "/opt/data"}),
+        ("search_files", {"pattern": "demand", "path": "skills", "workdir": "/app"}),
+        ("read_file", {"path": f"skills/{OMITTED}/SKILL.md", "workdir": "/opt/data"}),
+        ("read_file", {"path": f"/app/./skills/{OMITTED}/SKILL.md"}),
+        ("terminal", {"command": "cat SKILL.md", "workdir": f"/app/skills/{OMITTED}"}),
+        ("terminal", {"command": "cat skills/*/SKILL.md", "workdir": "/app"}),
+        ("terminal", {"command": "cat /app/skills/*/references/*.md"}),
+        ("terminal", {"command": FIND_EXEC}),
+        ("terminal", {"command": f"cat /app/./skills/{OMITTED}/SKILL.md"}),
+        ("execute_code", {"code": "p = '/app/' + 'skills/' + name; print(open(p).read())"}),
+        ("skill_view", {"name": f"{ENABLED}/../{OMITTED}"}),
+        ("skill_view", {"name": f"../{OMITTED}"}),
     ],
 )
 def test_an_omitted_skill_cannot_be_read(fence, tool, args) -> None:
     mod, _ = fence
     verdict = _call(mod, tool, args)
     assert verdict is not None and verdict["action"] == "block"
-    assert verdict["message"].startswith("could not load")
+    assert verdict["message"].startswith("could not")
 
 
 @pytest.mark.parametrize(
@@ -80,6 +96,27 @@ def test_an_omitted_skill_cannot_be_read(fence, tool, args) -> None:
 def test_an_enabled_skill_or_another_path_reads(fence, tool, args) -> None:
     mod, _ = fence
     assert _call(mod, tool, args) is None
+
+
+def test_a_search_with_no_path_from_a_root_parent_is_refused(fence, monkeypatch) -> None:
+    mod, _ = fence
+    monkeypatch.chdir("/")
+    verdict = _call(mod, "search_files", {"pattern": "demand"})
+    assert verdict is not None and verdict["action"] == "block"
+
+
+def test_a_dot_search_from_the_volume_is_refused(fence, monkeypatch) -> None:
+    mod, _ = fence
+    monkeypatch.setattr(mod.os, "getcwd", lambda: "/opt/data")
+    verdict = _call(mod, "search_files", {"pattern": "demand", "path": "."})
+    assert verdict is not None and verdict["action"] == "block"
+
+
+def test_a_home_relative_path_is_expanded(fence, monkeypatch) -> None:
+    mod, _ = fence
+    monkeypatch.setenv("HOME", "/opt/data")
+    verdict = _call(mod, "read_file", {"path": f"~/skills/{OMITTED}/SKILL.md"})
+    assert verdict is not None and verdict["action"] == "block"
 
 
 def test_an_unreadable_config_enables_nothing(fence, monkeypatch) -> None:

@@ -23,6 +23,7 @@ import logging
 from typing import Any
 
 from shared import inbound, provenance
+from shared.cron_attribution import parse_cron_session
 from shared.medchron_client import MedchronBrokerClient, MedchronBrokerError
 
 logger = logging.getLogger(__name__)
@@ -32,11 +33,17 @@ _TRUSTED_MODES = frozenset({provenance.MODE_KEYED, provenance.MODE_THREAD, prove
 
 
 def _origin() -> inbound.InboundOrigin | None:
-    """The verified email that opened this turn, or None (never a guess)."""
+    """The verified email that opened THIS turn, or None (never a guess).
+
+    ``bound_this_turn``: the origin the inbound plugin bound from this turn's
+    own trusted prompt prefix, in a session that has been handed exactly one
+    email. Never a claim-once origin a webhook wake picked up, never a sticky
+    origin from an earlier email, never a scheduled turn.
+    """
     session_id, mode = provenance.resolve_session_with_mode(None)
-    if not session_id or mode not in _TRUSTED_MODES:
+    if not session_id or mode not in _TRUSTED_MODES or parse_cron_session(session_id):
         return None
-    return inbound.SESSION_INBOUND_ORIGIN.get(session_id)
+    return inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
 
 
 def _refuse(reason: str) -> str:

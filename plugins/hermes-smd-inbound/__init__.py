@@ -92,13 +92,17 @@ def _bind_origin_from_prompt(session_id: str, user_message: Any) -> None:
     Svix signature verification, and the relay's recipient-lock still requires
     the draft to name exactly that sender.
     """
-    if not session_id or not isinstance(user_message, str):
+    if not session_id:
+        return
+    if not isinstance(user_message, str):
+        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, "")
         return
     try:
         cut = user_message.find(_UNTRUSTED_DELIMITER)
-        if cut < 0:
-            return
-        matches = _MESSAGE_ID_RE.findall(user_message[:cut])
+        matches = _MESSAGE_ID_RE.findall(user_message[:cut]) if cut >= 0 else []
+        # Every turn notes what its own trusted prefix named ("" for none), so
+        # bound_this_turn() can tell the email's turn from a later wake.
+        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, matches[-1] if matches else "")
         if not matches:
             return
         if inbound.SESSION_INBOUND_ORIGIN.bind(session_id, matches[-1]):
