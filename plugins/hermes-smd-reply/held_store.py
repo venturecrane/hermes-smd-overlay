@@ -318,6 +318,21 @@ class HeldReplyStore:
         ).fetchone()
         return row is not None
 
+    def has_pending_for_message(self, message_id: str) -> bool:
+        """True iff a reply to this inbound message is waiting to be released.
+
+        The verified reply binding (binding.py) refuses to bind an email that
+        has one: the release would answer it a second time.
+        """
+        if not message_id:
+            return False
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT 1 FROM held_replies WHERE message_id=? AND status IN (?, ?) LIMIT 1",
+            (message_id, STATUS_HELD, STATUS_SENDING),
+        ).fetchone()
+        return row is not None
+
     def pending_count(self) -> int:
         conn = self._connect()
         row = conn.execute(

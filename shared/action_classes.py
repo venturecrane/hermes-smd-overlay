@@ -939,6 +939,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "medchron_job_submit": ActionClass.INTERNAL_WRITE,
     "medchron_job_status": ActionClass.READ,
     "medchron_allowance": ActionClass.READ,
+    # The verified reply binding (hermes-smd-reply/binding.py, ss-console
+    # workspace_broker/reply_binding.py). It names an email, never a person;
+    # the broker resolves the sender from the mailbox and the reply that
+    # follows still goes through create_draft and every reply floor.
+    # INTERNAL_WRITE: it changes what this turn's reply lane may answer.
+    "reply_bind": ActionClass.INTERNAL_WRITE,
 }
 
 

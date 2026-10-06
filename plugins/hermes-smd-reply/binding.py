@@ -1,0 +1,281 @@
+"""The verified reply binding, overlay side: a turn no inbound email opened may
+answer ONE earlier email, once, to the person who sent it.
+
+WHY. The relay is keyed on the inbound that opened the turn
+(``SESSION_INBOUND_ORIGIN``). A job's completion turn (a ``/webhooks/handoff``
+wake) and a one-shot cron turn have none, so before this the chronology
+runner's delivery reached the matter and never the requester's thread: every
+operator chronology thread was the request and "queued", and nothing after.
+
+THE SHAPE. The agent calls ``reply_bind`` naming WHICH email (a demand job id,
+or the email's Graph or RFC 5322 id). It never names a person. The broker
+(ss-console ``workspace_broker/reply_binding.py``) resolves the email in the
+operator mailbox, refuses a draft, checks the sender against the live reply
+roster and that the email has not been answered, and answers with the sender.
+This module records that binding for the session; the relay then treats the
+bound sender exactly as it treats a verified inbound sender (recipient lock,
+fabrication and content floors, output checklist, matter gate, rate limit) and
+transmits through ``msgraph_reply_bound``, where the broker verifies AGAIN,
+takes a durable once-only claim and replies on the Graph id it resolved. So:
+
+* the recipient is the broker's, never the model's;
+* the roster is re-read at bind time, at relay time and at send time;
+* once-only survives a restart (the broker's claim; ``RepliedOnce`` is only
+  the in-turn guard);
+* a turn an email opened never binds: its replies belong to that email.
+
+One binding per session, first wins, exactly like the inbound origin.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import threading
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from shared import inbound, msgraph_broker
+from shared.cron_attribution import parse_cron_session
+
+TOOL_NAME = "reply_bind"
+#: The inbox marker a bound origin carries. Never a real inbox id; the relay
+#: keys every bound-only branch on it.
+BOUND_INBOX = "verified-binding"
+
+
+#: The sender id the gateway gives a ``/webhooks/handoff`` turn (the route, as
+#: ``webhook:agentmail`` is for mail): a job's completion wake.
+HANDOFF_SENDER = "webhook:handoff"
+#: The demand runner's wake names its job in its first line.
+_WAKE_JOB = re.compile(r"\bdemand job ([0-9A-HJKMNP-TV-Z]{26})\b")
+
+
+@dataclass(frozen=True)
+class Binding:
+    sender: str
+    #: The exact dict the broker verified, replayed verbatim at send.
+    request: tuple[tuple[str, str], ...]
+    #: The Graph id of the bound email: the reply's in_reply_to, the in-turn
+    #: once-only key, and what the held-reply store is checked against.
+    graph_message_id: str
+
+    def as_request(self) -> dict[str, str]:
+        return dict(self.request)
+
+    def origin(self) -> inbound.InboundOrigin:
+        """The bound email as the relay's recipient-lock anchor."""
+        return inbound.InboundOrigin(
+            sender_address=self.sender, message_id=self.graph_message_id, inbox_id=BOUND_INBOX
+        )
+
+
+class TurnSources:
+    """session id -> the handoff wake that opened it, with the demand job id it
+    names (or ""). Recorded at ``pre_llm_call`` from the gateway's own sender id,
+    never from anything the model writes. Cron turns need no record: the
+    scheduler stamps them in the session id itself."""
+
+    def __init__(self, max_sessions: int = 256) -> None:
+        self._max = max_sessions
+        self._handoff: OrderedDict[str, str] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def note(self, session_id: str, sender_id: Any, user_message: Any) -> None:
+        if not session_id or sender_id != HANDOFF_SENDER:
+            return
+        found = _WAKE_JOB.search(user_message) if isinstance(user_message, str) else None
+        with self._lock:
+            if session_id in self._handoff:
+                return
+            self._handoff[session_id] = found.group(1) if found else ""
+            while len(self._handoff) > self._max:
+                self._handoff.popitem(last=False)
+
+    def source(self, session_id: str) -> tuple[str, str] | None:
+        """("handoff", pinned job id or ""), ("cron", ""), or None."""
+        with self._lock:
+            if session_id in self._handoff:
+                return ("handoff", self._handoff[session_id])
+        if parse_cron_session(session_id):
+            return ("cron", "")
+        return None
+
+    def _reset_for_tests(self) -> None:
+        with self._lock:
+            self._handoff.clear()
+
+
+TURN_SOURCES = TurnSources()
+
+
+class SessionBindings:
+    """session id -> Binding. Bounded, thread-safe, first binding wins."""
+
+    def __init__(self, max_sessions: int = 256) -> None:
+        self._max = max_sessions
+        self._by_session: OrderedDict[str, Binding] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def record(self, session_id: str, binding: Binding) -> Binding:
+        """Record unless one is set; returns the binding the session HAS."""
+        with self._lock:
+            have = self._by_session.get(session_id)
+            if have is not None:
+                return have
+            self._by_session[session_id] = binding
+            while len(self._by_session) > self._max:
+                self._by_session.popitem(last=False)
+            return binding
+
+    def get(self, session_id: str) -> Binding | None:
+        if not session_id:
+            return None
+        with self._lock:
+            return self._by_session.get(session_id)
+
+    def _reset_for_tests(self) -> None:
+        with self._lock:
+            self._by_session.clear()
+
+
+SESSION_BINDINGS = SessionBindings()
+
+
+def _request_from_args(args: dict[str, Any]) -> dict[str, str] | str:
+    """The broker binding for the tool's arguments, or a refusal sentence."""
+    given = {
+        k: str(args.get(k) or "").strip()
+        for k in ("job_id", "graph_message_id", "internet_message_id")
+        if str(args.get(k) or "").strip()
+    }
+    if len(given) != 1:
+        return "name exactly one of job_id, graph_message_id or internet_message_id"
+    ((field, value),) = given.items()
+    if field == "job_id":
+        return {"kind": "demand_job", "job_id": value}
+    return {"kind": "message", field: value}
+
+
+def handle_tool(args: dict[str, Any], **_: Any) -> str:
+    """``reply_bind``: ask the broker; return its verdict as the tool result."""
+    req = _request_from_args(args if isinstance(args, dict) else {})
+    if isinstance(req, str):
+        return json.dumps({"bound": False, "reason": req})
+    try:
+        verdict = msgraph_broker.bind_reply(req)
+    except (msgraph_broker.MsGraphBrokerUnavailable, msgraph_broker.BrokerError) as exc:
+        return json.dumps({"bound": False, "reason": f"the binding could not be checked: {exc}"})
+    if verdict.get("bound") is not True:
+        return json.dumps({"bound": False, "reason": str(verdict.get("reason") or "refused")})
+    return json.dumps(
+        {
+            "bound": True,
+            "binding": req,
+            "sender": verdict.get("sender"),
+            "graph_message_id": verdict.get("graph_message_id"),
+            "message": (
+                "Bound. Draft ONE reply with create_draft addressed to this sender only; it is "
+                "sent in that email's thread once it passes the reply checks. Nothing else in "
+                "this turn can be replied to."
+            ),
+        }
+    )
+
+
+def _refused(reason: str) -> str:
+    return json.dumps({"bound": False, "reason": reason})
+
+
+def record_from_result(
+    session_id: str, result: Any, held_pending: Callable[[str], bool] | None = None
+) -> str | None:
+    """Record a successful ``reply_bind`` result for the session.
+
+    Returns a replacement tool result when the binding is NOT taken, so the
+    agent reads why; ``None`` when the result stands as is. Not taken when:
+    an email opened this turn (its replies are that email's); the turn is not a
+    job's completion wake or a scheduled turn; a demand job is not the one the
+    wake names; a held reply to that email is waiting for release; or the turn
+    already holds a different binding.
+    """
+    try:
+        data = json.loads(result) if isinstance(result, str) else None
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("bound") is not True:
+        return None
+    req, sender = data.get("binding"), str(data.get("sender") or "").strip().lower()
+    graph_id = str(data.get("graph_message_id") or "").strip()
+    if not isinstance(req, dict) or not sender or "@" not in sender or not graph_id:
+        return _refused("the broker's answer was incomplete; nothing was bound")
+    if not session_id:
+        return _refused("this turn has no session to bind; the reply cannot be sent")
+    if inbound.SESSION_INBOUND_ORIGIN.get(session_id) is not None:
+        return _refused("an email opened this turn; its replies go to that email, not a bound one")
+    source = TURN_SOURCES.source(session_id)
+    if source is None:
+        return _refused(
+            "only a job's completion wake or a scheduled turn may bind a reply; this turn is neither"
+        )
+    if req.get("kind") == "demand_job":
+        if source[0] != "handoff" or not source[1]:
+            return _refused("a demand job's reply binds only from that job's own completion wake")
+        if req.get("job_id") != source[1]:
+            return _refused(
+                f"this wake is for demand job {source[1]}; it cannot answer another job"
+            )
+    if held_pending is not None and held_pending(graph_id):
+        return _refused(
+            "a held reply to that email is waiting for release; binding another would answer it twice"
+        )
+    request = tuple(sorted((str(k), str(v)) for k, v in req.items()))
+    wanted = Binding(sender=sender, request=request, graph_message_id=graph_id)
+    have = SESSION_BINDINGS.record(session_id, wanted)
+    if have != wanted:
+        return _refused("this turn is already bound to another email; one per turn")
+    return None
+
+
+TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "job_id": {
+            "type": "string",
+            "description": "A demand job's id, from its completion wake: binds to the email that requested it.",
+        },
+        "graph_message_id": {
+            "type": "string",
+            "description": "The Graph id of the email to answer, as this turn was handed it.",
+        },
+        "internet_message_id": {
+            "type": "string",
+            "description": "The email's RFC 5322 Message-ID (<...@...>), when that is what you hold.",
+        },
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+TOOL_DESCRIPTION = (
+    "Bind this turn's reply to ONE earlier email, for a turn no email opened (a job's completion "
+    "wake, a scheduled one-off). Name the email, never a person: the broker finds it in the "
+    "operator mailbox, checks its sender may be replied to and that it has had no reply, and "
+    "answers with that sender. Then draft one reply with create_draft to that sender; it goes out "
+    "in that email's thread, once. Pass exactly one of job_id, graph_message_id, internet_message_id."
+)
+
+__all__ = [
+    "BOUND_INBOX",
+    "HANDOFF_SENDER",
+    "TURN_SOURCES",
+    "SESSION_BINDINGS",
+    "TOOL_DESCRIPTION",
+    "TOOL_NAME",
+    "TOOL_SCHEMA",
+    "Binding",
+    "handle_tool",
+    "record_from_result",
+]

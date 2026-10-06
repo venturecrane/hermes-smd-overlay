@@ -159,6 +159,66 @@ def send_reply(
     return _vendor_id(_call("msgraph_reply", payload, session_id=session_id, matter_ref=matter_ref))
 
 
+def bind_reply(binding: dict[str, str]) -> dict[str, Any]:
+    """Ask the broker whether a reply may bind to one earlier email.
+
+    The verified reply binding (ss-console ``workspace_broker/reply_binding.py``).
+    ``binding`` is ``{"kind": "demand_job", "job_id": ...}`` or ``{"kind":
+    "message", "internet_message_id" | "graph_message_id": ...}``. The broker
+    resolves the email in the mailbox, checks its sender against the seat's
+    reply roster and that it has not been answered, and answers ``{"bound":
+    True, "sender": ...}`` or ``{"bound": False, "reason": ...}``. The sender
+    it names is the only person a bound reply can reach; nothing here chooses it.
+    """
+    if not transmit_available():
+        raise MsGraphBrokerUnavailable(
+            f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
+        )
+    try:
+        return request(
+            {"action": "msgraph_reply_bind", "binding": binding}, timeout=SEND_TIMEOUT_SECONDS
+        )
+    except OSError as exc:
+        raise MsGraphBrokerUnavailable(f"broker unreachable: {exc}") from exc
+
+
+def send_bound_reply(
+    binding: dict[str, str],
+    comment: str,
+    *,
+    html: str = "",
+    session_id: str = "",
+    matter_ref: str | None = None,
+) -> str:
+    """Send the ONE reply a verified binding allows.
+
+    The broker verifies the binding again (the roster is re-read now, not at
+    bind time), takes a durable once-only claim, then replies on the Graph id it
+    resolved itself, so Graph derives the recipient from that email. A second
+    call for the same binding is refused by the broker across restarts.
+    """
+    if not transmit_available():
+        raise MsGraphBrokerUnavailable(
+            f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
+        )
+    payload: dict[str, Any] = {"comment": comment}
+    if html.strip():
+        payload["html"] = html
+    envelope: dict[str, Any] = {
+        "action": "msgraph_reply_bound",
+        "binding": binding,
+        "payload": payload,
+    }
+    if session_id:
+        envelope["session_id"] = session_id
+    if matter_ref:
+        envelope["matter_ref"] = matter_ref
+    try:
+        return _vendor_id(request(envelope, timeout=SEND_TIMEOUT_SECONDS))
+    except OSError as exc:
+        raise MsGraphBrokerUnavailable(f"broker unreachable: {exc}") from exc
+
+
 def _vendor_id(response: dict[str, Any]) -> str:
     """The id of the message the broker just sent, or ``""`` if it has none.
 
