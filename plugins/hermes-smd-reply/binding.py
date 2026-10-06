@@ -220,6 +220,12 @@ def record_from_result(
         return _refused(
             "only a job's completion wake or a scheduled turn may bind a reply; this turn is neither"
         )
+    if source[0] == "handoff" and source[1] and req.get("kind") != "demand_job":
+        # A demand job's wake answers through the job's own binding only: the
+        # request email already had its acknowledgment (2026-10-06 practice job).
+        return _refused(
+            f"this is demand job {source[1]}'s wake; bind with job_id={source[1]}, never the email's id"
+        )
     if req.get("kind") == "demand_job":
         if source[0] != "handoff" or not source[1]:
             return _refused("a demand job's reply binds only from that job's own completion wake")
@@ -267,7 +273,37 @@ TOOL_DESCRIPTION = (
     "in that email's thread, once. Pass exactly one of job_id, graph_message_id, internet_message_id."
 )
 
+#: Tools a demand job's completion wake may never call: every send, and the
+#: casework brief (a message to staff by another name). The bound reply
+#: (create_draft after reply_bind) is the wake's ONLY channel (2026-10-06: a
+#: refused bind was followed by an email to the responsible attorney).
+WAKE_FORBIDDEN_TOOLS = frozenset({"smd_send_message", "casework_brief"})
+
+
+def wake_send_refusal(session_id: str, tool_name: str) -> str | None:
+    """The refusal for ``tool_name`` in a demand job's wake, or None."""
+    source = TURN_SOURCES.source(session_id) if session_id else None
+    if source is None or source[0] != "handoff" or not source[1]:
+        return None
+    from shared.action_classes import ActionClass, classify_tool
+
+    try:
+        cls = classify_tool(tool_name).action_class
+    except Exception:  # noqa: BLE001 - an unclassifiable tool is not allowed here
+        cls = None
+    sends = cls is not None and cls.value.startswith("external_send")
+    if tool_name in WAKE_FORBIDDEN_TOOLS or sends or cls is ActionClass.REFUSED:
+        return (
+            f"{tool_name} refused: this is demand job {source[1]}'s completion wake, and its only "
+            "channel is the bound reply to the requester (reply_bind with job_id, then create_draft). "
+            "If the bind was refused, send nothing to anyone and end the turn stating the refusal."
+        )
+    return None
+
+
 __all__ = [
+    "WAKE_FORBIDDEN_TOOLS",
+    "wake_send_refusal",
     "BOUND_INBOX",
     "HANDOFF_SENDER",
     "TURN_SOURCES",
