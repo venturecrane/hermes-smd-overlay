@@ -1,18 +1,8 @@
 """The verified reply binding (hermes-smd-reply/binding.py), overlay side.
 
-A turn no email opened binds to ONE earlier email through the broker, then its
-create_draft is relayed like any reply, but transmitted through
-``msgraph_reply_bound``. Each test pins a guard and fails without it:
-
-* the agent names an email, never a person; the bound sender is the broker's;
-* a draft to anyone but the bound sender is held (recipient lock);
-* without a binding, a non-inbound turn still sends nothing;
-* an email-opened turn cannot bind (its replies are that email's);
-* one binding per turn;
-* a bound reply goes through the bound verb, never the ordinary reply verb;
-* the floors still run (a fabricated reply is held, not sent);
-* a rate-held bound reply is never queued for release (that path would skip
-  the broker's once-only claim).
+A job's completion wake or a scheduled turn binds to ONE earlier email through
+the broker; its create_draft is then relayed like any reply, but transmitted
+through ``msgraph_reply_bound``. Each test pins a guard and fails without it.
 """
 
 from __future__ import annotations
@@ -23,13 +13,16 @@ import pytest
 
 from shared import inbound
 from shared.action_classes import TOOL_ACTION_CLASS_MAP, ActionClass
-from shared.inbound import SESSION_TAINT
+from shared.inbound import SESSION_TAINT, TRUST_CLASS_UNKNOWN_EXTERNAL
 from tests.conftest import load_plugin
 
 ADMIN = "admin@firm.example"
 OTHER = "someone@firm.example"
 GRAPH_ID = "AAMkSOURCEMESSAGE0001="
 JOB = "01J0000000000000000000000Z"
+OTHER_JOB = "01J0000000000000000000000Y"
+WAKE = "wake-1"
+CRON = "cron_abc123def456_20261006_120000"
 
 _SEAT_YAML = (
     "customer_id: acme\n"
@@ -43,6 +36,11 @@ _SEAT_YAML = (
     "    - '@firm.example'\n"
     "  admins:\n"
     f"    - {ADMIN}\n"
+    # Release ENABLED, so the test that a bound rate-hold is never queued can
+    # fail: with release off nothing is ever queued and that test proves nothing.
+    "send_policy:\n"
+    "  held_release:\n"
+    "    enabled: true\n"
 )
 
 
@@ -59,8 +57,8 @@ class _FakeD1:
 
 
 class _FakeBroker:
-    def __init__(self, sender: str = ADMIN, bound: bool = True) -> None:
-        self.sender, self.bound = sender, bound
+    def __init__(self) -> None:
+        self.bound = True
         self.binds: list[dict] = []
         self.bound_sends: list[dict] = []
         self.plain_sends: list[dict] = []
@@ -73,10 +71,10 @@ class _FakeBroker:
                 "bound": False,
                 "reason": "that email has already been answered from this mailbox",
             }
-        return {"ok": True, "bound": True, "sender": self.sender}
+        return {"ok": True, "bound": True, "sender": ADMIN, "graph_message_id": GRAPH_ID}
 
     def send_bound_reply(self, req, comment, *, html="", session_id="", matter_ref=None):
-        self.bound_sends.append({"binding": req, "comment": comment, "session_id": session_id})
+        self.bound_sends.append({"binding": req, "session_id": session_id})
         return "<sent@firm.example>"
 
     def send_reply(self, message_id, comment, **kw):
@@ -95,8 +93,10 @@ def _clean():
     ):
         reg.clear()
     mod.binding.SESSION_BINDINGS._reset_for_tests()
+    mod.binding.TURN_SOURCES._reset_for_tests()
     yield
     mod.binding.SESSION_BINDINGS._reset_for_tests()
+    mod.binding.TURN_SOURCES._reset_for_tests()
 
 
 @pytest.fixture
@@ -120,21 +120,31 @@ def lane(monkeypatch, tmp_path):
     return mod, d1, broker, yaml_path
 
 
-def _bind(mod, args: dict, session: str = "wake-1") -> str:
+def _wake(mod, session: str = WAKE, job: str = JOB, sender: str = "webhook:handoff") -> None:
+    mod.on_pre_llm_call(
+        session_id=session,
+        sender_id=sender,
+        user_message=(
+            f"Run the demand-letter-drafter skill's DELIVER mode for demand job {job}.\n"
+            "Kind: demand."
+        ),
+    )
+
+
+def _bind(mod, args: dict, session: str = WAKE) -> dict:
     """The tool call and both hooks, in the pinned Hermes order."""
     result = mod.binding.handle_tool(args)
     replaced = mod.on_transform_tool_result(
         tool_name="reply_bind", result=result, session_id=session, tool_call_id="b1"
     )
-    final = replaced if isinstance(replaced, str) else result
     mod.on_post_tool_call(
         tool_name="reply_bind", result=result, session_id=session, tool_call_id="b1"
     )
-    return final
+    return json.loads(replaced if isinstance(replaced, str) else result)
 
 
 def _draft(
-    mod, to, session: str = "wake-1", call: str = "c1", body: str = "Filed both to the matter."
+    mod, to, session: str = WAKE, call: str = "c1", body: str = "Filed both to the matter."
 ) -> None:
     mod.on_post_tool_call(
         tool_name="mcp_msgraph_mail_create_draft",
@@ -144,83 +154,222 @@ def _draft(
     )
 
 
-def test_a_bound_turn_replies_through_the_bound_verb(lane) -> None:
+def _held(d1) -> list[dict]:
+    return [m for a, m in d1.events() if a == "REPLY_HELD"]
+
+
+# -- the happy paths
+
+
+def test_a_demand_wake_replies_through_the_bound_verb(lane) -> None:
     mod, d1, broker, _ = lane
-    out = json.loads(_bind(mod, {"job_id": JOB}))
-    assert out["bound"] is True and out["sender"] == ADMIN
-    assert broker.binds == [{"kind": "demand_job", "job_id": JOB}]
+    _wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
     _draft(mod, [ADMIN])
     assert broker.bound_sends == [
-        {
-            "binding": {"kind": "demand_job", "job_id": JOB},
-            "comment": broker.bound_sends[0]["comment"],
-            "session_id": "wake-1",
-        }
+        {"binding": {"kind": "demand_job", "job_id": JOB}, "session_id": WAKE}
     ]
     assert broker.plain_sends == []
-    assert [a for a, _m in d1.events()].count("REPLY_SENT") == 1
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == GRAPH_ID
 
 
-def test_a_graph_id_binds_as_a_message(lane) -> None:
+def test_a_scheduled_turn_binds_a_message(lane) -> None:
     mod, _d1, broker, _ = lane
-    _bind(mod, {"graph_message_id": GRAPH_ID})
-    assert broker.binds == [{"kind": "message", "graph_message_id": GRAPH_ID}]
+    assert _bind(mod, {"graph_message_id": GRAPH_ID}, session=CRON)["bound"] is True
+    _draft(mod, [ADMIN], session=CRON)
+    assert broker.bound_sends[0]["binding"] == {"kind": "message", "graph_message_id": GRAPH_ID}
 
 
-def test_without_a_binding_a_wake_turn_sends_nothing(lane) -> None:
-    """FALSIFIER for the relay's fail-closed default: no origin, no binding."""
+# -- which turns may bind
+
+
+def test_a_turn_that_is_neither_wake_nor_schedule_cannot_bind(lane) -> None:
     mod, _d1, broker, _ = lane
-    _draft(mod, [ADMIN])
+    out = _bind(mod, {"graph_message_id": GRAPH_ID}, session="some-other-turn")
+    assert out["bound"] is False and "neither" in out["reason"]
+    _draft(mod, [ADMIN], session="some-other-turn")
     assert broker.bound_sends == [] and broker.plain_sends == []
 
 
-def test_a_draft_to_anyone_else_is_held(lane) -> None:
-    """The recipient lock holds the bound sender, not the draft's choice."""
-    mod, d1, broker, _ = lane
-    _bind(mod, {"job_id": JOB})
-    _draft(mod, [OTHER])
+def test_a_wake_from_another_route_is_not_a_handoff(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _wake(mod, sender="webhook:agentmail")
+    assert _bind(mod, {"job_id": JOB})["bound"] is False
+
+
+def test_a_demand_wake_cannot_answer_another_job(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _wake(mod, job=JOB)
+    out = _bind(mod, {"job_id": OTHER_JOB})
+    assert out["bound"] is False and "cannot answer another job" in out["reason"]
+
+
+def test_a_scheduled_turn_cannot_bind_a_demand_job(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    assert _bind(mod, {"job_id": JOB}, session=CRON)["bound"] is False
+
+
+def test_an_email_opened_turn_cannot_bind(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _wake(mod)
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        WAKE, inbound.InboundOrigin(sender_address=OTHER, message_id="graph-in-1", inbox_id="op@x")
+    )
+    out = _bind(mod, {"job_id": JOB})
+    assert out["bound"] is False and "an email opened this turn" in out["reason"]
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
+
+
+def test_one_binding_per_turn(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _bind(mod, {"graph_message_id": GRAPH_ID}, session=CRON)
+    out = _bind(mod, {"internet_message_id": "<x@y.example>"}, session=CRON)
+    assert out["bound"] is False and "already bound" in out["reason"]
+
+
+def test_a_held_reply_waiting_for_that_email_blocks_the_binding(lane) -> None:
+    """The release would answer it a second time. FALSIFIER: drop held_pending."""
+    mod, _d1, broker, _ = lane
+    mod._HELD_STORE.enqueue(
+        sender=ADMIN,
+        sender_class="internal",
+        adapter="msgraph",
+        inbox_id="op@x",
+        message_id=GRAPH_ID,
+        send_text="held",
+        send_html="",
+        body_digest="d",
+        hold_reason="rate_limited",
+    )
+    out = _bind(mod, {"graph_message_id": GRAPH_ID}, session=CRON)
+    assert out["bound"] is False and "held reply" in out["reason"]
+    _draft(mod, [ADMIN], session=CRON)
     assert broker.bound_sends == []
-    assert any(a == "REPLY_HELD" and m["reason"] == "recipient_mismatch" for a, m in d1.events())
 
 
 def test_a_refused_binding_binds_nothing(lane) -> None:
     mod, _d1, broker, _ = lane
     broker.bound = False
-    out = json.loads(_bind(mod, {"job_id": JOB}))
+    _wake(mod)
+    out = _bind(mod, {"job_id": JOB})
     assert out["bound"] is False and "already been answered" in out["reason"]
     _draft(mod, [ADMIN])
     assert broker.bound_sends == []
 
 
-def test_an_email_opened_turn_cannot_bind(lane) -> None:
+def test_without_a_binding_a_wake_turn_sends_nothing(lane) -> None:
     mod, _d1, broker, _ = lane
-    inbound.SESSION_INBOUND_ORIGIN.record(
-        "wake-1",
-        inbound.InboundOrigin(sender_address=OTHER, message_id="graph-in-1", inbox_id="op@x"),
-    )
-    out = json.loads(_bind(mod, {"job_id": JOB}))
-    assert out["bound"] is False and "an email opened this turn" in out["reason"]
-    assert mod.binding.SESSION_BINDINGS.get("wake-1") is None
+    _wake(mod)
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == [] and broker.plain_sends == []
 
 
-def test_one_binding_per_turn(lane) -> None:
-    mod, _d1, _broker, _ = lane
+# -- the relay's guards still hold
+
+
+def test_a_draft_to_anyone_else_is_held(lane) -> None:
+    mod, d1, broker, _ = lane
+    _wake(mod)
     _bind(mod, {"job_id": JOB})
-    out = json.loads(_bind(mod, {"graph_message_id": GRAPH_ID}))
-    assert out["bound"] is False and "already bound" in out["reason"]
-    assert mod.binding.SESSION_BINDINGS.get("wake-1").as_request() == {
-        "kind": "demand_job",
-        "job_id": JOB,
-    }
+    _draft(mod, [OTHER])
+    assert broker.bound_sends == []
+    assert any(m["reason"] == "recipient_mismatch" for m in _held(d1))
+
+
+def test_the_fabrication_floor_still_holds_a_bound_reply(lane) -> None:
+    mod, d1, broker, _ = lane
+    _wake(mod)
+    _bind(mod, {"job_id": JOB})
+    _draft(
+        mod,
+        [ADMIN],
+        body="Per Smith v. Jones, 123 F.3d 456 (9th Cir. 1999), the lien is waived.",
+    )
+    assert broker.bound_sends == [] and _held(d1)
+
+
+def _spy_floor(mod, monkeypatch) -> list[bool]:
+    seen: list[bool] = []
+    real = mod.relay.gate_body
+
+    def spy(*a, **k):
+        seen.append(k["internal_recipient"])
+        return real(*a, **k)
+
+    monkeypatch.setattr(mod.relay, "gate_body", spy)
+    return seen
+
+
+def test_a_tainted_bound_turn_gets_the_content_floor(lane, monkeypatch) -> None:
+    """FALSIFIER: drop the taint branch and the floor is skipped for a colleague."""
+    mod, _d1, _broker, _ = lane
+    seen = _spy_floor(mod, monkeypatch)
+    _wake(mod)
+    _bind(mod, {"job_id": JOB})
+    SESSION_TAINT.mark(WAKE, TRUST_CLASS_UNKNOWN_EXTERNAL)
+    _draft(mod, [ADMIN])
+    assert seen == [False]
+
+
+def test_an_untainted_bound_turn_keeps_the_colleague_carve_out(lane, monkeypatch) -> None:
+    mod, _d1, _broker, _ = lane
+    seen = _spy_floor(mod, monkeypatch)
+    _wake(mod)
+    _bind(mod, {"job_id": JOB})
+    _draft(mod, [ADMIN])
+    assert seen == [True]
+
+
+def _rate_hold_everything(mod, monkeypatch) -> None:
+    monkeypatch.setattr(
+        mod._LIMITER, "check", lambda *a, **k: mod.relay.RateDecision(False, "rate_limited")
+    )
+
+
+def test_a_rate_held_bound_reply_is_never_queued_for_release(lane, monkeypatch) -> None:
+    """Release is enabled in the fixture, so an ordinary rate-hold WOULD queue
+    (the control below); a bound one must not. FALSIFIER: drop the BOUND_INBOX
+    branch in _enqueue_hold."""
+    mod, d1, broker, _ = lane
+    _rate_hold_everything(mod, monkeypatch)
+    _wake(mod)
+    _bind(mod, {"job_id": JOB})
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == []
+    assert mod._HELD_STORE.pending_count() == 0
+    assert _held(d1)[0]["held_for_release"] is False
+
+
+def test_an_ordinary_rate_hold_does_queue_under_this_fixture(lane, monkeypatch) -> None:
+    mod, _d1, _broker, _ = lane
+    _rate_hold_everything(mod, monkeypatch)
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "mail-1",
+        inbound.InboundOrigin(sender_address=ADMIN, message_id="graph-in-9", inbox_id="op@x"),
+    )
+    _draft(mod, [ADMIN], session="mail-1")
+    assert mod._HELD_STORE.pending_count() == 1
+
+
+def test_another_transport_holds_a_bound_reply(lane) -> None:
+    mod, d1, broker, yaml_path = lane
+    yaml_path.write_text(_SEAT_YAML.format(adapter="agentmail"))
+    _wake(mod)
+    _bind(mod, {"job_id": JOB})
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == []
+    assert any(m["reason"] == "bound_reply_unsupported" for m in _held(d1))
+
+
+# -- the surface
 
 
 def test_the_tool_takes_exactly_one_email(lane) -> None:
     mod, _d1, broker, _ = lane
     assert json.loads(mod.binding.handle_tool({}))["bound"] is False
-    assert (
-        json.loads(mod.binding.handle_tool({"job_id": JOB, "graph_message_id": GRAPH_ID}))["bound"]
-        is False
-    )
+    both = {"job_id": JOB, "graph_message_id": GRAPH_ID}
+    assert json.loads(mod.binding.handle_tool(both))["bound"] is False
     assert broker.binds == []
 
 
@@ -229,48 +378,11 @@ def test_the_schema_offers_no_recipient(lane) -> None:
     assert set(props) == {"job_id", "graph_message_id", "internet_message_id"}
 
 
-def test_the_fabrication_floor_still_holds_a_bound_reply(lane) -> None:
-    mod, d1, broker, _ = lane
-    _bind(mod, {"job_id": JOB})
-    _draft(
-        mod, [ADMIN], body="Per Smith v. Jones, 123 F.3d 456 (9th Cir. 1999), the lien is waived."
-    )
-    assert broker.bound_sends == []
-    assert any(a == "REPLY_HELD" for a, _m in d1.events())
-
-
-def test_a_rate_held_bound_reply_is_never_queued_for_release(lane, monkeypatch) -> None:
-    mod, d1, broker, _ = lane
-    monkeypatch.setattr(
-        mod._LIMITER,
-        "check",
-        lambda *a, **k: mod.relay.RateDecision(False, "rate_limited"),
-        raising=True,
-    )
-    _bind(mod, {"job_id": JOB})
-    _draft(mod, [ADMIN])
-    assert broker.bound_sends == []
-    assert mod._HELD_STORE.pending_count() == 0
-    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
-    assert held and held[0].get("held_for_release") is False
-
-
-def test_another_transport_holds_a_bound_reply(lane) -> None:
-    mod, d1, broker, yaml_path = lane
-    yaml_path.write_text(_SEAT_YAML.format(adapter="agentmail"))
-    _bind(mod, {"job_id": JOB})
-    _draft(mod, [ADMIN])
-    assert broker.bound_sends == []
-    assert any(
-        a == "REPLY_HELD" and m["reason"] == "bound_reply_unsupported" for a, m in d1.events()
-    )
-
-
 def test_reply_bind_is_classified(lane) -> None:
     assert TOOL_ACTION_CLASS_MAP["reply_bind"] is ActionClass.INTERNAL_WRITE
 
 
-def test_the_plugin_registers_the_tool(tmp_path, monkeypatch) -> None:
+def test_the_plugin_registers_the_tool_and_the_wake_hook(tmp_path, monkeypatch) -> None:
     class Ctx:
         def __init__(self) -> None:
             self.tools: dict = {}
@@ -287,5 +399,5 @@ def test_the_plugin_registers_the_tool(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(mod, "_start_held_release", lambda: None)
     ctx = Ctx()
     mod.register(ctx)
-    assert "reply_bind" in ctx.tools
+    assert "reply_bind" in ctx.tools and "pre_llm_call" in ctx.hooks
     assert ctx.tools["reply_bind"]["schema"]["parameters"]["additionalProperties"] is False

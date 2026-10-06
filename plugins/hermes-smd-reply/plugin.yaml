@@ -12,6 +12,9 @@ requires_env:
   - SMD_CUSTOMER_SLUG
   - SMD_D1_AUDIT_BINDING
 provides_hooks:
+  # The verified reply binding (binding.py): notes a job's completion wake so
+  # only it, or a scheduled turn, may bind a reply. Observes; injects nothing.
+  - pre_llm_call
   - post_tool_call
   # ss-console#2367: a held reply is reported to the agent on the draft tool's
   # own result, in the same turn. post_tool_call returns are ignored by the
@@ -23,6 +26,7 @@ provides_hooks:
   - post_llm_call
   - on_session_end
 hooks:
+  - pre_llm_call
   - post_tool_call
   - transform_tool_result
   - post_llm_call

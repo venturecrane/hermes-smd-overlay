@@ -356,6 +356,14 @@ _DECIDED = relay.DecidedOnce()
 _CURRENT_CALL = threading.local()
 
 
+def _session_tainted(session_id: str) -> bool:
+    """Whether this session ingested outside content. Fails toward tainted."""
+    try:
+        return bool(inbound.SESSION_TAINT.is_tainted(session_id))
+    except Exception:  # noqa: BLE001 - an unreadable taint register floors the reply
+        return True
+
+
 def _current_session_id() -> str:
     """The session this thread's dispatch belongs to, or "" when unresolved."""
     value = getattr(_CURRENT_CALL, "session_id", "")
@@ -643,6 +651,21 @@ def on_post_tool_call(**kwargs: Any) -> None:
     _relay_draft(**kwargs)
 
 
+def on_pre_llm_call(**kwargs: Any) -> None:
+    """Note a job's completion wake (binding.py), so only such a turn, or a
+    scheduled one, may bind a reply, and a demand wake only to its own job.
+    Observes; injects nothing. Exception-safe."""
+    try:
+        session_id = kwargs.get("session_id")
+        binding.TURN_SOURCES.note(
+            session_id if isinstance(session_id, str) else "",
+            kwargs.get("sender_id"),
+            kwargs.get("user_message"),
+        )
+    except Exception as exc:  # noqa: BLE001 - never raise out of a hook
+        logger.warning("hermes-smd-reply: noting the turn's source failed (%s)", exc)
+
+
 def _record_binding(kwargs: dict[str, Any]) -> str | None:
     """Record a ``reply_bind`` verdict for the session (binding.py).
 
@@ -652,8 +675,11 @@ def _record_binding(kwargs: dict[str, Any]) -> str | None:
     """
     try:
         session_id = kwargs.get("session_id")
+        store = _HELD_STORE
         return binding.record_from_result(
-            session_id if isinstance(session_id, str) else "", kwargs.get("result")
+            session_id if isinstance(session_id, str) else "",
+            kwargs.get("result"),
+            held_pending=store.has_pending_for_message if store is not None else None,
         )
     except Exception as exc:  # noqa: BLE001 - never raise out of a hook
         logger.warning(
@@ -870,6 +896,12 @@ def _relay_draft(**kwargs: Any) -> None:
             )
             recipient_class = None
         internal = recipient_class is RecipientClass.INTERNAL
+        if bound is not None and internal and _session_tainted(session_id):
+            # A bound turn that ingested outside content (a wake carrying a
+            # document's words, a cron that read the mailbox) gets the content
+            # floor even for a colleague: the recipient is pinned, but the
+            # body may carry what the turn read, and no inbound fence wrapped it.
+            internal = False
         # Provenance exemption — the SAME one the drafting path applies
         # (hermes-smd-trust/outbound.py). Case captions the agent READ from a
         # system of record this session are quotable; without them the two
@@ -1522,6 +1554,7 @@ def register(ctx) -> None:
         description=binding.TOOL_DESCRIPTION,
         emoji="",
     )
+    ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     # ss-console#2367: a hold the agent is never told about is silence to the
     # person who wrote in. This is the seam that tells it, in the same turn.
