@@ -620,6 +620,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # 2026-10-06). Internal write: the firm's record; it never signs, mails
     # or sends.
     "mcp_smokeball_render_sr1": ActionClass.INTERNAL_WRITE,
+    # The state DMV SR 19C (the other driver's insurance information),
+    # prefilled and filed for the firm's signer (ss-console sr19_form.py,
+    # 2026-10-06). Internal write: never signed, mailed or paid.
+    "mcp_smokeball_render_sr19": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches
