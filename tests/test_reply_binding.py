@@ -401,3 +401,45 @@ def test_the_plugin_registers_the_tool_and_the_wake_hook(tmp_path, monkeypatch) 
     mod.register(ctx)
     assert "reply_bind" in ctx.tools and "pre_llm_call" in ctx.hooks
     assert ctx.tools["reply_bind"]["schema"]["parameters"]["additionalProperties"] is False
+
+
+# -- a demand job's wake has one channel (2026-10-06 practice job)
+
+
+def test_a_demand_wake_refuses_a_binding_by_email_id(lane) -> None:
+    """FALSIFIER: drop the handoff+job branch and the email-id bind is taken."""
+    mod, _d1, _broker, _ = lane
+    _wake(mod)
+    out = _bind(mod, {"internet_message_id": "<req@firm.example>"})
+    assert out["bound"] is False and f"bind with job_id={JOB}" in out["reason"]
+    out = _bind(mod, {"graph_message_id": GRAPH_ID})
+    assert out["bound"] is False
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "smd_send_message",
+        "casework_brief",
+        "mcp_msgraph_mail_send_message",
+        "mcp_agentmail_send_message",
+    ],
+)
+def test_a_demand_wake_may_call_no_send_tool(lane, tool) -> None:
+    mod, _d1, _broker, _ = lane
+    _wake(mod)
+    verdict = mod.on_pre_tool_call(tool_name=tool, args={}, session_id=WAKE)
+    assert verdict is not None and verdict["action"] == "block"
+
+
+def test_the_bound_reply_path_stays_open_in_a_wake(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _wake(mod)
+    for tool in ("reply_bind", "mcp_msgraph_mail_create_draft", "demand_job_status"):
+        assert mod.on_pre_tool_call(tool_name=tool, args={}, session_id=WAKE) is None, tool
+
+
+def test_other_turns_are_untouched_by_the_wake_guard(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    assert mod.on_pre_tool_call(tool_name="smd_send_message", args={}, session_id="mail-1") is None
+    assert mod.on_pre_tool_call(tool_name="smd_send_message", args={}, session_id=CRON) is None

@@ -15,6 +15,8 @@ provides_hooks:
   # The verified reply binding (binding.py): notes a job's completion wake so
   # only it, or a scheduled turn, may bind a reply. Observes; injects nothing.
   - pre_llm_call
+  # A demand job's wake may call no send tool: the bound reply is its only channel.
+  - pre_tool_call
   - post_tool_call
   # ss-console#2367: a held reply is reported to the agent on the draft tool's
   # own result, in the same turn. post_tool_call returns are ignored by the
@@ -27,6 +29,7 @@ provides_hooks:
   - on_session_end
 hooks:
   - pre_llm_call
+  - pre_tool_call
   - post_tool_call
   - transform_tool_result
   - post_llm_call

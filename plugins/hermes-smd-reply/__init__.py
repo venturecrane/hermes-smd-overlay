@@ -651,6 +651,20 @@ def on_post_tool_call(**kwargs: Any) -> None:
     _relay_draft(**kwargs)
 
 
+def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
+    """Block every send in a demand job's completion wake (binding.py). The
+    bound reply is that turn's only channel. Exception-safe: a fault blocks."""
+    try:
+        session_id = kwargs.get("session_id")
+        message = binding.wake_send_refusal(
+            session_id if isinstance(session_id, str) else "", str(kwargs.get("tool_name") or "")
+        )
+    except Exception:  # noqa: BLE001 - never raise out of a hook
+        logger.exception("hermes-smd-reply: wake send guard failed; not blocking")
+        return None
+    return {"action": "block", "message": message} if message else None
+
+
 def on_pre_llm_call(**kwargs: Any) -> None:
     """Note a job's completion wake (binding.py), so only such a turn, or a
     scheduled one, may bind a reply, and a demand wake only to its own job.
@@ -1555,6 +1569,7 @@ def register(ctx) -> None:
         emoji="",
     )
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     # ss-console#2367: a hold the agent is never told about is silence to the
     # person who wrote in. This is the seam that tells it, in the same turn.
