@@ -161,6 +161,14 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_agentmail_auth_me",
             "mcp_agentmail_get_message",
             "mcp_agentmail_search_inboxes",
+            # BANNED_TOOLS, not mapped (both forms count as decided): the
+            # vendor-side human handoff and the "apps" integration verbs, all
+            # found by the live sweep (2026-09-29, 2026-10-06).
+            "mcp_agentmail_agent_attach_human",
+            "mcp_agentmail_connect_app",
+            "mcp_agentmail_get_app",
+            "mcp_agentmail_list_apps",
+            "mcp_agentmail_search_apps",
         }
     ),
     # Smokeball (mcp:smokeball) — the law wedge's system of record, now a

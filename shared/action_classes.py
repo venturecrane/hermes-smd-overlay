@@ -139,6 +139,18 @@ BANNED_TOOLS: frozenset[str] = frozenset(
         # operator, so this is a hard ban rather than a ceiling: nothing an
         # engagement could author makes it right.
         "mcp_agentmail_agent_attach_human",
+        # AgentMail's "apps" verbs (seen unclassified on the pilot seat's sweep,
+        # SMD-OPERATOR-26, through 2026-10-06). ``connect_app`` grants a
+        # third-party app standing access through the seat's mailbox: a
+        # persistent integration no engagement authors and no ceiling governs,
+        # the same reason agent_attach_human is a ban and not a dial. The three
+        # reads browse the vendor's app catalog and serve nothing but that
+        # connect, so they are banned with it rather than left as a READ the
+        # agent could use to go shopping for one.
+        "mcp_agentmail_connect_app",
+        "mcp_agentmail_get_app",
+        "mcp_agentmail_list_apps",
+        "mcp_agentmail_search_apps",
         "email_send",
         "email_send_message",
         "email_reply",

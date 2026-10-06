@@ -161,4 +161,12 @@ def test_second_consecutive_miss_escalates_to_a_real_outage():
     """One sweep interval later the process is still alive, which teardown does
     not survive. That is an outage and must reach Sentry."""
     assert _unreachable_log_level(2) == logging.ERROR
-    assert _unreachable_log_level(9) == logging.ERROR
+
+
+def test_one_outage_reaches_sentry_once_not_every_sweep():
+    """SMD-OPERATOR-2G (2026-10-05): a 75s gap produced a Sentry event at misses
+    2, 3, 4 and 5. Only the escalation pages; the rest are breadcrumbs."""
+    levels = [_unreachable_log_level(n) for n in range(1, 41)]
+    assert levels.count(logging.ERROR) == 1
+    assert levels[1] == logging.ERROR
+    assert all(lvl == logging.WARNING for i, lvl in enumerate(levels) if i != 1)
