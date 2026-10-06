@@ -695,6 +695,14 @@ class SessionInboundOrigin:
     # prompt prefix) can bind session -> origin exactly, and the address-keyed
     # guess becomes a last resort instead of the normal path.
     _by_message: "OrderedDict[str, InboundOrigin]" = field(default_factory=OrderedDict)
+    # Per-turn provenance (2026-10-06, the demand job's requester). For each
+    # session: the message id the inbound plugin read off THIS turn's trusted
+    # prompt prefix ("" for a turn whose prompt carried none: a wake, a cron,
+    # an MCP turn), and every such id the session has ever been handed. A
+    # consumer that must know the turn's own email, and only that one, asks
+    # :meth:`bound_this_turn`.
+    _turn_prompt_id: "OrderedDict[str, str]" = field(default_factory=OrderedDict)
+    _prompt_ids_seen: "OrderedDict[str, set[str]]" = field(default_factory=OrderedDict)
 
     def record(self, session_id: str, origin: InboundOrigin) -> None:
         """Record the opening inbound's origin (recipient-lock anchor).
@@ -774,6 +782,41 @@ class SessionInboundOrigin:
                 del self._unbound[i]
                 break
         return True
+
+    def note_turn_prompt(self, session_id: str, message_id: str) -> None:
+        """Record the message id THIS turn's trusted prompt prefix named, or
+        "" when it named none. Called by the inbound plugin on every turn,
+        before it binds, so a later turn without an email clears the mark."""
+        if not session_id:
+            return
+        self._turn_prompt_id[session_id] = message_id or ""
+        self._turn_prompt_id.move_to_end(session_id)
+        if message_id:
+            seen = self._prompt_ids_seen.setdefault(session_id, set())
+            seen.add(message_id)
+            self._prompt_ids_seen.move_to_end(session_id)
+        for reg in (self._turn_prompt_id, self._prompt_ids_seen):
+            while len(reg) > self.max_sessions:
+                reg.popitem(last=False)
+
+    def bound_this_turn(self, session_id: str) -> InboundOrigin | None:
+        """The origin of the email that opened THIS turn, or ``None``.
+
+        Stricter than :meth:`get`, for acts that spend or attribute: the
+        session's origin must be the one whose message id this turn's own
+        trusted prompt prefix carried (never a claim-once or address-keyed
+        guess, never a wake or cron turn), and the session must have been
+        handed exactly one email, so a sticky origin from an earlier email
+        cannot speak for a later one.
+        """
+        if not session_id:
+            return None
+        origin = self._origins.get(session_id)
+        prompt_id = self._turn_prompt_id.get(session_id, "")
+        seen = self._prompt_ids_seen.get(session_id, set())
+        if origin is None or not prompt_id or origin.message_id != prompt_id or seen != {prompt_id}:
+            return None
+        return origin
 
     def get(self, session_id: str) -> InboundOrigin | None:
         """The recipient-lock origin for the session, or ``None`` if unset.

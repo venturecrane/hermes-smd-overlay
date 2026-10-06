@@ -5,5 +5,10 @@ author: VentureCrane
 requires_env: []
 provides_hooks:
   - pre_llm_call
+  # The omitted-skill read fence (skill_fence.py, 2026-10-06): read_file,
+  # search_files, skill_view, terminal and execute_code may not read a skill
+  # the live customer.yaml does not enable.
+  - pre_tool_call
 hooks:
   - pre_llm_call
+  - pre_tool_call

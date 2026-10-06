@@ -125,7 +125,15 @@ def _tools() -> dict:
 
 def test_the_three_tools_register_function_shaped_and_require_the_socket():
     tools = _tools()
-    assert set(tools) == {"medchron_job_submit", "medchron_job_status", "medchron_allowance"}
+    assert set(tools) == {
+        "medchron_job_submit",
+        "medchron_job_status",
+        "medchron_allowance",
+        # The demand job's three ride the same plugin (demand.py).
+        "demand_job_submit",
+        "demand_job_status",
+        "demand_allowance",
+    }
     for name, t in tools.items():
         assert t["requires_env"] == ["SMD_WORKSPACE_BROKER_SOCKET"], name
         assert t["schema"]["parameters"]["type"] == "object", name

@@ -98,7 +98,7 @@ from shared.customer_config import CustomerConfig
 from shared.inbound import SESSION_INBOUND_ORIGIN
 from shared.tool_registration import register_wrapped_tool
 
-from . import seat_facts
+from . import seat_facts, skill_fence
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +404,10 @@ def register(ctx: Any) -> None:
         emoji="",
     )
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    # The omitted-skill read fence (skill_fence.py): a skill this seat does not
+    # enable cannot be run by reading its files. The ONE blocking gate here,
+    # and it decides on paths and the live config, never on a skill identity.
+    ctx.register_hook("pre_tool_call", skill_fence.on_pre_tool_call)
     logger.info(
         "hermes-smd-initiation registered: pre_llm_call authority injection + %s "
         "(ss#2222 gate 3 — authored initiation disposition for rostered senders; "
