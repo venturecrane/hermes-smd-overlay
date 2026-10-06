@@ -376,6 +376,8 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # record the agent could quote from; nothing here seeds a claim.
         "medchron_job_status",
         "medchron_allowance",
+        "demand_job_status",
+        "demand_allowance",
         "connector_get_status",
         "connector_list_bindings",
         # Credential / identity metadata, carrying no tenant content.

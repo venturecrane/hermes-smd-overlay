@@ -58,6 +58,20 @@ class MedchronBrokerClient:
     def allowance(self) -> dict[str, Any]:
         return self._request({"action": "medchron_allowance"})
 
+    # -- the demand job (ss-console operator/workspace_broker/demand_verbs.py) --
+    def demand_submit(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """``accepted`` with a ``job_id``, or ``accepted: False`` with a ``reason``."""
+        return self._request({"action": "demand_job_submit", "envelope": envelope})
+
+    def demand_status(self, job_id: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"action": "demand_job_status"}
+        if job_id:
+            payload["job_id"] = job_id
+        return self._request(payload)
+
+    def demand_allowance(self) -> dict[str, Any]:
+        return self._request({"action": "demand_allowance"})
+
     def list_all(self) -> list[dict[str, Any]]:
         return list(self._request({"action": "medchron_job_list"}).get("jobs") or [])
 

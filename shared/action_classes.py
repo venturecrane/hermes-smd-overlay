@@ -945,6 +945,15 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # follows still goes through create_draft and every reply floor.
     # INTERNAL_WRITE: it changes what this turn's reply lane may answer.
     "reply_bind": ActionClass.INTERNAL_WRITE,
+    # The demand job (hermes-smd-medchron/demand.py, ss-console demand_verbs.py):
+    # the same shape as the chronology. Submit queues a job on the Machine's own
+    # runner, which files the gap audit and draft demand on the firm's matter:
+    # INTERNAL_WRITE, never sent outside the firm. The requester and request are
+    # the turn's verified inbound, not tool arguments. The reads return
+    # broker-authored states, counts and file names only.
+    "demand_job_submit": ActionClass.INTERNAL_WRITE,
+    "demand_job_status": ActionClass.READ,
+    "demand_allowance": ActionClass.READ,
 }
 
 

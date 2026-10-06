@@ -90,7 +90,8 @@ def test_register_wires_pre_llm_call_and_the_seat_facts_tool(initiation):
             tools.append(kwargs)
 
     initiation.register(_Ctx())
-    assert hooks.keys() == {"pre_llm_call"}
+    # The omitted-skill read fence (skill_fence.py) is the one blocking gate.
+    assert hooks.keys() == {"pre_llm_call", "pre_tool_call"}
     assert callable(hooks["pre_llm_call"])
     assert [t["name"] for t in tools] == [initiation.TOOL_SEAT_FACTS]
     assert initiation.TOOLS == (initiation.TOOL_SEAT_FACTS,)
