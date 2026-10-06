@@ -103,9 +103,11 @@ from shared.customer_config import CustomerConfig, CustomerConfigError
 from shared.pending_acts import PENDING_ACTS
 from shared.recipient_classifier import RecipientClass, classify_recipients_typed
 from shared.secrets import get_secret
+from shared.tool_registration import register_wrapped_tool
 
 from . import (
     act_delivery,
+    binding,
     held_store,
     notice,
     relay,  # noqa: F401 - surface for tests
@@ -296,6 +298,37 @@ def _send_msgraph_reply(
     # The placeholder stays for the case where that lookup could not run. It is
     # honest there: the broker's own row records why, and inventing an id would
     # name a message the mailbox does not contain.
+    return sent_id or "(sent via msgraph, id unavailable)"
+
+
+def _send_bound_reply(
+    bound: binding.Binding,
+    text: str,
+    html: str = "",
+    *,
+    session_id: str = "",
+    matter_ref: str | None = None,
+) -> str:
+    """Send a bound reply through ``msgraph_reply_bound`` (see binding.py).
+
+    The broker verifies the binding again, takes its durable once-only claim
+    and replies on the Graph id it resolved, so this process names no
+    recipient and no message. Same body rendering and same error mapping as
+    :func:`_send_msgraph_reply`.
+    """
+    body_html = _msgraph_reply_html(text, html)
+    try:
+        sent_id = msgraph_broker.send_bound_reply(
+            bound.as_request(),
+            text,
+            html=body_html,
+            session_id=session_id,
+            matter_ref=matter_ref,
+        )
+    except msgraph_broker.BrokerError as exc:
+        raise relay.RelaySendError(f"broker refused the bound reply: {exc}") from exc
+    except msgraph_broker.MsGraphBrokerUnavailable as exc:
+        raise relay.RelaySendError(f"bound reply unavailable: {exc}") from exc
     return sent_id or "(sent via msgraph, id unavailable)"
 
 
@@ -563,6 +596,11 @@ def _enqueue_hold(
     """
     if not policy.held_release_enabled or _HELD_STORE is None:
         return False
+    if origin.inbox_id == binding.BOUND_INBOX:
+        # A bound reply is never queued for release: the release path replies on
+        # a Graph id through the ordinary verb, which would skip the broker's
+        # once-only claim. It is held and the agent is told, like any refusal.
+        return False
     try:
         _HELD_STORE.enqueue(
             sender=origin.sender_address,
@@ -595,11 +633,33 @@ def on_post_tool_call(**kwargs: Any) -> None:
     transform never fired) or when the call carries no id. See
     :class:`relay.DecidedOnce`.
     """
+    if (kwargs.get("tool_name") or "") == binding.TOOL_NAME:
+        _record_binding(kwargs)
+        return
     if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
         return
     if _DECIDED.claim(kwargs.get("tool_call_id")) is False:
         return
     _relay_draft(**kwargs)
+
+
+def _record_binding(kwargs: dict[str, Any]) -> str | None:
+    """Record a ``reply_bind`` verdict for the session (binding.py).
+
+    Runs from both hooks; recording is first-wins and the checks are the same
+    each time, so the order does not matter. Returns the replacement result
+    when the binding was not taken. Exception-safe: a failure takes nothing.
+    """
+    try:
+        session_id = kwargs.get("session_id")
+        return binding.record_from_result(
+            session_id if isinstance(session_id, str) else "", kwargs.get("result")
+        )
+    except Exception as exc:  # noqa: BLE001 - never raise out of a hook
+        logger.warning(
+            "hermes-smd-reply: recording a reply binding failed (%s); nothing bound", exc
+        )
+        return None
 
 
 def _relay_draft(**kwargs: Any) -> None:
@@ -666,6 +726,13 @@ def _relay_draft(**kwargs: Any) -> None:
         args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
 
         origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id)
+        # The verified reply binding (binding.py): a turn no email opened, bound
+        # through the broker to ONE earlier email. Consulted before the
+        # address-keyed recovery below, so a bound turn never falls back to
+        # "whoever last wrote from this address".
+        bound = binding.SESSION_BINDINGS.get(session_id) if origin is None else None
+        if bound is not None:
+            origin = bound.origin()
         if origin is None:
             # Recovery path. The router records the recipient-lock origin under
             # the DISPATCH-time session_id, which can be empty or differ from
@@ -755,6 +822,12 @@ def _relay_draft(**kwargs: Any) -> None:
         if not origin.inbox_id:
             # No inbox to thread the reply into — fail closed.
             _held("no_inbox_id", origin)
+            return
+        if bound is not None and (redirected or _email_adapter(cfg) != _ADAPTER_MSGRAPH):
+            # The binding is a Graph-broker verb and answers the email's own
+            # sender only; a device redirect or another transport has no bound
+            # path, so the reply is held rather than sent some other way.
+            _held("bound_reply_unsupported", origin)
             return
         if redirected and _email_adapter(cfg) != _ADAPTER_MSGRAPH:
             # Only the Graph broker can aim a reply at someone other than the
@@ -1029,7 +1102,15 @@ def _relay_draft(**kwargs: Any) -> None:
         # (ss-console#2501) rather than a second reconstruction of them.
         wire_text, wire_html = _transmitted_body(adapter, send_text, send_html)
         try:
-            if adapter == _ADAPTER_MSGRAPH:
+            if bound is not None:
+                sent_id = _send_bound_reply(
+                    bound,
+                    wire_text,
+                    wire_html,
+                    session_id=session_id,
+                    matter_ref=cited_matter_ref,
+                )
+            elif adapter == _ADAPTER_MSGRAPH:
                 sent_id = _send_msgraph_reply(
                     origin.message_id,
                     wire_text,
@@ -1133,6 +1214,8 @@ def on_transform_tool_result(**kwargs: Any) -> str | None:
     two never contend for the single replacing return.
     """
     try:
+        if (kwargs.get("tool_name") or "") == binding.TOOL_NAME:
+            return _record_binding(kwargs)
         if (kwargs.get("tool_name") or "") not in _CREATE_DRAFT_TOOLS:
             return None
         tool_call_id = kwargs.get("tool_call_id")
@@ -1427,6 +1510,18 @@ def register(ctx) -> None:
     _LIMITER = relay.RateLimiter()
     _start_held_release()
     _INFRA_READY = True
+    # The verified reply binding's one tool (binding.py). It names an email,
+    # never a person; the broker decides who that is.
+    register_wrapped_tool(
+        ctx,
+        name=binding.TOOL_NAME,
+        toolset="reply",
+        schema=binding.TOOL_SCHEMA,
+        handler=binding.handle_tool,
+        requires_env=["SMD_WORKSPACE_BROKER_SOCKET"],
+        description=binding.TOOL_DESCRIPTION,
+        emoji="",
+    )
     ctx.register_hook("post_tool_call", on_post_tool_call)
     # ss-console#2367: a hold the agent is never told about is silence to the
     # person who wrote in. This is the seam that tells it, in the same turn.
