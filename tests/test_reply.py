@@ -113,6 +113,8 @@ def relay_mod(monkeypatch, tmp_path):
     # instance the reused ``msg_*`` ids from an earlier test would read as
     # duplicates in a later one.
     monkeypatch.setattr(mod, "_REPLIED", mod.relay.RepliedOnce(), raising=False)
+    # Per-call decision register: same reasoning, tool_call_ids recur across tests.
+    monkeypatch.setattr(mod, "_DECIDED", mod.relay.DecidedOnce(), raising=False)
     monkeypatch.setattr(mod, "_YAML_PATH", yaml_path, raising=False)
     # Held-reply store (#2070) is register-time infra; point it at a temp db so
     # the live-path hold tests exercise real persistence, not a stub.
@@ -1893,3 +1895,107 @@ def test_the_report_row_names_the_surface_for_each_class(
     )
     classes = [r["output_class"] for r in checklist_rows()]
     assert classes == ["staff", output_checklist.EXTERNAL_REPLY]
+
+
+# ---------------------------------------------------------------------------
+# Hook order (2026-10-05). The relay decided only in post_tool_call and told the
+# agent in transform_tool_result, on the documented premise that post fires
+# first. At the pinned Hermes the agent executor suppresses the inner post hook
+# and fires its own terminal post_tool_call AFTER handle_function_call has run
+# transform_tool_result, so a held reply's notice was recorded after the only
+# seam that could carry it had passed: a REPLY_HELD row on the ledger and an
+# agent that told the person the reply was on its way. The relay now decides in
+# whichever hook reaches the call first, exactly once per tool_call_id.
+# ---------------------------------------------------------------------------
+
+_HELD_CAPS_TEXT = "URGENT: the hearing file needs you before Friday."
+
+
+def _hook_kwargs(tool_call_id, text, session_id="s1"):
+    return {
+        "tool_name": "mcp_agentmail_create_draft",
+        "args": _draft(["greg@whitfield.example"], text=text),
+        "result": _DRAFT_RESULT,
+        "session_id": session_id,
+        "tool_call_id": tool_call_id,
+        "status": "success",
+        "error_type": None,
+    }
+
+
+def test_transform_before_post_tells_the_agent_of_the_hold(relay_mod) -> None:
+    """THE FALSIFIER. The pinned Hermes order: transform first, post after. The
+    hold must be in the result the agent reads, and the late post must not
+    decide the same call a second time."""
+    mod, d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    _record_origin(message_id="msg_order_tp")
+    kw = _hook_kwargs("tc_order_tp", _HELD_CAPS_TEXT)
+
+    out = mod.on_transform_tool_result(**kw)
+    mod.on_post_tool_call(**kw)
+
+    assert sent == []
+    assert isinstance(out, str)
+    assert "WAS NOT SENT" in out
+    assert "output_checklist" in out
+    assert "dft_123" in out
+    held = [m for a, m in d1.events() if a == "REPLY_HELD"]
+    assert len(held) == 1
+    assert held[0]["reason"] == "output_checklist"
+    assert "caps_emphasis" in held[0]["rules"]
+
+
+def test_post_before_transform_still_tells_the_agent_once(relay_mod) -> None:
+    """The documented order, and any future Hermes that restores it."""
+    mod, d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    _record_origin(message_id="msg_order_pt")
+    kw = _hook_kwargs("tc_order_pt", _HELD_CAPS_TEXT)
+
+    mod.on_post_tool_call(**kw)
+    out = mod.on_transform_tool_result(**kw)
+
+    assert sent == []
+    assert isinstance(out, str) and "WAS NOT SENT" in out
+    assert len([a for a, _m in d1.events() if a == "REPLY_HELD"]) == 1
+    # A third firing for the same call (a retried dispatch, another registrant)
+    # neither re-decides nor re-tells.
+    assert mod.on_transform_tool_result(**kw) is None
+    mod.on_post_tool_call(**kw)
+    assert len([a for a, _m in d1.events() if a == "REPLY_HELD"]) == 1
+
+
+@pytest.mark.parametrize("transform_first", [True, False])
+def test_a_clean_reply_is_sent_once_and_untouched_under_either_order(
+    relay_mod, transform_first
+) -> None:
+    mod, d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    _record_origin(message_id=f"msg_order_ok_{transform_first}")
+    kw = _hook_kwargs(f"tc_order_ok_{transform_first}", "The hearing is at 9:30 a.m.")
+
+    if transform_first:
+        out = mod.on_transform_tool_result(**kw)
+        mod.on_post_tool_call(**kw)
+    else:
+        mod.on_post_tool_call(**kw)
+        out = mod.on_transform_tool_result(**kw)
+
+    assert out is None
+    assert len(sent) == 1
+    assert [a for a, _m in d1.events() if a in {"REPLY_SENT", "REPLY_HELD"}] == ["REPLY_SENT"]
+
+
+def test_a_call_with_no_id_is_decided_by_post_alone(relay_mod) -> None:
+    """No key, no claim: transform cannot tell this call's second hook from a
+    second call, so it does not decide, and post keeps the legacy shape."""
+    mod, _d1, sent = relay_mod
+    mod._HOLD_NOTICES._reset_for_tests()
+    _record_origin(message_id="msg_order_noid")
+    kw = _hook_kwargs("", "The hearing is at 9:30 a.m.")
+
+    assert mod.on_transform_tool_result(**kw) is None
+    assert sent == []
+    mod.on_post_tool_call(**kw)
+    assert len(sent) == 1

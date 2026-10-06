@@ -21,9 +21,10 @@ WHAT THIS DOES
 --------------
 Records each hold against its ``tool_call_id`` and renders it as text the reply
 plugin appends to the draft tool's own result at ``transform_tool_result`` --
-the hook that fires immediately after ``post_tool_call`` for the SAME
-``tool_call_id`` and whose first ``str`` return replaces the tool result
-(``plugins/hermes-smd-hook-probe/README.md:67``, ``model_tools.py:847-857``).
+the hook that fires for the SAME ``tool_call_id`` and whose first ``str``
+return replaces the tool result (``model_tools.py:847-857``). It is not
+ordered after ``post_tool_call``: at the pinned Hermes it fires first, so the
+relay decides in whichever hook comes first (``relay.DecidedOnce``).
 So the hold lands in the model's context in the same turn, in-band, attached to
 the very call that produced it. Nothing here decides anything: the hold already
 happened, this is only the telling.

@@ -8,6 +8,7 @@ load-bearing property, so it gets explicit coverage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -2227,3 +2228,206 @@ def test_every_shortfall_timestamp_carries_an_explicit_zone(tmp_path):
     # Ordered by instant across spellings: +00:00 at 14:00 before Z at 15:00.
     order = [e["code"] for e in facts.events]
     assert order.index("error") < order.index("too_long")
+
+
+# ---------------------------------------------------------------------------
+# A held reply is a shortfall (2026-10-05). The relay held a reply on the output
+# checklist, the agent was never told, and SMD heard nothing either: the only
+# record was a REPLY_HELD row. These pin that the row now pages as ``failed``,
+# that a hold the person was made whole on does not, and that nothing the row
+# carries about the person (address, message id, text) reaches the wire.
+# ---------------------------------------------------------------------------
+
+_SYNTH_ADDRESS = "pat.example@firm.example"
+_SYNTH_MESSAGE = "<msg-held-0001@firm.example>"
+
+
+def _reply_row(led, ts, action_type, *, message_id=_SYNTH_MESSAGE, **meta):
+    led.add(
+        ts,
+        action_type,
+        {
+            "customer": "acme",
+            "reply_channel": True,
+            "recipient": _SYNTH_ADDRESS,
+            "message_id": message_id,
+            "session_id": _PERSON_SESSION,
+            **meta,
+        },
+    )
+
+
+def test_a_held_reply_is_a_failed_shortfall(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _reply_row(
+            led, _ts(2), "REPLY_HELD", reason="output_checklist", rules="caps_emphasis"
+        ),
+    )
+    assert facts.count == 1 and facts.failed == 1
+    event = facts.events[0]
+    assert set(event) == SHORTFALL_EVENT_KEYS
+    assert event["class"] == "failed"
+    assert event["code"] == "reply_held:output_checklist"
+    assert event["tool"] == hb.REPLY_RELAY_TOOL
+    assert event["ts"] == _ts(2)
+    assert _ZONED_ISO.match(event["ts"])
+
+    assert event["key"] == "failed:" + hashlib.sha256(b"row0001").hexdigest()[:32]
+
+
+def test_a_reply_hold_never_puts_the_person_on_the_wire(tmp_path):
+    """Address, inbound message id, the checklist's quoted fragment and any body
+    text the row might carry: none of it reaches the payload."""
+    body = "URGENT: the Testclient hearing file needs you"
+
+    def build(led):
+        _reply_row(
+            led,
+            _ts(3),
+            "REPLY_HELD",
+            reason="output_checklist",
+            rules="caps_emphasis",
+            detail="'URGENT'",
+            body=body,
+            draft_to=[_SYNTH_ADDRESS],
+        )
+        _reply_row(led, _ts(2), "REPLY_FAILED", message_id="<m2@firm.example>", reason=body)
+
+    facts = _shortfalls(tmp_path, build)
+    assert [e["code"] for e in facts.events] == [
+        "reply_held:output_checklist",
+        "reply_failed:send_error",
+    ]
+    payload = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        shortfalls=facts.count,
+        shortfalls_last_ts=facts.last_ts,
+        shortfalls_json=facts.events,
+    )
+    wire = json.dumps(payload)
+    for leaked in (_SYNTH_ADDRESS, "firm.example", "msg-held", "m2@", "URGENT", "Testclient"):
+        assert leaked not in wire
+
+
+def test_an_unknown_hold_reason_rides_as_other_not_as_written(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _reply_row(led, _ts(1), "REPLY_HELD", reason="something new: with text"),
+    )
+    assert [e["code"] for e in facts.events] == ["reply_held:other"]
+
+
+def test_reply_holds_the_person_was_made_whole_on_are_not_shortfalls(tmp_path):
+    """Queued for automatic release; a duplicate of a reply already sent; a hold
+    the agent redrafted past (a LATER REPLY_SENT for the same inbound)."""
+
+    def build(led):
+        _reply_row(led, _ts(5), "REPLY_HELD", reason="rate_limited", held_for_release=True)
+        _reply_row(led, _ts(4), "REPLY_HELD", reason="duplicate_reply", message_id="<m-dup>")
+        _reply_row(led, _ts(3), "REPLY_HELD", reason="output_checklist", message_id="<m-fix>")
+        led.add(_ts(2.9), "REPLY_SENT", {"in_reply_to": "<m-fix>", "recipient": _SYNTH_ADDRESS})
+
+    assert _shortfalls(tmp_path, build).count == 0
+
+
+def test_a_send_before_the_hold_does_not_clear_it(tmp_path):
+    def build(led):
+        led.add(_ts(4), "REPLY_SENT", {"in_reply_to": _SYNTH_MESSAGE})
+        _reply_row(led, _ts(3), "REPLY_HELD", reason="sender_not_on_roster")
+
+    facts = _shortfalls(tmp_path, build)
+    assert [e["code"] for e in facts.events] == ["reply_held:sender_not_on_roster"]
+
+
+def test_reply_failed_codes_are_closed(tmp_path):
+    def build(led):
+        _reply_row(led, _ts(3), "REPLY_FAILED", message_id="<a>", reason="hold_expired")
+        _reply_row(
+            led, _ts(2), "REPLY_FAILED", message_id="<b>", reason="act_line_undelivered: boom"
+        )
+
+    facts = _shortfalls(tmp_path, build)
+    assert [e["code"] for e in facts.events] == [
+        "reply_failed:hold_expired",
+        "reply_failed:act_line_undelivered",
+    ]
+    assert facts.failed == 2
+
+
+# ---------------------------------------------------------------------------
+# A prose error_type gets an informative code (2026-10-05). A Smokeball token
+# mint rejected with HTTP 400 rode as code "error" eight times: the event said
+# something broke and nothing about what. The code is now derived from the
+# prose, in a fixed order, and only the derived token ever leaves the seat.
+# ---------------------------------------------------------------------------
+
+
+def _error_codes(tmp_path, *error_types):
+    def build(led):
+        for i, error_type in enumerate(error_types):
+            _call(
+                led,
+                _ts(len(error_types) - i),
+                "mcp_smokeball_get_matter",
+                "error",
+                session=f"s-err-{i}",
+                error_type=error_type,
+            )
+
+    return [e["code"] for e in _shortfalls(tmp_path, build).events]
+
+
+def test_a_rejected_token_mint_rides_as_its_http_status(tmp_path):
+    assert _error_codes(
+        tmp_path,
+        "token mint (authorization_code) rejected with HTTP 400 at "
+        "https://auth.example.com/oauth2/token",
+    ) == ["http_400"]
+
+
+def test_prose_error_codes_follow_the_fixed_order(tmp_path):
+    assert _error_codes(
+        tmp_path,
+        "upstream returned status 503",
+        "ReadTimeout while fetching the page",
+        "call failed: ConnectionError(peer reset)",
+        "refresh token rejected by the provider",
+        "the request timed out after 30s",
+        "connection refused by the broker",
+        "Refused: something nobody mapped",
+        "ValueError",
+    ) == [
+        "http_503",
+        "ReadTimeout",
+        "ConnectionError",
+        "auth_token_rejected",
+        "timeout",
+        "connection_refused",
+        "error",
+        # Already token-shaped: rides as written, as it always has.
+        "ValueError",
+    ]
+
+
+def test_only_the_derived_token_survives_a_prose_error(tmp_path):
+    """A client's name and a URL in the error never reach the wire."""
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _call(
+            led,
+            _ts(1),
+            "mcp_smokeball_get_matter",
+            "error",
+            error_type="Testclient Sampleperson matter lookup failed with HTTP 404 at "
+            "https://api.example.com/matters/testclient",
+        ),
+    )
+    assert [e["code"] for e in facts.events] == ["http_404"]
+    wire = json.dumps(facts.events)
+    for leaked in ("Testclient", "Sampleperson", "testclient", "api.example.com", "matters"):
+        assert leaked not in wire

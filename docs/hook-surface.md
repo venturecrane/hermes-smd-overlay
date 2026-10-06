@@ -67,7 +67,7 @@ hooks:
 
 **Firing site:** `model_tools.py:826-836`.
 
-**Ordering invariant:** Fires after `registry.dispatch()` returns. Always fires regardless of result (success or error). `transform_tool_result` fires immediately after `post_tool_call` on the same execution path; see hook #5 below.
+**Ordering invariant:** Fires after `registry.dispatch()` returns. Always fires regardless of result (success or error). **The order relative to `transform_tool_result` is NOT an invariant.** On the agent executor's path at the pinned Hermes, the inner post hook is suppressed (`agent/tool_executor.py` ~1535) and the executor fires its own terminal `post_tool_call` AFTER `handle_function_call` has already run `transform_tool_result` (`model_tools.py` ~944-945). A plugin that records something in this hook for `transform_tool_result` to deliver will miss on that path; `hermes-smd-reply` did, and a held reply's notice never reached the agent (2026-10-05). Write order-independent code: `hermes-smd-establishment` unwraps either shape, and `hermes-smd-reply` decides in whichever hook reaches the call first (`relay.DecidedOnce`).
 
 **Kwargs:**
 
@@ -89,7 +89,7 @@ hooks:
 
 **Return-value semantics:** Observer only. Returns are collected but not interpreted by the firing site.
 
-**Observer-only is load-bearing, and it cost a delivery.** Anything this hook decides is invisible to the model unless some other seam carries it. `hermes-smd-reply` makes its send/hold decision here, wrote `REPLY_HELD` to D1 and Sentry, and returned `None` — so on 2026-08-13 the Operator filed a demand letter on 2026-PI-104, had its reply held on a Tier-1 marker, and the turn ended 23 seconds later with the model believing `create_draft -> ok` (ss-console#2367). The authored redraft-once recovery in `demand-letter-drafter/SKILL.md` could not fire against a signal that never arrived. The fix is `transform_tool_result` (hook #5 in the appendix), which fires immediately after this hook for the same `tool_call_id` and CAN replace the result.
+**Observer-only is load-bearing, and it cost a delivery.** Anything this hook decides is invisible to the model unless some other seam carries it. `hermes-smd-reply` makes its send/hold decision here, wrote `REPLY_HELD` to D1 and Sentry, and returned `None` — so on 2026-08-13 the Operator filed a demand letter on 2026-PI-104, had its reply held on a Tier-1 marker, and the turn ended 23 seconds later with the model believing `create_draft -> ok` (ss-console#2367). The authored redraft-once recovery in `demand-letter-drafter/SKILL.md` could not fire against a signal that never arrived. The fix is `transform_tool_result` (hook #5 in the appendix), which fires for the same `tool_call_id` and CAN replace the result. It is not ordered after this hook (see the ordering note above), so the reply relay makes its decision in whichever of the two fires first and never twice.
 
 ### 3. `pre_llm_call`
 

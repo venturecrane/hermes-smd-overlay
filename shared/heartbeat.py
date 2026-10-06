@@ -677,6 +677,43 @@ MAIL_ROUTINE_SKILL = "combined-post-intake"
 #: would be a page for nothing.
 _PARTIAL_IDLE_SECONDS = 30 * 60
 
+#: The reply relay's own reasons for holding a reply (``hermes-smd-reply``:
+#: ``_held`` call sites, ``relay.gate_body``, ``relay.RateLimiter``,
+#: ``spec_gate.REASON_OUTPUT_CHECKLIST``). A CLOSED vocabulary: a reason not
+#: listed rides as ``reply_held:other`` rather than as whatever string the row
+#: carries, so nothing a row was given can reach the wire.
+REPLY_HOLD_REASONS = frozenset(
+    {
+        "sender_not_on_roster",
+        "recipient_mismatch",
+        "no_inbox_id",
+        "device_redirect_unsupported",
+        "empty_body",
+        "matter_mismatch",
+        "output_checklist",
+        "content_sensitive",
+        "content_floor_error",
+        "outbound_gate_error",
+        "fabrication:tier1_marker",
+        "fabrication:tier2_citation",
+        "fabrication:load_error",
+        "fabrication:blocked",
+        "rate_limited",
+        "rate_limited_per_sender",
+        "rate_limited_global",
+        "rate_limited_backstop",
+        "queued_behind_held",
+    }
+)
+
+#: Holds that are NOT a person going unanswered. ``duplicate_reply``: a reply
+#: to that message already went out, and this second draft was the extra one.
+_REPLY_HOLDS_NOT_A_SHORTFALL = frozenset({"duplicate_reply"})
+
+#: The ``tool`` a reply event carries when its row names none. The relay's rows
+#: record the reply, not the draft call that triggered it.
+REPLY_RELAY_TOOL = "reply_relay"
+
 _CODE_SAFE_RE = re.compile(r"[^A-Za-z0-9_:. -]")
 _CODE_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _GATE_PREFIX_RE = re.compile(r"^([A-Z][A-Z0-9_]{2,79}):")
@@ -753,6 +790,16 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
       person with what they asked for, and is not an event. ``limit`` when the
       code is in ``SHORTFALL_LIMIT_CODES``; ``failed`` otherwise, including a
       pre-call callback that timed out.
+    * ``failed`` (reply channel) — a ``REPLY_HELD`` or ``REPLY_FAILED`` row:
+      the person wrote in and the reply did not reach them. Not an event when
+      the hold queued the reply for automatic release (``held_for_release``),
+      when it held a duplicate of a reply already sent, or when a LATER
+      ``REPLY_SENT`` answered the same inbound message (the agent redrafted and
+      the person got their answer). Code: ``reply_held:<reason>`` from the
+      closed ``REPLY_HOLD_REASONS`` (else ``reply_held:other``), or
+      ``reply_failed:<hold_expired|act_line_undelivered|send_error>``. Tool:
+      the row's own ``tool`` token, else ``reply_relay``. The row's recipient
+      and message id are read only to join; neither reaches the wire.
     * ``partial`` — a mail-routine session (``MAIL_ROUTINE_SKILL``) that has
       CLOSED (a turn completed after its last call, or ``_PARTIAL_IDLE_SECONDS``
       of quiet) and read a bundle whose pages filed plus pages held for approval
@@ -827,6 +874,9 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
     for event in _partial_events(conn, calls, cutoff):
         tally["partial"] += 1
         events.append(event)
+    for event in _reply_events(conn, horizon, cutoff, procedure_by_session):
+        tally["failed"] += 1
+        events.append(event)
 
     # Ordered by INSTANT (the fixed-width prefix), not by spelling: ``Z`` and
     # ``+00:00`` rows sort differently as strings.
@@ -890,8 +940,116 @@ def _classify_call(call: _CallRow, calls: list[_CallRow], index: int) -> tuple[s
     if call.outcome == "shortfall":
         code = _token(call.shortfall_code) or "shortfall"
     else:
-        code = _token(call.error_type) or "error"
+        code = _token(call.error_type) or _error_code(call.error_type)
     return ("limit" if code in SHORTFALL_LIMIT_CODES else "failed", code)
+
+
+def _reply_code(action_type: str, reason: object) -> str:
+    """The wire code for one reply-channel row, from a closed vocabulary only."""
+    text = reason.strip() if isinstance(reason, str) else ""
+    if action_type == "REPLY_HELD":
+        return "reply_held:" + (text if text in REPLY_HOLD_REASONS else "other")
+    if text == "hold_expired":
+        return "reply_failed:hold_expired"
+    if text.startswith("act_line_undelivered"):
+        return "reply_failed:act_line_undelivered"
+    return "reply_failed:send_error"
+
+
+def _reply_events(
+    conn: sqlite3.Connection, horizon: str, cutoff: str, procedure_by_session: dict[str, str]
+) -> list[dict]:
+    """One ``failed`` event per reply the person never received (see
+    ``count_shortfalls``). A held reply used to reach SMD never: it was a
+    ledger row and a Sentry message, and the person waited."""
+    rows = conn.execute(
+        "SELECT id, ts, action_type, skill_name,"
+        " json_extract(metadata,'$.tool') AS tool,"
+        " json_extract(metadata,'$.reason') AS reason,"
+        " json_extract(metadata,'$.held_for_release') AS held_for_release,"
+        " json_extract(metadata,'$.message_id') AS message_id,"
+        " json_extract(metadata,'$.in_reply_to') AS in_reply_to,"
+        " json_extract(metadata,'$.session_id') AS session_id,"
+        " json_extract(metadata,'$.routine') AS routine,"
+        " json_extract(metadata,'$.skill') AS skill"
+        " FROM audit_log"
+        " WHERE action_type IN ('REPLY_HELD', 'REPLY_FAILED', 'REPLY_SENT')"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+        " ORDER BY ts, id",
+        (horizon, cutoff),
+    ).fetchall()
+    # inbound message id -> the latest instant a reply to it went out.
+    answered: dict[str, str] = {}
+    for row in rows:
+        if row[2] == "REPLY_SENT" and isinstance(row[8], str) and row[8]:
+            answered[row[8]] = max(answered.get(row[8], ""), _iso_floor(row[1]))
+    out: list[dict] = []
+    for row in rows:
+        row_id, ts, action_type, skill_name, tool, reason, for_release, message_id = row[:8]
+        session_id, routine, skill = row[9], row[10], row[11]
+        if action_type == "REPLY_SENT":
+            continue
+        if action_type == "REPLY_HELD" and (
+            for_release in (1, True) or reason in _REPLY_HOLDS_NOT_A_SHORTFALL
+        ):
+            continue
+        if isinstance(message_id, str) and answered.get(message_id, "") >= _iso_floor(ts):
+            continue
+        out.append(
+            _shortfall_event(
+                ts=ts,
+                cls="failed",
+                tool=_token(tool) or REPLY_RELAY_TOOL,
+                routine=(
+                    routine
+                    or skill
+                    or skill_name
+                    or procedure_by_session.get(session_id if isinstance(session_id, str) else "")
+                ),
+                code=_reply_code(action_type, reason),
+                key=_event_key("failed", row_id),
+            )
+        )
+    return out
+
+
+_HTTP_STATUS_RE = re.compile(r"\b(?:HTTP|status)\s*([1-5]\d{2})\b", re.IGNORECASE)
+_EXCEPTION_NAME_RE = re.compile(r"\b([A-Z][A-Za-z]+(?:Error|Exception|Timeout))\b")
+
+#: Phrase -> token, checked in order. Lower-cased substring match.
+_ERROR_PHRASES: tuple[tuple[str, str], ...] = (
+    ("token mint", "auth_token_rejected"),
+    ("refresh token", "auth_token_rejected"),
+    ("invalid_grant", "auth_token_rejected"),
+    ("timed out", "timeout"),
+    ("timeout", "timeout"),
+    ("connection refused", "connection_refused"),
+)
+
+
+def _error_code(error_type: object) -> str:
+    """A closed-vocabulary code for a PROSE ``error_type``.
+
+    Tools write ``error_type`` as a sentence ("token mint (authorization_code)
+    rejected with HTTP 400 at https://..."), which ``_token`` rightly refuses,
+    so every such event used to ride as the bare word ``error`` and told SMD
+    nothing. This derives a token deterministically, in order: an HTTP status
+    (``http_400``), an exception class name, a known phrase, else ``error``.
+    Only the matched digits or class name, or a fixed token, ever leave here:
+    no other text of the error, which can carry a URL or a client's name.
+    """
+    text = error_type if isinstance(error_type, str) else ""
+    status = _HTTP_STATUS_RE.search(text)
+    if status:
+        return f"http_{status.group(1)}"
+    name = _EXCEPTION_NAME_RE.search(text)
+    if name and len(name.group(1)) <= _FIELD_MAX:
+        return name.group(1)
+    lowered = text.lower()
+    for phrase, token in _ERROR_PHRASES:
+        if phrase in lowered:
+            return token
+    return "error"
 
 
 def _retried_ok(call: _CallRow, calls: list[_CallRow], index: int) -> bool:
@@ -1827,6 +1985,8 @@ __all__ = [
     "AuditLedgerFacts",
     "HeartbeatEmitter",
     "MAIL_ROUTINE_SKILL",
+    "REPLY_HOLD_REASONS",
+    "REPLY_RELAY_TOOL",
     "SHORTFALL_CLASSES",
     "SHORTFALL_LIMIT_CODES",
     "ShortfallFacts",
