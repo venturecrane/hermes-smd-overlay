@@ -52,7 +52,12 @@ def test_verify_state_accepts_a_valid_state():
 
 def test_verify_state_rejects_tampered_signature():
     state = _sign_state(_payload(), KEY)
-    bad = state[:-2] + ("aa" if not state.endswith("aa") else "bb")
+    # Flip the signature's FIRST character: every bit of it is significant. The
+    # old last-two-characters rewrite could leave the decoded bytes unchanged
+    # (a final base64 character's low bits are padding), so the "tampered"
+    # state sometimes verified and the test failed at random.
+    body, sig = state.split(".")
+    bad = f"{body}.{'B' if sig[0] == 'A' else 'A'}{sig[1:]}"
     with pytest.raises(CallbackError) as e:
         oauth_callback.verify_state(bad, key=KEY, own_slug="pilot-smokeball")
     assert e.value.reason == "bad_state"

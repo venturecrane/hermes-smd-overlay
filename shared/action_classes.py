@@ -614,6 +614,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # reason: work product saved into the firm's record. Mailing or faxing the
     # letter stays a person's act; this tool sends nothing.
     "mcp_smokeball_render_firm_form_letter": ActionClass.INTERNAL_WRITE,
+    # The state DMV SR1 prefilled from the matter (values off the client's
+    # license and estimate accepted only beside their labels) and filed on
+    # the matter for the client to complete and sign (ss-console sr1_form.py,
+    # 2026-10-06). Internal write: the firm's record; it never signs, mails
+    # or sends.
+    "mcp_smokeball_render_sr1": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches
