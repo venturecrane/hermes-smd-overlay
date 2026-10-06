@@ -97,8 +97,14 @@ def _unreachable_log_level(consecutive: int) -> int:
     second miss means this process outlived the broker by a full sweep
     interval, which teardown does not survive — that is a real outage and
     escalates to ERROR, and therefore to Sentry.
+
+    ONE event per outage, not one per sweep: every miss after the second goes
+    back to WARNING, so the outage's running count rides along as breadcrumbs
+    on the next event instead of paging every 15s (SMD-OPERATOR-2G, 2026-10-05:
+    a 75s gap produced an event at misses 2, 3, 4 and 5). The recovery line in
+    ``_worker_loop`` closes the outage with its length.
     """
-    return logging.WARNING if consecutive <= 1 else logging.ERROR
+    return logging.ERROR if consecutive == 2 else logging.WARNING
 
 
 # -- Hermes agent construction (STAGING) --------------------------------------
@@ -432,11 +438,18 @@ def _worker_loop() -> None:
     # died. They differ in exactly one way — whether this process is still
     # alive one sweep later. A dying process never reaches the second miss; a
     # real outage reaches every one of them. So the first miss is a warning
-    # (breadcrumb only, no Sentry event) and the second escalates to error.
+    # (breadcrumb only, no Sentry event), the second escalates to error once,
+    # and the rest of that outage stays a breadcrumb until it recovers.
     consecutive_unreachable = 0
     while True:
         try:
             worker.sweep()
+            if consecutive_unreachable:
+                logger.info(
+                    "smd-job-worker: broker reachable again after %d unreachable sweep(s) (~%.0fs)",
+                    consecutive_unreachable,
+                    consecutive_unreachable * WORKER_SWEEP_INTERVAL_S,
+                )
             consecutive_unreachable = 0
         except Exception as exc:  # the loop must never die
             if _is_broker_unreachable(exc):
