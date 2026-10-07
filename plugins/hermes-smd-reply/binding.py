@@ -50,17 +50,22 @@ BOUND_INBOX = "verified-binding"
 #: ``webhook:agentmail`` is for mail): a job's completion wake.
 HANDOFF_SENDER = "webhook:handoff"
 #: A job runner's wake names its job in its first line: "... for demand job
-#: <ULID>." (demand-letter-drafter) or "... for drafting job <ULID>."
-#: (document-drafter). The earliest mention decides the kind.
-_WAKE_JOB = re.compile(r"\b(demand|drafting) job ([0-9A-HJKMNP-TV-Z]{26})\b")
+#: <ULID>." (demand-letter-drafter), "... for drafting job <ULID>."
+#: (document-drafter) or "... for chronology job <ULID>."
+#: (medical-chronology-maintainer). The earliest mention decides the kind.
+#: The chronology wake was missing until 2026-10-07: a held chronology's wake
+#: was unfenced, and the Operator wrote a NEW email to the requester and the
+#: matter's attorney, who was not on the request.
+_WAKE_JOB = re.compile(r"\b(demand|drafting|chronology) job ([0-9A-HJKMNP-TV-Z]{26})\b")
 #: The wake word -> the broker's binding kind (ss-console reply_binding.KINDS).
-_JOB_KIND = {"demand": "demand_job", "drafting": "drafting_job"}
+_JOB_KIND = {"demand": "demand_job", "drafting": "drafting_job", "chronology": "medchron_job"}
 JOB_KINDS = frozenset(_JOB_KIND.values())
+_LABEL = {kind: f"{word} job" for word, kind in _JOB_KIND.items()}
 
 
 def _label(kind: str) -> str:
-    """ "demand job" / "drafting job", for the refusal sentences."""
-    return "drafting job" if kind == "drafting_job" else "demand job"
+    """ "demand job" / "drafting job" / "chronology job", for the refusal sentences."""
+    return _LABEL.get(kind, "demand job")
 
 
 @dataclass(frozen=True)
@@ -188,8 +193,7 @@ def _request_from_args(args: dict[str, Any]) -> dict[str, str] | str:
         return "name exactly one of job_id, graph_message_id or internet_message_id"
     ((field, value),) = given.items()
     if field == "job_id":
-        drafting = TURN_SOURCES.kind_of_job(value) == "drafting_job"
-        kind = "drafting_job" if drafting else "demand_job"
+        kind = TURN_SOURCES.kind_of_job(value) or "demand_job"
         return {"kind": kind, "job_id": value}
     return {"kind": "message", field: value}
 
@@ -291,8 +295,8 @@ TOOL_SCHEMA: dict[str, Any] = {
         "job_id": {
             "type": "string",
             "description": (
-                "A demand or drafting job's id, from its completion wake: binds to the email "
-                "that requested it."
+                "A demand, drafting or chronology job's id, from its completion wake: binds to "
+                "the email that requested it."
             ),
         },
         "graph_message_id": {
@@ -324,7 +328,7 @@ WAKE_FORBIDDEN_TOOLS = frozenset({"smd_send_message", "casework_brief"})
 
 
 def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str | None:
-    """The refusal for ``tool_name`` in a demand or drafting job's wake, or None."""
+    """The refusal for ``tool_name`` in a demand, drafting or chronology job's wake, or None."""
     source = TURN_SOURCES.source(session_id) if session_id else None
     if source is None or source[0] != "handoff" or not source[1]:
         return None

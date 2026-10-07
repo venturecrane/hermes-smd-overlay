@@ -613,3 +613,71 @@ def test_the_bound_reply_path_stays_open_in_a_drafting_wake(lane) -> None:
     assert (
         mod.on_pre_tool_call(tool_name="reply_bind", args={"job_id": JOB}, session_id=WAKE) is None
     )
+
+
+# -- a chronology job's wake (2026-10-07): a held chronology's wake was not
+# recognised, and the Operator emailed the requester AND the matter's attorney
+
+
+def _chronology_wake(mod, session: str = WAKE, job: str = JOB) -> None:
+    # The runner's own first line (ss-console operator/runners/medchron/medchron/daemon.py).
+    mod.on_pre_llm_call(
+        session_id=session,
+        sender_id="webhook:handoff",
+        user_message=(
+            "Run the medical-chronology-maintainer skill's DELIVER mode for chronology job "
+            f"{job}.\nRequester: admin@firm.example."
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "smd_send_message",
+        "casework_brief",
+        "mcp_msgraph_mail_send_message",
+        "mcp_agentmail_send_message",
+    ],
+)
+def test_a_chronology_wake_may_call_no_send_tool(lane, tool) -> None:
+    """FALSIFIER: drop "chronology" from the wake regex and this is 2026-10-07:
+    the wake is no wake, and a new email to the attorney passes."""
+    mod, _d1, _broker, _ = lane
+    _chronology_wake(mod)
+    verdict = mod.on_pre_tool_call(tool_name=tool, args={}, session_id=WAKE)
+    assert verdict is not None and verdict["action"] == "block"
+    assert f"chronology job {JOB}'s completion wake" in verdict["message"]
+
+
+def test_a_chronology_wake_replies_through_a_chronology_binding(lane) -> None:
+    mod, d1, broker, _ = lane
+    _chronology_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    assert broker.binds == [{"kind": "medchron_job", "job_id": JOB}]
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == [
+        {"binding": {"kind": "medchron_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == GRAPH_ID
+
+
+def test_a_chronology_wake_refuses_a_binding_by_email_id(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _chronology_wake(mod)
+    verdict = mod.on_pre_tool_call(
+        tool_name="reply_bind", args={"internet_message_id": "<req@firm.example>"}, session_id=WAKE
+    )
+    assert verdict is not None and verdict["action"] == "block"
+    assert verdict["message"] == (
+        f"this is chronology job {JOB}'s wake; call reply_bind with job_id={JOB}"
+    )
+
+
+def test_a_demand_binding_is_refused_in_a_chronology_wake(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _chronology_wake(mod)
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("demand_job")))
+    assert out["bound"] is False
+    assert out["reason"] == f"this wake is for chronology job {JOB}; it cannot answer another job"
