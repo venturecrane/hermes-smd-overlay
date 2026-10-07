@@ -57,7 +57,7 @@ class _Ledger:
         self.conn = sqlite3.connect(str(path))
         self.conn.execute(CREATE_TABLE_SQL)
         if job_tables:
-            for table in ("demand_jobs", "medchron_jobs"):
+            for table in ("demand_jobs", "drafting_jobs", "medchron_jobs"):
                 self.conn.execute(
                     f"CREATE TABLE {table} (id TEXT PRIMARY KEY, created_at TEXT, "
                     "updated_at TEXT, state TEXT, matter_number TEXT, request_ref TEXT, "
@@ -305,6 +305,32 @@ def test_medchron_job_joins_on_request_ref(ledger) -> None:
     ledger.job("medchron_jobs", "delivered", 3)
     kinds = _kinds(_decide(ledger, [_request(60)]))
     assert sorted(kinds) == ["job_done", "replied"]
+
+
+def test_a_drafting_job_suppresses_the_alarm_and_cards_when_it_ends(ledger) -> None:
+    """FALSIFIER: drop "drafting" from JOB_LANES and a queued drafting job
+    neither suppresses the no-reply alarm nor cards when it ends."""
+    ledger.job("drafting_jobs", "running", 10)
+    assert _decide(ledger, [_request(60)]) == []
+    ledger.conn.execute("UPDATE drafting_jobs SET state='delivered', updated_at=?", (_ts(4),))
+    ledger.conn.commit()
+    cards = _decide(ledger, [_request(60)])
+    assert _kinds(cards) == ["job_done"]
+    assert cards[0]["job"] == {"lane": "drafting", "state": "delivered", "reason": None}
+    assert cards[0]["matter"] == "2024-0042"
+
+
+def test_a_seat_with_only_the_older_job_tables_still_decides(tmp_path) -> None:
+    """A seat whose ledger predates the drafting lane has no drafting_jobs table."""
+    led = _Ledger(tmp_path / "audit.db", job_tables=False)
+    for table in ("demand_jobs", "medchron_jobs"):
+        led.conn.execute(
+            f"CREATE TABLE {table} (id TEXT PRIMARY KEY, created_at TEXT, "
+            "updated_at TEXT, state TEXT, matter_number TEXT, request_ref TEXT, "
+            "reason TEXT)"
+        )
+    led.job("demand_jobs", "delivered", 3)
+    assert _kinds(_decide(led, [_request(60)])) == ["job_done"]
 
 
 def test_late_reply_after_the_alarm_is_still_carded(ledger) -> None:
