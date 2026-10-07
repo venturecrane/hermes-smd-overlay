@@ -232,3 +232,50 @@ def test_a_delivered_job_status_is_an_ordinary_read(demand, monkeypatch) -> None
     result = mod.demand_job_status({"job_id": "01J0000000000000000000000Z"})
     emit = load_plugin("hermes-smd-audit").emit
     assert emit._outcome_from_result(result) == ("ok", None)
+
+
+# -- the chronology submit takes who asked from the email too (2026-10-07)
+
+
+class _ChronologyClient:
+    def __init__(self) -> None:
+        self.envelopes: list[dict] = []
+
+    def submit(self, envelope):
+        self.envelopes.append(envelope)
+        return {"accepted": True, "job_id": "01J0000000000000000000000Z", "state": "submitted"}
+
+
+_CHRONOLOGY = {
+    **MATTER,
+    "units": [{"client_name": "Jane Doe", "surname": "Doe", "dob": "01/01/1980"}],
+    "incident_date": "2025-01-01",
+    "incident_source": "matter_layout",
+    "requested_by": "attorney@firm.example",
+    "request_ref": "the thread",
+}
+
+
+def test_a_chronology_requester_comes_from_the_email_not_the_model(demand, monkeypatch) -> None:
+    """FALSIFIER: drop the origin override in _medchron_job_submit and the
+    completion reply binds to whoever the model named (the 2026-10-07 class)."""
+    from tests.conftest import load_plugin
+
+    plugin = load_plugin("hermes-smd-medchron")
+    client = _ChronologyClient()
+    monkeypatch.setattr(plugin, "MedchronBrokerClient", lambda: client)
+    _email()
+    assert json.loads(plugin._medchron_job_submit(dict(_CHRONOLOGY)))["accepted"] is True
+    env = client.envelopes[0]
+    assert env["requested_by"] == ADMIN and env["request_ref"] == IMID
+
+
+def test_a_chronology_submit_with_no_email_keeps_the_model_values(demand, monkeypatch) -> None:
+    from tests.conftest import load_plugin
+
+    plugin = load_plugin("hermes-smd-medchron")
+    client = _ChronologyClient()
+    monkeypatch.setattr(plugin, "MedchronBrokerClient", lambda: client)
+    plugin._medchron_job_submit(dict(_CHRONOLOGY))
+    env = client.envelopes[0]
+    assert env["requested_by"] == "attorney@firm.example" and env["request_ref"] == "the thread"

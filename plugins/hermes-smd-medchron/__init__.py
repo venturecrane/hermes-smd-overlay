@@ -84,6 +84,14 @@ def _medchron_job_submit(args: dict[str, Any], **_: Any) -> str:
     for key in ("injuries", "requested_by", "request_ref"):
         if args.get(key):
             envelope[key] = str(args[key])
+    # Who asked comes from the verified email that opened this turn whenever
+    # there is one, never the model's arguments (2026-10-07): the completion
+    # reply binds on request_ref and requested_by, and a model-written value
+    # there is a recipient the model chose.
+    origin = demand._origin()
+    if origin is not None and origin.sender_address and origin.internet_message_id:
+        envelope["requested_by"] = origin.sender_address
+        envelope["request_ref"] = origin.internet_message_id
     selection = args.get("selection")
     if isinstance(selection, dict) and selection.get("include_file_ids"):
         envelope["selection"] = {
