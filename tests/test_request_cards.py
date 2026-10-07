@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -318,6 +319,54 @@ def test_a_drafting_job_suppresses_the_alarm_and_cards_when_it_ends(ledger) -> N
     assert _kinds(cards) == ["job_done"]
     assert cards[0]["job"] == {"lane": "drafting", "state": "delivered", "reason": None}
     assert cards[0]["matter"] == "2024-0042"
+
+
+#: The console's reason contract (ss-console src/lib/operator/request-card.ts
+#: TOKEN_RE): a card whose job reason fails it is refused outright.
+_CONSOLE_TOKEN_RE = re.compile(r"^[a-z0-9_:.-]{1,64}$")
+
+#: The shapes of reason the drafting runner records through drafting_job_record
+#: (ss-console #3093, medchron/drafting/run.py + limits.py): free-text sentences,
+#: a limit's setting-led sentence, and an unexpected exception's class name.
+_DRAFTING_RUNNER_REASONS = [
+    "the request is missing what the draft needs: the deponent's name",
+    "filing refused: the upload stage refused",
+    "the drafting gate refused the document (hold): text quoting Secret Client.pdf",
+    "the format check refused the rendered document: caption missing",
+    "compose output still unfinished after 3 continuations",
+    "repair did not return 2 flagged section(s)",
+    "drafting_monthly_budget_cents: the run's spend reached the monthly cost budget during compose",
+    "KeyError: 'Secret Client'",
+    "/opt/data/vaults/acme/drafting/firm.yaml: not valid YAML (bad indent)",
+    "[Errno 2] No such file or directory: 'Secret Client.pdf'",
+    "the runner exited 1 without a verdict",
+    "Ünïcode leading word",
+    "x" * 500,
+]
+
+
+@pytest.mark.parametrize("reason", _DRAFTING_RUNNER_REASONS)
+def test_every_drafting_reason_leaves_as_a_console_valid_token_or_nothing(ledger, reason) -> None:
+    """The overlay tokenises every lane's reason to its leading word; the free
+    text after it never leaves the seat. FALSIFIER: send job["reason"] raw and
+    the console refuses the card (and the tail can name a document)."""
+    ledger.job("drafting_jobs", "held", 3, reason=reason)
+    cards = _decide(ledger, [_request(60)])
+    assert _kinds(cards) == ["job_done"]
+    token = cards[0]["job"]["reason"]
+    assert token is None or _CONSOLE_TOKEN_RE.match(token), token
+    assert "secret" not in json.dumps(cards[0]).lower()
+
+
+def test_a_limit_hold_leaves_as_its_setting(ledger) -> None:
+    ledger.job(
+        "drafting_jobs",
+        "failed",
+        3,
+        reason="drafting_monthly_budget_cents: the month's spend reached the budget during compose",
+    )
+    job = _decide(ledger, [_request(60)])[0]["job"]
+    assert job == {"lane": "drafting", "state": "failed", "reason": "drafting_monthly_budget_cents"}
 
 
 def test_a_seat_with_only_the_older_job_tables_still_decides(tmp_path) -> None:
