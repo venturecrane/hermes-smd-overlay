@@ -653,7 +653,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
 
 
 def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
-    """Block every send in a demand job's completion wake (binding.py). The
+    """Block every send in a demand or drafting job's completion wake (binding.py). The
     bound reply is that turn's only channel. Exception-safe: a fault blocks."""
     try:
         session_id = kwargs.get("session_id")
@@ -670,7 +670,7 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
 
 def on_pre_llm_call(**kwargs: Any) -> None:
     """Note a job's completion wake (binding.py), so only such a turn, or a
-    scheduled one, may bind a reply, and a demand wake only to its own job.
+    scheduled one, may bind a reply, and a job's wake only to its own job.
     Observes; injects nothing. Exception-safe."""
     try:
         session_id = kwargs.get("session_id")

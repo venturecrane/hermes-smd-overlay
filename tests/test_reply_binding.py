@@ -472,3 +472,144 @@ def test_a_wake_bind_by_its_own_job_id_passes_the_guard(lane) -> None:
     assert (
         mod.on_pre_tool_call(tool_name="reply_bind", args={"job_id": JOB}, session_id=WAKE) is None
     )
+
+
+# -- a drafting job's wake: the demand wake's rules, its own kind
+
+
+def _drafting_wake(mod, session: str = WAKE, job: str = JOB) -> None:
+    mod.on_pre_llm_call(
+        session_id=session,
+        sender_id="webhook:handoff",
+        user_message=(
+            f"Run the document-drafter skill's DELIVER mode for drafting job {job}.\n"
+            "Kind: drafting.\nDocument class: memo."
+        ),
+    )
+
+
+def _verdict(kind: str, job: str = JOB) -> str:
+    """A broker 'bound' answer for ``kind``, as handle_tool would return it."""
+    return json.dumps(
+        {
+            "bound": True,
+            "binding": {"kind": kind, "job_id": job},
+            "sender": ADMIN,
+            "graph_message_id": GRAPH_ID,
+        }
+    )
+
+
+def test_a_drafting_wake_replies_through_a_drafting_binding(lane) -> None:
+    """FALSIFIER: hard-code kind=demand_job in _request_from_args and the broker
+    looks the drafting job up on the demand ledger."""
+    mod, d1, broker, _ = lane
+    _drafting_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    assert broker.binds == [{"kind": "drafting_job", "job_id": JOB}]
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == [
+        {"binding": {"kind": "drafting_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == GRAPH_ID
+
+
+def test_a_demand_wake_still_binds_a_demand_job(lane) -> None:
+    mod, _d1, broker, _ = lane
+    _drafting_wake(mod, session="other-wake", job=OTHER_JOB)
+    _wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    assert broker.binds == [{"kind": "demand_job", "job_id": JOB}]
+
+
+def test_a_drafting_wake_cannot_answer_another_job(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _drafting_wake(mod)
+    out = _bind(mod, {"job_id": OTHER_JOB})
+    assert out["bound"] is False
+    assert out["reason"] == f"this wake is for drafting job {JOB}; it cannot answer another job"
+
+
+def test_a_demand_binding_is_refused_in_a_drafting_wake(lane) -> None:
+    """Cross-kind: the right id, the wrong ledger. FALSIFIER: drop the kind
+    comparison in record_from_result and the demand binding is taken."""
+    mod, _d1, _broker, _ = lane
+    _drafting_wake(mod)
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("demand_job")))
+    assert out["bound"] is False
+    assert out["reason"] == f"this wake is for drafting job {JOB}; it cannot answer another job"
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
+
+
+def test_a_drafting_binding_is_refused_in_a_demand_wake(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _wake(mod)
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("drafting_job")))
+    assert out["bound"] is False
+    assert out["reason"] == f"this wake is for demand job {JOB}; it cannot answer another job"
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
+
+
+def test_a_scheduled_turn_cannot_bind_a_drafting_job(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    out = json.loads(mod.binding.record_from_result(CRON, _verdict("drafting_job")))
+    assert out["bound"] is False
+    assert out["reason"] == "a drafting job's reply binds only from that job's own completion wake"
+
+
+def test_a_drafting_wake_refuses_a_binding_by_email_id(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _drafting_wake(mod)
+    out = _bind(mod, {"internet_message_id": "<req@firm.example>"})
+    assert out["bound"] is False
+    assert out["reason"] == (
+        f"this is drafting job {JOB}'s wake; bind with job_id={JOB}, never the email's id"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "smd_send_message",
+        "casework_brief",
+        "mcp_msgraph_mail_send_message",
+        "mcp_agentmail_send_message",
+    ],
+)
+def test_a_drafting_wake_may_call_no_send_tool(lane, tool) -> None:
+    """FALSIFIER: match only "demand job" in the wake regex and a drafting wake
+    is no wake at all, so every send passes (2026-10-06's failure)."""
+    mod, _d1, _broker, _ = lane
+    _drafting_wake(mod)
+    verdict = mod.on_pre_tool_call(tool_name=tool, args={}, session_id=WAKE)
+    assert verdict is not None and verdict["action"] == "block"
+    assert f"drafting job {JOB}'s completion wake" in verdict["message"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"internet_message_id": "<req@firm.example>"},
+        {"graph_message_id": GRAPH_ID},
+        {"job_id": OTHER_JOB},
+    ],
+)
+def test_a_drafting_wake_bind_by_email_id_is_refused_before_the_broker(lane, args) -> None:
+    mod, _d1, _broker, _ = lane
+    _drafting_wake(mod)
+    verdict = mod.on_pre_tool_call(tool_name="reply_bind", args=args, session_id=WAKE)
+    assert verdict is not None and verdict["action"] == "block"
+    assert verdict["message"] == (
+        f"this is drafting job {JOB}'s wake; call reply_bind with job_id={JOB}"
+    )
+
+
+def test_the_bound_reply_path_stays_open_in_a_drafting_wake(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _drafting_wake(mod)
+    for tool in ("reply_bind", "mcp_msgraph_mail_create_draft", "drafting_job_status"):
+        assert mod.on_pre_tool_call(tool_name=tool, args={}, session_id=WAKE) is None, tool
+    assert (
+        mod.on_pre_tool_call(tool_name="reply_bind", args={"job_id": JOB}, session_id=WAKE) is None
+    )
