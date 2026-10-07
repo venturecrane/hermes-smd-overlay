@@ -40,7 +40,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, inbound_message, msgraph_broker, read_volume
+from shared import inbound, inbound_message, msgraph_broker, read_volume, request_index
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params, sender_key
@@ -183,6 +183,35 @@ def _emit_inbound_received(
         session_id=session_id or None,
     )
     client.execute(_INSERT_SQL, *params)
+
+
+def _index_request(
+    envelope: inbound.InboundEnvelope | None, dto: inbound_message.InboundMessage | None
+) -> None:
+    """Index one person's request for the request cards, or do nothing.
+
+    Internal (rostered) senders only, and never an RFC 3834 auto-submitted
+    message: a vendor notice or an out-of-office is not a request anyone
+    waits on. The internetMessageId rides along because it is the key a queued
+    demand or chronology job records as its ``request_ref``."""
+    try:
+        if envelope is None or dto is None:
+            return
+        if envelope.trust_class != inbound.TRUST_CLASS_INTERNAL or dto.auto_submitted is True:
+            return
+        internet_message_id = ""
+        if isinstance(dto.provider_refs, dict):
+            candidate = dto.provider_refs.get("internet_message_id")
+            if isinstance(candidate, str):
+                internet_message_id = candidate
+        request_index.record_inbound(
+            vendor_message_id=dto.message_id,
+            internet_message_id=internet_message_id,
+            sender=dto.from_addr,
+            subject=dto.subject,
+        )
+    except Exception:  # noqa: BLE001 — a card is never worth a routing failure
+        logger.debug("hermes-smd-webhook-router: request index skipped", exc_info=True)
 
 
 def _inbound_content_for(payload: Any) -> str:
@@ -803,6 +832,12 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
                     "route still applied",
                     exc,
                 )
+
+    # Request cards (shared.request_cards): index a PERSON's request — a
+    # rostered sender, not an auto-reply — so SMD gets a card when it is
+    # answered and an alarm when it is not. The index is seat-local and holds
+    # the only text a card carries; record_inbound never raises.
+    _index_request(envelope, dto)
 
     directive: dict[str, Any] = {
         "action": "route_to_skill",

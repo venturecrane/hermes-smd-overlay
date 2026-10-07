@@ -452,6 +452,18 @@ vars:
     requirement: optional
     consumed_by: [reply]
     note: held-reply queue db (#2070); defaults to /opt/data/held_replies.db
+  SMD_REQUEST_INDEX_DB_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-router, reply, webhook-gate]
+    note: "test/dev override for the seat-local request index; defaults to /opt/data/requests.db (shared/request_index.py). The agent writes it (router at intake, reply plugin + held-reply sweeper at each send); the gate's heartbeat reads it read-only for the request cards. Holds sender/subject/reply opening, nulled after 7 days, rows deleted after 30."
+  SMD_REQUEST_CARDS_DB_PATH:
+    discovery: static
+    stage: agent
+    requirement: optional
+    consumed_by: [webhook-gate]
+    note: "test/dev override for the gate-owned request-card state; defaults to /opt/data/smd-gate/request_cards.db (shared/request_cards.py). Card keys (sha256 of the vendor message id + kind) and attempt/done times only; no text."
   SMD_SPEC_DIR:
     # indirect: shared/spec_manifest.py reads it through the module constant
     # SPEC_DIR_ENV (exported so translate.py and the trust plugin name the same

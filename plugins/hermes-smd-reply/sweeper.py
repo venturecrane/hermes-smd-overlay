@@ -35,6 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from shared import request_index
 from shared import send_policy as send_policy_mod
 
 from . import held_store as held_store_mod
@@ -182,6 +183,8 @@ def run_sweep_once(
                 "held_reason": row.hold_reason,
             },
         )
+        # Request cards: a released reply is a first reply like any other.
+        request_index.record_reply_opening(row.message_id, row.send_text)
         released += 1
 
     return SweepResult(released=released, expired=expired, skipped=skipped, failed=failed)
