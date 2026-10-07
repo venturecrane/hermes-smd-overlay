@@ -454,7 +454,7 @@ def test_other_turns_are_untouched_by_the_wake_guard(lane) -> None:
     ],
 )
 def test_a_wake_bind_by_email_id_is_refused_before_the_broker(lane, args) -> None:
-    """Martello: the broker's 'already had its bound reply' reached the model
+    """A live demand job: the broker's 'already had its bound reply' reached the model
     first, so it never learned to bind by job id. FALSIFIER: drop the
     reply_bind branch and the guard lets the broker be asked."""
     mod, _d1, _broker, _ = lane
