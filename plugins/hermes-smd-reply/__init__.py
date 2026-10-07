@@ -657,7 +657,9 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     try:
         session_id = kwargs.get("session_id")
         message = binding.wake_send_refusal(
-            session_id if isinstance(session_id, str) else "", str(kwargs.get("tool_name") or "")
+            session_id if isinstance(session_id, str) else "",
+            str(kwargs.get("tool_name") or ""),
+            kwargs.get("args"),
         )
     except Exception:  # noqa: BLE001 - never raise out of a hook
         logger.exception("hermes-smd-reply: wake send guard failed; not blocking")

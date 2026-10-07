@@ -443,3 +443,32 @@ def test_other_turns_are_untouched_by_the_wake_guard(lane) -> None:
     mod, _d1, _broker, _ = lane
     assert mod.on_pre_tool_call(tool_name="smd_send_message", args={}, session_id="mail-1") is None
     assert mod.on_pre_tool_call(tool_name="smd_send_message", args={}, session_id=CRON) is None
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"internet_message_id": "<req@firm.example>"},
+        {"graph_message_id": GRAPH_ID},
+        {"job_id": OTHER_JOB},
+    ],
+)
+def test_a_wake_bind_by_email_id_is_refused_before_the_broker(lane, args) -> None:
+    """Martello: the broker's 'already had its bound reply' reached the model
+    first, so it never learned to bind by job id. FALSIFIER: drop the
+    reply_bind branch and the guard lets the broker be asked."""
+    mod, _d1, _broker, _ = lane
+    _wake(mod)
+    verdict = mod.on_pre_tool_call(tool_name="reply_bind", args=args, session_id=WAKE)
+    assert verdict is not None and verdict["action"] == "block"
+    assert (
+        verdict["message"] == f"this is demand job {JOB}'s wake; call reply_bind with job_id={JOB}"
+    )
+
+
+def test_a_wake_bind_by_its_own_job_id_passes_the_guard(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _wake(mod)
+    assert (
+        mod.on_pre_tool_call(tool_name="reply_bind", args={"job_id": JOB}, session_id=WAKE) is None
+    )
