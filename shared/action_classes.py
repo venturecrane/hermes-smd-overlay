@@ -624,6 +624,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # prefilled and filed for the firm's signer (ss-console sr19_form.py,
     # 2026-10-06). Internal write: never signed, mailed or paid.
     "mcp_smokeball_render_sr19": ActionClass.INTERNAL_WRITE,
+    # A litigation-funding case evaluation form (the firm's copy in its
+    # Document Library) prefilled from the matter's record and filed on the
+    # matter for the firm to finish (ss-console funding_case_eval.py,
+    # 2026-10-06). Internal write: never signed, sent or submitted.
+    "mcp_smokeball_render_funding_case_eval": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches
