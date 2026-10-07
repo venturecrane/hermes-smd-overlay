@@ -286,7 +286,7 @@ def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str 
     if source is None or source[0] != "handoff" or not source[1]:
         return None
     if tool_name == TOOL_NAME:
-        # Refused BEFORE the broker is asked (Martello, 2026-10-06): a bind by
+        # Refused BEFORE the broker is asked (a live demand job, 2026-10-06): a bind by
         # the email's id reached the broker, which refused it as already
         # answered, and the model read that as "the reply was sent". The only
         # binding this wake is owed is the job's own.
