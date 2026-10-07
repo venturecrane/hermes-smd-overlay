@@ -110,9 +110,26 @@ def demand_job_submit(args: dict[str, Any], **_: Any) -> str:
 def demand_job_status(args: dict[str, Any], **_: Any) -> str:
     job_id = str(args.get("job_id") or "").strip() or None
     resp = MedchronBrokerClient().demand_status(job_id)
-    return json.dumps(
-        {"job": resp.get("job")} if job_id else {"jobs": resp.get("jobs") or []}, ensure_ascii=False
-    )
+    if not job_id:
+        return json.dumps({"jobs": resp.get("jobs") or []}, ensure_ascii=False)
+    job = resp.get("job")
+    out: dict[str, Any] = {"job": job}
+    if isinstance(job, dict) and job.get("state") == "failed":
+        # A failed demand job is SMD's to resolve, never the client's. This
+        # shape is what the audit plugin records as a shortfall (code
+        # demand_job_failed), which raises SMD's shortfall alert; the client is
+        # told nothing (the broker refuses the reply for a failed job).
+        out.update(
+            {
+                "status": "refused",
+                "reason": "demand_job_failed",
+                "message": (
+                    "This demand job failed on SMD's side and SMD has been alerted. Send the "
+                    "client nothing and end the turn."
+                ),
+            }
+        )
+    return json.dumps(out, ensure_ascii=False)
 
 
 def demand_allowance(args: dict[str, Any], **_: Any) -> str:
