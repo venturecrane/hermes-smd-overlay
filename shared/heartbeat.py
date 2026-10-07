@@ -770,6 +770,34 @@ def _shortfall_event(*, ts, cls, tool, routine, code, key) -> dict:
     }
 
 
+#: The per-call columns ``_CallRow`` is built from, in its field order. Shared
+#: with ``shared.request_cards``, which classifies one request's calls with the
+#: very ``_classify_call`` this module pages on, so a request card and the
+#: shortfall alert can never disagree about what counted as refused or failed.
+CALL_ROW_SELECT = (
+    "SELECT id, ts, action_type, skill_name,"
+    " json_extract(metadata,'$.tool') AS tool,"
+    " json_extract(metadata,'$.outcome') AS outcome,"
+    " json_extract(metadata,'$.error_type') AS error_type,"
+    " json_extract(metadata,'$.shortfall_code') AS shortfall_code,"
+    " json_extract(metadata,'$.trust_decision') AS trust_decision,"
+    " json_extract(metadata,'$.trust_reason') AS trust_reason,"
+    " json_extract(metadata,'$.plugin_block') AS plugin_block,"
+    " json_extract(metadata,'$.callback_timeout') AS callback_timeout,"
+    " json_extract(metadata,'$.banned_tool') AS banned_tool,"
+    " json_extract(metadata,'$.session_id') AS session_id,"
+    " json_extract(metadata,'$.object_digest') AS object_digest,"
+    " json_extract(metadata,'$.routine') AS routine,"
+    " json_extract(metadata,'$.skill') AS skill,"
+    " json_extract(metadata,'$.skill_procedure') AS procedure,"
+    " json_extract(metadata,'$.bundle_sha256') AS bundle_sha256,"
+    " json_extract(metadata,'$.bundle_page_count') AS bundle_page_count,"
+    " json_extract(metadata,'$.bundle_pages_filed') AS bundle_pages_filed,"
+    " json_extract(metadata,'$.bundle_pages_pending') AS bundle_pages_pending"
+    " FROM audit_log"
+)
+
+
 def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
     """Every time in the trailing day the Operator could not give a person what
     they asked for. THE PURE QUERY: the ticker and the retro-falsifier
@@ -814,27 +842,7 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
     cutoff = _iso_floor(_as_utc(now).isoformat())
     horizon = _iso_floor((_as_utc(now) - timedelta(hours=SHORTFALL_WINDOW_HOURS)).isoformat())
     rows = conn.execute(
-        "SELECT id, ts, action_type, skill_name,"
-        " json_extract(metadata,'$.tool') AS tool,"
-        " json_extract(metadata,'$.outcome') AS outcome,"
-        " json_extract(metadata,'$.error_type') AS error_type,"
-        " json_extract(metadata,'$.shortfall_code') AS shortfall_code,"
-        " json_extract(metadata,'$.trust_decision') AS trust_decision,"
-        " json_extract(metadata,'$.trust_reason') AS trust_reason,"
-        " json_extract(metadata,'$.plugin_block') AS plugin_block,"
-        " json_extract(metadata,'$.callback_timeout') AS callback_timeout,"
-        " json_extract(metadata,'$.banned_tool') AS banned_tool,"
-        " json_extract(metadata,'$.session_id') AS session_id,"
-        " json_extract(metadata,'$.object_digest') AS object_digest,"
-        " json_extract(metadata,'$.routine') AS routine,"
-        " json_extract(metadata,'$.skill') AS skill,"
-        " json_extract(metadata,'$.skill_procedure') AS procedure,"
-        " json_extract(metadata,'$.bundle_sha256') AS bundle_sha256,"
-        " json_extract(metadata,'$.bundle_page_count') AS bundle_page_count,"
-        " json_extract(metadata,'$.bundle_pages_filed') AS bundle_pages_filed,"
-        " json_extract(metadata,'$.bundle_pages_pending') AS bundle_pages_pending"
-        " FROM audit_log"
-        " WHERE action_type IN ('TOOL_CALL_COMPLETED', 'INVARIANT_VIOLATION')"
+        CALL_ROW_SELECT + " WHERE action_type IN ('TOOL_CALL_COMPLETED', 'INVARIANT_VIOLATION')"
         " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
         " ORDER BY ts, id",
         (horizon, cutoff),
@@ -1469,20 +1477,24 @@ def build_payload(
     return payload
 
 
-def _default_post(url: str, headers: dict[str, str], body: bytes) -> int:
+def _default_post(
+    url: str, headers: dict[str, str], body: bytes, timeout: float = _HTTP_TIMEOUT_SECONDS
+) -> int:
     """POST ``body`` to ``url`` over HTTPS/HTTP, returning the status code.
 
     Stdlib ``http.client`` (no third-party dependency), matching the gate's
     existing forward path. Raises on connection failure; the caller catches.
+    ``timeout`` is per socket operation; the request-card leg passes a shorter
+    one than the beat so a slow console cannot hold the ticker.
     """
     parts = urlsplit(url)
     host = parts.hostname or ""
     if parts.scheme == "http":
         conn: http.client.HTTPConnection = http.client.HTTPConnection(
-            host, parts.port or 80, timeout=_HTTP_TIMEOUT_SECONDS
+            host, parts.port or 80, timeout=timeout
         )
     else:
-        conn = http.client.HTTPSConnection(host, parts.port or 443, timeout=_HTTP_TIMEOUT_SECONDS)
+        conn = http.client.HTTPSConnection(host, parts.port or 443, timeout=timeout)
     try:
         conn.request("POST", parts.path or "/", body=body, headers=headers)
         resp = conn.getresponse()
@@ -1542,6 +1554,8 @@ class HeartbeatEmitter:
         webhook_surface_check_fn=None,
         gateway_loop_check_fn=None,
         gateway_loop_check_debounce: int = 3,
+        card_post_fn=_default_post,
+        request_cards_fn=None,
     ) -> None:
         self._slug = slug
         self._key = key
@@ -1592,6 +1606,12 @@ class HeartbeatEmitter:
         self._loop_debounce = max(1, gateway_loop_check_debounce)
         self._loop_fail_count = 0
         self._loop_last_good = None
+        # Request cards (shared.request_cards): its own POST function so the
+        # leg's short per-POST timeout never applies to the beat, and an
+        # injectable leg so tests can drive the tick without a ledger.
+        self._card_post_fn = card_post_fn
+        self._request_cards_fn = request_cards_fn or self._send_request_cards
+        self._card_store = None
 
     def start(self) -> bool:
         """Launch the daemon thread. Returns False (and logs) when the
@@ -1644,6 +1664,30 @@ class HeartbeatEmitter:
                 self._ping_fn(self._healthchecks_url)
             except Exception as exc:
                 logger.warning("heartbeat: healthchecks ping failed: %s", exc)
+        # Request cards LAST, in their own leg: the beat and the dead-man ping
+        # have already gone, so a slow console can only delay the next tick,
+        # and by at most the leg's own budget (shared.request_cards).
+        if self._slug and self._key:
+            try:
+                self._request_cards_fn()
+            except Exception as exc:  # never let the emitter die
+                logger.warning("heartbeat: request-card leg failed: %s", exc)
+
+    def _send_request_cards(self) -> int:
+        """POST the request cards that are due (shared.request_cards)."""
+        from shared import request_cards
+
+        if self._card_store is None:
+            # One gate-owned store for the life of the emitter (one connection).
+            self._card_store = request_cards.CardStore()
+        return request_cards.send_due_cards(
+            slug=self._slug or "",
+            key=self._key or "",
+            url=request_cards.card_url(self._ingest_url),
+            audit_db_path=self._audit_db_path_fn(),
+            post_fn=self._card_post_fn,
+            store=self._card_store,
+        )
 
     def _read_scheduler_check(self):
         """Run the work-liveness self-check with a consecutive-failure

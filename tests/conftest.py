@@ -48,6 +48,15 @@ def _sent_lines_dir(monkeypatch, tmp_path_factory) -> None:
     monkeypatch.setenv("SMD_SENT_LINES_DIR", str(tmp_path_factory.mktemp("sent_lines")))
 
 
+@pytest.fixture(autouse=True)
+def _request_card_files(monkeypatch, tmp_path_factory) -> None:
+    """Every test keeps the request index and card state (``shared.request_index``
+    / ``shared.request_cards``) in its own directory, never under /opt/data."""
+    base = tmp_path_factory.mktemp("request_cards")
+    monkeypatch.setenv("SMD_REQUEST_INDEX_DB_PATH", str(base / "requests.db"))
+    monkeypatch.setenv("SMD_REQUEST_CARDS_DB_PATH", str(base / "smd-gate" / "request_cards.db"))
+
+
 @pytest.fixture
 def fake_ctx() -> FakePluginContext:
     """Return a fresh ``FakePluginContext`` for each test."""
