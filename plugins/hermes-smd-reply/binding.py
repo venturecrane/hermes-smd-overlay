@@ -280,10 +280,23 @@ TOOL_DESCRIPTION = (
 WAKE_FORBIDDEN_TOOLS = frozenset({"smd_send_message", "casework_brief"})
 
 
-def wake_send_refusal(session_id: str, tool_name: str) -> str | None:
+def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str | None:
     """The refusal for ``tool_name`` in a demand job's wake, or None."""
     source = TURN_SOURCES.source(session_id) if session_id else None
     if source is None or source[0] != "handoff" or not source[1]:
+        return None
+    if tool_name == TOOL_NAME:
+        # Refused BEFORE the broker is asked (Martello, 2026-10-06): a bind by
+        # the email's id reached the broker, which refused it as already
+        # answered, and the model read that as "the reply was sent". The only
+        # binding this wake is owed is the job's own.
+        a = args if isinstance(args, dict) else {}
+        by_email = any(
+            str(a.get(k) or "").strip() for k in ("graph_message_id", "internet_message_id")
+        )
+        other_job = str(a.get("job_id") or "").strip() not in ("", source[1])
+        if by_email or other_job:
+            return f"this is demand job {source[1]}'s wake; call reply_bind with job_id={source[1]}"
         return None
     from shared.action_classes import ActionClass, classify_tool
 
