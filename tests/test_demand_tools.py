@@ -201,3 +201,34 @@ def test_the_tools_are_classified() -> None:
     assert classify_tool("demand_job_submit").action_class is ActionClass.INTERNAL_WRITE
     assert classify_tool("demand_job_status").action_class is ActionClass.READ
     assert classify_tool("demand_allowance").action_class is ActionClass.READ
+
+
+class _Status:
+    def __init__(self, state: str) -> None:
+        self.state = state
+
+    def demand_status(self, job_id=None):
+        return {"ok": True, "job": {"id": job_id, "state": self.state}}
+
+
+def test_a_failed_job_status_is_a_shortfall_for_smd(demand, monkeypatch) -> None:
+    """A failed demand job raises SMD's shortfall alert through the audit
+    plugin's shortfall shape. FALSIFIER: return the bare job and the failure is
+    recorded as an ordinary ok read, so nobody at SMD hears."""
+    from tests.conftest import load_plugin
+
+    mod, _client = demand
+    monkeypatch.setattr(mod, "MedchronBrokerClient", lambda: _Status("failed"))
+    result = mod.demand_job_status({"job_id": "01J0000000000000000000000Z"})
+    emit = load_plugin("hermes-smd-audit").emit
+    assert emit._outcome_from_result(result) == ("shortfall", "demand_job_failed")
+
+
+def test_a_delivered_job_status_is_an_ordinary_read(demand, monkeypatch) -> None:
+    from tests.conftest import load_plugin
+
+    mod, _client = demand
+    monkeypatch.setattr(mod, "MedchronBrokerClient", lambda: _Status("delivered"))
+    result = mod.demand_job_status({"job_id": "01J0000000000000000000000Z"})
+    emit = load_plugin("hermes-smd-audit").emit
+    assert emit._outcome_from_result(result) == ("ok", None)
