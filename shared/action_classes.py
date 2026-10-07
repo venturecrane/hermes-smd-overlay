@@ -959,6 +959,15 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "demand_job_submit": ActionClass.INTERNAL_WRITE,
     "demand_job_status": ActionClass.READ,
     "demand_allowance": ActionClass.READ,
+    # The drafting job (hermes-smd-medchron/drafting.py, ss-console
+    # drafting_verbs.py): the demand job's shape for five litigation document
+    # classes. Submit queues a job on the Machine's own runner, which files the
+    # draft on the firm's matter: INTERNAL_WRITE. The requester and request are
+    # the turn's verified inbound, not tool arguments. The reads return
+    # broker-authored states, counts and file roles only.
+    "drafting_job_submit": ActionClass.INTERNAL_WRITE,
+    "drafting_job_status": ActionClass.READ,
+    "drafting_allowance": ActionClass.READ,
 }
 
 

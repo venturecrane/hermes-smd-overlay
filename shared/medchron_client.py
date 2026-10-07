@@ -72,6 +72,20 @@ class MedchronBrokerClient:
     def demand_allowance(self) -> dict[str, Any]:
         return self._request({"action": "demand_allowance"})
 
+    # -- the drafting job (ss-console operator/workspace_broker/drafting_verbs.py) --
+    def drafting_submit(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """``accepted`` with a ``job_id``, or ``accepted: False`` with a ``reason``."""
+        return self._request({"action": "drafting_job_submit", "envelope": envelope})
+
+    def drafting_status(self, job_id: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"action": "drafting_job_status"}
+        if job_id:
+            payload["job_id"] = job_id
+        return self._request(payload)
+
+    def drafting_allowance(self) -> dict[str, Any]:
+        return self._request({"action": "drafting_allowance"})
+
     def list_all(self) -> list[dict[str, Any]]:
         return list(self._request({"action": "medchron_job_list"}).get("jobs") or [])
 
