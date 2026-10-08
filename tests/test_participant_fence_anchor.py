@@ -159,6 +159,24 @@ def test_a_job_wake_anchors_on_its_own_job() -> None:
     assert send_anchor.turn_anchor("s-not") is None
 
 
+@pytest.mark.parametrize(
+    ("word", "kind"),
+    [
+        ("demand", "demand_job"),
+        ("drafting", "drafting_job"),
+        ("chronology", "medchron_job"),
+        ("litigation", "litigation_job"),
+    ],
+)
+def test_every_job_lane_wake_anchors_on_its_job(word: str, kind: str) -> None:
+    """Every job lane, the litigation status lane (#431) included: the broker
+    resolves the job's request email and requires its From to be the job's
+    requester. FALSIFIER: drop a kind from shared.turn_sources and its wake has
+    no anchor."""
+    TURN_SOURCES.note(f"s-{word}", "webhook:handoff", f"Done: for {word} job {JOB}.")
+    assert send_anchor.turn_anchor(f"s-{word}") == {"kind": kind, "job_id": JOB}
+
+
 def test_the_address_keyed_recovery_is_gone() -> None:
     assert not hasattr(inbound.SESSION_INBOUND_ORIGIN, "find_for_recipient")
 
