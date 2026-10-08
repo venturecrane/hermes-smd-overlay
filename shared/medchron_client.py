@@ -86,6 +86,15 @@ class MedchronBrokerClient:
     def drafting_allowance(self) -> dict[str, Any]:
         return self._request({"action": "drafting_allowance"})
 
+    # -- the litigation status job (ss-console operator/workspace_broker/litigation_verbs.py) --
+    def litigation_submit(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """``accepted`` with a ``job_id``, or ``accepted: False`` with a ``reason``."""
+        return self._request({"action": "litigation_job_submit", "envelope": envelope})
+
+    def litigation_status(self, job_id: str) -> dict[str, Any]:
+        """One job's state, stage and counts (never matter facts)."""
+        return self._request({"action": "litigation_job_status", "job_id": job_id})
+
     def list_all(self) -> list[dict[str, Any]]:
         return list(self._request({"action": "medchron_job_list"}).get("jobs") or [])
 

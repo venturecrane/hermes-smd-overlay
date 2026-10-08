@@ -35,6 +35,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from shared import inbound, msgraph_broker
@@ -56,16 +57,52 @@ HANDOFF_SENDER = "webhook:handoff"
 #: The chronology wake was missing until 2026-10-07: a held chronology's wake
 #: was unfenced, and the Operator wrote a NEW email to the requester and the
 #: matter's attorney, who was not on the request.
-_WAKE_JOB = re.compile(r"\b(demand|drafting|chronology) job ([0-9A-HJKMNP-TV-Z]{26})\b")
+#: "... for litigation job <ULID>." is the litigation-status skill's wake.
+_WAKE_JOB = re.compile(r"\b(demand|drafting|chronology|litigation) job ([0-9A-HJKMNP-TV-Z]{26})\b")
 #: The wake word -> the broker's binding kind (ss-console reply_binding.KINDS).
-_JOB_KIND = {"demand": "demand_job", "drafting": "drafting_job", "chronology": "medchron_job"}
+_JOB_KIND = {
+    "demand": "demand_job",
+    "drafting": "drafting_job",
+    "chronology": "medchron_job",
+    "litigation": "litigation_job",
+}
 JOB_KINDS = frozenset(_JOB_KIND.values())
 _LABEL = {kind: f"{word} job" for word, kind in _JOB_KIND.items()}
 
+#: A litigation wake's own lines (ss-console litigation_lane.py, code-authored):
+#: "Trigger: scheduled." and "Requested by: <email>.". Read only from a wake the
+#: gateway delivered on the handoff route, like the job id itself.
+_WAKE_TRIGGER = re.compile(r"^Trigger: (request|scheduled)\.?\s*$", re.MULTILINE)
+_WAKE_REQUESTER = re.compile(r"^Requested by: ([^\s@<>]+@[^\s@<>]+?)\.?\s*$", re.MULTILINE)
+#: The one email a SCHEDULED litigation wake may send: a new message to the
+#: job's requester under this subject, nothing else (no thread to answer: the
+#: run was the calendar's, not an email's).
+SCHEDULED_SUBJECT_PREFIX = "Litigation status list, "
+SCHEDULED_SEND_TOOL = "smd_send_message"
+#: The only arguments that one send may carry: one recipient, the subject, the body.
+_SCHEDULED_SEND_ARGS = frozenset({"to", "subject", "text", "html"})
+_PACIFIC = "America/Los_Angeles"
+
 
 def _label(kind: str) -> str:
-    """ "demand job" / "drafting job" / "chronology job", for the refusal sentences."""
+    """ "demand job" / "drafting job" / "chronology job" / "litigation job"."""
     return _LABEL.get(kind, "demand job")
+
+
+def _pacific_today() -> date:
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo(_PACIFIC)).date()
+
+
+def scheduled_subjects(day: date) -> frozenset[str]:
+    """The subjects a scheduled litigation wake noted on ``day`` may send: that
+    date or the day before (a run that crossed midnight), ISO or written out."""
+    out: set[str] = set()
+    for d in (day, day - timedelta(days=1)):
+        out.add(f"{SCHEDULED_SUBJECT_PREFIX}{d.isoformat()}")
+        out.add(f"{SCHEDULED_SUBJECT_PREFIX}{d.strftime('%B')} {d.day}, {d.year}")
+    return frozenset(out)
 
 
 @dataclass(frozen=True)
@@ -97,20 +134,47 @@ class TurnSources:
     def __init__(self, max_sessions: int = 256) -> None:
         self._max = max_sessions
         self._handoff: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        #: session -> (requester, Pacific date noted) for a SCHEDULED litigation
+        #: wake, the one wake that may send a new email (see wake_send_refusal).
+        self._scheduled: dict[str, tuple[str, date]] = {}
+        self._scheduled_sent: set[str] = set()
         self._lock = threading.Lock()
 
     def note(self, session_id: str, sender_id: Any, user_message: Any) -> None:
         if not session_id or sender_id != HANDOFF_SENDER:
             return
-        found = _WAKE_JOB.search(user_message) if isinstance(user_message, str) else None
+        text = user_message if isinstance(user_message, str) else ""
+        found = _WAKE_JOB.search(text)
+        kind = _JOB_KIND[found.group(1)] if found else ""
+        scheduled: tuple[str, date] | None = None
+        if kind == "litigation_job":
+            trigger = _WAKE_TRIGGER.search(text)
+            requester = _WAKE_REQUESTER.search(text)
+            if trigger and trigger.group(1) == "scheduled" and requester:
+                scheduled = (requester.group(1).strip().lower(), _pacific_today())
         with self._lock:
             if session_id in self._handoff:
                 return
-            self._handoff[session_id] = (
-                (_JOB_KIND[found.group(1)], found.group(2)) if found else ("", "")
-            )
+            self._handoff[session_id] = (kind, found.group(2)) if found else ("", "")
+            if scheduled is not None:
+                self._scheduled[session_id] = scheduled
             while len(self._handoff) > self._max:
-                self._handoff.popitem(last=False)
+                gone, _ = self._handoff.popitem(last=False)
+                self._scheduled.pop(gone, None)
+                self._scheduled_sent.discard(gone)
+
+    def scheduled(self, session_id: str) -> tuple[str, date] | None:
+        """(requester, date noted) for a scheduled litigation wake, else None."""
+        with self._lock:
+            return self._scheduled.get(session_id)
+
+    def claim_scheduled_send(self, session_id: str) -> bool:
+        """True the first time only: the scheduled wake's one email."""
+        with self._lock:
+            if session_id in self._scheduled_sent:
+                return False
+            self._scheduled_sent.add(session_id)
+            return True
 
     def source(self, session_id: str) -> tuple[str, str] | None:
         """("handoff", pinned job id or ""), ("cron", ""), or None."""
@@ -138,6 +202,8 @@ class TurnSources:
     def _reset_for_tests(self) -> None:
         with self._lock:
             self._handoff.clear()
+            self._scheduled.clear()
+            self._scheduled_sent.clear()
 
 
 TURN_SOURCES = TurnSources()
@@ -260,6 +326,8 @@ def record_from_result(
             "only a job's completion wake or a scheduled turn may bind a reply; this turn is neither"
         )
     wake_kind = TURN_SOURCES.job_kind(session_id) if source[0] == "handoff" else ""
+    if source[0] == "handoff" and TURN_SOURCES.scheduled(session_id) is not None:
+        return _refused(_scheduled_bind_refusal(source[1]))
     if source[0] == "handoff" and source[1] and req.get("kind") not in JOB_KINDS:
         # A job's wake answers through the job's own binding only: the request
         # email already had its acknowledgment (2026-10-06 practice job).
@@ -295,8 +363,8 @@ TOOL_SCHEMA: dict[str, Any] = {
         "job_id": {
             "type": "string",
             "description": (
-                "A demand, drafting or chronology job's id, from its completion wake: binds to "
-                "the email that requested it."
+                "A demand, drafting, chronology or litigation job's id, from its completion "
+                "wake: binds to the email that requested it."
             ),
         },
         "graph_message_id": {
@@ -327,11 +395,74 @@ TOOL_DESCRIPTION = (
 WAKE_FORBIDDEN_TOOLS = frozenset({"smd_send_message", "casework_brief"})
 
 
+def _scheduled_bind_refusal(job_id: str) -> str:
+    return (
+        f"this is litigation job {job_id}'s scheduled wake: no email asked for this run, so "
+        "there is no thread to answer. Send the one status email to the requester with "
+        f"{SCHEDULED_SEND_TOOL} instead"
+    )
+
+
+def _scheduled_send_refusal(session_id: str, job_id: str, tool_name: str, args: Any) -> str | None:
+    """A scheduled litigation wake: exactly one ``smd_send_message`` to the
+    job's requester, under the fixed subject, carrying only a body. Everything
+    else that sends is refused, and so is a second send. A fault refuses."""
+    requester, day = TURN_SOURCES.scheduled(session_id) or ("", _pacific_today())
+    base = (
+        f"{tool_name} refused: this is litigation job {job_id}'s scheduled wake, and its only "
+        f"channel is ONE new email with {SCHEDULED_SEND_TOOL} to {requester}, subject "
+        f"'{SCHEDULED_SUBJECT_PREFIX}<date>', counts only"
+    )
+    if tool_name == TOOL_NAME:
+        return _scheduled_bind_refusal(job_id)
+    from shared.action_classes import ActionClass, classify_tool
+
+    try:
+        cls = classify_tool(tool_name).action_class
+    except Exception:  # noqa: BLE001 - an unclassifiable tool is not allowed here
+        cls = None
+    sends = cls is not None and cls.value.startswith("external_send")
+    if tool_name != SCHEDULED_SEND_TOOL:
+        if tool_name in WAKE_FORBIDDEN_TOOLS or sends or cls is ActionClass.REFUSED:
+            return base + "."
+        return None
+    a = args if isinstance(args, dict) else {}
+    extra = sorted(
+        k for k, v in a.items() if k not in _SCHEDULED_SEND_ARGS and v not in (None, "", [])
+    )
+    if extra:
+        return f"{base}; it may carry no {', '.join(extra)}."
+    to = a.get("to")
+    to = [to] if isinstance(to, str) else to
+    if (
+        not requester
+        or not isinstance(to, list)
+        or len(to) != 1
+        or not isinstance(to[0], str)
+        or to[0].strip().lower() != requester
+    ):
+        return f"{base}; the recipient must be exactly {requester}."
+    if str(a.get("subject") or "").strip() not in scheduled_subjects(day):
+        return (
+            f"{base}; the subject must be exactly '{SCHEDULED_SUBJECT_PREFIX}"
+            f"{day.strftime('%B')} {day.day}, {day.year}'."
+        )
+    if not TURN_SOURCES.claim_scheduled_send(session_id):
+        return f"{base}; that email has already been sent this turn. End the turn."
+    return None
+
+
 def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str | None:
-    """The refusal for ``tool_name`` in a demand, drafting or chronology job's wake, or None."""
+    """The refusal for ``tool_name`` in a demand, drafting, chronology or
+    litigation job's wake, or None."""
     source = TURN_SOURCES.source(session_id) if session_id else None
     if source is None or source[0] != "handoff" or not source[1]:
         return None
+    if TURN_SOURCES.scheduled(session_id) is not None:
+        try:
+            return _scheduled_send_refusal(session_id, source[1], tool_name, args)
+        except Exception:  # noqa: BLE001 - the one permission fails closed
+            return f"{tool_name} refused: the scheduled wake's send check failed; send nothing."
     label = _label(TURN_SOURCES.job_kind(session_id))
     if tool_name == TOOL_NAME:
         # Refused BEFORE the broker is asked (a live demand job, 2026-10-06): a bind by
@@ -364,6 +495,9 @@ def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str 
 
 __all__ = [
     "JOB_KINDS",
+    "SCHEDULED_SEND_TOOL",
+    "SCHEDULED_SUBJECT_PREFIX",
+    "scheduled_subjects",
     "WAKE_FORBIDDEN_TOOLS",
     "wake_send_refusal",
     "BOUND_INBOX",

@@ -968,6 +968,13 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "drafting_job_submit": ActionClass.INTERNAL_WRITE,
     "drafting_job_status": ActionClass.READ,
     "drafting_allowance": ActionClass.READ,
+    # The litigation status job (hermes-smd-medchron/litigation.py, ss-console
+    # litigation_verbs.py). Submit queues a job on the Machine's own runner,
+    # which files the status workbook on the firm's filing matter:
+    # INTERNAL_WRITE. The requester and request are the turn's verified
+    # inbound, not tool arguments. Status returns states and counts only.
+    "litigation_job_submit": ActionClass.INTERNAL_WRITE,
+    "litigation_job_status": ActionClass.READ,
 }
 
 

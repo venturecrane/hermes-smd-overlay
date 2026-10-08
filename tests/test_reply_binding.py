@@ -7,6 +7,7 @@ through ``msgraph_reply_bound``. Each test pins a guard and fails without it.
 
 from __future__ import annotations
 
+import datetime
 import json
 
 import pytest
@@ -681,3 +682,240 @@ def test_a_demand_binding_is_refused_in_a_chronology_wake(lane) -> None:
     out = json.loads(mod.binding.record_from_result(WAKE, _verdict("demand_job")))
     assert out["bound"] is False
     assert out["reason"] == f"this wake is for chronology job {JOB}; it cannot answer another job"
+
+
+# -- a litigation status job's wake. A REQUEST-trigger wake is fenced exactly
+# like a drafting wake; a SCHEDULED-trigger wake has no request email, so its
+# one channel is ONE new email to the job's requester under a fixed subject.
+
+_DAY = datetime.date(2026, 10, 7)
+_SUBJECT = "Litigation status list, October 7, 2026"
+
+
+def _litigation_wake(
+    mod,
+    trigger: str = "request",
+    session: str = WAKE,
+    job: str = JOB,
+    requester: str = ADMIN,
+    sender: str = "webhook:handoff",
+) -> None:
+    # The lane's own wake (ss-console litigation_lane.py, the frozen interface).
+    mod.on_pre_llm_call(
+        session_id=session,
+        sender_id=sender,
+        user_message=(
+            f"Run the litigation-status skill's DELIVER mode for litigation job {job}.\n"
+            "Kind: litigation.\n"
+            f"Trigger: {trigger}.\n"
+            "Outcome: delivered.\n"
+            "Matters: 40; re-read this run: 6; new flags: 2.\n"
+            "Folder id: f-1.\n"
+            "Files: workbook (9000 bytes).\n"
+            f"Requested by: {requester}."
+        ),
+    )
+
+
+@pytest.fixture
+def pacific(monkeypatch):
+    mod = load_plugin("hermes-smd-reply")
+    monkeypatch.setattr(mod.binding, "_pacific_today", lambda: _DAY)
+    return mod
+
+
+def _send(mod, args: dict, session: str = WAKE, tool: str = "smd_send_message"):
+    return mod.on_pre_tool_call(tool_name=tool, args=args, session_id=session)
+
+
+def _status_email(**over) -> dict:
+    return {
+        "to": [ADMIN],
+        "subject": _SUBJECT,
+        "text": "40 matters; 6 re-read; 2 new flags.",
+        **over,
+    }
+
+
+def test_a_litigation_request_wake_replies_through_a_litigation_binding(lane) -> None:
+    """FALSIFIER: drop "litigation" from _JOB_KIND and the bind goes to the
+    demand ledger, which has no such job."""
+    mod, d1, broker, _ = lane
+    _litigation_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    assert broker.binds == [{"kind": "litigation_job", "job_id": JOB}]
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == [
+        {"binding": {"kind": "litigation_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == GRAPH_ID
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "smd_send_message",
+        "casework_brief",
+        "mcp_msgraph_mail_send_message",
+        "mcp_agentmail_send_message",
+    ],
+)
+def test_a_litigation_request_wake_may_call_no_send_tool(lane, pacific, tool) -> None:
+    """FALSIFIER: drop "litigation" from the wake regex and the wake is no wake:
+    every send passes. Even the scheduled wake's exact email is refused here."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod)
+    verdict = _send(mod, _status_email(), tool=tool)
+    assert verdict is not None and verdict["action"] == "block"
+    assert f"litigation job {JOB}'s completion wake" in verdict["message"]
+
+
+def test_a_demand_binding_is_refused_in_a_litigation_wake(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod)
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("demand_job")))
+    assert out["bound"] is False
+    assert out["reason"] == f"this wake is for litigation job {JOB}; it cannot answer another job"
+
+
+def test_a_litigation_wake_with_no_trigger_line_is_a_request_wake(lane, pacific) -> None:
+    """Only an explicit "Trigger: scheduled." opens the one-email channel."""
+    mod, _d1, _broker, _ = lane
+    mod.on_pre_llm_call(
+        session_id=WAKE,
+        sender_id="webhook:handoff",
+        user_message=(
+            f"Run the litigation-status skill's DELIVER mode for litigation job {JOB}.\n"
+            f"Requested by: {ADMIN}."
+        ),
+    )
+    assert _send(mod, _status_email()) is not None
+
+
+def test_a_scheduled_litigation_wake_sends_its_one_email(lane, pacific) -> None:
+    """FALSIFIER: remove the scheduled branch in wake_send_refusal and the
+    scheduled run's status email is refused like every wake send."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+    assert _send(mod, _status_email()) is None
+
+
+def test_a_scheduled_wake_accepts_the_iso_date_and_the_day_before(lane, pacific) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled", session="w-a")
+    _litigation_wake(mod, trigger="scheduled", session="w-b")
+    iso = _status_email(subject="Litigation status list, 2026-10-07")
+    before = _status_email(subject="Litigation status list, October 6, 2026")
+    assert _send(mod, iso, session="w-a") is None
+    assert _send(mod, before, session="w-b") is None
+
+
+def test_a_scheduled_litigation_wake_sends_only_once(lane, pacific) -> None:
+    """FALSIFIER: drop claim_scheduled_send and the wake can email the requester
+    again and again."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+    assert _send(mod, _status_email()) is None
+    second = _send(mod, _status_email())
+    assert second is not None and "already been sent" in second["message"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        _status_email(to=[OTHER]),
+        _status_email(to=[ADMIN, OTHER]),
+        _status_email(to=[]),
+        _status_email(to=OTHER),
+        _status_email(cc=[OTHER]),
+        _status_email(bcc=[OTHER]),
+        _status_email(reply_to=OTHER),
+        _status_email(**{"from": ADMIN}),
+        _status_email(attachments=[{"name": "x.xlsx"}]),
+        _status_email(subject="Re: litigation list"),
+        _status_email(subject="Litigation status list, October 9, 2026"),
+        _status_email(subject="Litigation status list, October 7, 2026 - Martello"),
+    ],
+)
+def test_a_scheduled_wake_refuses_anything_but_the_one_email(lane, pacific, args) -> None:
+    """Each case fails if its check (recipient, extra field, subject) is removed;
+    a refused attempt does not spend the one send."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+    verdict = _send(mod, args)
+    assert verdict is not None and verdict["action"] == "block"
+    assert _send(mod, _status_email()) is None
+
+
+def test_the_recipient_matches_case_insensitively(lane, pacific) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled", requester="Admin@Firm.Example")
+    assert _send(mod, _status_email(to=["ADMIN@firm.example"])) is None
+
+
+@pytest.mark.parametrize(
+    "tool", ["casework_brief", "mcp_msgraph_mail_send_message", "mcp_agentmail_send_message"]
+)
+def test_a_scheduled_wake_may_call_no_other_send_tool(lane, pacific, tool) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+    verdict = _send(mod, _status_email(), tool=tool)
+    assert verdict is not None and verdict["action"] == "block"
+    assert f"litigation job {JOB}'s scheduled wake" in verdict["message"]
+
+
+@pytest.mark.parametrize("args", [{"job_id": JOB}, {"internet_message_id": "<r@firm.example>"}])
+def test_a_scheduled_litigation_wake_binds_nothing(lane, pacific, args) -> None:
+    """No email asked for a scheduled run: reply_bind is refused before the
+    broker, and a bind result reaching record_from_result is refused too."""
+    mod, _d1, broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+    verdict = mod.on_pre_tool_call(tool_name="reply_bind", args=args, session_id=WAKE)
+    assert verdict is not None and "scheduled wake" in verdict["message"]
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("litigation_job")))
+    assert out["bound"] is False and "scheduled wake" in out["reason"]
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None and broker.binds == []
+
+
+def test_the_scheduled_channel_needs_the_handoff_route(lane, pacific) -> None:
+    """The same text in a turn the handoff route did not open is no wake."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled", sender="webhook:agentmail")
+    assert mod.binding.TURN_SOURCES.scheduled(WAKE) is None
+
+
+def test_the_scheduled_channel_is_litigation_only(lane, pacific) -> None:
+    """A drafting wake carrying a 'Trigger: scheduled.' line gets no channel."""
+    mod, _d1, _broker, _ = lane
+    mod.on_pre_llm_call(
+        session_id=WAKE,
+        sender_id="webhook:handoff",
+        user_message=(
+            f"Run the document-drafter skill's DELIVER mode for drafting job {JOB}.\n"
+            f"Trigger: scheduled.\nRequested by: {ADMIN}."
+        ),
+    )
+    assert _send(mod, _status_email()) is not None
+
+
+def test_a_scheduled_send_check_that_faults_refuses(lane, pacific, monkeypatch) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+
+    def _boom(*a, **k):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(mod.binding, "scheduled_subjects", _boom)
+    verdict = _send(mod, _status_email())
+    assert verdict is not None and verdict["action"] == "block"
+
+
+def test_the_subjects_name_the_date_and_the_day_before() -> None:
+    mod = load_plugin("hermes-smd-reply")
+    assert mod.binding.scheduled_subjects(_DAY) == {
+        "Litigation status list, 2026-10-07",
+        "Litigation status list, October 7, 2026",
+        "Litigation status list, 2026-10-06",
+        "Litigation status list, October 6, 2026",
+    }
