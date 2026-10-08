@@ -68,7 +68,7 @@ _UNIT_SCHEMA = {
 }
 
 
-def _medchron_job_submit(args: dict[str, Any], **_: Any) -> str:
+def _medchron_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -> str:
     envelope = {
         "matter": {
             "id": str(args.get("matter_id") or "").strip(),
@@ -88,10 +88,22 @@ def _medchron_job_submit(args: dict[str, Any], **_: Any) -> str:
     # there is one, never the model's arguments (2026-10-07): the completion
     # reply binds on request_ref and requested_by, and a model-written value
     # there is a recipient the model chose.
-    origin = demand._origin()
+    origin = demand._origin(session_id)
     if origin is not None and origin.sender_address and origin.internet_message_id:
         envelope["requested_by"] = origin.sender_address
         envelope["request_ref"] = origin.internet_message_id
+    elif demand._turn_email_id(session_id):
+        # An email opened this turn and its verified origin did not bind, so
+        # the completion reply has no thread to go to. The job still queues (a
+        # chronology is not refused for want of a reply), but this break was
+        # silent until 2026-10-08 and must not be again.
+        logger.warning(
+            "medchron_job_submit: this turn was opened by an email but its verified origin "
+            "did not bind or carries no internet message id (session=%r); queued without "
+            "requested_by/request_ref, so the "
+            "completion reply cannot find the requester's thread",
+            session_id,
+        )
     selection = args.get("selection")
     if isinstance(selection, dict) and selection.get("include_file_ids"):
         envelope["selection"] = {

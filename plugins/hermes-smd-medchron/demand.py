@@ -32,7 +32,26 @@ STRING = {"type": "string"}
 _TRUSTED_MODES = frozenset({provenance.MODE_KEYED, provenance.MODE_THREAD, provenance.MODE_PROCESS})
 
 
-def _origin() -> inbound.InboundOrigin | None:
+def _turn_session(session_id: Any = None) -> str:
+    """This tool call's session, or "" when it cannot be named with certainty.
+
+    The id Hermes hands the handler (``registry.dispatch`` passes ``session_id``
+    beside ``task_id``) keys the lookup. Resolving with no id, as this did until
+    2026-10-08, reads a THREAD-local id, and Hermes runs every tool on a fresh
+    worker thread that never noted one; the process fallback then answers
+    ``ambiguous`` on any seat that has run a cron turn and an email turn, so no
+    emailed request ever bound (or, before that point, the last session to speak,
+    which may be another turn's). A cron session is never one an email opened.
+    """
+    sid, mode = provenance.resolve_session_with_mode(
+        session_id if isinstance(session_id, str) and session_id else None
+    )
+    if not sid or mode not in _TRUSTED_MODES or parse_cron_session(sid):
+        return ""
+    return sid
+
+
+def _origin(session_id: Any = None) -> inbound.InboundOrigin | None:
     """The verified email that opened THIS turn, or None (never a guess).
 
     ``bound_this_turn``: the origin the inbound plugin bound from this turn's
@@ -40,10 +59,15 @@ def _origin() -> inbound.InboundOrigin | None:
     email. Never a claim-once origin a webhook wake picked up, never a sticky
     origin from an earlier email, never a scheduled turn.
     """
-    session_id, mode = provenance.resolve_session_with_mode(None)
-    if not session_id or mode not in _TRUSTED_MODES or parse_cron_session(session_id):
-        return None
-    return inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
+    sid = _turn_session(session_id)
+    return inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(sid) if sid else None
+
+
+def _turn_email_id(session_id: Any = None) -> str:
+    """The message id THIS turn's trusted prompt prefix named, "" for a turn no
+    email opened (a wake, a cron, an MCP turn) or one that cannot be named."""
+    sid = _turn_session(session_id)
+    return inbound.SESSION_INBOUND_ORIGIN.turn_prompt_id(sid) if sid else ""
 
 
 def _refuse(reason: str) -> str:
@@ -56,8 +80,8 @@ def _matter(args: dict[str, Any], id_key: str, number_key: str) -> dict[str, str
     return {"id": mid, "number": number} if mid or number else None
 
 
-def demand_job_submit(args: dict[str, Any], **_: Any) -> str:
-    origin = _origin()
+def demand_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -> str:
+    origin = _origin(session_id)
     if origin is None or not origin.sender_address:
         return _refuse(
             "a demand is submitted only from the turn of the email that asked for it; "

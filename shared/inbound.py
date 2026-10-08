@@ -799,6 +799,15 @@ class SessionInboundOrigin:
             while len(reg) > self.max_sessions:
                 reg.popitem(last=False)
 
+    def turn_prompt_id(self, session_id: str) -> str:
+        """The message id THIS turn's trusted prompt prefix named, or "" (no
+        email opened this turn, or the session never reached pre_llm_call).
+        Says only that an email opened the turn, never whose: the origin is
+        :meth:`bound_this_turn`'s to name."""
+        if not session_id:
+            return ""
+        return self._turn_prompt_id.get(session_id, "")
+
     def bound_this_turn(self, session_id: str) -> InboundOrigin | None:
         """The origin of the email that opened THIS turn, or ``None``.
 

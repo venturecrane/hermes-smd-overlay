@@ -37,8 +37,8 @@ DOCUMENT_CLASSES = (
 )
 
 
-def drafting_job_submit(args: dict[str, Any], **_: Any) -> str:
-    origin = _origin()
+def drafting_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -> str:
+    origin = _origin(session_id)
     if origin is None or not origin.sender_address:
         return _refuse(
             "a draft is submitted only from the turn of the email that asked for it; "
