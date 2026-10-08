@@ -78,6 +78,16 @@
 #                                   # and the ULID it stamped on the message as
 #                                   # X-SMD-Audit-Row (ss#2499). The identity
 #                                   # join below reads them (B7).
+#     anchor_kind / lane            # the participant fence (ss-console
+#                                   # workspace_broker/participant_fence.py):
+#                                   # which request the send answered and which
+#                                   # authored lane sent it, written by the
+#                                   # broker on DISPATCHED and FAILED alike.
+#   CONFIRM_SEND_FAILED adds, on a participant-fence refusal:
+#     outcome: refused, fence: participants | participants_unverifiable,
+#     refused: [sender_key]         # hashed, never an address. The overlay's
+#                                   # heartbeat pages send_refused naming the
+#                                   # fence; there is no second count.
 #   console verifier (operator/bin/lib/send_verify.py) compares per entry;
 #     a skeleton match grades `degraded`, never `BODY_DIVERGED`. The two hashes
 #     answer two different questions and neither substitutes for the other:
