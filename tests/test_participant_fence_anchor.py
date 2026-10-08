@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 JOB = "01M4BXJ2DYY5ARPXSMG869YMCR"
 
 
-def _email_turn(session: str, message_id: str, sender: str = "christa@firm.example") -> None:
+def _email_turn(session: str, message_id: str, sender: str = "alice@firm.example") -> None:
     inbound.SESSION_INBOUND_ORIGIN.record(
         session,
         inbound.InboundOrigin(
@@ -96,7 +96,7 @@ def test_the_rule_loop_sends_under_its_lane_and_its_anchors() -> None:
         proposal_id="abcd1234",
         text="Short sentences.",
         requester="dana@firm.example",
-        rule_requests_to=["christa@firm.example"],
+        rule_requests_to=["alice@firm.example"],
         send=sender,
         anchor=anchor,
     )
@@ -187,14 +187,14 @@ def test_the_address_keyed_recovery_is_gone() -> None:
 def test_the_send_gate_classifies_cc_and_bcc() -> None:
     """FALSIFIER: classify ``to`` alone and the attorney on bcc is unseen."""
     args = {
-        "to": ["Christa <christa@firm.example>"],
+        "to": ["Alice <alice@firm.example>"],
         "cc": ["dana@firm.example"],
-        "bcc": "craig@firm.example",
+        "bcc": "bruno@firm.example",
     }
     assert send_recipients("smd_send_message", args, "s1") == {
-        "christa@firm.example",
+        "alice@firm.example",
         "dana@firm.example",
-        "craig@firm.example",
+        "bruno@firm.example",
     }
 
 
@@ -224,7 +224,7 @@ def test_the_send_tool_takes_its_anchor_from_the_turn_and_never_from_args(
     _email_turn("s-tool", "AAMkREQ")
     out = trust._smd_send_message(
         {
-            "to": ["christa@firm.example"],
+            "to": ["alice@firm.example"],
             "subject": "s",
             "text": "t",
             "anchor": {"kind": "graph_message", "graph_message_id": "FORGED"},
@@ -246,7 +246,7 @@ def test_a_participant_refusal_reaches_the_model_with_its_decision(trust, monkey
     monkeypatch.setattr(trust.outbound_send, "send_via_msgraph", refuse)
     _email_turn("s-refused", "AAMkREQ")
     out = trust._smd_send_message(
-        {"to": ["craig@firm.example"], "subject": "s", "text": "t"}, session_id="s-refused"
+        {"to": ["bruno@firm.example"], "subject": "s", "text": "t"}, session_id="s-refused"
     )
     assert out.startswith("Not sent")
     assert send_anchor.FENCE_DECISION in out
@@ -340,12 +340,12 @@ def test_a_routine_with_its_own_recipient_rides_its_skill_lane(monkeypatch) -> N
                 {
                     "name": "statute-watch",
                     "enabled": True,
-                    "settings": {"recipient": "christa@firm.example"},
+                    "settings": {"recipient": "alice@firm.example"},
                 },
                 {
                     "name": "retired",
                     "enabled": False,
-                    "settings": {"recipient": "craig@firm.example"},
+                    "settings": {"recipient": "bruno@firm.example"},
                 },
             ]
         }

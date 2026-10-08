@@ -1,7 +1,7 @@
 """The participant fence's ANCHOR and LANE, decided by code (ss-console
 ``workspace_broker/participant_fence.py``).
 
-THE RULE THE BROKER ENFORCES (2026-10-07, A&P). A firm person gets Operator
+THE RULE THE BROKER ENFORCES (2026-10-07, a law-firm seat). A firm person gets Operator
 mail only if they were From, To or Cc on the request the send answers, or the
 firm authored them for the job sending it (a LANE), or SMD originated the work
 and they are an admin. Outside recipients are unchanged. The broker reads the

@@ -1331,7 +1331,7 @@ def test_a_participant_fence_refusal_pages_once_naming_its_fence(tmp_path):
                     "verb": "msgraph_send",
                     "outcome": "refused",
                     "fence": fence,
-                    "reason": "participant fence: craig@firm.example was not on the request",
+                    "reason": "participant fence: bruno@firm.example was not on the request",
                     "refused": ["a" * 64],
                 },
             )
