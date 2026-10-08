@@ -653,8 +653,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
 
 
 def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
-    """Block every send in a demand or drafting job's completion wake (binding.py). The
-    bound reply is that turn's only channel. Exception-safe: a fault blocks."""
+    """Block every send in a job's completion wake (binding.py). The bound reply
+    is that turn's only channel (for a scheduled litigation run, a bound NEW
+    message the broker addresses). Exception-safe."""
     try:
         session_id = kwargs.get("session_id")
         message = binding.wake_send_refusal(

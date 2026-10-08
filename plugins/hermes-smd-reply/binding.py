@@ -56,15 +56,36 @@ HANDOFF_SENDER = "webhook:handoff"
 #: The chronology wake was missing until 2026-10-07: a held chronology's wake
 #: was unfenced, and the Operator wrote a NEW email to the requester and the
 #: matter's attorney, who was not on the request.
-_WAKE_JOB = re.compile(r"\b(demand|drafting|chronology) job ([0-9A-HJKMNP-TV-Z]{26})\b")
+#: "... for litigation job <ULID>." is the litigation-status skill's wake.
+_WAKE_JOB = re.compile(r"\b(demand|drafting|chronology|litigation) job ([0-9A-HJKMNP-TV-Z]{26})\b")
 #: The wake word -> the broker's binding kind (ss-console reply_binding.KINDS).
-_JOB_KIND = {"demand": "demand_job", "drafting": "drafting_job", "chronology": "medchron_job"}
+_JOB_KIND = {
+    "demand": "demand_job",
+    "drafting": "drafting_job",
+    "chronology": "medchron_job",
+    "litigation": "litigation_job",
+}
 JOB_KINDS = frozenset(_JOB_KIND.values())
 _LABEL = {kind: f"{word} job" for word, kind in _JOB_KIND.items()}
 
+#: A litigation wake's trigger line (ss-console litigation_lane.py,
+#: code-authored): "Trigger: scheduled." Read only from a wake the gateway
+#: delivered on the handoff route, like the job id itself.
+_WAKE_TRIGGER = re.compile(r"^Trigger: (request|scheduled)\.?\s*$", re.MULTILINE)
+#: A SCHEDULED litigation job has no request email: the calendar ran it. The
+#: broker binds it as ONE new message (``mode: new_message``), and it alone
+#: sets the recipient (the firm's authored scheduled recipient) and the fixed
+#: subject. The overlay takes such a binding only in that job's own scheduled
+#: wake, and never takes a reply-to-an-email binding there.
+MODE_REPLY = "reply"
+MODE_NEW_MESSAGE = "new_message"
+#: The in-process once-only key of a new-message binding (there is no email id
+#: to key on; an empty key would collide across every scheduled run).
+_NEW_MESSAGE_KEY = "litigation-scheduled:"
+
 
 def _label(kind: str) -> str:
-    """ "demand job" / "drafting job" / "chronology job", for the refusal sentences."""
+    """ "demand job" / "drafting job" / "chronology job" / "litigation job"."""
     return _LABEL.get(kind, "demand job")
 
 
@@ -97,20 +118,32 @@ class TurnSources:
     def __init__(self, max_sessions: int = 256) -> None:
         self._max = max_sessions
         self._handoff: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        #: Sessions opened by a SCHEDULED litigation job's wake.
+        self._scheduled: set[str] = set()
         self._lock = threading.Lock()
 
     def note(self, session_id: str, sender_id: Any, user_message: Any) -> None:
         if not session_id or sender_id != HANDOFF_SENDER:
             return
-        found = _WAKE_JOB.search(user_message) if isinstance(user_message, str) else None
+        text = user_message if isinstance(user_message, str) else ""
+        found = _WAKE_JOB.search(text)
+        kind = _JOB_KIND[found.group(1)] if found else ""
+        trigger = _WAKE_TRIGGER.search(text) if kind == "litigation_job" else None
+        scheduled = bool(trigger and trigger.group(1) == "scheduled")
         with self._lock:
             if session_id in self._handoff:
                 return
-            self._handoff[session_id] = (
-                (_JOB_KIND[found.group(1)], found.group(2)) if found else ("", "")
-            )
+            self._handoff[session_id] = (kind, found.group(2)) if found else ("", "")
+            if scheduled:
+                self._scheduled.add(session_id)
             while len(self._handoff) > self._max:
-                self._handoff.popitem(last=False)
+                gone, _ = self._handoff.popitem(last=False)
+                self._scheduled.discard(gone)
+
+    def scheduled(self, session_id: str) -> bool:
+        """True in a scheduled litigation job's wake."""
+        with self._lock:
+            return session_id in self._scheduled
 
     def source(self, session_id: str) -> tuple[str, str] | None:
         """("handoff", pinned job id or ""), ("cron", ""), or None."""
@@ -138,6 +171,7 @@ class TurnSources:
     def _reset_for_tests(self) -> None:
         with self._lock:
             self._handoff.clear()
+            self._scheduled.clear()
 
 
 TURN_SOURCES = TurnSources()
@@ -209,19 +243,27 @@ def handle_tool(args: dict[str, Any], **_: Any) -> str:
         return json.dumps({"bound": False, "reason": f"the binding could not be checked: {exc}"})
     if verdict.get("bound") is not True:
         return json.dumps({"bound": False, "reason": str(verdict.get("reason") or "refused")})
-    return json.dumps(
-        {
-            "bound": True,
-            "binding": req,
-            "sender": verdict.get("sender"),
-            "graph_message_id": verdict.get("graph_message_id"),
-            "message": (
-                "Bound. Draft ONE reply with create_draft addressed to this sender only; it is "
-                "sent in that email's thread once it passes the reply checks. Nothing else in "
-                "this turn can be replied to."
-            ),
-        }
-    )
+    mode = str(verdict.get("mode") or MODE_REPLY)
+    out: dict[str, Any] = {
+        "bound": True,
+        "binding": req,
+        "mode": mode,
+        "sender": verdict.get("sender"),
+        "graph_message_id": verdict.get("graph_message_id"),
+        "message": (
+            "Bound. Draft ONE reply with create_draft addressed to this sender only; it is "
+            "sent in that email's thread once it passes the reply checks. Nothing else in "
+            "this turn can be replied to."
+        ),
+    }
+    if mode == MODE_NEW_MESSAGE:
+        out["subject"] = verdict.get("subject")
+        out["message"] = (
+            "Bound to ONE new message (no email asked for this run). Draft it with create_draft "
+            "addressed to this sender only; the subject is set for you. It is sent once it "
+            "passes the reply checks. Nothing else in this turn can be sent."
+        )
+    return json.dumps(out)
 
 
 def _refused(reason: str) -> str:
@@ -248,7 +290,12 @@ def record_from_result(
         return None
     req, sender = data.get("binding"), str(data.get("sender") or "").strip().lower()
     graph_id = str(data.get("graph_message_id") or "").strip()
-    if not isinstance(req, dict) or not sender or "@" not in sender or not graph_id:
+    mode = str(data.get("mode") or MODE_REPLY)
+    if mode not in (MODE_REPLY, MODE_NEW_MESSAGE):
+        return _refused("the broker's answer was incomplete; nothing was bound")
+    if not isinstance(req, dict) or not sender or "@" not in sender:
+        return _refused("the broker's answer was incomplete; nothing was bound")
+    if mode == MODE_REPLY and not graph_id:
         return _refused("the broker's answer was incomplete; nothing was bound")
     if not session_id:
         return _refused("this turn has no session to bind; the reply cannot be sent")
@@ -277,6 +324,22 @@ def record_from_result(
             return _refused(
                 f"this wake is for {_label(wake_kind)} {source[1]}; it cannot answer another job"
             )
+    # A new message is the scheduled litigation run's ONE channel, and that wake
+    # has no other: the broker's mode must agree with the wake's own trigger.
+    # (Only a litigation wake is ever marked scheduled, and the checks above
+    # already pinned the binding to that wake's own kind and job.)
+    scheduled = source[0] == "handoff" and TURN_SOURCES.scheduled(session_id)
+    if mode == MODE_NEW_MESSAGE:
+        if not scheduled:
+            return _refused(
+                "only a scheduled litigation job's own wake may bind a new message; nothing was bound"
+            )
+        graph_id = f"{_NEW_MESSAGE_KEY}{source[1]}"
+    elif scheduled:
+        return _refused(
+            f"this is litigation job {source[1]}'s scheduled wake: no email asked for this run, "
+            "so it answers no email; nothing was bound"
+        )
     if held_pending is not None and held_pending(graph_id):
         return _refused(
             "a held reply to that email is waiting for release; binding another would answer it twice"
@@ -295,8 +358,8 @@ TOOL_SCHEMA: dict[str, Any] = {
         "job_id": {
             "type": "string",
             "description": (
-                "A demand, drafting or chronology job's id, from its completion wake: binds to "
-                "the email that requested it."
+                "A demand, drafting, chronology or litigation job's id, from its completion "
+                "wake: binds to the email that requested it."
             ),
         },
         "graph_message_id": {
@@ -317,7 +380,9 @@ TOOL_DESCRIPTION = (
     "wake, a scheduled one-off). Name the email, never a person: the broker finds it in the "
     "operator mailbox, checks its sender may be replied to and that it has had no reply, and "
     "answers with that sender. Then draft one reply with create_draft to that sender; it goes out "
-    "in that email's thread, once. Pass exactly one of job_id, graph_message_id, internet_message_id."
+    "in that email's thread, once. Pass exactly one of job_id, graph_message_id, internet_message_id. "
+    "A scheduled litigation job's wake binds by its job_id too: the broker answers with a NEW "
+    "message to the firm's scheduled recipient instead of a thread."
 )
 
 #: Tools a demand or drafting job's completion wake may never call: every
@@ -328,7 +393,8 @@ WAKE_FORBIDDEN_TOOLS = frozenset({"smd_send_message", "casework_brief"})
 
 
 def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str | None:
-    """The refusal for ``tool_name`` in a demand, drafting or chronology job's wake, or None."""
+    """The refusal for ``tool_name`` in a demand, drafting, chronology or
+    litigation job's wake, or None."""
     source = TURN_SOURCES.source(session_id) if session_id else None
     if source is None or source[0] != "handoff" or not source[1]:
         return None
@@ -364,6 +430,8 @@ def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str 
 
 __all__ = [
     "JOB_KINDS",
+    "MODE_NEW_MESSAGE",
+    "MODE_REPLY",
     "WAKE_FORBIDDEN_TOOLS",
     "wake_send_refusal",
     "BOUND_INBOX",

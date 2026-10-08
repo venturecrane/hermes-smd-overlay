@@ -321,6 +321,46 @@ def test_a_drafting_job_suppresses_the_alarm_and_cards_when_it_ends(ledger) -> N
     assert cards[0]["matter"] == "2024-0042"
 
 
+def _litigation_table(ledger: _Ledger) -> None:
+    """The litigation ledger's columns this lane reads; no matter_number (a
+    status job spans the firm's matters), so the lane must select NULL for it."""
+    ledger.conn.execute(
+        "CREATE TABLE litigation_jobs (id TEXT PRIMARY KEY, created_at TEXT, "
+        "updated_at TEXT, state TEXT, request_ref TEXT, reason TEXT)"
+    )
+    ledger.conn.commit()
+
+
+def _litigation_job(ledger: _Ledger, state: str, minutes_ago: float, ref: str = IMID) -> None:
+    ledger.conn.execute(
+        "INSERT INTO litigation_jobs (id, created_at, updated_at, state, request_ref, reason) "
+        "VALUES (?,?,?,?,?,?)",
+        (f"l{state}{ref}", _ts(minutes_ago + 5), _ts(minutes_ago), state, ref, None),
+    )
+    ledger.conn.commit()
+
+
+def test_a_litigation_job_suppresses_the_alarm_and_cards_when_it_ends(ledger) -> None:
+    """FALSIFIER: drop "litigation" from JOB_LANES and a queued status job
+    neither suppresses the no-reply alarm nor cards when it ends."""
+    _litigation_table(ledger)
+    _litigation_job(ledger, "running", 10)
+    assert _decide(ledger, [_request(60)]) == []
+    ledger.conn.execute("UPDATE litigation_jobs SET state='delivered', updated_at=?", (_ts(4),))
+    ledger.conn.commit()
+    cards = _decide(ledger, [_request(60)])
+    assert _kinds(cards) == ["job_done"]
+    assert cards[0]["job"] == {"lane": "litigation", "state": "delivered", "reason": None}
+    assert cards[0]["matter"] is None
+
+
+def test_a_scheduled_litigation_job_cards_no_request(ledger) -> None:
+    """A scheduled run's ref is "scheduled:<date>", never a request's id."""
+    _litigation_table(ledger)
+    _litigation_job(ledger, "delivered", 4, ref="scheduled:2026-10-07")
+    assert _kinds(_decide(ledger, [_request(60)])) == ["no_reply"]
+
+
 #: The console's reason contract (ss-console src/lib/operator/request-card.ts
 #: TOKEN_RE): a card whose job reason fails it is refused outright.
 _CONSOLE_TOKEN_RE = re.compile(r"^[a-z0-9_:.-]{1,64}$")

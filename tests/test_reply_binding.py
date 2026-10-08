@@ -681,3 +681,244 @@ def test_a_demand_binding_is_refused_in_a_chronology_wake(lane) -> None:
     out = json.loads(mod.binding.record_from_result(WAKE, _verdict("demand_job")))
     assert out["bound"] is False
     assert out["reason"] == f"this wake is for chronology job {JOB}; it cannot answer another job"
+
+
+# -- a litigation status job's wake. A REQUEST-trigger wake is fenced exactly
+# like a drafting wake. A SCHEDULED-trigger wake has no request email: its one
+# channel is the job's binding in the broker's new_message mode (the broker
+# sets the recipient and the subject); every send tool stays refused.
+
+SUBJECT = "Litigation status list, October 7, 2026"
+
+
+def _litigation_wake(
+    mod,
+    trigger: str = "request",
+    session: str = WAKE,
+    job: str = JOB,
+    sender: str = "webhook:handoff",
+) -> None:
+    # The lane's own wake (ss-console litigation_lane.py, the frozen interface).
+    mod.on_pre_llm_call(
+        session_id=session,
+        sender_id=sender,
+        user_message=(
+            f"Run the litigation-status skill's DELIVER mode for litigation job {job}.\n"
+            "Kind: litigation.\n"
+            f"Trigger: {trigger}.\n"
+            "Outcome: delivered.\n"
+            "Matters: 40; re-read this run: 6; new flags: 2.\n"
+            "Folder id: f-1.\n"
+            "Files: workbook (9000 bytes).\n"
+            f"Requested by: {ADMIN}."
+        ),
+    )
+
+
+def _new_message_broker(mod, monkeypatch, broker) -> None:
+    """The broker's answer for a scheduled litigation job (ss-console
+    reply_binding.py): a new message, no email id."""
+
+    def bind_reply(req):
+        broker.binds.append(req)
+        return {
+            "ok": True,
+            "bound": True,
+            "mode": "new_message",
+            "subject": SUBJECT,
+            "sender": ADMIN,
+            "graph_message_id": "",
+        }
+
+    monkeypatch.setattr(mod.msgraph_broker, "bind_reply", bind_reply)
+
+
+def _new_message_verdict(kind: str = "litigation_job", job: str = JOB) -> str:
+    return json.dumps(
+        {
+            "bound": True,
+            "mode": "new_message",
+            "binding": {"kind": kind, "job_id": job},
+            "sender": ADMIN,
+            "graph_message_id": "",
+        }
+    )
+
+
+SEND_TOOLS = [
+    "smd_send_message",
+    "casework_brief",
+    "mcp_msgraph_mail_send_message",
+    "mcp_agentmail_send_message",
+]
+
+
+def test_a_litigation_request_wake_replies_through_a_litigation_binding(lane) -> None:
+    """FALSIFIER: drop "litigation" from _JOB_KIND and the bind goes to the
+    demand ledger, which has no such job."""
+    mod, d1, broker, _ = lane
+    _litigation_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    assert broker.binds == [{"kind": "litigation_job", "job_id": JOB}]
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == [
+        {"binding": {"kind": "litigation_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == GRAPH_ID
+
+
+@pytest.mark.parametrize("trigger", ["request", "scheduled"])
+@pytest.mark.parametrize("tool", SEND_TOOLS)
+def test_a_litigation_wake_may_call_no_send_tool(lane, trigger, tool) -> None:
+    """FALSIFIER: drop "litigation" from the wake regex and the wake is no wake:
+    every send passes. A scheduled wake is no exception."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger=trigger)
+    verdict = mod.on_pre_tool_call(
+        tool_name=tool, args={"to": [ADMIN], "subject": SUBJECT}, session_id=WAKE
+    )
+    assert verdict is not None and verdict["action"] == "block"
+    assert f"litigation job {JOB}'s completion wake" in verdict["message"]
+
+
+def test_a_demand_binding_is_refused_in_a_litigation_wake(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod)
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("demand_job")))
+    assert out["bound"] is False
+    assert out["reason"] == f"this wake is for litigation job {JOB}; it cannot answer another job"
+
+
+def test_a_scheduled_wake_sends_one_new_message_through_the_binding(lane, monkeypatch) -> None:
+    """The scheduled run's status email: bound by job id, the broker answers
+    new_message with no email id, and the draft goes out through
+    msgraph_reply_bound. FALSIFIER: require a graph id for every binding and
+    the scheduled run can never deliver."""
+    mod, d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _litigation_wake(mod, trigger="scheduled")
+    out = _bind(mod, {"job_id": JOB})
+    assert out["bound"] is True and out["mode"] == "new_message" and out["subject"] == SUBJECT
+    assert broker.binds == [{"kind": "litigation_job", "job_id": JOB}]
+    _draft(mod, [ADMIN], body="40 matters; 6 re-read this run; 2 new flags.")
+    assert broker.bound_sends == [
+        {"binding": {"kind": "litigation_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    assert len([m for a, m in d1.events() if a == "REPLY_SENT"]) == 1
+
+
+def test_a_scheduled_wake_sends_only_once(lane, monkeypatch) -> None:
+    mod, d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _litigation_wake(mod, trigger="scheduled")
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [ADMIN], call="c1")
+    _draft(mod, [ADMIN], call="c2")
+    assert len(broker.bound_sends) == 1
+    assert len([m for a, m in d1.events() if a == "REPLY_SENT"]) == 1
+
+
+def test_two_scheduled_runs_each_send(lane, monkeypatch) -> None:
+    """The once-only key is per job: FALSIFIER: key the new message on its
+    empty email id and the second day's run is held as a duplicate."""
+    mod, _d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _litigation_wake(mod, trigger="scheduled", session="day-1", job=JOB)
+    _litigation_wake(mod, trigger="scheduled", session="day-2", job=OTHER_JOB)
+    assert _bind(mod, {"job_id": JOB}, session="day-1")["bound"] is True
+    _draft(mod, [ADMIN], session="day-1", call="c1")
+    assert _bind(mod, {"job_id": OTHER_JOB}, session="day-2")["bound"] is True
+    _draft(mod, [ADMIN], session="day-2", call="c2")
+    assert len(broker.bound_sends) == 2
+
+
+def test_a_scheduled_wake_draft_to_anyone_else_is_held(lane, monkeypatch) -> None:
+    mod, d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _litigation_wake(mod, trigger="scheduled")
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [OTHER])
+    assert broker.bound_sends == []
+    assert [m for a, m in d1.events() if a == "REPLY_SENT"] == []
+
+
+def test_a_new_message_binding_is_refused_in_a_request_wake(lane) -> None:
+    """The broker's mode must agree with the wake's trigger. FALSIFIER: drop
+    the scheduled check and a request wake could mail out instead of replying."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="request")
+    out = json.loads(mod.binding.record_from_result(WAKE, _new_message_verdict()))
+    assert out["bound"] is False and "scheduled litigation job" in out["reason"]
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
+
+
+@pytest.mark.parametrize("kind", ["demand_job", "drafting_job", "medchron_job"])
+def test_a_new_message_binding_is_refused_for_any_other_job(lane, kind) -> None:
+    mod, _d1, _broker, _ = lane
+    mod.on_pre_llm_call(
+        session_id=WAKE,
+        sender_id="webhook:handoff",
+        user_message=(
+            f"Run the document-drafter skill's DELIVER mode for drafting job {JOB}.\n"
+            "Trigger: scheduled."
+        ),
+    )
+    out = json.loads(mod.binding.record_from_result(WAKE, _new_message_verdict(kind)))
+    assert out["bound"] is False
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
+
+
+def test_a_new_message_binding_is_refused_on_a_cron_turn(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    out = json.loads(mod.binding.record_from_result(CRON, _new_message_verdict()))
+    assert out["bound"] is False
+    assert mod.binding.SESSION_BINDINGS.get(CRON) is None
+
+
+def test_a_reply_binding_is_refused_in_a_scheduled_wake(lane) -> None:
+    """No email asked for a scheduled run, so it answers none. FALSIFIER: drop
+    the elif and a scheduled wake could answer whatever email the broker named."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("litigation_job")))
+    assert out["bound"] is False and "scheduled wake" in out["reason"]
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
+
+
+def test_a_scheduled_wake_refuses_a_bind_by_email_id(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled")
+    verdict = mod.on_pre_tool_call(
+        tool_name="reply_bind", args={"internet_message_id": "<r@firm.example>"}, session_id=WAKE
+    )
+    assert verdict is not None and verdict["action"] == "block"
+
+
+@pytest.mark.parametrize("trigger", ["request", "scheduled"])
+def test_an_unknown_mode_binds_nothing(lane, trigger) -> None:
+    """FALSIFIER: drop the mode check and a request wake takes a binding whose
+    mode it does not understand as an ordinary reply."""
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger=trigger)
+    verdict = json.loads(_verdict("litigation_job"))
+    verdict["mode"] = "forward"
+    out = mod.binding.record_from_result(WAKE, json.dumps(verdict))
+    assert out is not None and json.loads(out)["bound"] is False
+    assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
+
+
+def test_the_scheduled_trigger_is_read_only_from_the_handoff_route(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _litigation_wake(mod, trigger="scheduled", sender="webhook:agentmail")
+    assert mod.binding.TURN_SOURCES.scheduled(WAKE) is False
+
+
+def test_the_scheduled_trigger_is_litigation_only(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    mod.on_pre_llm_call(
+        session_id=WAKE,
+        sender_id="webhook:handoff",
+        user_message=f"Run the DELIVER mode for drafting job {JOB}.\nTrigger: scheduled.",
+    )
+    assert mod.binding.TURN_SOURCES.scheduled(WAKE) is False

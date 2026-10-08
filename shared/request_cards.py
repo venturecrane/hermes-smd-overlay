@@ -7,7 +7,7 @@ When a firm person emails an Operator seat, SMD (team@smd.services) gets:
   many calls were refused or failed, and the minutes to first reply;
 * a ``no_reply`` alarm when nothing has answered the request within
   :data:`NO_REPLY_AFTER` and nothing else is already handling it;
-* a ``job_done`` card when a demand, drafting or chronology job the request started
+* a ``job_done`` card when a demand, drafting, litigation status or chronology job the request started
   reaches ``delivered``, ``failed`` or ``held``.
 
 The seat decides; ss-console sends. This module is the seat half, hosted by the
@@ -26,7 +26,7 @@ The three reads, all read-only:
 * ``audit_log``: ``REPLY_SENT`` / ``REPLY_HELD`` / ``REPLY_FAILED`` rows joined
   on the inbound's vendor message id, and the per-call rows of the replying
   session, classified with the SAME ``_classify_call`` the shortfall alert uses.
-* ``demand_jobs`` / ``drafting_jobs`` / ``medchron_jobs`` in the same audit db file, joined on
+* ``demand_jobs`` / ``drafting_jobs`` / ``litigation_jobs`` / ``medchron_jobs`` in the same audit db file, joined on
   ``request_ref`` (the request's internetMessageId). A seat without one of those
   tables simply has no jobs in that lane.
 
@@ -77,7 +77,7 @@ POST_TIMEOUT_SECONDS = 5.0
 TICK_BUDGET_SECONDS = 20.0
 MAX_CARDS_PER_TICK = 10
 
-JOB_LANES = ("demand", "drafting", "medchron")
+JOB_LANES = ("demand", "drafting", "litigation", "medchron")
 JOB_TERMINAL = ("delivered", "failed", "held")
 
 _TOOL_TOKEN_RE = re.compile(r"^[a-z0-9_:.-]{1,64}$")
@@ -249,6 +249,12 @@ _JOB_SQL = {
     ),
     "medchron": (
         "SELECT request_ref, state, reason, matter_number, updated_at FROM medchron_jobs"
+        " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
+    ),
+    # A litigation status job spans the firm's matters and files to the firm's
+    # library matter, so it names no matter on its card.
+    "litigation": (
+        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at FROM litigation_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
 }

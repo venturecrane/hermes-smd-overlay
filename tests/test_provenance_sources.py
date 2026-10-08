@@ -380,6 +380,7 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         "demand_allowance",
         "drafting_job_status",
         "drafting_allowance",
+        "litigation_job_status",
         "connector_get_status",
         "connector_list_bindings",
         # Credential / identity metadata, carrying no tenant content.
