@@ -55,8 +55,8 @@ def _scope(args: dict[str, Any]) -> dict[str, Any] | str:
     return {"attorneys": list(dict.fromkeys(cleaned))}
 
 
-def litigation_job_submit(args: dict[str, Any], **_: Any) -> str:
-    origin = _origin()
+def litigation_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -> str:
+    origin = _origin(session_id)
     if origin is None or not origin.sender_address:
         return _refuse(
             "a litigation status list is submitted only from the turn of the email that asked "
