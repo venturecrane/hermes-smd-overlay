@@ -89,7 +89,9 @@ class _FakeGraphBroker:
         #: the harder of the two cases.
         self.vendor_id: str = ""
 
-    def send_reply(self, message_id, comment, *, html="", session_id="", matter_ref=None):
+    def send_reply(
+        self, message_id, comment, *, html="", session_id="", matter_ref=None, anchor=None
+    ):
         self.replies.append((message_id, comment))
         self.reply_calls.append((message_id, comment, html))
         self.joins.append((session_id, matter_ref))
@@ -108,10 +110,10 @@ class _FakeGraphBroker:
 
 @pytest.fixture(autouse=True)
 def _clear_origin():
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     yield
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
 
 
@@ -136,6 +138,7 @@ def _record_origin(
         "s1",
         inbound.InboundOrigin(sender_address=sender, message_id=message_id, inbox_id=mailbox),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", message_id)
 
 
 def test_msgraph_reply_dispatches_via_graph_reply(monkeypatch, tmp_path):

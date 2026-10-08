@@ -75,7 +75,18 @@ def test_send_takes_no_credential_and_no_inbox():
     # channel, so the control below still holds.
     # attachments (statute-watch v2) exists only to be REFUSED on this transport
     # (see test_agentmail_refuses_an_attachment_loudly).
-    assert params == {"payload", "sender", "session_id", "matter_ref", "audit_extra", "attachments"}
+    # anchor and lane (participant fence) say which request the send answers
+    # and which authored lane sends it; neither names a From.
+    assert params == {
+        "payload",
+        "sender",
+        "session_id",
+        "matter_ref",
+        "audit_extra",
+        "attachments",
+        "anchor",
+        "lane",
+    }
     # The control is what is ABSENT: no way to name the From or hand over a key.
     assert not params & {"from", "sender_address", "inbox_id", "api_key", "token"}
 

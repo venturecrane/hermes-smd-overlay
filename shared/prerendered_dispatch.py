@@ -97,6 +97,7 @@ from shared import (
     outbound_attachment,
     pre_run_handoff,
     provenance,
+    send_anchor,
     send_dispatch,
     sent_lines,
 )
@@ -451,6 +452,9 @@ def dispatch_prerendered(session_id: str) -> str | None:
             # CONFIRM row on it and stamps their thread_ref (plain-word replies).
             dispatch_ref = digest_reply_ref.mint_dispatch_ref()
             audit_base = {"skill_name": routine.skill, "dispatch_ref": dispatch_ref}
+            # The participant fence: a routine's send answers no email, so it
+            # rides the routine's authored lane (send_anchor.routine_lane).
+            fence_lane = send_anchor.routine_lane(routine.skill)
             if isinstance(entry.get("routing_leg"), str) and entry["routing_leg"]:
                 audit_base["routing_leg"] = entry["routing_leg"]
             # Rung 1 carries the workbook (when one survived validation); the
@@ -465,6 +469,8 @@ def dispatch_prerendered(session_id: str) -> str | None:
                 to=recipients,
                 subject=str(entry["subject"]),
                 text=sent_body,
+                anchor=None,
+                lane=fence_lane,
                 session_id=session_id,
                 cc=[str(c) for c in (entry.get("cc") or []) if isinstance(c, str)],
                 templated=True,
@@ -489,6 +495,8 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     to=recipients,
                     subject=str(entry["subject"]),
                     text=sent_body,
+                    anchor=None,
+                    lane=fence_lane,
                     session_id=session_id,
                     cc=[str(c) for c in (entry.get("cc") or []) if isinstance(c, str)],
                     templated=True,
@@ -568,6 +576,8 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     to=recipients,
                     subject=str(entry["subject"]),
                     text=skeleton,
+                    anchor=None,
+                    lane=fence_lane,
                     session_id=session_id,
                     cc=[str(c) for c in (entry.get("cc") or []) if isinstance(c, str)],
                     templated=True,

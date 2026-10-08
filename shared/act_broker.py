@@ -177,8 +177,13 @@ def propose(
     payload: dict[str, Any],
     instructed_by: str,
     source_ref: str,
+    origin: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Ask the broker to mint a proposal for one authored act.
+
+    ``origin`` is the email the act was asked for in (``shared.send_anchor.
+    message_origin``); the broker records it on the row so the person's
+    outcome letter anchors there (participant fence). Sent only when known.
 
     ``payload`` is the authored block whole, names included. The hook resolves
     nothing and looks nothing up: the broker renders the read-back from the same
@@ -192,6 +197,7 @@ def propose(
             "payload": payload,
             "instructed_by": instructed_by,
             "source_ref": source_ref,
+            **({"origin": dict(origin)} if origin else {}),
         }
     )
 

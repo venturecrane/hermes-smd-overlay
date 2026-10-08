@@ -285,6 +285,9 @@ def _send_msgraph_reply(
             # Passed only when set, so a reply that is not a redirect makes
             # exactly the call it made before device senders existed.
             **({"to": to} if to else {}),
+            # The participant fence: a reply's anchor is the email it answers,
+            # which every caller took from a verified origin (never a guess).
+            anchor={"kind": "graph_message", "graph_message_id": graph_message_id},
         )
     except msgraph_broker.BrokerError as exc:
         raise relay.RelaySendError(f"broker refused the msgraph reply: {exc}") from exc
@@ -419,21 +422,6 @@ def _emit_reply_event(
         _D1_CLIENT.execute(_INSERT_SQL, *params)
     except Exception as exc:  # noqa: BLE001 — audit must never break the hook
         logger.warning("hermes-smd-reply: %s emission failed (%s)", action_type, exc)
-
-
-def _note_fallback_resolution() -> None:
-    """Tag Sentry when the relay resolves an origin by address (#195 alarm).
-
-    Carries no identifiers — the signal is the RATE, not the instance.
-    """
-    try:
-        import sentry_sdk
-
-        with sentry_sdk.new_scope() as scope:
-            scope.set_tag("origin_resolution", "fallback_by_address")
-            sentry_sdk.capture_message("reply origin resolved by address fallback", level="warning")
-    except Exception as exc:  # noqa: BLE001 — telemetry never breaks the hook
-        logger.debug("hermes-smd-reply: fallback telemetry skipped (%s)", exc)
 
 
 def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
@@ -769,50 +757,22 @@ def _relay_draft(**kwargs: Any) -> None:
         session_id = kwargs.get("session_id") or ""
         args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
 
-        origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id)
+        # THIS turn's own email only (ss-console participant fence, 2026-10-07):
+        # the origin the inbound plugin bound from this turn's trusted prompt
+        # prefix. Not the sticky session origin, and no longer the address-keyed
+        # recovery (``find_for_recipient`` is deleted): a draft addressed to
+        # someone who once wrote in found their most recent email and answered
+        # it, which is a reply to a request nobody made in this turn.
+        origin = inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
         # The verified reply binding (binding.py): a turn no email opened, bound
-        # through the broker to ONE earlier email. Consulted before the
-        # address-keyed recovery below, so a bound turn never falls back to
-        # "whoever last wrote from this address".
+        # through the broker to ONE earlier email.
         bound = binding.SESSION_BINDINGS.get(session_id) if origin is None else None
         if bound is not None:
             origin = bound.origin()
         if origin is None:
-            # Recovery path. The router records the recipient-lock origin under
-            # the DISPATCH-time session_id, which can be empty or differ from
-            # this agent-loop session_id — so the session-keyed lookup misses
-            # even though a verified inbound DID open the work. Recover the
-            # origin by matching THIS draft's own recipient against the verified
-            # address index. Injection-safe: only Svix-verified inbound senders
-            # populate the index, so a draft addressed to someone who never
-            # emailed in matches nothing; and the recipient-lock below still
-            # enforces that the draft names ONLY the recovered sender.
-            recovered = inbound.SESSION_INBOUND_ORIGIN.find_for_recipient(
-                relay.draft_recipients(args)
-            )
-            if recovered is not None:
-                # LAST RESORT since #195: the inbound plugin binds session ->
-                # origin by the inbound's unique message id at pre_llm_call, so
-                # the session-keyed lookup above should hit on every email turn.
-                # This path is address-keyed and most-recent-wins, which is
-                # exactly how concurrent messages from one person got their
-                # replies crossed. Reaching it means the binding did not happen
-                # (template drift, a non-email path, a parse miss) — so it is
-                # reported, not silently taken. A nonzero rate here is the
-                # regression alarm; without it the burst failure could only be
-                # rediscovered by a client.
-                logger.warning(
-                    "hermes-smd-reply: session-keyed origin missed (session=%r); "
-                    "recovered by recipient address — origin_resolution=fallback_by_address "
-                    "(expected ~never since #195)",
-                    session_id,
-                )
-                _note_fallback_resolution()
-                origin = recovered
-        if origin is None:
-            # Fail closed: no verified inbound sender matches this draft, so
-            # there is no address to reply to. A create_draft that did NOT
-            # originate from an inbound email never relays.
+            # Fail closed: no email opened this turn and no binding was taken,
+            # so there is nobody to reply to. A create_draft that did NOT
+            # originate from this turn's inbound email never relays.
             return
 
         # (0b) One inbound message, at most one reply out. The hook fires per
@@ -1434,7 +1394,8 @@ def _deliver_owed_act(session_id: str) -> str:
     pending = PENDING_ACTS.peek(session_id)
     if act_delivery.owed_line(pending) is None:
         return "none"
-    origin = inbound.SESSION_INBOUND_ORIGIN.get(session_id)
+    # This turn's own email only (participant fence): the act line answers it.
+    origin = inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
     try:
         adapter = _email_adapter(CustomerConfig.from_volume(str(_YAML_PATH)))
     except Exception:  # noqa: BLE001 - an unreadable config still gets the default transport

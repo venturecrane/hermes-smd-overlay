@@ -1315,6 +1315,37 @@ def test_send_refusals_counts_confirm_send_failed(tmp_path):
     assert "gmail.example" not in json.dumps(facts.events)
 
 
+def test_a_participant_fence_refusal_pages_once_naming_its_fence(tmp_path):
+    """ss-console participant fence: the broker's refusal row carries ``fence``
+    from a closed vocabulary, and the page names it instead of the bare
+    outcome. One event per row: no second count.
+
+    FALSIFIER: keep ``reason = outcome`` and this reads ``refused``."""
+
+    def build(led):
+        for fence in ("participants", "participants_unverifiable", "not-a-fence"):
+            led.add(
+                _ts(2),
+                "CONFIRM_SEND_FAILED",
+                {
+                    "verb": "msgraph_send",
+                    "outcome": "refused",
+                    "fence": fence,
+                    "reason": "participant fence: craig@firm.example was not on the request",
+                    "refused": ["a" * 64],
+                },
+            )
+
+    facts = _facts(tmp_path, build)
+    assert facts.count == 3
+    assert sorted(e["reason"] for e in facts.events) == [
+        "participants",
+        "participants_unverifiable",
+        "refused",
+    ]
+    assert "firm.example" not in json.dumps(facts.events)
+
+
 def test_send_refusals_counts_a_wake_that_sent_nothing(tmp_path):
     """The 2026-08-20 instance: five items waiting, no attempt, no refusal row.
 

@@ -452,7 +452,7 @@ def test_an_unwired_seat_reports_that_it_cannot_send():
     the notification did not go, which is the whole contract."""
     send_dispatch.set_sender(None)
     try:
-        result = send_dispatch.dispatch(to=[ADMIN], subject="s", text="t")
+        result = send_dispatch.dispatch(to=[ADMIN], subject="s", text="t", anchor=None, lane=None)
         assert result.sent is False
         assert "no send path wired" in result.reason
         assert result.recipients == (ADMIN,)
@@ -469,7 +469,7 @@ def test_a_raising_sender_is_reported_rather_than_propagated():
 
     send_dispatch.set_sender(boom)
     try:
-        result = send_dispatch.dispatch(to=[ADMIN], subject="s", text="t")
+        result = send_dispatch.dispatch(to=[ADMIN], subject="s", text="t", anchor=None, lane=None)
         assert result.sent is False
         assert "socket gone" in result.reason
     finally:

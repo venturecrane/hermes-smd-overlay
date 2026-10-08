@@ -95,6 +95,27 @@ def extract_to_recipients(args: Any) -> set[str]:
     return {addr for addr in (_normalize_addr(x) for x in items) if addr}
 
 
+def extract_send_recipients(args: Any) -> set[str]:
+    """Normalized recipient set across ``to``, ``cc`` AND ``bcc``.
+
+    The send gate classifies every address a message DELIVERS to (ss-console
+    participant fence, 2026-10-07). Classifying ``to`` alone let a firm person
+    ride a send on cc or bcc under a ceiling decided for somebody else.
+    ``extract_to_recipients`` stays for the reply-code path, which is about the
+    addressed reader only.
+    """
+    if not isinstance(args, dict):
+        return set()
+    found: set[str] = set()
+    for key in ("to", "cc", "bcc"):
+        raw = args.get(key)
+        items: list[Any] = (
+            [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, (list, tuple)) else []
+        )
+        found |= {addr for addr in (_normalize_addr(x) for x in items) if addr}
+    return found
+
+
 def extract_draft_id_from_result(result: Any) -> str:
     """Best-effort draft id from a ``create_draft`` / ``update_draft`` result.
 
@@ -176,7 +197,7 @@ def record_draft_from_post_tool_call(
     """
     if tool_name not in DRAFT_RECORD_TOOLS:
         return
-    recipients = extract_to_recipients(args)
+    recipients = extract_send_recipients(args)
     draft_id = extract_draft_id_from_result(result)
     DRAFT_RECIPIENTS.record(session_id, draft_id, recipients)
 
@@ -189,7 +210,7 @@ def send_recipients(tool_name: str, args: Any, session_id: str) -> set[str] | No
     ``None`` (the caller leaves its base action class untouched).
     """
     if tool_name in DIRECT_TO_SEND_TOOLS:
-        recips = extract_to_recipients(args)
+        recips = extract_send_recipients(args)
         return recips or None
     if tool_name in DRAFT_SEND_TOOLS:
         draft_id = args.get("draft_id") if isinstance(args, dict) else None

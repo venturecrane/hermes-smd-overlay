@@ -73,6 +73,8 @@ def _brief(**extra) -> send_dispatch.DispatchResult:
         cc=[PARALEGAL],
         subject="Garcia hearing prep",
         text=BODY,
+        anchor=None,
+        lane="escalation",
         session_id=SESSION,
         templated=False,
         **extra,

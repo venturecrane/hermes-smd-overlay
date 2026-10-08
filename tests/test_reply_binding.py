@@ -216,6 +216,7 @@ def test_an_email_opened_turn_cannot_bind(lane) -> None:
     inbound.SESSION_INBOUND_ORIGIN.record(
         WAKE, inbound.InboundOrigin(sender_address=OTHER, message_id="graph-in-1", inbox_id="op@x")
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(WAKE, "graph-in-1")
     out = _bind(mod, {"job_id": JOB})
     assert out["bound"] is False and "an email opened this turn" in out["reason"]
     assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
@@ -348,6 +349,7 @@ def test_an_ordinary_rate_hold_does_queue_under_this_fixture(lane, monkeypatch) 
         "mail-1",
         inbound.InboundOrigin(sender_address=ADMIN, message_id="graph-in-9", inbox_id="op@x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("mail-1", "graph-in-9")
     _draft(mod, [ADMIN], session="mail-1")
     assert mod._HELD_STORE.pending_count() == 1
 

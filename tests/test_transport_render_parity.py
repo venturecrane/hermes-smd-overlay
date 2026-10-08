@@ -278,7 +278,7 @@ def _reply_html_on(monkeypatch, tmp_path, adapter: str, args: dict) -> tuple[str
         lambda *, message_id, text, html, **_joins: wire.append((text, html)) or "am-1",
     )
 
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     inbound.SESSION_INBOUND_ORIGIN.record(
         "s1",
@@ -286,6 +286,7 @@ def _reply_html_on(monkeypatch, tmp_path, adapter: str, args: dict) -> tuple[str
             sender_address=_TO, message_id=f"mid-{adapter}", inbox_id="op@client.example"
         ),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", f"mid-{adapter}")
     mod.on_post_tool_call(
         tool_name=_CREATE_DRAFT[adapter],
         args={"to": [_TO], "subject": "Re: matter", **args},

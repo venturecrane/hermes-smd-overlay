@@ -57,6 +57,18 @@ def _request_card_files(monkeypatch, tmp_path_factory) -> None:
     monkeypatch.setenv("SMD_REQUEST_CARDS_DB_PATH", str(base / "smd-gate" / "request_cards.db"))
 
 
+@pytest.fixture(autouse=True)
+def _fresh_turn_provenance() -> None:
+    """Every test starts with no inbound origins, no per-turn prompt marks and
+    no job wakes. ``bound_this_turn`` (the participant fence's anchor and the
+    reply relay's origin) refuses a session that was handed two emails, and a
+    previous test's ``s1`` is not this test's."""
+    from shared import inbound, turn_sources
+
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
+    turn_sources.TURN_SOURCES._reset_for_tests()
+
+
 @pytest.fixture
 def fake_ctx() -> FakePluginContext:
     """Return a fresh ``FakePluginContext`` for each test."""

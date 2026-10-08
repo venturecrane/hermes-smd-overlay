@@ -51,6 +51,7 @@ from typing import Any
 
 from shared import attachment_spool
 from shared.secrets import get_secret
+from shared.send_anchor import envelope_fields
 from shared.workspace_broker import BrokerError, request
 
 SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
@@ -81,6 +82,8 @@ def _call(
     session_id: str = "",
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
+    anchor: dict[str, str] | None = None,
+    lane: str | None = None,
 ) -> dict[str, Any]:
     if not transmit_available():
         raise AgentMailBrokerUnavailable(
@@ -105,6 +108,11 @@ def _call(
         # joins above and get the same deploy-order freedom — the broker
         # filters them through its own closed allowlist.
         envelope["audit_extra"] = audit_extra
+    # The participant fence (ss-console participant_fence.py): which request
+    # this send answers, and which authored lane sends it. Both set by code
+    # (shared.send_anchor), never by the model; the broker reads the request's
+    # people out of the inbox itself.
+    envelope.update(envelope_fields(anchor, lane))
     try:
         return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
     except OSError as exc:
@@ -122,6 +130,8 @@ def send_message(
     session_id: str = "",
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
+    anchor: dict[str, str] | None = None,
+    lane: str | None = None,
 ) -> str:
     """Transmit a fresh message; return the AgentMail message id.
 
@@ -137,6 +147,8 @@ def send_message(
             session_id=session_id,
             matter_ref=matter_ref,
             audit_extra=audit_extra,
+            anchor=anchor,
+            lane=lane,
         ).get("message_id")
         or ""
     )
@@ -149,6 +161,7 @@ def send_reply(
     *,
     session_id: str = "",
     matter_ref: str | None = None,
+    anchor: dict[str, str] | None,
 ) -> str:
     """Reply to an inbound message; return the new message id.
 
@@ -163,9 +176,15 @@ def send_reply(
     if html:
         body["html"] = html
     return str(
-        _call("agentmail_reply", body, session_id=session_id, matter_ref=matter_ref).get(
-            "message_id"
-        )
+        _call(
+            "agentmail_reply",
+            body,
+            session_id=session_id,
+            matter_ref=matter_ref,
+            # The email this reply answers (participant fence): the broker
+            # refuses a reply that names none.
+            anchor=anchor,
+        ).get("message_id")
         or ""
     )
 

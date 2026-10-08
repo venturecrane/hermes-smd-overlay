@@ -30,7 +30,6 @@ One binding per session, first wins, exactly like the inbound origin.
 from __future__ import annotations
 
 import json
-import re
 import threading
 from collections import OrderedDict
 from collections.abc import Callable
@@ -38,7 +37,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from shared import inbound, msgraph_broker
-from shared.cron_attribution import parse_cron_session
+from shared.turn_sources import (
+    HANDOFF_SENDER,
+    JOB_KIND,
+    JOB_KINDS,
+    TURN_SOURCES,
+    WAKE_JOB,
+    WAKE_TRIGGER,
+    TurnSources,
+)
 
 TOOL_NAME = "reply_bind"
 #: The inbox marker a bound origin carries. Never a real inbox id; the relay
@@ -46,32 +53,16 @@ TOOL_NAME = "reply_bind"
 BOUND_INBOX = "verified-binding"
 
 
-#: The sender id the gateway gives a ``/webhooks/handoff`` turn (the route, as
-#: ``webhook:agentmail`` is for mail): a job's completion wake.
-HANDOFF_SENDER = "webhook:handoff"
-#: A job runner's wake names its job in its first line: "... for demand job
-#: <ULID>." (demand-letter-drafter), "... for drafting job <ULID>."
-#: (document-drafter) or "... for chronology job <ULID>."
-#: (medical-chronology-maintainer). The earliest mention decides the kind.
-#: The chronology wake was missing until 2026-10-07: a held chronology's wake
-#: was unfenced, and the Operator wrote a NEW email to the requester and the
-#: matter's attorney, who was not on the request.
-#: "... for litigation job <ULID>." is the litigation-status skill's wake.
-_WAKE_JOB = re.compile(r"\b(demand|drafting|chronology|litigation) job ([0-9A-HJKMNP-TV-Z]{26})\b")
-#: The wake word -> the broker's binding kind (ss-console reply_binding.KINDS).
-_JOB_KIND = {
-    "demand": "demand_job",
-    "drafting": "drafting_job",
-    "chronology": "medchron_job",
-    "litigation": "litigation_job",
-}
-JOB_KINDS = frozenset(_JOB_KIND.values())
+#: The wake vocabulary lives in ``shared.turn_sources`` (moved there so the
+#: trust plugin's send paths can read a wake's job as their participant-fence
+#: anchor). The chronology wake was missing until 2026-10-07: a held
+#: chronology's wake was unfenced, and the Operator wrote a NEW email to the
+#: requester and the matter's attorney, who was not on the request.
+_WAKE_JOB = WAKE_JOB
+_JOB_KIND = JOB_KIND
+_WAKE_TRIGGER = WAKE_TRIGGER
 _LABEL = {kind: f"{word} job" for word, kind in _JOB_KIND.items()}
 
-#: A litigation wake's trigger line (ss-console litigation_lane.py,
-#: code-authored): "Trigger: scheduled." Read only from a wake the gateway
-#: delivered on the handoff route, like the job id itself.
-_WAKE_TRIGGER = re.compile(r"^Trigger: (request|scheduled)\.?\s*$", re.MULTILINE)
 #: A SCHEDULED litigation job has no request email: the calendar ran it. The
 #: broker binds it as ONE new message (``mode: new_message``), and it alone
 #: sets the recipient (the firm's authored scheduled recipient) and the fixed
@@ -106,75 +97,6 @@ class Binding:
         return inbound.InboundOrigin(
             sender_address=self.sender, message_id=self.graph_message_id, inbox_id=BOUND_INBOX
         )
-
-
-class TurnSources:
-    """session id -> the handoff wake that opened it, with the job it names: the
-    kind (``demand_job`` / ``drafting_job``) and id, or ("", ""). Recorded at
-    ``pre_llm_call`` from the gateway's own sender id, never from anything the
-    model writes. Cron turns need no record: the scheduler stamps them in the
-    session id itself."""
-
-    def __init__(self, max_sessions: int = 256) -> None:
-        self._max = max_sessions
-        self._handoff: OrderedDict[str, tuple[str, str]] = OrderedDict()
-        #: Sessions opened by a SCHEDULED litigation job's wake.
-        self._scheduled: set[str] = set()
-        self._lock = threading.Lock()
-
-    def note(self, session_id: str, sender_id: Any, user_message: Any) -> None:
-        if not session_id or sender_id != HANDOFF_SENDER:
-            return
-        text = user_message if isinstance(user_message, str) else ""
-        found = _WAKE_JOB.search(text)
-        kind = _JOB_KIND[found.group(1)] if found else ""
-        trigger = _WAKE_TRIGGER.search(text) if kind == "litigation_job" else None
-        scheduled = bool(trigger and trigger.group(1) == "scheduled")
-        with self._lock:
-            if session_id in self._handoff:
-                return
-            self._handoff[session_id] = (kind, found.group(2)) if found else ("", "")
-            if scheduled:
-                self._scheduled.add(session_id)
-            while len(self._handoff) > self._max:
-                gone, _ = self._handoff.popitem(last=False)
-                self._scheduled.discard(gone)
-
-    def scheduled(self, session_id: str) -> bool:
-        """True in a scheduled litigation job's wake."""
-        with self._lock:
-            return session_id in self._scheduled
-
-    def source(self, session_id: str) -> tuple[str, str] | None:
-        """("handoff", pinned job id or ""), ("cron", ""), or None."""
-        with self._lock:
-            if session_id in self._handoff:
-                return ("handoff", self._handoff[session_id][1])
-        if parse_cron_session(session_id):
-            return ("cron", "")
-        return None
-
-    def kind_of_job(self, job_id: str) -> str:
-        """The kind a noted wake gave ``job_id``, or ""."""
-        with self._lock:
-            for kind, jid in self._handoff.values():
-                if jid and jid == job_id:
-                    return kind
-        return ""
-
-    def job_kind(self, session_id: str) -> str:
-        """The pinned job's binding kind in a job's wake, or ""."""
-        with self._lock:
-            have = self._handoff.get(session_id)
-        return have[0] if have else ""
-
-    def _reset_for_tests(self) -> None:
-        with self._lock:
-            self._handoff.clear()
-            self._scheduled.clear()
-
-
-TURN_SOURCES = TurnSources()
 
 
 class SessionBindings:
@@ -437,6 +359,7 @@ __all__ = [
     "BOUND_INBOX",
     "HANDOFF_SENDER",
     "TURN_SOURCES",
+    "TurnSources",
     "SESSION_BINDINGS",
     "TOOL_DESCRIPTION",
     "TOOL_NAME",

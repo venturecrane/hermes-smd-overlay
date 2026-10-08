@@ -248,6 +248,10 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
     )
 
 
+#: The participant fence's closed vocabulary (ss-console participant_fence.FENCES).
+_FENCE_REASONS = frozenset({"participants", "participants_unverifiable"})
+
+
 def _refused_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[dict]:
     """Refusal rows in the window, as events.
 
@@ -276,7 +280,8 @@ def _refused_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list
         " json_extract(metadata,'$.tool') AS tool,"
         " json_extract(metadata,'$.verb') AS verb,"
         " json_extract(metadata,'$.error_type') AS error_type,"
-        " json_extract(metadata,'$.outcome') AS outcome"
+        " json_extract(metadata,'$.outcome') AS outcome,"
+        " json_extract(metadata,'$.fence') AS fence"
         " FROM audit_log"
         " WHERE substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
         " AND ("
@@ -300,13 +305,17 @@ def _refused_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list
         verb,
         error_type,
         outcome,
+        fence,
     ) in conn.execute(sql, (horizon, cutoff)):
         if action_type == "CONFIRM_SEND_FAILED":
             # The broker's row carries ``reason = str(exc)``, which can quote the
             # recipient it refused. ``outcome`` is the closed vocabulary next to
             # it (``refused`` / ``transport_error``) and says the same thing about
-            # kind without carrying an address off the seat.
-            reason = outcome
+            # kind without carrying an address off the seat. A participant-fence
+            # refusal (ss-console participant_fence.py) names its fence instead,
+            # ``participants`` or ``participants_unverifiable``, from the same
+            # closed vocabulary: SMD is paged once, here, and knows which rule.
+            reason = fence if fence in _FENCE_REASONS else outcome
         else:
             reason = error_type or outcome
         out.append(

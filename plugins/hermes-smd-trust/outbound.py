@@ -40,6 +40,7 @@ from shared import (
     output_checklist,
     provenance,
     report_render,
+    send_anchor,
     send_dispatch,
     spec_gate,
 )
@@ -1537,11 +1538,16 @@ def _send_withheld_notice(
         return send_dispatch.DispatchResult(sent=False, reason="a notice cannot raise a notice")
     _NOTICE_GUARD.active = True
     try:
+        # The notice is about a send, so it goes under that send's anchor and
+        # lane: an out-of-turn dispatch's own (dispatch_scope), else this turn's.
+        anchor, lane = send_anchor.capture_context(session_id)
         return send_dispatch.dispatch(
             to=to,
             cc=cc,
             subject=_notice_subject(subject),
             text=_notice_body(rules),
+            anchor=anchor,
+            lane=lane,
             session_id=session_id,
             templated=True,
             **(

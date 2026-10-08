@@ -67,11 +67,11 @@ _NO_ROSTER_YAML = "customer_id: acme\nvertical: law-firm\n"
 
 @pytest.fixture(autouse=True)
 def _clear_origin():
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
     yield
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
 
@@ -135,6 +135,7 @@ def _record_origin(
         session,
         inbound.InboundOrigin(sender_address=sender, message_id=message_id, inbox_id=inbox_id),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session, message_id)
 
 
 def _draft(
@@ -207,11 +208,15 @@ def test_runtime_mcp_tool_name_fires_relay(relay_mod) -> None:
     assert sent[0]["message_id"] == "msg_in"
 
 
-def test_recovers_origin_when_session_id_mismatches(relay_mod) -> None:
-    """The router records the origin under the DISPATCH session_id (often empty);
-    the relay reads under the AGENT session_id. When they differ (the 2026-06-12
-    live bug — draft created, no reply sent), the relay recovers the verified
-    origin by matching the draft's recipient against the address index."""
+def test_a_session_mismatch_no_longer_recovers_by_address(relay_mod) -> None:
+    """The address-keyed recovery (``find_for_recipient``) is deleted
+    (ss-console participant fence, 2026-10-07). A draft addressed to someone who
+    once wrote in found their most recent email and answered it, a reply to a
+    request nobody made in this turn. The relay now answers only THIS turn's
+    own email (``bound_this_turn``) or a verified binding, and otherwise sends
+    nothing.
+
+    FALSIFIER: restore the address fallback and this sends one reply."""
     mod, _d1, sent = relay_mod
     # Recorded under an empty dispatch session id ...
     _record_origin(
@@ -223,11 +228,7 @@ def test_recovers_origin_when_session_id_mismatches(relay_mod) -> None:
         args=_draft(["greg@whitfield.example"]),
         session_id="agent-20260613-013303",
     )
-    assert len(sent) == 1
-    # ss#2258: the agent no longer names the inbox — the broker pins it from the
-    # seat's own config, so identity is absent from what this process can express.
-    assert "inbox_id" not in sent[0]
-    assert sent[0]["message_id"] == "msg_in"
+    assert sent == []
 
 
 def test_recovery_fails_closed_for_unverified_recipient(relay_mod) -> None:
@@ -545,6 +546,7 @@ def _burst(mod, n: int, sender: str = "greg@whitfield.example") -> None:
             sid,
             inbound.InboundOrigin(sender, f"msg_{i}", inbox_id="inbox_x"),
         )
+        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(sid, f"msg_{i}")
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
             args=_draft([sender]),
@@ -728,7 +730,7 @@ def test_send_reply_delegates_to_the_broker_and_carries_no_credential() -> None:
     mod = load_plugin("hermes-smd-reply")
     captured = {}
 
-    def _sender(*, message_id, text, html, session_id="", matter_ref=None):
+    def _sender(*, message_id, text, html, session_id="", matter_ref=None, anchor=None):
         captured.update(
             message_id=message_id,
             text=text,
@@ -866,6 +868,7 @@ def test_bound_session_beats_a_fresher_address_entry(relay_mod) -> None:
     reg.record("", inbound.InboundOrigin("greg@whitfield.example", "msg_early", "", "inbox_x"))
     reg.record("", inbound.InboundOrigin("greg@whitfield.example", "msg_late", "", "inbox_x"))
     assert reg.bind("agent-1", "msg_early") is True
+    reg.note_turn_prompt("agent-1", "msg_early")
 
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
@@ -907,6 +910,7 @@ def test_failed_draft_call_never_relays(relay_mod, kw) -> None:
         "s1",
         inbound.InboundOrigin("greg@whitfield.example", "msg_fail", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", "msg_fail")
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args=_draft(["greg@whitfield.example"]),
@@ -928,6 +932,7 @@ def test_unknown_result_shape_still_relays(relay_mod) -> None:
         "s1",
         inbound.InboundOrigin("greg@whitfield.example", "msg_odd", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", "msg_odd")
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args=_draft(["greg@whitfield.example"]),
@@ -946,6 +951,7 @@ def test_retry_after_failed_draft_sends_exactly_once(relay_mod) -> None:
         "s1",
         inbound.InboundOrigin("greg@whitfield.example", "msg_retry", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", "msg_retry")
     args = _draft(["greg@whitfield.example"])
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
@@ -969,6 +975,7 @@ def test_second_successful_draft_for_one_inbound_is_held(relay_mod) -> None:
         "s1",
         inbound.InboundOrigin("greg@whitfield.example", "msg_dup", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", "msg_dup")
     for _ in range(2):
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
@@ -989,6 +996,7 @@ def test_distinct_inbounds_each_get_a_reply(relay_mod) -> None:
             sid,
             inbound.InboundOrigin("greg@whitfield.example", f"msg_{i}", inbox_id="inbox_x"),
         )
+        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(sid, f"msg_{i}")
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
             args=_draft(["greg@whitfield.example"]),
@@ -1013,6 +1021,7 @@ def test_rate_held_reply_commits_once_and_releases_once(relay_mod) -> None:
         "s1",
         inbound.InboundOrigin("greg@whitfield.example", "msg_held", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", "msg_held")
     for _ in range(2):
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
@@ -1048,6 +1057,7 @@ def test_caption_read_this_session_is_quotable(relay_mod) -> None:
         session_id,
         inbound.InboundOrigin("greg@whitfield.example", "msg_prov", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, "msg_prov")
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args=_draft(
@@ -1073,6 +1083,7 @@ def test_unread_caption_still_blocks(relay_mod) -> None:
         session_id,
         inbound.InboundOrigin("greg@whitfield.example", "msg_noprov", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, "msg_noprov")
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args=_draft(
@@ -1311,6 +1322,7 @@ def _reply_with_money(mod, session_id, text, message_id, *, tool_call_id=None):
         session_id,
         inbound.InboundOrigin("greg@whitfield.example", message_id, inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, message_id)
     kwargs = {
         "tool_name": "agentmail:create_draft",
         "args": _draft(["greg@whitfield.example"], text=text),
@@ -1591,6 +1603,7 @@ def test_a_queued_reply_is_not_reported_as_undelivered(relay_mod) -> None:
             f"s_q{i}",
             inbound.InboundOrigin("greg@whitfield.example", f"msg_q{i}", inbox_id="inbox_x"),
         )
+        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(f"s_q{i}", f"msg_q{i}")
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
             args=_draft(["greg@whitfield.example"]),
@@ -1614,6 +1627,7 @@ def test_a_dropped_rate_hold_is_still_told(relay_mod) -> None:
             f"s_d{i}",
             inbound.InboundOrigin("greg@whitfield.example", f"msg_d{i}", inbox_id="inbox_x"),
         )
+        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(f"s_d{i}", f"msg_d{i}")
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
             args=_draft(["greg@whitfield.example"]),
@@ -1637,6 +1651,7 @@ def test_a_second_hold_for_one_message_stops_the_redraft_loop(relay_mod) -> None
         "s_loop",
         inbound.InboundOrigin("greg@whitfield.example", "msg_loop", inbox_id="inbox_x"),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s_loop", "msg_loop")
     for n, call in enumerate(("tc_r1", "tc_r2")):
         mod.on_post_tool_call(
             tool_name="agentmail:create_draft",
@@ -1698,7 +1713,12 @@ def test_a_held_reply_names_its_session_before_any_matter_work_happens(relay_mod
     still passes."""
     mod, d1, sent = relay_mod
     # Not on the roster: held at step (a), before recipient-lock or matter work.
-    _record_origin(sender="stranger@nowhere.example", message_id="msg_join_2", inbox_id="inbox_x")
+    _record_origin(
+        sender="stranger@nowhere.example",
+        message_id="msg_join_2",
+        inbox_id="inbox_x",
+        session="s_hold",
+    )
     mod.on_post_tool_call(
         tool_name="agentmail:create_draft",
         args=_draft(["stranger@nowhere.example"]),
