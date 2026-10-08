@@ -278,6 +278,7 @@ from shared import (
     read_capture,
     rule_confirm,
     rule_dispatch,
+    send_anchor,
     send_dispatch,
 )
 from shared import (
@@ -2056,6 +2057,23 @@ def _remember_readback(session_id: str, readback: str) -> None:
         _READBACK_OWED.popitem(last=False)
 
 
+def _origin_field(session_id: Any) -> dict[str, Any]:
+    """``{"origin": <this turn's message anchor>}``, or ``{}`` (shared.send_anchor).
+
+    A job wake's anchor is not an origin: a rule is stated in an email."""
+    anchor = send_anchor.message_origin(
+        session_id if isinstance(session_id, str) and session_id else None
+    )
+    return {"origin": anchor} if anchor else {}
+
+
+def _rule_anchor(row: dict[str, Any]) -> dict[str, str] | None:
+    """The anchor for a rule's outcome letter: the row, which the broker
+    resolves to the origin it recorded when the row was created."""
+    proposal_id = str(row.get("proposal_id") or "")
+    return {"kind": "rule", "proposal_id": proposal_id} if proposal_id else None
+
+
 def _propose(args: dict[str, Any], **kwargs: Any) -> str:
     """State one rule back for the person to confirm. Installs nothing.
 
@@ -2073,6 +2091,10 @@ def _propose(args: dict[str, Any], **kwargs: Any) -> str:
             "instructed_by": args.get("instructed_by"),
             "source_ref": args.get("source_ref"),
             "for_admin": bool(args.get("for_admin")),
+            # The participant fence: the email this rule was stated in, from
+            # THIS turn's prompt (never the model), recorded on the row so the
+            # person's outcome letter later anchors on the broker's own record.
+            **_origin_field(kwargs.get("session_id")),
         }
     )
     if _is_old_broker(response):
@@ -2229,6 +2251,7 @@ def _notify_admins_of(session_id: str, response: dict[str, Any], args: dict[str,
         send=send_dispatch.dispatch,
         emit=_emit_audit,
         session_id=session_id,
+        anchor=send_anchor.message_origin(session_id or None),
     )
     return notification.note
 
@@ -2495,6 +2518,7 @@ def _dispatch_outcome_letter(
             reason=str(row.get("outcome_reason") or ""),
             send=send_dispatch.dispatch,
             session_id=session_id,
+            anchor=_rule_anchor(row),
         )
         return notification.sent
     notification = rule_dispatch.notify_outcome(
@@ -2505,6 +2529,7 @@ def _dispatch_outcome_letter(
         by=by,
         send=send_dispatch.dispatch,
         session_id=session_id,
+        anchor=_rule_anchor(row),
     )
     return notification.sent
 
@@ -2907,6 +2932,7 @@ def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
                 "instructed_by": sender,
                 "text": summary,
                 "source_ref": source_ref,
+                **_origin_field(session_id),
             }
         )
     except Exception as exc:  # noqa: BLE001 -- an unreachable broker records nothing
@@ -2940,6 +2966,10 @@ def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
         to=message["to"],
         subject=message["subject"],
         text=message["text"],
+        # SMD's desk: the fence lets SMD through without an anchor; this one
+        # is the request's own email anyway.
+        anchor=send_anchor.message_origin(session_id or None),
+        lane=None,
         session_id=session_id,
     )
     if not result.sent:
@@ -4280,6 +4310,9 @@ def _ask_smd_for_a_plain_answer(row: dict[str, Any], answerer: str) -> tuple[boo
         text=_OPS_ASK_UNPARSED_BODY.format(
             proposal_id=proposal_id, readback=readback, requester=requester
         ),
+        # The answerer is on scope.ops_reply_from, SMD's own addresses.
+        anchor=None,
+        lane=None,
         session_id="",
     )
     return bool(result.sent), str(result.reason or "")

@@ -27,7 +27,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from shared import agentmail_broker, msgraph_broker, outbound_attachment
+from shared import agentmail_broker, msgraph_broker, outbound_attachment, send_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,8 @@ def send_message(
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    anchor: dict[str, str] | None = None,
+    lane: str | None = None,
 ) -> str:
     """Ask the broker to send a fresh message; return the new message id.
 
@@ -155,6 +157,9 @@ def send_message(
         # keeps working on stamp-less sends; a caller that DOES stamp gets the
         # loud TypeError contract the ss#2497 note above describes.
         kwargs["audit_extra"] = audit_extra
+    # The participant fence (shared.send_anchor): forwarded only when set, like
+    # the stamps above, so a sender double predating them keeps working.
+    kwargs.update(send_anchor.envelope_fields(anchor, lane))
     try:
         message_id = send(body, **kwargs)
     except agentmail_broker.BrokerError as exc:
@@ -205,6 +210,8 @@ def send_via_msgraph(
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    anchor: dict[str, str] | None = None,
+    lane: str | None = None,
 ) -> str:
     """Ask the broker to send an approved message via Graph ``/sendMail``.
 
@@ -246,6 +253,9 @@ def send_via_msgraph(
     if audit_extra:
         # Same conditional forward as the AgentMail twin, same rationale.
         kwargs["audit_extra"] = audit_extra
+    # The participant fence (shared.send_anchor): forwarded only when set, like
+    # the stamps above, so a sender double predating them keeps working.
+    kwargs.update(send_anchor.envelope_fields(anchor, lane))
     try:
         message_id = send(body, **kwargs)
     except msgraph_broker.BrokerError as exc:

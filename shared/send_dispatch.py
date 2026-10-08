@@ -127,6 +127,8 @@ def dispatch(
     to: list[str],
     subject: str,
     text: str,
+    anchor: dict[str, str] | None,
+    lane: str | None,
     session_id: str = "",
     cc: list[str] | None = None,
     templated: bool = True,
@@ -139,6 +141,14 @@ def dispatch(
     key: see :mod:`shared.outbound_attachment`. Forwarded only when non-empty,
     so a sender that predates it is called exactly as before on every send
     that carries none.
+
+    ``anchor`` and ``lane`` are REQUIRED and keyword-only, ``None`` included, so
+    a call site that never decided them fails in tests rather than on a seat
+    (ss-console participant fence, 2026-10-07). ``anchor`` is the request this
+    message answers (``shared.send_anchor``); ``lane`` is the authored key the
+    calling code path owns (``rule_dispatch``, ``escalation``,
+    ``skill:<name>``). The broker allows a firm person only when they were on
+    the anchor or the lane names them; SMD and outside recipients are unchanged.
 
     ``templated`` says the body is a FIXED template this repo authored, not
     prose a model composed. It reaches ``shared.spec_gate`` and skips exactly
@@ -166,6 +176,8 @@ def dispatch(
             to=list(to),
             subject=subject,
             text=text,
+            anchor=anchor,
+            lane=lane,
             session_id=session_id,
             cc=list(cc or []),
             templated=templated,

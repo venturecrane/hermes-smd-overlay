@@ -57,7 +57,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from shared import act_broker, content_floor, matter_gate, read_volume, spec_gate
+from shared import act_broker, content_floor, matter_gate, read_volume, send_anchor, spec_gate
 from shared.action_classes import (
     BANNED_TOOLS,
     TOOL_ACTION_CLASS_MAP,
@@ -1293,6 +1293,7 @@ def _propose_commitment_act(tool_name: str, session_id: str, args: dict | None =
             payload=payload,
             instructed_by=sender,
             source_ref=message_id,
+            origin=send_anchor.message_origin(session_id or None),
         )
     except Exception:  # noqa: BLE001 - an unreachable broker withholds, never allows
         logger.warning("trust: act_propose failed; the commitment stays withheld", exc_info=True)
@@ -1704,7 +1705,11 @@ def _evaluate_tool_call(
     # approval releases exactly THIS payload (ADR 0071 #1806). A new compose
     # supersedes any prior pending; only a resolved-recipient send is captured.
     if is_send and send_recips and decision.audit_action == "await_approval":
-        PENDING_SEND.capture(tool_name, args, send_recips)
+        # Captured with the anchor and lane it was held under (shared.send_anchor):
+        # the approval arrives on another turn, and the broker re-reads THIS
+        # anchor at replay.
+        held_anchor, held_lane = send_anchor.capture_context(session_id)
+        PENDING_SEND.capture(tool_name, args, send_recips, anchor=held_anchor, lane=held_lane)
 
     # Staff send-as (ss ADR 0089): the whole path ends here, one way or the
     # other. A refused ceiling refuses; the confirm ceiling proposes, which runs
@@ -1945,7 +1950,10 @@ def _evaluate_tool_call(
         # it can never release a second send (ADR 0071 #1806). The live args were
         # already overwritten with the stored payload above.
         if is_send and approved_replay:
-            PENDING_SEND.take_for_send(tool_name, send_recips)
+            replayed = PENDING_SEND.take_for_send(tool_name, send_recips)
+            if replayed is not None:
+                # The handler sends it under the anchor it was held with.
+                send_anchor.note_replay(replayed.anchor, replayed.lane, replayed.recipients)
         # The commitment's approval is spent the same way and at the same moment,
         # once the call has cleared every gate and is about to execute. The
         # record survives the spend so ``post_tool_call`` can close the broker row

@@ -63,6 +63,13 @@ class PendingSend:
     approved: bool = False
     approval_source: str | None = None
     consumed: bool = False
+    #: The participant fence (shared.send_anchor): the request this send
+    #: answered and the lane that sent it, captured WHEN IT WAS HELD. The
+    #: approval turn is a different turn; replaying under its anchor would let
+    #: an approver's email vouch for people who were on someone else's request.
+    #: The broker re-reads the anchor at replay.
+    anchor: dict[str, str] | None = None
+    lane: str | None = None
 
 
 @dataclass
@@ -81,7 +88,15 @@ class PendingSendRegister:
         return (now - rec.created_at) > self.ttl_seconds
 
     # -- capture (pre_tool_call, on await_approval) -------------------------
-    def capture(self, tool_name: str, args: Any, recipients: Iterable[str] | None) -> None:
+    def capture(
+        self,
+        tool_name: str,
+        args: Any,
+        recipients: Iterable[str] | None,
+        *,
+        anchor: dict[str, str] | None = None,
+        lane: str | None = None,
+    ) -> None:
         """Record — or SUPERSEDE — the single outstanding pending send.
 
         A fresh capture always resets approval: a stale approval must never attach
@@ -94,6 +109,8 @@ class PendingSendRegister:
             args=copy.deepcopy(args) if isinstance(args, dict) else {},
             recipients=frozenset(recipients or ()),
             created_at=self._now(),
+            anchor=dict(anchor) if anchor else None,
+            lane=lane,
         )
 
     # -- approve (pre_llm_call, allowlisted-sender affirmative) -------------

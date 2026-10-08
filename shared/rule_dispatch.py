@@ -61,6 +61,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+#: The participant fence's lane for the administrators' request email; the
+#: broker maps it to ``scope.rule_requests_to`` and nothing else.
+LANE_RULE_DISPATCH = "rule_dispatch"
+
 #: The audit type written when a rule request has actually been emailed to the
 #: administrators the firm named. Its own row, rather than a field on somebody
 #: else's: this is the moment a request reached a person, and it is the only
@@ -245,6 +249,7 @@ def notify_admins(
     send: SendFn,
     emit: EmitFn | None = None,
     session_id: str = "",
+    anchor: dict[str, str] | None = None,
 ) -> Notification:
     """Put one paralegal's rule in front of the administrators the firm named.
 
@@ -273,6 +278,11 @@ def notify_admins(
         subject=_ADMIN_SUBJECT.format(proposal_id=proposal_id),
         text=_ADMIN_BODY.format(requester=requester, readback=readback),
         session_id=session_id,
+        # The participant fence: the administrators are the firm's authored
+        # routing (the lane), the requester is on the email that asked (the
+        # anchor, this turn's own).
+        anchor=anchor,
+        lane=LANE_RULE_DISPATCH,
     )
     if not getattr(result, "sent", False):
         reason = _clean(getattr(result, "reason", "")) or "the send was refused"
@@ -345,8 +355,12 @@ def notify_outcome(
     send: SendFn,
     by: str = "",
     session_id: str = "",
+    anchor: dict[str, str] | None = None,
 ) -> Notification:
     """Tell the person who asked how their rule ended.
+
+    ``anchor`` is the rule row (``{"kind": "rule", ...}``): the broker resolves
+    it to the email the rule was stated in, recorded when the row was made.
 
     ``kind`` is ``installed``, ``declined`` or ``lapsed``. Three sentences
     rather than one parameterised sentence, because the three are different news
@@ -381,6 +395,8 @@ def notify_outcome(
         subject=subject,
         text=body,
         session_id=session_id,
+        anchor=anchor,
+        lane=None,
     )
     sent = bool(getattr(result, "sent", False))
     reason = _clean(getattr(result, "reason", ""))
@@ -406,6 +422,7 @@ def notify_ops_outcome(
     by: str = "",
     reason: str = "",
     session_id: str = "",
+    anchor: dict[str, str] | None = None,
 ) -> Notification:
     """Tell the person who asked how SMD answered their operations request.
 
@@ -462,6 +479,8 @@ def notify_ops_outcome(
         subject=subject,
         text=body,
         session_id=session_id,
+        anchor=anchor,
+        lane=None,
     )
     sent = bool(getattr(result, "sent", False))
     send_reason = _clean(getattr(result, "reason", ""))

@@ -43,7 +43,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from shared import digest_reply_ref, send_dispatch, sent_lines
+from shared import digest_reply_ref, send_anchor, send_dispatch, sent_lines
 from shared.casework_acts import CASEWORK_ACTS, COMPLETED, CaseworkActs, TaskWrite
 
 from .casework_reply import reply_verdicts
@@ -262,6 +262,11 @@ def _send_reviews(
             to=list(message["recipients"]),
             subject=message["subject"],
             text=body,
+            # The participant fence: a review answers no email; its recipients
+            # are the routing the pre_run resolved, so it rides the case-alert
+            # lane, which the broker maps to escalation.*_recipients only.
+            anchor=None,
+            lane=send_anchor.LANE_ESCALATION,
             session_id=session_id,
             cc=list(message.get("cc") or []),
             templated=True,
@@ -454,6 +459,8 @@ def casework_brief(
         to=to,
         subject=subject,
         text=body,
+        anchor=None,
+        lane=send_anchor.LANE_ESCALATION,
         session_id=session_id,
         cc=cc,
         templated=False,

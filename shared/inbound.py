@@ -45,7 +45,6 @@ import re
 import secrets
 import time
 from collections import OrderedDict, deque
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -749,7 +748,8 @@ class SessionInboundOrigin:
     def bind(self, session_id: str, message_id: str) -> bool:
         """Bind a session to the origin of a SPECIFIC inbound message (#195).
 
-        The deterministic counterpart to :meth:`find_for_recipient`. The router
+        The deterministic session binding (the address-keyed recovery that
+        preceded it, ``find_for_recipient``, is deleted). The router
         records under the dispatch-time session id, which is empty on the live
         email path, so the relay's session-keyed lookup misses and falls back to
         the address index — most-recent-wins, which collapses two concurrent
@@ -847,25 +847,18 @@ class SessionInboundOrigin:
             return None
         return self._unbound.popleft()[1]
 
-    def find_for_recipient(self, addresses: "Iterable[str]") -> InboundOrigin | None:
-        """Recover a verified inbound origin by matching the draft's intended
-        recipient against the address index — the recovery path when the
-        session-keyed :meth:`get` misses (dispatch session_id absent/differs).
-
-        Returns the most-recently recorded verified origin whose sender is among
-        ``addresses`` (the addresses the agent's draft is addressed to), or
-        ``None``. Injection-safe: only Svix-verified inbound senders populate the
-        index, so a draft naming an address that never emailed in matches nothing
-        and the relay fails closed. The relay's recipient-lock (draft must name
-        ONLY the recovered sender) still applies on top, so an injected EXTRA
-        recipient is still refused."""
-        wanted = {a.strip().lower() for a in addresses if isinstance(a, str) and a.strip()}
-        if not wanted:
-            return None
-        for addr in reversed(self._by_address):
-            if addr in wanted:
-                return self._by_address[addr]
-        return None
+    def _reset_for_tests(self) -> None:
+        """Every index, including the per-turn provenance a test's previous
+        session left behind (``bound_this_turn`` reads it)."""
+        for reg in (
+            self._origins,
+            self._by_address,
+            self._by_message,
+            self._turn_prompt_id,
+            self._prompt_ids_seen,
+        ):
+            reg.clear()
+        self._unbound.clear()
 
 
 # Process-wide singleton — the webhook router records, the demo relay reads.

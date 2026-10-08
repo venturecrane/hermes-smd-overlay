@@ -31,6 +31,7 @@ import os
 import socket
 from typing import Any
 
+from shared.send_anchor import envelope_fields
 from shared.workspace_broker import BrokerError, request
 
 SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
@@ -57,6 +58,8 @@ def _call(
     session_id: str = "",
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
+    anchor: dict[str, str] | None = None,
+    lane: str | None = None,
 ) -> dict[str, Any]:
     if not transmit_available():
         raise MsGraphBrokerUnavailable(
@@ -73,6 +76,10 @@ def _call(
         envelope["matter_ref"] = matter_ref
     if audit_extra:
         envelope["audit_extra"] = audit_extra
+    # The participant fence (ss-console participant_fence.py): which request
+    # this send answers and which authored lane sends it, set by code
+    # (shared.send_anchor), never by the model.
+    envelope.update(envelope_fields(anchor, lane))
     try:
         return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
     except OSError as exc:
@@ -91,6 +98,8 @@ def send_message(
     session_id: str = "",
     matter_ref: str | None = None,
     audit_extra: dict[str, str] | None = None,
+    anchor: dict[str, str] | None = None,
+    lane: str | None = None,
 ) -> str:
     """Transmit a fresh message via Graph ``/sendMail``.
 
@@ -115,6 +124,8 @@ def send_message(
             session_id=session_id,
             matter_ref=matter_ref,
             audit_extra=audit_extra,
+            anchor=anchor,
+            lane=lane,
         )
     )
 
@@ -127,6 +138,7 @@ def send_reply(
     session_id: str = "",
     matter_ref: str | None = None,
     to: str | None = None,
+    anchor: dict[str, str] | None,
 ) -> str:
     """Reply in-thread to an inbound Graph message.
 
@@ -156,7 +168,11 @@ def send_reply(
         payload["html"] = html
     if to and to.strip():
         payload["to"] = to.strip()
-    return _vendor_id(_call("msgraph_reply", payload, session_id=session_id, matter_ref=matter_ref))
+    # ``anchor`` is the email this reply answers (participant fence); the
+    # broker refuses a reply that names none.
+    return _vendor_id(
+        _call("msgraph_reply", payload, session_id=session_id, matter_ref=matter_ref, anchor=anchor)
+    )
 
 
 def bind_reply(binding: dict[str, str]) -> dict[str, Any]:

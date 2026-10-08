@@ -823,7 +823,12 @@ def test_send_dispatch_forwards_attachments_only_when_present():
         return DispatchResult(sent=True, message_id="m")
 
     send_dispatch.set_sender(legacy_sender)
-    send_dispatch.dispatch(to=["a@x"], subject="s", text="t")
-    send_dispatch.dispatch(to=["a@x"], subject="s", text="t", attachments=[])
-    send_dispatch.dispatch(to=["a@x"], subject="s", text="t", attachments=[{"name": "x"}])
-    assert calls == [{}, {}, {"attachments": [{"name": "x"}]}]
+    send_dispatch.dispatch(to=["a@x"], subject="s", text="t", anchor=None, lane=None)
+    send_dispatch.dispatch(
+        to=["a@x"], subject="s", text="t", anchor=None, lane=None, attachments=[]
+    )
+    send_dispatch.dispatch(
+        to=["a@x"], subject="s", text="t", anchor=None, lane=None, attachments=[{"name": "x"}]
+    )
+    fence = {"anchor": None, "lane": None}
+    assert calls == [fence, fence, {**fence, "attachments": [{"name": "x"}]}]

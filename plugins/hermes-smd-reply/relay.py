@@ -542,6 +542,9 @@ def send_reply(
                 html=html,
                 session_id=session_id,
                 matter_ref=matter_ref,
+                # The participant fence: a reply's anchor is the email it
+                # answers, which every caller took from a verified origin.
+                anchor={"kind": "agentmail_message", "message_id": message_id},
             )
             or ""
         )

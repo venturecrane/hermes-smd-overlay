@@ -32,11 +32,13 @@ from shared import (
     read_volume,
     rendered_body_gate,
     report_render,
+    send_anchor,
     spec_stamp,
 )
 from shared.broker_audit import write_decision
 from shared.casework_acts import CASEWORK_ACTS
 from shared.casework_steps import STEP_WITNESS
+from shared.outbound_recipient import extract_send_recipients
 from shared.pending_acts import PENDING_ACTS, tool_call_failed
 from shared.pending_send import PENDING_SEND
 from shared.secrets import get_secret
@@ -902,21 +904,45 @@ def _smd_send_message(args: dict[str, Any], **kwargs: Any) -> str:
     send_matter_ref = matter_gate.matter_ref_for(
         send_session_id, _send_cited_matters(send_session_id, payload)
     )
+    # The participant fence (shared.send_anchor). The model never names either
+    # value: an approved held send replays under the anchor it was held with,
+    # and anything else sends under THIS turn's own email or job wake. This
+    # tool never takes a lane; lanes belong to the code paths that own them.
+    fence_anchor, fence_lane = _tool_send_fence(kwargs, payload)
     try:
         if _seat_email_adapter() == _ADAPTER_MSGRAPH:
             message_id = outbound_send.send_via_msgraph(
-                payload, session_id=send_session_id, matter_ref=send_matter_ref
+                payload,
+                session_id=send_session_id,
+                matter_ref=send_matter_ref,
+                **send_anchor.envelope_fields(fence_anchor, fence_lane),
             )
         else:
             message_id = outbound_send.send_message(
-                payload=payload, session_id=send_session_id, matter_ref=send_matter_ref
+                payload=payload,
+                session_id=send_session_id,
+                matter_ref=send_matter_ref,
+                **send_anchor.envelope_fields(fence_anchor, fence_lane),
             )
     except outbound_send.OutboundSendError as exc:
         # Returned, not raised: a refused send is information the agent should
         # act on (pick a different recipient, ask the owner), not a tool crash.
-        # The broker has already recorded the attempt and the reason.
-        return f"Not sent: {exc}"
+        # The broker has already recorded the attempt and the reason. A
+        # participant-fence refusal also carries the one thing to do next.
+        return f"Not sent: {exc} {send_anchor.refusal_note(str(exc))}".rstrip()
     return f"Sent (message {message_id})."
+
+
+def _tool_send_fence(
+    kwargs: dict[str, Any], payload: dict[str, Any]
+) -> tuple[dict[str, str] | None, str | None]:
+    """(anchor, lane) for the model's send tool. Never read from ``payload``
+    beyond its recipients, which only match a noted replay."""
+    replayed = send_anchor.take_replay(extract_send_recipients(payload))
+    if replayed is not None:
+        return replayed
+    raw = kwargs.get("session_id")
+    return send_anchor.turn_anchor(raw if isinstance(raw, str) and raw else None), None
 
 
 def _scan_approved_send(rec: Any, payload: dict, session_id: str) -> str | None:
@@ -995,10 +1021,15 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     # the stored payload and consumes the approval). Fail-safe: any gate error →
     # do not send.
     payload = dict(rec.args)
+    # The participant fence: the anchor and lane this send was HELD under. The
+    # approval turn is not the turn that composed it, so its email vouches for
+    # nobody here; the broker re-reads the held anchor at the send below.
+    fence_anchor, fence_lane = rec.anchor, rec.lane
     try:
-        block = enforce.evaluate_tool_call(
-            rec.tool_name, payload, customer_slug, session_id=session_id
-        )
+        with send_anchor.dispatch_scope(fence_anchor, fence_lane):
+            block = enforce.evaluate_tool_call(
+                rec.tool_name, payload, customer_slug, session_id=session_id
+            )
     except Exception:  # noqa: BLE001 — an indeterminate gate must not send
         logger.exception(
             "hermes-smd-trust: out-of-band send gate raised; NOT dispatching (fail-safe)"
@@ -1027,7 +1058,8 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     # and to the send's own recipients when they are staff, so nobody who was
     # waiting on it hears silence. The approval is already consumed; the model
     # is told, and a corrected send needs a fresh approval.
-    scan_block = _scan_approved_send(rec, payload, session_id)
+    with send_anchor.dispatch_scope(fence_anchor, fence_lane):
+        scan_block = _scan_approved_send(rec, payload, session_id)
     if scan_block is not None:
         return scan_block
     # Same post-gate html attach as the tool path. This path needs its own call:
@@ -1056,7 +1088,10 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     try:
         if is_msgraph:
             message_id = outbound_send.send_via_msgraph(
-                payload, session_id=session_id, matter_ref=send_matter_ref
+                payload,
+                session_id=session_id,
+                matter_ref=send_matter_ref,
+                **send_anchor.envelope_fields(fence_anchor, fence_lane),
             )
         else:
             # ss#2258: AgentMail transmit is a broker verb now. No key is read
@@ -1067,10 +1102,16 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
             # inbox from an account listing in THIS process, which is how a seat
             # could send as (and to) someone it was never authored to touch.
             message_id = outbound_send.send_message(
-                payload=payload, session_id=session_id, matter_ref=send_matter_ref
+                payload=payload,
+                session_id=session_id,
+                matter_ref=send_matter_ref,
+                **send_anchor.envelope_fields(fence_anchor, fence_lane),
             )
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
+        note = send_anchor.refusal_note(str(exc))
+        if note:
+            return f"[Your approved send to {recipients} was not sent. {note}]"
         # NOTE: NEITHER path emits a row here any more. Both transports are broker
         # verbs now, and the broker writes CONFIRM_SEND_DISPATCHED /
         # CONFIRM_SEND_FAILED itself, before it answers. A second row from this
@@ -1098,8 +1139,15 @@ def _dispatch_internal_message(
     audit_extra: dict[str, str] | None = None,
     code_fixed_recipients: CodeFixedRecipients | None = None,
     attachments: list[dict[str, str]] | None = None,
+    anchor: dict[str, str] | None = None,
+    lane: str | None = None,
 ) -> DispatchResult:
     """Send one seat-authored message OUT OF TURN, through the full gate.
+
+    ``anchor`` / ``lane`` are the participant fence's (``shared.send_anchor``),
+    decided by the calling code path and forwarded to the broker unchanged. A
+    send this gate holds is captured with them, so its approved replay is
+    fenced on the same request.
 
     Published to :mod:`shared.send_dispatch` at register so the establishment
     plugin and its sweeper can reach it; they cannot import this package (see
@@ -1220,15 +1268,16 @@ def _dispatch_internal_message(
         except KeyError:
             customer_slug = ""
     try:
-        block = enforce.evaluate_tool_call(
-            _SEND_TOOL_NAME,
-            payload,
-            customer_slug,
-            session_id=session_id,
-            # Passed only when verified, so every other sender's call is the
-            # call it always was.
-            **({"code_fixed_recipients": True} if code_fixed else {}),
-        )
+        with send_anchor.dispatch_scope(anchor, lane):
+            block = enforce.evaluate_tool_call(
+                _SEND_TOOL_NAME,
+                payload,
+                customer_slug,
+                session_id=session_id,
+                # Passed only when verified, so every other sender's call is the
+                # call it always was.
+                **({"code_fixed_recipients": True} if code_fixed else {}),
+            )
     except Exception as exc:  # noqa: BLE001 (an indeterminate gate must not send)
         logger.exception("hermes-smd-trust: out-of-turn send gate raised; NOT dispatching")
         return DispatchResult(
@@ -1251,8 +1300,12 @@ def _dispatch_internal_message(
     for outbound_check in (outbound.check_outbound_draft, outbound.check_outbound_send):
         try:
             # A withheld notice raised by this scan inherits the capability only
-            # when it was verified above (see outbound.code_fixed_scope).
-            with outbound.code_fixed_scope(code_fixed_recipients if code_fixed else None):
+            # when it was verified above (see outbound.code_fixed_scope), and
+            # this send's own anchor and lane (send_anchor.dispatch_scope).
+            with (
+                outbound.code_fixed_scope(code_fixed_recipients if code_fixed else None),
+                send_anchor.dispatch_scope(anchor, lane),
+            ):
                 scan_block = outbound_check(
                     tool_name=_SEND_TOOL_NAME, args=payload, session_id=gate_session
                 )
@@ -1357,6 +1410,7 @@ def _dispatch_internal_message(
                 session_id=send_session_id,
                 matter_ref=send_matter_ref,
                 audit_extra=send_audit_extra,
+                **send_anchor.envelope_fields(anchor, lane),
                 **attachment_kwargs,
             )
         else:
@@ -1365,6 +1419,7 @@ def _dispatch_internal_message(
                 session_id=send_session_id,
                 matter_ref=send_matter_ref,
                 audit_extra=send_audit_extra,
+                **send_anchor.envelope_fields(anchor, lane),
                 **attachment_kwargs,
             )
     except outbound_send.AttachmentSendError as exc:

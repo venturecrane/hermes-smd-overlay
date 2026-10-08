@@ -111,6 +111,8 @@ def _dispatch(**kwargs) -> send_dispatch.DispatchResult:
     kwargs.setdefault("subject", "s")
     kwargs.setdefault("text", "Needs you:\n1. A question?")
     kwargs.setdefault("session_id", SESSION)
+    kwargs.setdefault("anchor", None)
+    kwargs.setdefault("lane", "escalation")
     return send_dispatch.dispatch(**kwargs)
 
 

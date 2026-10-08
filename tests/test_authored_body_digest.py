@@ -98,18 +98,20 @@ class _FakeGraphBroker:
     def __init__(self) -> None:
         self.reply_calls: list[tuple[str, str, str]] = []
 
-    def send_reply(self, message_id, comment, *, html="", session_id="", matter_ref=None):
+    def send_reply(
+        self, message_id, comment, *, html="", session_id="", matter_ref=None, anchor=None
+    ):
         self.reply_calls.append((message_id, comment, html))
         return ""
 
 
 @pytest.fixture(autouse=True)
 def _clear_origin():
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
     yield
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
 
@@ -123,6 +125,7 @@ def _record_origin(message_id="msg_in"):
             inbox_id="inbox_x",
         ),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("s1", message_id)
 
 
 def _agentmail_mod(monkeypatch, tmp_path):

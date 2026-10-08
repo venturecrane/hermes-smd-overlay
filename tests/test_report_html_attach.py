@@ -119,6 +119,8 @@ def test_out_of_band_approved_send_also_attaches(mod, monkeypatch) -> None:
         approved = True
         recipients = {"scott@smd.services"}
         approval_source = "telegram"
+        anchor = None
+        lane = None
         args = {"to": ["scott@smd.services"], "text": REPORT_TEXT}
 
     monkeypatch.setattr(mod.PENDING_SEND, "peek", lambda: _Rec())

@@ -284,23 +284,24 @@ def test_session_inbound_origin_fail_closed_on_empty_sender() -> None:
     # (neither the session index nor the address-recovery index).
     reg.record("sess", inbound.InboundOrigin("", "msg_1", inbox_id="inbox_1"))
     assert reg.get("sess") is None
-    assert reg.find_for_recipient({""}) is None
+    assert not reg._by_address and not reg._by_message
 
 
-def test_session_inbound_origin_empty_session_recoverable_by_address() -> None:
-    # The dispatch-time session_id is often empty (the gateway does not carry
-    # one at pre_gateway_dispatch). The SESSION index stays empty — get("") is
-    # None — but the ADDRESS index captures the verified origin so the relay can
-    # recover it by matching its draft's recipient. This is the demo-law
-    # 2026-06-12 fix: without it the origin was dropped and no reply was sent.
+def test_an_empty_session_origin_answers_no_turn_by_address() -> None:
+    # The dispatch-time session_id is often empty. The address-keyed recovery
+    # that once let the relay find such an origin by its draft's recipient
+    # (``find_for_recipient``) is deleted (ss-console participant fence): an
+    # origin reaches a turn only by its message id, bound from that turn's own
+    # prompt, or through the claim-once handoff.
     reg = inbound.SessionInboundOrigin()
     origin = inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1")
     reg.record("", origin)
     assert reg.get("") is None
-    recovered = reg.find_for_recipient({"jane@example.com"})
-    assert recovered is not None
-    assert recovered.message_id == "msg_1"
-    assert recovered.inbox_id == "inbox_1"
+    assert reg.bound_this_turn("") is None
+    assert not hasattr(reg, "find_for_recipient")
+    assert reg.bind("agent-1", "msg_1") is True
+    reg.note_turn_prompt("agent-1", "msg_1")
+    assert reg.bound_this_turn("agent-1") == origin
 
 
 def test_claim_unbound_returns_single_fresh_origin_exactly_once() -> None:
@@ -338,26 +339,6 @@ def test_session_keyed_record_does_not_queue_unbound() -> None:
     reg = inbound.SessionInboundOrigin()
     reg.record("sess", inbound.InboundOrigin("jane@example.com", "msg_1"))
     assert reg.claim_unbound() is None
-
-
-def test_find_for_recipient_only_matches_verified_senders() -> None:
-    # Injection-safety: an address that never emailed in is not in the index,
-    # so a draft addressed to it recovers nothing (the relay then fails closed).
-    reg = inbound.SessionInboundOrigin()
-    reg.record("s1", inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1"))
-    assert reg.find_for_recipient({"attacker@evil.test"}) is None
-    assert reg.find_for_recipient(set()) is None
-
-
-def test_find_for_recipient_returns_most_recent_for_address() -> None:
-    # A sender who emails twice: the recovery threads the reply to their LATEST
-    # inbound message (most-recent wins on the address index).
-    reg = inbound.SessionInboundOrigin()
-    reg.record("s1", inbound.InboundOrigin("jane@example.com", "msg_1", inbox_id="inbox_1"))
-    reg.record("s2", inbound.InboundOrigin("jane@example.com", "msg_2", inbox_id="inbox_1"))
-    got = reg.find_for_recipient({"jane@example.com"})
-    assert got is not None
-    assert got.message_id == "msg_2"
 
 
 def test_session_inbound_origin_unknown_session_is_none() -> None:
@@ -841,8 +822,8 @@ def test_router_routes_via_event_raw_message_no_headers(tmp_path, monkeypatch) -
     # Routed — a rewrite directive is returned (no headers ⇒ trust upstream verify).
     assert isinstance(result, dict)
     assert result.get("skill") == "triage_inbox"
-    # Origin recorded and recoverable by the draft recipient (the relay's path).
-    rec = inbound.SESSION_INBOUND_ORIGIN.find_for_recipient({"greg@whitfield.example"})
+    # Origin recorded under its message id (what the turn's prompt binds by).
+    rec = inbound.SESSION_INBOUND_ORIGIN._by_message.get("msg_real")
     assert rec is not None
     assert rec.message_id == "msg_real"
     assert rec.inbox_id == "inbox_abc"
@@ -994,9 +975,8 @@ def test_bind_disambiguates_concurrent_inbound_from_one_sender() -> None:
     reg.record("", _origin("greg@x.test", "m1"))
     reg.record("", _origin("greg@x.test", "m2"))
 
-    # The old path: both turns would resolve to m2 (most-recent-wins).
-    assert reg.find_for_recipient(["greg@x.test"]).message_id == "m2"
-    # ...and claim_unbound refuses outright with two pending, so there was no
+    # The address-keyed path that collapsed both to m2 is deleted; and
+    # claim_unbound refuses outright with two pending, so there was no
     # deterministic answer available at all.
     assert reg.claim_unbound() is None
 

@@ -44,7 +44,9 @@ def test_reply_cannot_name_its_recipient():
     the vendor body, which ``test_audit_joins_ride_beside_the_payload`` proves.
     """
     params = set(inspect.signature(agentmail_broker.send_reply).parameters)
-    assert params == {"message_id", "text", "html", "session_id", "matter_ref"}
+    # ``anchor`` (participant fence) names the email the reply ANSWERS, never a
+    # recipient: the broker reads that email's sender itself.
+    assert params == {"message_id", "text", "html", "session_id", "matter_ref", "anchor"}
     assert not params & {"to", "cc", "bcc", "recipient", "recipients", "deliver_to"}
 
 
@@ -55,7 +57,7 @@ def test_transmit_is_unavailable_without_a_broker_socket(monkeypatch):
     with pytest.raises(agentmail_broker.AgentMailBrokerUnavailable):
         agentmail_broker.send_message({"to": ["a@b.example"], "text": "x"})
     with pytest.raises(agentmail_broker.AgentMailBrokerUnavailable):
-        agentmail_broker.send_reply("m1", text="x")
+        agentmail_broker.send_reply("m1", text="x", anchor=None)
 
 
 def test_send_forwards_the_payload_and_returns_the_id(monkeypatch):
@@ -82,10 +84,13 @@ def test_reply_sends_only_the_body_parts_it_was_given(monkeypatch):
 
     monkeypatch.setenv(agentmail_broker.SOCKET_ENV, "/run/broker.sock")
     monkeypatch.setattr(agentmail_broker, "request", _request)
-    assert agentmail_broker.send_reply("m1", text="hello") == "msg_2"
+    anchor = {"kind": "agentmail_message", "message_id": "m1"}
+    assert agentmail_broker.send_reply("m1", text="hello", anchor=anchor) == "msg_2"
     assert captured["action"] == "agentmail_reply"
     # No empty html key: an empty body part must not look like an authored one.
     assert captured["payload"] == {"message_id": "m1", "text": "hello"}
+    # The anchor rides BESIDE the payload, never inside it.
+    assert captured["anchor"] == anchor
 
 
 def test_a_socket_failure_is_not_a_refusal(monkeypatch):

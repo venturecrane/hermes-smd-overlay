@@ -203,12 +203,12 @@ class _FakeGraphBroker:
 
 @pytest.fixture(autouse=True)
 def _clean_registers():
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
     SESSION_TAINT._tainted.clear()
     yield
-    inbound.SESSION_INBOUND_ORIGIN._origins.clear()
+    inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     inbound.SESSION_INBOUND_ORIGIN._by_address.clear()
     inbound.SESSION_INBOUND_ORIGIN._by_message.clear()
     SESSION_TAINT._tainted.clear()
@@ -245,6 +245,7 @@ def _inbound(sender: str = DEVICE, message_id: str = "graph-mid-1", session: str
             sender_address=sender, message_id=message_id, inbox_id="op@x.example"
         ),
     )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session, message_id)
 
 
 def _draft(mod, to, session: str = "s1", call: str = "c1") -> None:
@@ -522,8 +523,8 @@ def test_the_broker_client_carries_to_only_when_asked(monkeypatch) -> None:
     monkeypatch.setattr(
         msgraph_broker, "_call", lambda verb, payload, **kw: payloads.append(payload) or {}
     )
-    msgraph_broker.send_reply("mid", "hello", to=PERSON)
-    msgraph_broker.send_reply("mid", "hello")
+    msgraph_broker.send_reply("mid", "hello", to=PERSON, anchor=None)
+    msgraph_broker.send_reply("mid", "hello", anchor=None)
     assert payloads[0]["to"] == PERSON
     assert "to" not in payloads[1]
 
