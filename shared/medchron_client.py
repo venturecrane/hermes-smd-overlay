@@ -95,6 +95,11 @@ class MedchronBrokerClient:
         """One job's state, stage and counts (never matter facts)."""
         return self._request({"action": "litigation_job_status", "job_id": job_id})
 
+    # -- the negotiation watch (ss-console operator/workspace_broker/negotiation_verbs.py) --
+    def negotiation_status(self, job_id: str) -> dict[str, Any]:
+        """A notice's composed message and subject, or a job's state and counts."""
+        return self._request({"action": "negotiation_job_status", "job_id": job_id})
+
     def list_all(self) -> list[dict[str, Any]]:
         return list(self._request({"action": "medchron_job_list"}).get("jobs") or [])
 

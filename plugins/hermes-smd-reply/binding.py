@@ -246,20 +246,21 @@ def record_from_result(
             return _refused(
                 f"this wake is for {_label(wake_kind)} {source[1]}; it cannot answer another job"
             )
-    # A new message is the scheduled litigation run's ONE channel, and that wake
-    # has no other: the broker's mode must agree with the wake's own trigger.
-    # (Only a litigation wake is ever marked scheduled, and the checks above
+    # A new message is a scheduled run's ONE channel (a litigation list, or a
+    # negotiation notice: one per new offer), and that wake has no other: the
+    # broker's mode must agree with the wake's own trigger. (Only a litigation
+    # or negotiation wake is ever marked scheduled, and the checks above
     # already pinned the binding to that wake's own kind and job.)
     scheduled = source[0] == "handoff" and TURN_SOURCES.scheduled(session_id)
     if mode == MODE_NEW_MESSAGE:
         if not scheduled:
             return _refused(
-                "only a scheduled litigation job's own wake may bind a new message; nothing was bound"
+                "only a scheduled run's own wake may bind a new message; nothing was bound"
             )
         graph_id = f"{_NEW_MESSAGE_KEY}{source[1]}"
     elif scheduled:
         return _refused(
-            f"this is litigation job {source[1]}'s scheduled wake: no email asked for this run, "
+            f"this is {_label(wake_kind)} {source[1]}'s scheduled wake: no email asked for this run, "
             "so it answers no email; nothing was bound"
         )
     if held_pending is not None and held_pending(graph_id):

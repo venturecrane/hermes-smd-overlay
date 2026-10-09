@@ -984,6 +984,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # inbound, not tool arguments. Status returns states and counts only.
     "litigation_job_submit": ActionClass.INTERNAL_WRITE,
     "litigation_job_status": ActionClass.READ,
+    # The negotiation watch (hermes-smd-medchron/negotiation.py, ss-console
+    # negotiation_verbs.py). Scheduled only: no submit tool exists (the cron's
+    # pre_run submits to the broker directly). Status returns a notice's
+    # broker-held message (composed in code on the runner) or a job's counts.
+    "negotiation_job_status": ActionClass.READ,
 }
 
 

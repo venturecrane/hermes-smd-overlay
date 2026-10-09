@@ -140,6 +140,8 @@ def test_the_three_tools_register_function_shaped_and_require_the_socket():
         # The litigation status job's two (litigation.py).
         "litigation_job_submit",
         "litigation_job_status",
+        # The negotiation watch's one (negotiation.py): scheduled only, no submit.
+        "negotiation_job_status",
     }
     for name, t in tools.items():
         assert t["requires_env"] == ["SMD_WORKSPACE_BROKER_SOCKET"], name

@@ -851,7 +851,7 @@ def test_a_new_message_binding_is_refused_in_a_request_wake(lane) -> None:
     mod, _d1, _broker, _ = lane
     _litigation_wake(mod, trigger="request")
     out = json.loads(mod.binding.record_from_result(WAKE, _new_message_verdict()))
-    assert out["bound"] is False and "scheduled litigation job" in out["reason"]
+    assert out["bound"] is False and "scheduled run's own wake" in out["reason"]
     assert mod.binding.SESSION_BINDINGS.get(WAKE) is None
 
 
@@ -924,3 +924,68 @@ def test_the_scheduled_trigger_is_litigation_only(lane) -> None:
         user_message=f"Run the DELIVER mode for drafting job {JOB}.\nTrigger: scheduled.",
     )
     assert mod.binding.TURN_SOURCES.scheduled(WAKE) is False
+
+
+# -- the negotiation watch (ss-console negotiation_lane.py). Every wake is a
+# scheduled run's: one per new offer (the id is the broker's notice), and its
+# ONE channel is the broker's new_message binding.
+
+
+def _negotiation_wake(mod, session: str = WAKE, job: str = JOB) -> None:
+    mod.on_pre_llm_call(
+        session_id=session,
+        sender_id="webhook:handoff",
+        user_message=(
+            f"Run the negotiation-watch skill's DELIVER mode for negotiation job {job}.\n"
+            "Kind: negotiation.\n"
+            "Trigger: scheduled.\n"
+            "Outcome: notice."
+        ),
+    )
+
+
+def test_a_negotiation_notice_wake_sends_one_new_message(lane, monkeypatch) -> None:
+    """FALSIFIER: drop "negotiation" from the wake regex or from the scheduled
+    kinds and the notice can never bind its one email."""
+    mod, d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _negotiation_wake(mod)
+    out = _bind(mod, {"job_id": JOB})
+    assert out["bound"] is True and out["mode"] == "new_message"
+    assert broker.binds == [{"kind": "negotiation_job", "job_id": JOB}]
+    _draft(mod, [ADMIN], body="New offer on matter 200123.")
+    assert broker.bound_sends == [
+        {"binding": {"kind": "negotiation_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    assert len([m for a, m in d1.events() if a == "REPLY_SENT"]) == 1
+
+
+def test_two_notices_each_send_once(lane, monkeypatch) -> None:
+    mod, _d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _negotiation_wake(mod, session="offer-1", job=JOB)
+    _negotiation_wake(mod, session="offer-2", job=OTHER_JOB)
+    assert _bind(mod, {"job_id": JOB}, session="offer-1")["bound"] is True
+    _draft(mod, [ADMIN], session="offer-1", call="c1")
+    _draft(mod, [ADMIN], session="offer-1", call="c1b")
+    assert _bind(mod, {"job_id": OTHER_JOB}, session="offer-2")["bound"] is True
+    _draft(mod, [ADMIN], session="offer-2", call="c2")
+    assert len(broker.bound_sends) == 2
+
+
+@pytest.mark.parametrize("tool", SEND_TOOLS)
+def test_a_negotiation_wake_may_call_no_send_tool(lane, tool) -> None:
+    mod, _d1, _broker, _ = lane
+    _negotiation_wake(mod)
+    verdict = mod.on_pre_tool_call(
+        tool_name=tool, args={"to": [ADMIN], "subject": SUBJECT}, session_id=WAKE
+    )
+    assert verdict is not None and verdict["action"] == "block"
+    assert f"negotiation job {JOB}'s completion wake" in verdict["message"]
+
+
+def test_a_negotiation_wake_answers_no_email(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _negotiation_wake(mod)
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("negotiation_job")))
+    assert out["bound"] is False and "scheduled wake" in out["reason"]

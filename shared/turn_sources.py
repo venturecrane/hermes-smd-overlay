@@ -9,7 +9,9 @@ importable, ``shared`` is; nothing about the record changed in the move.
 A job runner's wake names its job in its first line: "... for demand job
 <ULID>." (demand-letter-drafter), "... for drafting job <ULID>." (document-
 drafter), "... for chronology job <ULID>." (medical-chronology-maintainer) or
-"... for litigation job <ULID>." (the litigation-status skill). The earliest
+"... for litigation job <ULID>." (the litigation-status skill) or "... for
+negotiation job <ULID>." (the negotiation-watch skill; the id is a notice's,
+one wake per new offer, or a failed job's). The earliest
 mention decides the kind. It is recorded at ``pre_llm_call`` from the gateway's
 sender id (``webhook:handoff``), never from anything the model writes.
 """
@@ -26,7 +28,9 @@ from shared.cron_attribution import parse_cron_session
 #: The sender id the gateway gives a ``/webhooks/handoff`` turn (the route, as
 #: ``webhook:agentmail`` is for mail): a job's completion wake.
 HANDOFF_SENDER = "webhook:handoff"
-WAKE_JOB = re.compile(r"\b(demand|drafting|chronology|litigation) job ([0-9A-HJKMNP-TV-Z]{26})\b")
+WAKE_JOB = re.compile(
+    r"\b(demand|drafting|chronology|litigation|negotiation) job ([0-9A-HJKMNP-TV-Z]{26})\b"
+)
 #: The wake word -> the broker's job kind (ss-console reply_binding.KINDS, and
 #: the participant fence's job anchor kinds).
 JOB_KIND = {
@@ -34,11 +38,15 @@ JOB_KIND = {
     "drafting": "drafting_job",
     "chronology": "medchron_job",
     "litigation": "litigation_job",
+    "negotiation": "negotiation_job",
 }
 JOB_KINDS = frozenset(JOB_KIND.values())
-#: A litigation wake's trigger line (ss-console litigation_lane.py,
-#: code-authored): "Trigger: scheduled." Read only from a wake the gateway
-#: delivered on the handoff route, like the job id itself.
+#: The kinds whose wake may be a SCHEDULED run's (no request email).
+SCHEDULED_KINDS = frozenset({"litigation_job", "negotiation_job"})
+#: A litigation or negotiation wake's trigger line (ss-console
+#: litigation_lane.py / negotiation_lane.py, code-authored): "Trigger:
+#: scheduled." Read only from a wake the gateway delivered on the handoff
+#: route, like the job id itself. A negotiation wake is always scheduled.
 WAKE_TRIGGER = re.compile(r"^Trigger: (request|scheduled)\.?\s*$", re.MULTILINE)
 
 
@@ -61,7 +69,7 @@ class TurnSources:
         text = user_message if isinstance(user_message, str) else ""
         found = WAKE_JOB.search(text)
         kind = JOB_KIND[found.group(1)] if found else ""
-        trigger = WAKE_TRIGGER.search(text) if kind == "litigation_job" else None
+        trigger = WAKE_TRIGGER.search(text) if kind in SCHEDULED_KINDS else None
         scheduled = bool(trigger and trigger.group(1) == "scheduled")
         with self._lock:
             if session_id in self._handoff:
@@ -119,6 +127,7 @@ __all__ = [
     "HANDOFF_SENDER",
     "JOB_KIND",
     "JOB_KINDS",
+    "SCHEDULED_KINDS",
     "TURN_SOURCES",
     "WAKE_JOB",
     "WAKE_TRIGGER",
