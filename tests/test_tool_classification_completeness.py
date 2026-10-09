@@ -231,6 +231,8 @@ PINNED_CONNECTOR_SURFACES: dict[str, frozenset[str]] = {
             "mcp_smokeball_render_sr1",
             "mcp_smokeball_render_sr19",
             "mcp_smokeball_render_funding_case_eval",
+            "mcp_smokeball_get_matter_layouts",
+            "mcp_smokeball_add_negotiation_rows",
             "mcp_smokeball_render_docx_template",
             "mcp_smokeball_render_docx_draft",
             "mcp_smokeball_add_workbook",

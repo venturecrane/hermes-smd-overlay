@@ -500,6 +500,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_smokeball_auth_status": ActionClass.READ,
     "mcp_smokeball_list_matters": ActionClass.READ,
     "mcp_smokeball_get_matter": ActionClass.READ,
+    # Every layout item on a matter (the custom tabs: negotiation, insurance,
+    # case details), as a section index or one section's fields, sensitive
+    # identifiers masked (ss-console layout_tools.py, 2026-10-09).
+    "mcp_smokeball_get_matter_layouts": ActionClass.READ,
     "mcp_smokeball_list_matter_types": ActionClass.READ,
     "mcp_smokeball_get_stage_sets": ActionClass.READ,
     "mcp_smokeball_get_stage_to_matter_mappings": ActionClass.READ,
@@ -629,6 +633,11 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # matter for the firm to finish (ss-console funding_case_eval.py,
     # 2026-10-06). Internal write: never signed, sent or submitted.
     "mcp_smokeball_render_funding_case_eval": ActionClass.INTERNAL_WRITE,
+    # Demand and offer rows on a matter's Negotiation Details tab, written
+    # only into EMPTY fields and confirmed by read-back (ss-console
+    # layout_tools.py, 2026-10-09). Internal write: the firm's own record,
+    # it never sends, signs or settles anything.
+    "mcp_smokeball_add_negotiation_rows": ActionClass.INTERNAL_WRITE,
     # The .docx producer (ss#2222, Captain directive 2026-08-10): renders a
     # content-gated markdown skeleton server-side and files it into the matter
     # via the same two-stage upload as add_file. Internal write: it reaches
