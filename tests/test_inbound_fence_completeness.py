@@ -307,6 +307,9 @@ SMOKEBALL_FIRM_RECORD_READS: frozenset[str] = frozenset(
         # Matter, contact, staff and role records the firm keeps.
         "mcp_smokeball_list_matters",
         "mcp_smokeball_get_matter",
+        # The matter's custom tabs (negotiation, insurance, case details):
+        # field values staff entered, not document text from outside the firm.
+        "mcp_smokeball_get_matter_layouts",
         "mcp_smokeball_list_matter_types",
         "mcp_smokeball_get_stage_sets",
         "mcp_smokeball_get_stage_to_matter_mappings",
