@@ -111,6 +111,14 @@ def card_key(vendor_message_id: str, kind: str) -> str:
     return hashlib.sha256(vendor_message_id.encode("utf-8")).hexdigest() + ":" + kind
 
 
+def job_done_key(vendor_message_id: str, state: str, attempt: int) -> str:
+    """One ``job_done`` card per job ENDING. A resumed job ends again (a new
+    attempt, or a new state), and that ending is its own card; keyed on the
+    request hash so the console still groups it under its request. Not keyed on
+    ``updated_at``: a same-state note rewrites it and would card one ending twice."""
+    return card_key(vendor_message_id, "job_done") + f":{state}-{int(attempt)}"
+
+
 # ---------------------------------------------------------------------------
 # Card state (gate-owned)
 # ---------------------------------------------------------------------------
@@ -240,21 +248,42 @@ def _session_calls(conn: sqlite3.Connection, sessions: list[str], horizon: str) 
 #: One fixed statement per lane (no table name is ever composed into SQL).
 _JOB_SQL = {
     "demand": (
-        "SELECT request_ref, state, reason, matter_number, updated_at FROM demand_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, attempt FROM demand_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     "drafting": (
-        "SELECT request_ref, state, reason, matter_number, updated_at FROM drafting_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, attempt FROM drafting_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     "medchron": (
-        "SELECT request_ref, state, reason, matter_number, updated_at FROM medchron_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, attempt FROM medchron_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     # A litigation status job spans the firm's matters and files to the firm's
     # library matter, so it names no matter on its card.
     "litigation": (
-        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at FROM litigation_jobs"
+        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at, attempt FROM litigation_jobs"
+        " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
+    ),
+}
+#: The same reads for a ledger older than the ``attempt`` column: attempt 1.
+_JOB_SQL_NO_ATTEMPT = {
+    "demand": (
+        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt FROM demand_jobs"
+        " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
+    ),
+    "drafting": (
+        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt FROM drafting_jobs"
+        " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
+    ),
+    "medchron": (
+        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt FROM medchron_jobs"
+        " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
+    ),
+    # A litigation status job spans the firm's matters and files to the firm's
+    # library matter, so it names no matter on its card.
+    "litigation": (
+        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at, 1 AS attempt FROM litigation_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
 }
@@ -269,12 +298,12 @@ def _job_rows(conn: sqlite3.Connection, refs: list[str], horizon: str) -> dict[s
         return out
     for lane in JOB_LANES:
         try:
-            rows = conn.execute(_JOB_SQL[lane], (horizon,)).fetchall()
+            rows = _lane_rows(conn, lane, horizon)
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc):
                 continue
             raise
-        for ref, state, reason, matter, updated_at in rows:
+        for ref, state, reason, matter, updated_at, attempt in rows:
             if ref not in wanted:
                 continue
             out[str(ref)] = {
@@ -283,8 +312,20 @@ def _job_rows(conn: sqlite3.Connection, refs: list[str], horizon: str) -> dict[s
                 "reason": reason,
                 "matter": matter,
                 "updated_at": updated_at,
+                "attempt": attempt if isinstance(attempt, int) and attempt > 0 else 1,
             }
     return out
+
+
+def _lane_rows(conn: sqlite3.Connection, lane: str, horizon: str) -> list:
+    """One lane's job rows with their ``attempt``. A ledger older than the
+    attempt column (or a lane that never resumes) reads as attempt 1."""
+    try:
+        return conn.execute(_JOB_SQL[lane], (horizon,)).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such column" not in str(exc):
+            raise
+        return conn.execute(_JOB_SQL_NO_ATTEMPT[lane], (horizon,)).fetchall()
 
 
 def _tool_token(value: object) -> str | None:
@@ -320,11 +361,14 @@ def decide(
     audit_conn: sqlite3.Connection,
     done: set[str],
     now: datetime,
+    done_at: dict[str, float] | None = None,
 ) -> list[dict]:
     """The cards due now, oldest event first, as wire-shaped dicts.
 
     ``requests`` are :func:`shared.request_index.read_requests` rows; ``done``
-    the card keys already landed. Pure apart from the read-only queries on
+    the card keys already landed; ``done_at`` (key -> when it landed) lets a
+    legacy per-request ``job_done`` key cover the ending it was sent for, so a
+    rollout re-sends nothing. Pure apart from the read-only queries on
     ``audit_conn``. Raises on a ledger it cannot read; the leg then sends
     nothing this tick rather than deciding "no reply" from a failed read.
     """
@@ -403,15 +447,14 @@ def decide(
                 }
             )
 
-        if (
-            job is not None
-            and job["state"] in JOB_TERMINAL
-            and card_key(vid, "job_done") not in done
-        ):
+        if job is not None and job["state"] in JOB_TERMINAL:
             ended = _parse_ts(job["updated_at"]) or now
+            key = job_done_key(vid, job["state"], job["attempt"])
+            if key in done or _legacy_covers(vid, ended, done, done_at):
+                continue
             cards.append(
                 {
-                    "card_key": card_key(vid, "job_done"),
+                    "card_key": key,
                     "kind": "job_done",
                     **base,
                     "event_at": _iso(ended),
@@ -431,6 +474,21 @@ def decide(
             )
     cards.sort(key=lambda c: (c["event_at"], c["card_key"]))
     return cards
+
+
+def _legacy_covers(
+    vid: str, ended: datetime, done: set[str], done_at: dict[str, float] | None
+) -> bool:
+    """A card sent under the old per-request key covers the ending that
+    happened before it landed; a later ending (a resume) is not covered.
+    Without a landing time, the legacy key covers everything (never re-send)."""
+    legacy = card_key(vid, "job_done")
+    if legacy not in done:
+        return False
+    landed = (done_at or {}).get(legacy)
+    if landed is None:
+        return True
+    return ended.timestamp() <= float(landed)
 
 
 def _replied_card(req, vid, base, sent, calls_by_session, now, heartbeat) -> dict | None:
@@ -515,11 +573,14 @@ def send_due_cards(
             return 0
         store = store or CardStore()
         state = store.load()
-        done = {k for k, (_first, _n, done_at) in state.items() if done_at is not None}
+        landed_at = {
+            k: done_at for k, (_first, _n, done_at) in state.items() if done_at is not None
+        }
+        done = set(landed_at)
         conn = sqlite3.connect(f"file:{audit_db_path}?mode=ro", uri=True, timeout=5)
         try:
             conn.execute("PRAGMA busy_timeout=2000")
-            cards = decide(requests, conn, done, now)
+            cards = decide(requests, conn, done, now, done_at=landed_at)
         finally:
             conn.close()
         started = monotonic_fn()
@@ -578,5 +639,6 @@ __all__ = [
     "card_url",
     "cards_db_path",
     "decide",
+    "job_done_key",
     "send_due_cards",
 ]
