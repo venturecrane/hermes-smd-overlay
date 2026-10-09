@@ -166,6 +166,9 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         # ``get_expenses`` (which seeds), never from the vendor's PDF.
         "mcp_smokeball_list_matters",
         "mcp_smokeball_get_matter",
+        # The matter's custom tabs (negotiation figures, insurance, case
+        # details) exactly as staff entered them in the firm's system.
+        "mcp_smokeball_get_matter_layouts",
         "mcp_smokeball_list_matter_types",
         "mcp_smokeball_get_stage_sets",
         "mcp_smokeball_get_stage_to_matter_mappings",
