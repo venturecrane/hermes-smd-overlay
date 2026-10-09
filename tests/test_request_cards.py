@@ -734,3 +734,123 @@ def test_tick_runs_the_card_leg_after_the_beat_and_survives_it() -> None:
     em._tick()
     em._tick()
     assert order == ["beat", "ping", "cards", "beat", "ping", "cards"]
+
+
+# ---------------------------------------------------------------------------
+# job_done is one card per job ENDING (a resumed job reports how it ended)
+# ---------------------------------------------------------------------------
+
+
+def _attempt_column(ledger: _Ledger) -> None:
+    ledger.conn.execute("ALTER TABLE demand_jobs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1")
+    ledger.conn.commit()
+
+
+def _end(ledger: _Ledger, state: str, minutes_ago: float, attempt: int) -> None:
+    ledger.conn.execute(
+        "UPDATE demand_jobs SET state=?, updated_at=?, attempt=?",
+        (state, _ts(minutes_ago), attempt),
+    )
+    ledger.conn.commit()
+
+
+def test_a_resumed_job_cards_its_new_ending(ledger) -> None:
+    """FALSIFIER: key job_done on the request alone (the old card_key(vid,
+    "job_done")) and the resumed job's delivered ending is never carded: its
+    first ending's key is already done."""
+    _attempt_column(ledger)
+    ledger.job("demand_jobs", "failed", 30)
+    first = _decide(ledger, [_request(60)])
+    assert _kinds(first) == ["job_done"] and first[0]["job"]["state"] == "failed"
+    _end(ledger, "delivered", 2, attempt=2)
+    second = _decide(ledger, [_request(60)], done={first[0]["card_key"]})
+    assert _kinds(second) == ["job_done"]
+    assert second[0]["job"]["state"] == "delivered"
+    assert second[0]["card_key"] == rc.job_done_key(VID, "delivered", 2)
+    assert second[0]["card_key"] != first[0]["card_key"]
+    # Same request hash, so the console still groups both endings under one request.
+    assert second[0]["card_key"].split(":")[0] == first[0]["card_key"].split(":")[0]
+
+
+def test_a_same_state_note_does_not_card_one_ending_twice(ledger) -> None:
+    """FALSIFIER: key the ending on updated_at and a same-state note (which
+    rewrites updated_at) re-sends the delivered card."""
+    _attempt_column(ledger)
+    ledger.job("demand_jobs", "delivered", 30)
+    first = _decide(ledger, [_request(60)])
+    ledger.conn.execute("UPDATE demand_jobs SET updated_at=?", (_ts(1),))
+    ledger.conn.commit()
+    assert _decide(ledger, [_request(60)], done={first[0]["card_key"]}) == []
+
+
+def test_a_job_that_fails_again_after_a_resume_cards_again(ledger) -> None:
+    _attempt_column(ledger)
+    ledger.job("demand_jobs", "failed", 30)
+    first = _decide(ledger, [_request(60)])
+    _end(ledger, "failed", 5, attempt=2)
+    again = _decide(ledger, [_request(60)], done={first[0]["card_key"]})
+    assert _kinds(again) == ["job_done"]
+    assert again[0]["card_key"] == rc.job_done_key(VID, "failed", 2)
+
+
+def _decide_at(ledger: _Ledger, done: set[str], done_at: dict[str, float]) -> list[dict]:
+    conn = ledger.ro()
+    try:
+        return rc.decide([_request(60)], conn, done, NOW, done_at=done_at)
+    finally:
+        conn.close()
+
+
+def test_a_legacy_card_covers_the_ending_it_was_sent_for(ledger) -> None:
+    """Rollout: a card that landed under the old per-request key is never re-sent."""
+    _attempt_column(ledger)
+    ledger.job("demand_jobs", "failed", 30)
+    legacy = rc.card_key(VID, "job_done")
+    landed = (NOW - timedelta(minutes=28)).timestamp()  # landed after the failure at -30
+    assert _decide_at(ledger, {legacy}, {legacy: landed}) == []
+
+
+def test_a_legacy_card_does_not_cover_a_later_resumed_ending(ledger) -> None:
+    """FALSIFIER: treat any legacy job_done key as covering every ending and
+    the resume that ended after it landed is silently dropped (the defect)."""
+    _attempt_column(ledger)
+    ledger.job("demand_jobs", "failed", 30)
+    legacy = rc.card_key(VID, "job_done")
+    landed = (NOW - timedelta(minutes=28)).timestamp()
+    _end(ledger, "delivered", 2, attempt=2)
+    cards = _decide_at(ledger, {legacy}, {legacy: landed})
+    assert _kinds(cards) == ["job_done"] and cards[0]["job"]["state"] == "delivered"
+
+
+def test_a_legacy_card_without_a_landing_time_covers_everything(ledger) -> None:
+    _attempt_column(ledger)
+    ledger.job("demand_jobs", "delivered", 2)
+    assert _decide(ledger, [_request(60)], done={rc.card_key(VID, "job_done")}) == []
+
+
+def test_a_ledger_without_the_attempt_column_reads_as_attempt_one(ledger) -> None:
+    ledger.job("medchron_jobs", "delivered", 3)
+    job_cards = [c for c in _decide(ledger, [_request(60)]) if c["kind"] == "job_done"]
+    assert len(job_cards) == 1
+    assert job_cards[0]["card_key"] == rc.job_done_key(VID, "delivered", 1)
+
+
+def test_the_leg_sends_a_resumed_ending_once_after_a_legacy_card(ledger) -> None:
+    """End to end through send_due_cards and the CardStore: the legacy row's
+    landing time is what lets the resumed ending through, exactly once."""
+    _attempt_column(ledger)
+    _index(1)
+    ledger.job("demand_jobs", "failed", 30, ref="m00")
+    store = rc.CardStore()
+    store.mark_done(rc.card_key("m00", "job_done"), (NOW - timedelta(minutes=28)).timestamp())
+    poster = _Poster()
+    _leg(ledger, poster, store=store)
+    assert [c[2]["kind"] for c in poster.calls if c[2]["kind"] == "job_done"] == []
+    _end(ledger, "delivered", 2, attempt=2)
+    poster = _Poster()
+    _leg(ledger, poster, store=store)
+    done_cards = [c[2] for c in poster.calls if c[2]["kind"] == "job_done"]
+    assert [c["job"]["state"] for c in done_cards] == ["delivered"]
+    poster = _Poster()
+    _leg(ledger, poster, store=store)
+    assert [c for c in poster.calls if c[2]["kind"] == "job_done"] == []
