@@ -27,7 +27,7 @@ from typing import Any
 from shared.medchron_client import MedchronBrokerClient
 from shared.tool_registration import register_wrapped_tool
 
-from . import demand, drafting, litigation
+from . import demand, drafting, litigation, negotiation
 
 logger = logging.getLogger(__name__)
 
@@ -257,9 +257,9 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
 
 
 def register(ctx: Any) -> None:
-    """Register the chronology-package, demand, drafting and litigation tools. All require the
-    broker socket."""
-    tools = {**TOOLS, **demand.TOOLS, **drafting.TOOLS, **litigation.TOOLS}
+    """Register the chronology-package, demand, drafting, litigation and negotiation tools. All
+    require the broker socket."""
+    tools = {**TOOLS, **demand.TOOLS, **drafting.TOOLS, **litigation.TOOLS, **negotiation.TOOLS}
     for name, (description, schema, handler) in tools.items():
         register_wrapped_tool(
             ctx,
@@ -272,10 +272,11 @@ def register(ctx: Any) -> None:
             emoji="",
         )
     logger.info(
-        "hermes-smd-medchron registered %d chronology-package, %d demand, %d drafting and %d "
-        "litigation tools",
+        "hermes-smd-medchron registered %d chronology-package, %d demand, %d drafting, %d "
+        "litigation and %d negotiation tools",
         len(TOOLS),
         len(demand.TOOLS),
         len(drafting.TOOLS),
         len(litigation.TOOLS),
+        len(negotiation.TOOLS),
     )

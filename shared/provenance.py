@@ -169,6 +169,14 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         # The matter's custom tabs (negotiation figures, insurance, case
         # details) exactly as staff entered them in the firm's system.
         "mcp_smokeball_get_matter_layouts",
+        # A negotiation watch notice (ss-console negotiation_verbs.py): the
+        # message the runner composed IN CODE from the firm's own records, the
+        # matter number from the firm's matter list and the offer's figures as
+        # entered on that matter's Negotiation Details and read back. The turn
+        # sends it verbatim; it is the tenant's record relayed by the broker,
+        # not a sentence the Operator composed. A job's counts carry no
+        # identifier, so seeding from them certifies nothing.
+        "negotiation_job_status",
         "mcp_smokeball_list_matter_types",
         "mcp_smokeball_get_stage_sets",
         "mcp_smokeball_get_stage_to_matter_mappings",
