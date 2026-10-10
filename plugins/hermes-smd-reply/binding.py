@@ -71,8 +71,16 @@ _LABEL = {kind: f"{word} job" for word, kind in _JOB_KIND.items()}
 MODE_REPLY = "reply"
 MODE_NEW_MESSAGE = "new_message"
 #: The in-process once-only key of a new-message binding (there is no email id
-#: to key on; an empty key would collide across every scheduled run).
-_NEW_MESSAGE_KEY = "litigation-scheduled:"
+#: to key on; an empty key would collide across every scheduled run). It names
+#: the wake's own lane ("litigation-scheduled:<job>",
+#: "negotiation-scheduled:<notice>"), and it is what the REPLY_SENT audit row
+#: records as in_reply_to: a negotiation send must never read as a litigation
+#: one (2026-10-10, the first live negotiation notice did).
+_WORD_OF_KIND = {kind: word for word, kind in _JOB_KIND.items()}
+
+
+def _new_message_key(kind: str, job_id: str) -> str:
+    return f"{_WORD_OF_KIND[kind]}-scheduled:{job_id}"
 
 
 def _label(kind: str) -> str:
@@ -257,7 +265,7 @@ def record_from_result(
             return _refused(
                 "only a scheduled run's own wake may bind a new message; nothing was bound"
             )
-        graph_id = f"{_NEW_MESSAGE_KEY}{source[1]}"
+        graph_id = _new_message_key(wake_kind, source[1])
     elif scheduled:
         return _refused(
             f"this is {_label(wake_kind)} {source[1]}'s scheduled wake: no email asked for this run, "

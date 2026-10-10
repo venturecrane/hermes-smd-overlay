@@ -960,6 +960,29 @@ def test_a_negotiation_notice_wake_sends_one_new_message(lane, monkeypatch) -> N
     assert len([m for a, m in d1.events() if a == "REPLY_SENT"]) == 1
 
 
+def test_a_negotiation_send_is_audited_under_its_own_lane(lane, monkeypatch) -> None:
+    """FALSIFIER: the new-message key was the constant "litigation-scheduled:",
+    so the first live negotiation notice's REPLY_SENT read in_reply_to
+    "litigation-scheduled:<notice>" (2026-10-10)."""
+    mod, d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _negotiation_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [ADMIN], body="New offer on matter 200123.")
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == f"negotiation-scheduled:{JOB}"
+
+
+def test_a_scheduled_litigation_send_keeps_its_key(lane, monkeypatch) -> None:
+    mod, d1, broker, _ = lane
+    _new_message_broker(mod, monkeypatch, broker)
+    _litigation_wake(mod, trigger="scheduled")
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [ADMIN])
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == f"litigation-scheduled:{JOB}"
+
+
 def test_two_notices_each_send_once(lane, monkeypatch) -> None:
     mod, _d1, broker, _ = lane
     _new_message_broker(mod, monkeypatch, broker)
