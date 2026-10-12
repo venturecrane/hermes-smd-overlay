@@ -17,10 +17,13 @@ with a job id or a reason to relay as it comes back.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 from typing import Any
 
+from shared import attachment_spool, email_adapter, msgraph_attachments
 from shared.medchron_client import MedchronBrokerClient, MedchronBrokerError
 
 from .demand import STRING, _matter, _origin, _refuse, _schema
@@ -35,6 +38,65 @@ DOCUMENT_CLASSES = (
     "memo",
     "depo_outline",
 )
+
+
+#: The class whose request may carry the attorney's OWN documents: sets of
+#: discovery he drafted himself, for the job to place in the court's caption on
+#: the firm's paper (ss-console drafting/place.py).
+ATTACHMENT_CLASSES = ("discovery_set",)
+#: ss-console workspace_broker/drafting_attachments.py: the broker's socket
+#: takes one request line of at most 1 MiB, and base64 grows bytes by a third.
+MAX_ATTACHMENTS = 6
+MAX_ATTACHMENT_BYTES = 700_000
+
+
+def _request_attachments(origin: Any) -> tuple[list[dict[str, str]], str]:
+    """The request email's own Word documents, as the broker's envelope
+    carries them, or ``([], reason)`` when they exist and cannot be carried.
+
+    Read by the message id of the turn's VERIFIED origin, never an id or a
+    file the model names: the documents are the request's, exactly as the
+    words are. A Microsoft 365 seat only (A&P's transport); another seat
+    carries none and the job drafts as before."""
+    if email_adapter.email_adapter() != email_adapter.ADAPTER_MSGRAPH:
+        return [], ""
+    try:
+        found = msgraph_attachments.list_attachments(origin.message_id)
+    except msgraph_attachments.MsGraphAttachmentError as exc:
+        return [], f"the request email's attachments could not be read ({exc}); nothing was queued"
+    docs = [
+        a
+        for a in found
+        if not a.get("refused")
+        and not a.get("is_inline")
+        and str(a.get("filename") or "").lower().endswith(".docx")
+    ]
+    if len(docs) > MAX_ATTACHMENTS:
+        return [], (
+            f"the request attaches {len(docs)} Word documents and one request carries at most "
+            f"{MAX_ATTACHMENTS}; nothing was queued"
+        )
+    out, total = [], 0
+    for a in docs:
+        try:
+            receipt = msgraph_attachments.spool_attachment(origin.message_id, a["attachment_id"])
+            blob = attachment_spool.read(receipt["spool_token"], expected_sha256=receipt["sha256"])
+        except (msgraph_attachments.MsGraphAttachmentError, attachment_spool.SpoolError) as exc:
+            return [], f"an attached Word document could not be read ({exc}); nothing was queued"
+        total += len(blob)
+        if total > MAX_ATTACHMENT_BYTES:
+            return [], (
+                "the attached Word documents are too large together for one request "
+                f"(over {MAX_ATTACHMENT_BYTES:,} bytes); nothing was queued"
+            )
+        out.append(
+            {
+                "filename": receipt["filename"],
+                "sha256": hashlib.sha256(blob).hexdigest(),
+                "b64": base64.b64encode(blob).decode("ascii"),
+            }
+        )
+    return out, ""
 
 
 def drafting_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -> str:
@@ -67,6 +129,12 @@ def drafting_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) ->
         "request_text": origin.reply_text,
         "document_class": klass,
     }
+    if klass in ATTACHMENT_CLASSES:
+        attached, why = _request_attachments(origin)
+        if why:
+            return _refuse(why)
+        if attached:
+            envelope["attachments"] = attached
     try:
         resp = MedchronBrokerClient().drafting_submit(envelope)
     except MedchronBrokerError as exc:
