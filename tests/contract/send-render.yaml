@@ -64,6 +64,16 @@
 #                                   # attached (prose reply, composer-supplied
 #                                   # html) -- absence means "text is still the
 #                                   # authored bytes", not "unknown".
+#     html_body_sha256:     <hex>   # msgraph only, written by the BROKER (an
+#                                   # ops key, never caller-supplied): the
+#                                   # html_canon_v1 hash (ss-console
+#                                   # workspace_broker/html_canon.py) of the
+#                                   # html it handed Graph as the body. Graph
+#                                   # gets ONLY that part when one exists, so
+#                                   # Sent Items stores Exchange's rewrite of
+#                                   # it; the canon undoes the rewrite
+#                                   # (calibration fixture html-canon-
+#                                   # calibration.json). OMITTED on a Text body.
 #     body_variant:         full | skeleton
 #     dispatch_ref:         <uuid4 hex>  # one per dispatch entry, full and
 #                                   # skeleton alike (shared/digest_reply_ref.py).
@@ -142,6 +152,13 @@
 # message nobody can tie to one is a guess. `body_unavailable` stays a hold
 # throughout. Net invariant: no false findings before the pin lands, no
 # permanent holds after it, and no finding filed by proximity.
+# An msgraph body Graph returns as HTML is graded on its OWN stamp instead
+# (operator/bin/lib/html_channel.py): html_canon_v1(stored) against the row's
+# `html_body_sha256` -> `match`, or a FINDING when a row identified the message
+# (hold when none did). A row without that stamp keeps
+# `channel_unstamped_representation` (neither hold nor finding): before the
+# inbox's html-stamp edge because nothing can ever stamp it, after it because
+# the broker stamps sendMail bodies only (a reply's stored html has no stamp).
 #
 # NOT EVERY SEND CARRIES STAMPS, BY DESIGN. Three paths are ungraded on purpose
 # and the verifier must not expect stamps there:
@@ -237,7 +254,22 @@ skills:
       dispatched out of turn by the overlay's prerendered-dispatch hook to the
       recipient authored in the skill's settings; the model composes nothing,
       and the envelope's in_turn declares the skeleton as the only body the
-      woken turn may send. Stamps: body_sha256 pairs on EMITTED_WAKE.
+      woken turn may send. The dispatch carries the workbook (workbook.py,
+      built in the connector venv) as its one attachment, with a
+      body_without_attachment rung between the full body and the skeleton.
+      Stamps: body_sha256 entries on EMITTED_WAKE (full, skeleton, and
+      without_attachment when the workbook rides).
+  negotiation-watch:
+    render: compositional
+    note: >-
+      The cron's pre_run submits a negotiation job and wakes no turn; the job
+      enters new offers on Negotiation Details and composes, IN CODE
+      (runners/medchron/medchron/negotiation/notice.py), one message per new
+      offer, held on the broker's notice row. Each notice's completion wake
+      binds one new email (recipient and subject the broker's) and the turn
+      sends the notice's message word for word. Declared compositional because
+      the send is the woken turn's, not a pre_run dispatch, so the body-hash
+      stamps do not apply; the cross-run invariants (one recipient) do.
 
   # ---- scott seat cron rows ----
   status-report-assembler:
