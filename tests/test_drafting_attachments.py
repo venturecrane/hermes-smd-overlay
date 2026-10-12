@@ -33,10 +33,14 @@ class _Graph:
 
 
 def _graph(monkeypatch, mod, graph):
-    monkeypatch.setattr(mod.email_adapter, "email_adapter", lambda: mod.email_adapter.ADAPTER_MSGRAPH)
+    monkeypatch.setattr(
+        mod.email_adapter, "email_adapter", lambda: mod.email_adapter.ADAPTER_MSGRAPH
+    )
     monkeypatch.setattr(mod.msgraph_attachments, "list_attachments", graph.list_attachments)
     monkeypatch.setattr(mod.msgraph_attachments, "spool_attachment", graph.spool_attachment)
-    monkeypatch.setattr(mod.attachment_spool, "read", lambda token, expected_sha256="": graph.blobs[token])
+    monkeypatch.setattr(
+        mod.attachment_spool, "read", lambda token, expected_sha256="": graph.blobs[token]
+    )
 
 
 def _entry(aid, name, inline=False, refused=""):
@@ -46,7 +50,11 @@ def _entry(aid, name, inline=False, refused=""):
 def test_a_discovery_set_request_carries_its_own_word_documents(drafting, monkeypatch) -> None:  # noqa: F811
     mod, client = drafting
     graph = _Graph(
-        [_entry("set1", "set1.docx"), _entry("logo", "logo.png", inline=True), _entry("memo", "memo.pdf")],
+        [
+            _entry("set1", "set1.docx"),
+            _entry("logo", "logo.png", inline=True),
+            _entry("memo", "memo.pdf"),
+        ],
         {"set1": b"PK his set"},
     )
     _graph(monkeypatch, mod, graph)
@@ -80,7 +88,9 @@ def test_attachments_that_cannot_be_read_queue_nothing(drafting, monkeypatch) ->
 
 def test_too_many_word_documents_queue_nothing(drafting, monkeypatch) -> None:  # noqa: F811
     mod, client = drafting
-    graph = _Graph([_entry(f"s{i}", f"s{i}.docx") for i in range(7)], {f"s{i}": b"x" for i in range(7)})
+    graph = _Graph(
+        [_entry(f"s{i}", f"s{i}.docx") for i in range(7)], {f"s{i}": b"x" for i in range(7)}
+    )
     _graph(monkeypatch, mod, graph)
     _email()
     out = json.loads(mod.drafting_job_submit({**MATTER, "document_class": "discovery_set"}))
