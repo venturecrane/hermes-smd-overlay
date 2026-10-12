@@ -14,7 +14,8 @@ What this does, entirely within the customer's isolated Machine:
   2. Exchange the ``code`` for a refresh token at Smokeball's token endpoint using
      the Machine's OWN ``SMOKEBALL_CLIENT_ID/SECRET`` (already Fly secrets here).
      No shared client secret, no call to any Worker.
-  3. Write the refresh token to a hermes-owned 0600 file on the per-customer
+  3. Write the refresh token to a hermes-owned 0660 file (group smokeball-token,
+     read by the medchron runner; see write_token_file) on the per-customer
      volume, where the connector reads it (the Clio token-file pattern). The file
      is durable across restarts/deploys (it lives on the Fly volume).
 
@@ -192,14 +193,33 @@ def exchange_code(
 
 # ---- token persistence -----------------------------------------------------
 def write_token_file(refresh_token: str, *, path: str | None = None) -> None:
-    """Write the refresh token to the connector-read file: hermes-owned, 0600,
-    parent 0700. On the per-customer volume (durable across restarts/deploys)."""
+    """Write the refresh token to the connector-read file, mode 0660, on the
+    per-customer volume (durable across restarts/deploys).
+
+    Why 0660 and not 0600: the token is deliberately shared with a second uid.
+    ss-console's operator entrypoint.sh converges the dir to
+    ``hermes:smokeball-token 2770`` and this file to ``hermes:smokeball-token
+    0660`` at boot, then bind-mounts it to ``/run/smd-smokeball-token`` where
+    the medchron/drafting runner (uid ``medchron``, a member of group
+    ``smokeball-token``) reads it; boot-smoke asserts ``smokeball-token:660``.
+    A re-consent that wrote 0600 locked the runner out until the next reboot
+    (``auth_mode='authorization_code' requires a refresh_token``; seat
+    hermes-ashton-price, 2026-10-12). The group comes from the setgid parent
+    dir, which is why an existing parent is left exactly as boot made it; the
+    dir is only created (0700) when missing, e.g. a fresh volume or a test."""
     target = Path(path or os.environ.get("SMOKEBALL_REFRESH_TOKEN_FILE") or _DEFAULT_TOKEN_FILE)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Write to a temp sibling then rename — never leave a half-written token.
     tmp = target.with_suffix(".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o660)
     try:
+        # O_CREAT's mode is filtered by the process umask, which can strip the
+        # group bits; fchmod is not, so the mode lands exactly. It also covers
+        # a stale .tmp left by an earlier 0600 writer (O_CREAT does not re-mode
+        # an existing file).
+        # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        os.fchmod(fd, 0o660)
         os.write(fd, refresh_token.encode())
     finally:
         os.close(fd)
