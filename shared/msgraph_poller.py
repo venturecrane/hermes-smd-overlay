@@ -287,14 +287,22 @@ def _default_state_path() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _default_forward(*, body: bytes, signature: str, timestamp: str, request_id: str) -> int:
-    """POST a stamped webhook to the Hermes adapter loopback; return the status.
+def _post_forward(
+    *, body: bytes, signature: str, timestamp: str, request_id: str
+) -> tuple[int, bytes]:
+    """POST a stamped webhook to the Hermes adapter loopback; return (status, body).
 
     Mirrors the gate's own forward (``_drive_agent_turn`` / ``_handle_handoff``):
     the adapter's generic HMAC V2 over ``"<timestamp>.<bytes>"`` with the route
-    secret (``shared/forward_signature.py``), ``X-Request-ID`` = the Graph message
-    id (the adapter's idempotency key). Raises on a transport failure; the caller
-    is exception-safe."""
+    secret (``shared/forward_signature.py``), ``X-Request-ID`` = sha256 of the
+    Graph message id (the adapter's idempotency key). Raises on a transport
+    failure; the caller is exception-safe.
+
+    The body is surfaced because a 2xx alone does not mean the adapter took the
+    message: it answers HTTP 200 ``{"status":"duplicate"}`` when the request id is
+    in its 1h in-memory idempotency cache (hermes ``gateway/platforms/webhook.py``
+    ``_record_delivery_id``). The dead-letter replay must not read that as a
+    delivery (``shared/msgraph_replay.py``)."""
     conn = http.client.HTTPConnection(_GATEWAY_HOST, _GATEWAY_PORT, timeout=_FORWARD_TIMEOUT_S)
     try:
         conn.request(
@@ -309,10 +317,26 @@ def _default_forward(*, body: bytes, signature: str, timestamp: str, request_id:
             },
         )
         resp = conn.getresponse()
-        resp.read()
-        return resp.status
+        payload = resp.read()
+        return resp.status, payload
     finally:
         conn.close()
+
+
+def _default_forward(*, body: bytes, signature: str, timestamp: str, request_id: str) -> int:
+    """The poller's forward: :func:`_post_forward`'s status only.
+
+    The poller deliberately keeps reading an adapter ``duplicate`` 200 as
+    accepted. It forwards a message only while the message is unseen, and
+    re-forwards only after a FAILED attempt, so a duplicate on that retry means
+    the adapter recorded the id on the earlier attempt, which in the adapter's
+    code happens immediately before it dispatches the turn and answers 202. The
+    usual cause is a lost 202; holding the cursor for the cache's hour would then
+    run the same turn twice."""
+    status, _ = _post_forward(
+        body=body, signature=signature, timestamp=timestamp, request_id=request_id
+    )
+    return status
 
 
 class MsGraphPoller:
