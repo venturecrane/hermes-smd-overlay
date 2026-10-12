@@ -113,6 +113,7 @@ from . import (
     notice,
     relay,  # noqa: F401 - surface for tests
     sweeper,
+    working_drafts,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,43 @@ _YAML_PATH: Path = Path(_DEFAULT_CUSTOMER_YAML_PATH)
 # keeps it cheap. Not a rate limit — the send policy owns pacing; this owns
 # "the same email is never answered twice".
 _REPLIED: relay.RepliedOnce = relay.RepliedOnce()
+
+
+def _reply_guard_key(
+    session_id: str, bound: binding.Binding | None, origin: inbound.InboundOrigin
+) -> str:
+    """The ``_REPLIED`` key this draft is checked against.
+
+    An email-opened turn: the email's id (one email in, one reply out). A bound
+    turn: its binding in THIS session, so the guard lives exactly as long as the
+    turn it protects (binding.py: "``RepliedOnce`` is only the in-turn guard").
+    Never the bound email's id: an ack or failure reply to the request email
+    must not suppress the job's delivery, and the broker's durable claim already
+    keeps a bound reply to one per job, attempt and outcome."""
+    if bound is None:
+        return origin.message_id
+    request = "&".join(f"{k}={v}" for k, v in bound.request)
+    return f"bound:{session_id}:{request}:{bound.graph_message_id}"
+
+
+# The agent's working drafts on a Graph seat, discarded once their reply is
+# transmitted (working_drafts.py: the Drafts-folder leak, ashton-price 10-12).
+_WORKING_DRAFTS: working_drafts.WorkingDrafts = working_drafts.WorkingDrafts()
+
+
+def _discard_drafts(draft_ids: list[str]) -> None:
+    working_drafts.discard(draft_ids, msgraph_broker.discard_draft)
+
+
+def _commit_reply(reply_key: str, origin: inbound.InboundOrigin) -> None:
+    """Commit the reply's own key, and the email's id too: a bound reply has
+    answered that email, so an ordinary turn it reopens still holds a second
+    answer exactly as before."""
+    _REPLIED.commit(reply_key)
+    if reply_key != origin.message_id:
+        _REPLIED.commit(origin.message_id)
+
+
 # Held-reply auto-release (#2070). The store is register-time infra; whether
 # release is ON is a live per-call/per-pass question (send_policy), so the
 # sweeper thread starts unconditionally and no-ops while release is unauthored.
@@ -782,17 +820,41 @@ def _relay_draft(**kwargs: Any) -> None:
         # transport, including shapes no result envelope would reveal. Committed
         # only on a real send or a durable enqueue, so a gated reply stays
         # deliverable by the release path.
-        if _REPLIED.committed(origin.message_id):
+        #
+        # A BOUND reply is keyed on its binding in THIS session, never on the
+        # email's id (2026-10-12, A&P drafting job 01M4RXQV...): the request
+        # email's earlier failure reply had committed its id, so the job's
+        # delivery, bound correctly hours later, was held as a duplicate and
+        # dropped until a gateway restart cleared the guard. The broker's
+        # durable claim is the once-only rule across turns for a bound reply
+        # (one per job, attempt and outcome); this guard only collapses two
+        # drafts in one bound turn.
+        reply_key = _reply_guard_key(session_id, bound, origin)
+        # The Graph draft this call made: the agent's working copy of the reply
+        # (working_drafts.py). Only a Graph seat's draft is ever discarded.
+        draft_id = (
+            working_drafts.draft_id_of(kwargs.get("result"))
+            if _email_adapter(cfg) == _ADAPTER_MSGRAPH
+            else ""
+        )
+        if _REPLIED.committed(reply_key):
             _held("duplicate_reply", origin)
+            # The reply already went out (or is queued): this draft is a copy of
+            # an answer the person has, not something left for review.
+            _discard_drafts([draft_id])
             return
 
         # (a) Roster authorization — the Operator replies autonomously only to a
         # colleague on the organization roster (ADR 0055). A verified inbound
         # sender NOT on the roster gets a drafted (not sent) reply: reaching
         # outside the roster needs explicit authorization. Held, not an error.
+        # That draft is the one left for staff, so it is never tracked.
         if not cfg.sender_on_roster(origin.sender_address):
             _held("sender_not_on_roster", origin)
             return
+        # From here a held draft is one the agent redrafts; it is discarded with
+        # the others once this reply is actually transmitted, and kept otherwise.
+        _WORKING_DRAFTS.track(session_id, reply_key, draft_id)
 
         # (a2) Device redirect. A sender authored under ``scope.device_senders``
         # is a machine (an office scanner emailing its scans), and a reply sent
@@ -1078,7 +1140,7 @@ def _relay_draft(**kwargs: Any) -> None:
                 # Durably queued for release — the reply for this inbound is
                 # committed. Without this a retry in the same turn would enqueue
                 # a SECOND row and the sweeper would deliver the answer twice.
-                _REPLIED.commit(origin.message_id)
+                _commit_reply(reply_key, origin)
                 # It WILL go out, so an act line it carries is not owed again.
                 _ACT_BODIES.note(session_id, send_text, send_html)
             _held(
@@ -1154,7 +1216,7 @@ def _relay_draft(**kwargs: Any) -> None:
 
         # (f) The reply for this inbound is now committed — record it before the
         # audit emission so a retry cannot race between the send and the mark.
-        _REPLIED.commit(origin.message_id)
+        _commit_reply(reply_key, origin)
         # The only evidence the end-of-turn act delivery trusts: bytes the
         # transport was actually handed (act_delivery module docstring).
         _ACT_BODIES.note(session_id, wire_text, wire_html)
@@ -1197,6 +1259,9 @@ def _relay_draft(**kwargs: Any) -> None:
         # Request cards: the opening of the first reply, seat-local only (the
         # audit row above carries digests, never words). Never raises.
         request_index.record_reply_opening(origin.message_id, wire_text)
+        # (h) The reply is out: its working drafts (this one, and any held ones
+        # it superseded in this turn) leave the Drafts folder. Never raises.
+        _discard_drafts(_WORKING_DRAFTS.take(session_id, reply_key))
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-reply: post_tool_call handler error: %s", exc)
     finally:

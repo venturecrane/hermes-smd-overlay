@@ -235,6 +235,31 @@ def send_bound_reply(
         raise MsGraphBrokerUnavailable(f"broker unreachable: {exc}") from exc
 
 
+def discard_draft(draft_id: str) -> str:
+    """Delete the agent's WORKING draft once its reply has gone out.
+
+    The relay transmits a reply as a new message (``msgraph_reply`` /
+    ``msgraph_reply_bound``), never by sending the draft ``create_draft`` made, so
+    without this every relayed reply left its draft behind in the operator
+    mailbox's Drafts folder (ashton-price, 2026-10-12: 50+ stale drafts). The
+    broker (ss-console ``msgraph_drafts.py``) deletes only a message Graph says
+    is still a draft. Answers ``"discarded"`` or ``"absent"``; raises
+    :class:`MsGraphBrokerUnavailable` or ``BrokerError`` otherwise.
+    """
+    if not transmit_available():
+        raise MsGraphBrokerUnavailable(
+            f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
+        )
+    try:
+        out = request(
+            {"action": "msgraph_discard_draft", "payload": {"draft_id": draft_id}},
+            timeout=SEND_TIMEOUT_SECONDS,
+        )
+    except OSError as exc:
+        raise MsGraphBrokerUnavailable(f"broker unreachable: {exc}") from exc
+    return str(out.get("outcome") or "")
+
+
 def _vendor_id(response: dict[str, Any]) -> str:
     """The id of the message the broker just sent, or ``""`` if it has none.
 

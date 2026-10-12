@@ -1012,3 +1012,231 @@ def test_a_negotiation_wake_answers_no_email(lane) -> None:
     _negotiation_wake(mod)
     out = json.loads(mod.binding.record_from_result(WAKE, _verdict("negotiation_job")))
     assert out["bound"] is False and "scheduled wake" in out["reason"]
+
+
+# -- the duplicate guard: a bound reply is keyed on its binding, not the email
+# (2026-10-12, A&P drafting job: the request email's failure reply committed the
+# email's id, and the job's delivery hours later was held as duplicate_reply and
+# dropped until a gateway restart cleared the in-process guard)
+
+
+def _email_turn(mod, session: str, message_id: str = GRAPH_ID) -> None:
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        session,
+        inbound.InboundOrigin(sender_address=ADMIN, message_id=message_id, inbox_id="op@x"),
+    )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session, message_id)
+
+
+def test_an_ack_to_the_request_does_not_suppress_the_jobs_delivery(lane) -> None:
+    """FALSIFIER: key the guard on origin.message_id for a bound reply (the old
+    code) and the delivery is held as duplicate_reply."""
+    mod, d1, broker, _ = lane
+    _email_turn(mod, "mail-1")
+    _draft(mod, [ADMIN], session="mail-1", call="ack", body="Drafting could not start yet.")
+    assert broker.plain_sends == [{"message_id": GRAPH_ID}]
+    _drafting_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [ADMIN], call="deliver")
+    assert broker.bound_sends == [
+        {"binding": {"kind": "drafting_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    assert not any(m["reason"] == "duplicate_reply" for m in _held(d1))
+
+
+def test_two_drafts_in_one_job_wake_send_once(lane) -> None:
+    mod, d1, broker, _ = lane
+    _drafting_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [ADMIN], call="c1")
+    _draft(mod, [ADMIN], call="c2")
+    assert len(broker.bound_sends) == 1
+    assert [m["reason"] for m in _held(d1)] == ["duplicate_reply"]
+
+
+def test_two_replies_to_one_email_in_ordinary_turns_hold_the_second(lane) -> None:
+    mod, d1, broker, _ = lane
+    _email_turn(mod, "mail-1")
+    _draft(mod, [ADMIN], session="mail-1", call="c1")
+    _email_turn(mod, "mail-2")
+    _draft(mod, [ADMIN], session="mail-2", call="c2")
+    assert broker.plain_sends == [{"message_id": GRAPH_ID}]
+    assert [m["reason"] for m in _held(d1)] == ["duplicate_reply"]
+
+
+def test_a_held_ack_does_not_block_the_jobs_delivery_after_a_restart(lane) -> None:
+    """The guard behaves the same with or without a fresh process: a new
+    RepliedOnce (a restart) and a carried-over one both let the delivery out."""
+    mod, _d1, broker, _ = lane
+    _email_turn(mod, "mail-1")
+    _draft(mod, [ADMIN], session="mail-1", call="ack")
+    mod._REPLIED = mod.relay.RepliedOnce()
+    _drafting_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [ADMIN], call="deliver")
+    assert len(broker.bound_sends) == 1
+
+
+def test_an_ordinary_turn_after_a_bound_delivery_still_holds(lane) -> None:
+    """The bound send also commits the email's id, so the once-per-email rule
+    for ordinary turns is no weaker than before."""
+    mod, d1, broker, _ = lane
+    _drafting_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _draft(mod, [ADMIN], call="deliver")
+    _email_turn(mod, "mail-1")
+    _draft(mod, [ADMIN], session="mail-1", call="c1")
+    assert broker.plain_sends == []
+    assert [m["reason"] for m in _held(d1)] == ["duplicate_reply"]
+
+
+# -- working drafts (ashton-price 2026-10-12: 50+ drafts left in the operator
+# mailbox's Drafts folder, each a reply that had gone out as a new message)
+
+
+@pytest.fixture
+def drafts(lane, monkeypatch):
+    mod, d1, broker, yaml_path = lane
+    discarded: list[str] = []
+
+    def discard_draft(draft_id):
+        discarded.append(draft_id)
+        return "discarded"
+
+    monkeypatch.setattr(mod.msgraph_broker, "discard_draft", discard_draft)
+    monkeypatch.setattr(mod, "_WORKING_DRAFTS", mod.working_drafts.WorkingDrafts(), raising=False)
+    return mod, d1, broker, yaml_path, discarded
+
+
+def _graph_draft(mod, to, draft_id, session="mail-1", call=None, body="Filed both to the matter."):
+    """create_draft as Hermes reports it: the connector's draft in the dispatcher envelope."""
+    mod.on_post_tool_call(
+        tool_name="mcp_msgraph_mail_create_draft",
+        args={"to": to, "subject": "Re: demand prep", "body_text": body},
+        result=json.dumps({"result": json.dumps({"id": draft_id, "isDraft": True})}),
+        session_id=session,
+        tool_call_id=call or draft_id,
+    )
+
+
+def test_a_sent_reply_discards_its_working_draft(drafts) -> None:
+    """FALSIFIER: drop step (h) and the draft stays in Drafts after the send."""
+    mod, _d1, broker, _, discarded = drafts
+    _email_turn(mod, "mail-1")
+    _graph_draft(mod, [ADMIN], "draft-1")
+    assert broker.plain_sends == [{"message_id": GRAPH_ID}]
+    assert discarded == ["draft-1"]
+
+
+def test_held_drafts_a_sent_redraft_superseded_are_discarded_with_it(drafts) -> None:
+    """The 21:45:56 / 21:46:02 / 21:46:07 shape: two held drafts, one sent."""
+    mod, _d1, broker, _, discarded = drafts
+    _email_turn(mod, "mail-1")
+    _graph_draft(mod, [OTHER], "draft-1")
+    _graph_draft(mod, [OTHER], "draft-2")
+    assert discarded == [] and broker.plain_sends == []
+    _graph_draft(mod, [ADMIN], "draft-3")
+    assert len(broker.plain_sends) == 1
+    assert discarded == ["draft-1", "draft-2", "draft-3"]
+
+
+def test_a_draft_after_its_reply_went_out_is_discarded(drafts) -> None:
+    mod, d1, _broker, _, discarded = drafts
+    _email_turn(mod, "mail-1")
+    _graph_draft(mod, [ADMIN], "draft-1")
+    _graph_draft(mod, [ADMIN], "draft-2")
+    assert [m["reason"] for m in _held(d1)] == ["duplicate_reply"]
+    assert discarded == ["draft-1", "draft-2"]
+
+
+def test_a_draft_left_for_staff_is_kept(drafts) -> None:
+    """sender_not_on_roster leaves the drafted reply for a person: never discarded,
+    not even when a later reply to someone else goes out."""
+    mod, d1, broker, _, discarded = drafts
+    inbound.SESSION_INBOUND_ORIGIN.record(
+        "mail-x",
+        inbound.InboundOrigin(
+            sender_address="stranger@elsewhere.example", message_id="graph-x", inbox_id="op@x"
+        ),
+    )
+    inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt("mail-x", "graph-x")
+    _graph_draft(mod, ["stranger@elsewhere.example"], "draft-staff", session="mail-x")
+    assert [m["reason"] for m in _held(d1)] == ["sender_not_on_roster"]
+    _email_turn(mod, "mail-1")
+    _graph_draft(mod, [ADMIN], "draft-1")
+    assert len(broker.plain_sends) == 1
+    assert discarded == ["draft-1"]
+
+
+def test_a_reply_held_and_never_sent_keeps_its_draft(drafts) -> None:
+    mod, d1, broker, _, discarded = drafts
+    _email_turn(mod, "mail-1")
+    _graph_draft(
+        mod,
+        [ADMIN],
+        "draft-1",
+        body="Per Smith v. Jones, 123 F.3d 456 (9th Cir. 1999), the lien is waived.",
+    )
+    assert broker.plain_sends == [] and _held(d1)
+    assert discarded == []
+
+
+def test_a_reply_queued_for_release_keeps_its_draft(drafts, monkeypatch) -> None:
+    mod, _d1, _broker, _, discarded = drafts
+    _rate_hold_everything(mod, monkeypatch)
+    _email_turn(mod, "mail-1")
+    _graph_draft(mod, [ADMIN], "draft-1")
+    assert mod._HELD_STORE.pending_count() == 1
+    assert discarded == []
+
+
+def test_a_bound_delivery_discards_its_working_draft(drafts) -> None:
+    mod, _d1, broker, _, discarded = drafts
+    _drafting_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    _graph_draft(mod, [ADMIN], "draft-w", session=WAKE)
+    assert len(broker.bound_sends) == 1
+    assert discarded == ["draft-w"]
+
+
+def test_an_agentmail_seat_discards_nothing(drafts) -> None:
+    mod, _d1, _broker, yaml_path, discarded = drafts
+    yaml_path.write_text(_SEAT_YAML.format(adapter="agentmail"))
+    _email_turn(mod, "mail-1")
+    _graph_draft(mod, [ADMIN], "draft-1")
+    assert discarded == []
+
+
+def test_a_failed_discard_never_fails_the_reply(drafts, monkeypatch) -> None:
+    mod, d1, broker, _, _discarded = drafts
+
+    def boom(_draft_id):
+        raise mod.msgraph_broker.MsGraphBrokerUnavailable("down")
+
+    monkeypatch.setattr(mod.msgraph_broker, "discard_draft", boom)
+    _email_turn(mod, "mail-1")
+    _graph_draft(mod, [ADMIN], "draft-1")
+    assert len(broker.plain_sends) == 1
+    assert len([m for a, m in d1.events() if a == "REPLY_SENT"]) == 1
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        json.dumps({"id": "d-1", "isDraft": True}),
+        json.dumps({"result": json.dumps({"id": "d-1", "isDraft": True})}),
+        {"result": {"id": "d-1"}},
+    ],
+)
+def test_the_draft_id_is_read_through_the_envelopes(result) -> None:
+    wd = load_plugin("hermes-smd-reply").working_drafts
+    assert wd.draft_id_of(result) == "d-1"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [None, "", "not json", json.dumps({"id": "d-1", "isDraft": False}), json.dumps({"error": "x"})],
+)
+def test_no_draft_id_is_invented(result) -> None:
+    wd = load_plugin("hermes-smd-reply").working_drafts
+    assert wd.draft_id_of(result) == ""
