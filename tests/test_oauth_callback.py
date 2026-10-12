@@ -11,6 +11,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 
 import pytest
@@ -100,11 +101,40 @@ def test_verify_state_requires_a_key():
 
 
 # ---- write_token_file ------------------------------------------------------
-def test_write_token_file_is_0600_and_roundtrips(tmp_path):
+def test_write_token_file_is_0660_and_roundtrips(tmp_path):
     target = tmp_path / "nest" / "refresh_token"
     oauth_callback.write_token_file("rt-secret", path=str(target))
     assert target.read_text() == "rt-secret"
-    assert (target.stat().st_mode & 0o777) == 0o600
+    assert (target.stat().st_mode & 0o777) == 0o660
+
+
+def test_write_token_file_is_0660_under_a_restrictive_umask(tmp_path):
+    """Falsifier for the 2026-10-12 re-consent defect: the token is shared with
+    the medchron runner via group smokeball-token (ss-console entrypoint.sh
+    converges it to 0660 at boot; boot-smoke asserts it). A re-consent that
+    writes 0600 — or lets the process umask strip the group bits off O_CREAT —
+    locks the drafting runner out until the next reboot."""
+    target = tmp_path / "refresh_token"
+    # Pre-existing token at the boot-converged mode, as on a live seat.
+    target.write_text("old")
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- seat contract: hermes:smokeball-token 0660
+    os.chmod(target, 0o660)
+    old = os.umask(0o077)
+    try:
+        oauth_callback.write_token_file("rt-new", path=str(target))
+    finally:
+        os.umask(old)
+    assert target.read_text() == "rt-new"
+    assert (target.stat().st_mode & 0o777) == 0o660
+
+
+def test_write_token_file_leaves_an_existing_parent_dir_alone(tmp_path):
+    parent = tmp_path / "tokdir"
+    parent.mkdir()
+    # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions -- boot-converged setgid token dir
+    os.chmod(parent, 0o2770)
+    oauth_callback.write_token_file("rt", path=str(parent / "refresh_token"))
+    assert (parent.stat().st_mode & 0o7777) == 0o2770
 
 
 # ---- handle_smokeball_callback (orchestration) -----------------------------
