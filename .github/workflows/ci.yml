@@ -32,5 +32,16 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
+      # The title-model falsifier (tests/test_title_generation_model.py) builds
+      # the seat's title request with the REAL Hermes Anthropic adapter, so it
+      # needs the fleet's pinned Hermes source. Keep this SHA equal to the
+      # hermes_ref the seats run (ss-console operator/customers/*/customer.yaml).
+      - name: Check out pinned Hermes (read-only, outside the workspace)
+        run: |
+          git init -q "$RUNNER_TEMP/hermes-agent"
+          git -C "$RUNNER_TEMP/hermes-agent" fetch -q --depth 1 https://github.com/venturecrane/hermes-agent.git 345cd2b057a452236de401d3534b8502a7465e8d
+          git -C "$RUNNER_TEMP/hermes-agent" checkout -q FETCH_HEAD
+          echo "HERMES_AGENT_SRC=$RUNNER_TEMP/hermes-agent" >> "$GITHUB_ENV"
+
       - name: Pytest
         run: pytest -v
