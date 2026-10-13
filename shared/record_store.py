@@ -129,7 +129,13 @@ def _clean_stores(raw: Any) -> list[dict[str, str]]:
 #: ``index``        frontmatter keys the LISTING exposes for every record, so a
 #:                  capture can notice a duplicate visitor across owners without
 #:                  opening a colleague's notes. ``status`` is always exposed.
-POLICY_KEYS: tuple[str, ...] = ("owner_field", "readers", "index")
+#: ``writers``      addresses that may WRITE to the store at all. Present = on
+#:                  an inbound turn nobody else may create or change a record,
+#:                  whatever the owner rules say. For a document the whole
+#:                  roster reads and only some may edit: a client's program,
+#:                  refined by the broker in conversation while every agent
+#:                  reads it (2026-10-13). Works with or without owner_field.
+POLICY_KEYS: tuple[str, ...] = ("owner_field", "readers", "index", "writers")
 FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 ALWAYS_INDEXED: tuple[str, ...] = ("status",)
 
@@ -144,19 +150,19 @@ def policy_problems(entry: dict[str, Any]) -> list[str]:
     owner = entry.get("owner_field")
     if "owner_field" in entry and (not isinstance(owner, str) or not FIELD_RE.match(owner)):
         faults.append("owner_field: must be a frontmatter key (a-z, 0-9, _)")
-    for key in ("readers", "index"):
+    for key in ("readers", "index", "writers"):
         if key not in entry:
             continue
         value = entry[key]
         if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
             faults.append(f"{key}: must be a list of non-empty strings")
             continue
-        if key == "readers":
-            if "owner_field" not in entry:
+        if key in ("readers", "writers"):
+            if key == "readers" and "owner_field" not in entry:
                 faults.append("readers: needs owner_field (a shared store has nothing to grant)")
             for v in value:
                 if "@" not in v or v.strip() != v:
-                    faults.append(f"readers: {v!r} is not an email address")
+                    faults.append(f"{key}: {v!r} is not an email address")
         else:
             for v in value:
                 if not FIELD_RE.match(v):
@@ -172,10 +178,17 @@ class StorePolicy:
     owner_field: str | None = None
     readers: frozenset[str] = frozenset()
     index: tuple[str, ...] = ()
+    writers: frozenset[str] = frozenset()
 
     @property
     def private(self) -> bool:
         return self.owner_field is not None
+
+    @property
+    def fenced(self) -> bool:
+        """True when the store's policy can refuse anyone: an owner rule or a
+        writers list. A store with neither is open to the whole roster."""
+        return self.private or bool(self.writers)
 
 
 def authored_policies(config: CustomerConfig | None = None) -> dict[str, StorePolicy]:
@@ -193,6 +206,7 @@ def authored_policies(config: CustomerConfig | None = None) -> dict[str, StorePo
             owner_field=entry.get("owner_field"),
             readers=frozenset(r.strip().lower() for r in entry.get("readers", [])),
             index=tuple(entry.get("index", [])),
+            writers=frozenset(w.strip().lower() for w in entry.get("writers", [])),
         )
     return out
 
@@ -257,7 +271,10 @@ def access_problem(
     the fence is between the PEOPLE who write in. ``existing`` is the record's
     current text when it exists.
 
-    * A shared store (no owner field) fences nothing.
+    * write, when the store authors ``writers``: refused unless the viewer is
+      one of them. This comes first and binds owners too: on such a store an
+      owner who is not a writer cannot change even their own record.
+    * A shared store (no owner field) fences nothing further.
     * read: another owner's record is refused unless the viewer is a reader.
     * write: the content must be stamped with the viewer's own address, and an
       existing record that belongs to someone else is never rewritten, reader
@@ -266,9 +283,16 @@ def access_problem(
     An unstamped record in a private store is nobody's: readable by all, and
     rewritable only by stamping it with the writer's own address.
     """
-    if not policy.private or viewer is None:
+    if viewer is None:
         return None
     viewer = viewer.strip().lower()
+    if action == "write" and policy.writers and viewer not in policy.writers:
+        return (
+            "only the people this store names as writers may change it "
+            f"({', '.join(sorted(policy.writers))}); anyone on the seat may read it"
+        )
+    if not policy.private:
+        return None
     owner = record_owner(existing, policy) if existing is not None else None
     if action == "read":
         if owner and owner != viewer and viewer not in policy.readers:
