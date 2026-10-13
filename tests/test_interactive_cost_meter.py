@@ -189,7 +189,9 @@ def test_vendored_pricing_covers_declared_models():
     # when present, else asserts the baseline fleet models are covered.
     # claude-opus-5-5: smd-staging's main model and the fleet's escalation
     # model from 2026-09-23; unpriced, the meter records its turns at 0.
-    baseline = {"claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-5-5"}
+    # claude-sonnet-5-5: smd-staging's main model from 2026-10-13 (the trial
+    # before A&P's main moves off claude-sonnet-4-6).
+    baseline = {"claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-5-5", "claude-sonnet-5-5"}
     assert baseline <= priced, (
         f"baseline fleet models missing from vendored pricing: {baseline - priced}"
     )
