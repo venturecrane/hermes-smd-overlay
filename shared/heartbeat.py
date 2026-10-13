@@ -723,6 +723,31 @@ _REPLY_HOLDS_NOT_A_SHORTFALL = frozenset({"duplicate_reply"})
 #: record the reply, not the draft call that triggered it.
 REPLY_RELAY_TOOL = "reply_relay"
 
+#: The broker's delivery-proof vocabulary (ss-console
+#: ``workspace_broker/delivery_proof.py`` ``CODES``, mirroring
+#: ``medchron/proof/gate.py``). A CLOSED vocabulary for the reason
+#: ``REPLY_HOLD_REASONS`` is: a code not listed rides as ``proof:other``.
+DELIVERY_PROOF_CODES = frozenset(
+    {
+        "proof_missing",
+        "readback_unproven",
+        "readback_mismatch",
+        "review_missing",
+        "review_held",
+        "dry_run_reported",
+        "wake_lost",
+        "reply_unproven",
+        "reply_not_in_sent_items",
+    }
+)
+
+#: The job lanes that write a delivery-proof row (``delivery_proof.LANES``).
+#: An event's tool is ``<lane>_job``, the lane's own status tool's prefix.
+DELIVERY_PROOF_LANES = frozenset({"medchron", "demand", "drafting", "litigation", "negotiation"})
+
+#: The ``tool`` a delivery-proof event carries when its lane is not one above.
+PROOF_TOOL = "delivery_proof"
+
 _CODE_SAFE_RE = re.compile(r"[^A-Za-z0-9_:. -]")
 _CODE_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _GATE_PREFIX_RE = re.compile(r"^([A-Z][A-Z0-9_]{2,79}):")
@@ -837,6 +862,18 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
       ``reply_failed:<hold_expired|act_line_undelivered|send_error>``. Tool:
       the row's own ``tool`` token, else ``reply_relay``. The row's recipient
       and message id are read only to join; neither reaches the wire.
+    * ``failed`` (job delivery) — a ``DELIVERY_PROOF_FAILED`` row, written by
+      the broker when a job lane (chronology, demand, drafting, litigation,
+      negotiation) could not prove its delivery reached the firm: the review
+      held it, the far-end read-back failed, a dry run reached the ledger, the
+      DELIVER wake was lost, or the requester's reply was not in Sent Items.
+      Every row is an event and nothing later clears it: an attempt whose
+      delivery could not be proven is SMD's to read even if a later attempt
+      proves. Code:
+      ``proof:<code>`` from the closed ``DELIVERY_PROOF_CODES`` (else
+      ``proof:other``). Tool: ``<lane>_job`` for a known lane, else
+      ``delivery_proof``. Routine: none. The row's ``detail`` and ``job_id``
+      are never read, so neither reaches the wire.
     * ``partial`` — a mail-routine session (``MAIL_ROUTINE_SKILL``) that has
       CLOSED (a turn completed after its last call, or ``_PARTIAL_IDLE_SECONDS``
       of quiet) and read a bundle whose pages filed plus pages held for approval
@@ -892,6 +929,9 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
         tally["partial"] += 1
         events.append(event)
     for event in _reply_events(conn, horizon, cutoff, procedure_by_session):
+        tally["failed"] += 1
+        events.append(event)
+    for event in _proof_events(conn, horizon, cutoff):
         tally["failed"] += 1
         events.append(event)
 
@@ -1024,6 +1064,52 @@ def _reply_events(
                     or procedure_by_session.get(session_id if isinstance(session_id, str) else "")
                 ),
                 code=_reply_code(action_type, reason),
+                key=_event_key("failed", row_id),
+            )
+        )
+    return out
+
+
+def _proof_code(code: object) -> str:
+    """The wire code for one delivery-proof row, from a closed vocabulary only."""
+    text = code.strip() if isinstance(code, str) else ""
+    return "proof:" + (text if text in DELIVERY_PROOF_CODES else "other")
+
+
+def _proof_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[dict]:
+    """One ``failed`` event per ``DELIVERY_PROOF_FAILED`` row in the window.
+
+    The broker writes the row (ss-console ``workspace_broker/delivery_proof.py``)
+    when a job lane's delivery could not be proven: its pre-delivery review held
+    it, the far-end read-back failed or disagreed, a dry run reached the ledger,
+    the DELIVER wake was lost, or the requester's reply was never seen in Sent
+    Items. It is the only alert path a root process can feed without the agent:
+    a lost wake is exactly the turn that never runs a status shim.
+
+    Only ``lane`` and ``code`` are read, and each only through a closed
+    vocabulary. The row's ``detail`` and ``job_id`` are never selected, so
+    neither can reach the wire: SMD reads the detail on the seat's own ledger.
+    """
+    rows = conn.execute(
+        "SELECT id, ts,"
+        " json_extract(metadata,'$.lane') AS lane,"
+        " json_extract(metadata,'$.code') AS code"
+        " FROM audit_log"
+        " WHERE action_type = 'DELIVERY_PROOF_FAILED'"
+        " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
+        " ORDER BY ts, id",
+        (horizon, cutoff),
+    ).fetchall()
+    out: list[dict] = []
+    for row_id, ts, lane, code in rows:
+        lane_text = lane.strip() if isinstance(lane, str) else ""
+        out.append(
+            _shortfall_event(
+                ts=ts,
+                cls="failed",
+                tool=(f"{lane_text}_job" if lane_text in DELIVERY_PROOF_LANES else PROOF_TOOL),
+                routine=None,
+                code=_proof_code(code),
                 key=_event_key("failed", row_id),
             )
         )

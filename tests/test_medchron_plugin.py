@@ -211,6 +211,26 @@ def test_status_and_allowance_are_thin(broker):
     assert json.loads(tools["medchron_allowance"]["handler"]({}))["remaining"] == 40
 
 
+def test_a_failed_job_status_is_a_shortfall_for_smd(broker):
+    """A failed chronology job raises SMD's shortfall alert through the audit
+    plugin's shortfall shape, as the four sibling lanes do. FALSIFIER: return
+    the bare job and the failure is recorded as an ordinary ok read."""
+    broker.answers["medchron_job_status"] = {"ok": True, "job": {"id": "01J", "state": "failed"}}
+    result = _tools()["medchron_job_status"]["handler"]({"job_id": "01J"})
+    out = json.loads(result)
+    assert out["job"] == {"id": "01J", "state": "failed"}
+    assert out["status"] == "refused" and out["reason"] == "medchron_job_failed"
+    emit = load_plugin("hermes-smd-audit").emit
+    assert emit._outcome_from_result(result) == ("shortfall", "medchron_job_failed")
+
+
+def test_a_running_job_status_is_an_ordinary_read(broker):
+    result = _tools()["medchron_job_status"]["handler"]({"job_id": "01J"})
+    assert "status" not in json.loads(result)
+    emit = load_plugin("hermes-smd-audit").emit
+    assert emit._outcome_from_result(result)[0] == "ok"
+
+
 def test_status_by_matter_asks_for_the_matter_and_never_smuggles_a_job_id(broker):
     """The UPDATE path: a matter id in, that matter's cumulative coverage out.
 

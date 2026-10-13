@@ -2462,3 +2462,126 @@ def test_only_the_derived_token_survives_a_prose_error(tmp_path):
     wire = json.dumps(facts.events)
     for leaked in ("Testclient", "Sampleperson", "testclient", "api.example.com", "matters"):
         assert leaked not in wire
+
+
+# ---------------------------------------------------------------------------
+# Proven delivery (ss-console#3152): the broker's DELIVERY_PROOF_FAILED row is
+# a ``failed`` shortfall. The row is written by a root process with no agent
+# turn, so this count is the only way it pages SMD.
+# ---------------------------------------------------------------------------
+
+_PROOF_JOB_ID = "01JPROOFJOBIDXXXXXXXXXXXXX"
+_PROOF_DETAIL = "unit 3: Testclient Sampleperson draft held, the review found a false date"
+
+
+def _proof_row(led, ts, *, lane="drafting", code="review_held", attempt=1):
+    led.add(
+        ts,
+        "DELIVERY_PROOF_FAILED",
+        {
+            "lane": lane,
+            "job_id": _PROOF_JOB_ID,
+            "attempt": attempt,
+            "code": code,
+            "detail": _PROOF_DETAIL,
+        },
+    )
+
+
+def test_an_unproven_delivery_is_one_failed_shortfall(tmp_path):
+    """FALSIFIER: drop ``_proof_events`` from ``count_shortfalls`` and this
+    count is zero, which is the silence the broker row was written to end."""
+    facts = _shortfalls(tmp_path, lambda led: _proof_row(led, _ts(2)))
+    assert facts.count == 1 and facts.failed == 1
+    event = facts.events[0]
+    assert set(event) == SHORTFALL_EVENT_KEYS
+    assert event["class"] == "failed"
+    assert event["code"] == "proof:review_held"
+    assert event["tool"] == "drafting_job"
+    assert event["routine"] is None
+    assert event["ts"] == _ts(2)
+    assert _ZONED_ISO.match(event["ts"])
+    assert event["key"] == "failed:" + hashlib.sha256(b"row0001").hexdigest()[:32]
+    assert hb._CODE_TOKEN_RE.match(event["code"])
+
+
+def test_an_unproven_delivery_never_puts_the_detail_or_job_on_the_wire(tmp_path):
+    facts = _shortfalls(tmp_path, lambda led: _proof_row(led, _ts(2)))
+    payload = hb.build_payload(
+        heartbeat_ts="t",
+        last_audit_ts=None,
+        last_skill_ts=None,
+        uptime_seconds=None,
+        version=None,
+        shortfalls=facts.count,
+        shortfalls_last_ts=facts.last_ts,
+        shortfalls_json=facts.events,
+    )
+    wire = json.dumps(payload)
+    for leaked in (_PROOF_JOB_ID, "01JPROOF", "Testclient", "Sampleperson", "false date", "unit 3"):
+        assert leaked not in wire
+
+
+def test_unproven_deliveries_outside_the_window_are_not_shortfalls(tmp_path):
+    def build(led):
+        _proof_row(led, _ts(25))
+        _proof_row(led, _ts(-1))
+
+    facts = _shortfalls(tmp_path, build)
+    assert facts.count == 0 and facts.failed == 0
+
+
+def test_an_unknown_proof_code_rides_as_other_not_as_written(tmp_path):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _proof_row(led, _ts(1), code="something new: Testclient"),
+    )
+    assert [e["code"] for e in facts.events] == ["proof:other"]
+    assert "Testclient" not in json.dumps(facts.events)
+
+
+def test_every_proof_code_and_lane_rides_as_itself(tmp_path):
+    codes = sorted(hb.DELIVERY_PROOF_CODES)
+    lanes = sorted(hb.DELIVERY_PROOF_LANES)
+
+    def build(led):
+        for n, code in enumerate(codes):
+            _proof_row(led, _ts(10 - n * 0.5), code=code, lane=lanes[n % len(lanes)])
+
+    facts = _shortfalls(tmp_path, build)
+    assert facts.failed == len(codes)
+    assert [e["code"] for e in facts.events] == [f"proof:{c}" for c in codes]
+    assert [e["tool"] for e in facts.events] == [
+        f"{lanes[n % len(lanes)]}_job" for n in range(len(codes))
+    ]
+    for event in facts.events:
+        assert hb._CODE_TOKEN_RE.match(event["code"]), event["code"]
+
+
+def test_an_unknown_lane_rides_as_the_proof_tool(tmp_path):
+    facts = _shortfalls(tmp_path, lambda led: _proof_row(led, _ts(1), lane="Testclient lane"))
+    assert [e["tool"] for e in facts.events] == [hb.PROOF_TOOL]
+
+
+def test_the_proof_vocabulary_matches_the_broker_list():
+    """Pinned to ss-console ``workspace_broker/delivery_proof.py`` CODES / LANES
+    at ss-console#3152. A code added there and not here rides as
+    ``proof:other`` (paged, but unnamed); update both together."""
+    assert hb.DELIVERY_PROOF_CODES == {
+        "proof_missing",
+        "readback_unproven",
+        "readback_mismatch",
+        "review_missing",
+        "review_held",
+        "dry_run_reported",
+        "wake_lost",
+        "reply_unproven",
+        "reply_not_in_sent_items",
+    }
+    assert hb.DELIVERY_PROOF_LANES == {
+        "medchron",
+        "demand",
+        "drafting",
+        "litigation",
+        "negotiation",
+    }

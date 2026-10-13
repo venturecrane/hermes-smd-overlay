@@ -26,6 +26,11 @@ and no ``object_digest``. On such rows:
   nothing to read, NOT that the run was whole; the report prints the v3 row
   count per day so the two are never confused.
 
+The job-delivery ``failed`` events (``DELIVERY_PROOF_FAILED``, ss-console#3152)
+likewise cannot appear before the broker began writing that row: a day before
+it shipped shows none because nothing was being proven, not because every
+delivery reached the firm.
+
 Usage:
 
     python tests/tools/shortfalls_retro.py /path/to/audit.db \\

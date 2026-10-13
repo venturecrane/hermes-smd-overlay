@@ -243,6 +243,14 @@ ACCEPTED_ACTION_TYPES: frozenset[str] = frozenset(
         "OPS_REQUEST_RECORDED",
         "OPS_REQUEST_RESOLVED",
         "OPS_REQUEST_LAPSED",
+        # ss-console#3152, proven delivery. Both BROKER-written (ss-console
+        # operator/workspace_broker/delivery_proof.py), declared for the reason
+        # the OPS_REQUEST_* three are. DELIVERY_PROOF_FAILED is a job lane's
+        # delivery that could not be proven (shared.heartbeat counts it as a
+        # ``failed`` shortfall, which pages SMD); DELIVERY_PROVEN is the
+        # evidence a delivered job's claim rests on.
+        "DELIVERY_PROOF_FAILED",
+        "DELIVERY_PROVEN",
     }
 )
 
