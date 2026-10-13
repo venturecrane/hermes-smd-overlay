@@ -191,7 +191,18 @@ def test_vendored_pricing_covers_declared_models():
     # model from 2026-09-23; unpriced, the meter records its turns at 0.
     # claude-sonnet-5-5: smd-staging's main model from 2026-10-13 (the trial
     # before A&P's main moves off claude-sonnet-4-6).
-    baseline = {"claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-5-5", "claude-sonnet-5-5"}
+    # The session-title model translate.py pins on every Claude seat (overlay
+    # #448): read from translate itself, so moving the pin without pricing the
+    # new model fails here instead of metering every title at 0.
+    from bootstrap.translate import _TITLE_GENERATION_MODEL
+
+    baseline = {
+        "claude-sonnet-4-6",
+        "claude-opus-4-8",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        _TITLE_GENERATION_MODEL,
+    }
     assert baseline <= priced, (
         f"baseline fleet models missing from vendored pricing: {baseline - priced}"
     )

@@ -2,7 +2,7 @@
   "_meta": {
     "version": "3",
     "updated": "2026-10-13",
-    "source": "https://platform.claude.com/docs/en/about-claude/pricing (manually retrieved); claude-opus-5-5 added 2026-09-23 from the Opus 5.5 launch pricing; claude-sonnet-5-5 added 2026-10-13 from the same page ($2/$10)",
+    "source": "https://platform.claude.com/docs/en/about-claude/pricing (manually retrieved); claude-opus-5-5 added 2026-09-23 from the Opus 5.5 launch pricing; claude-sonnet-5-5 added 2026-10-13 from the same page ($2/$10); claude-haiku-5-5 added 2026-10-13 ($0.10/$0.50 for prompts up to 100K tokens; it is the session-title model and a title prompt is ~1K tokens, so the $0.50/$2.50 tier beyond 100K is not modelled)",
     "note": "Per-million-token pricing in cents. Captain updates on Anthropic price changes. CI test ensures every customer.yaml-declared `model` has a pricing entry. Cited in docs/specs/operator/cost-telemetry-events.md 'Per-call emission (Claude API)'.",
     "units": "cents per million tokens"
   },
@@ -30,6 +30,10 @@
     "claude-sonnet-5-5": {
       "input_per_million_cents": 200,
       "output_per_million_cents": 1000
+    },
+    "claude-haiku-5-5": {
+      "input_per_million_cents": 10,
+      "output_per_million_cents": 50
     }
   }
 }
