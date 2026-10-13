@@ -465,6 +465,15 @@ def _validate_skill(skill: Any, sk_prefix: str, errors: list[str]) -> None:
         _err(f"{sk_prefix}: version must be a string when present", errors)
     if "enabled" in skill and not isinstance(skill["enabled"], bool):
         _err(f"{sk_prefix}: enabled must be a boolean when present", errors)
+    settings = skill.get("settings")
+    if (
+        isinstance(settings, dict)
+        and "recipients" in settings
+        and settings["recipients"] != "roster"
+    ):
+        # The scheduled-turn roster lane (shared.send_anchor.routine_turn_lane):
+        # one value is meaningful, and any other would author a lane nobody gets.
+        _err(f"{sk_prefix}.settings.recipients: must be 'roster' when present", errors)
 
 
 def _validate_initiation(raw: Any, path: str, errors: list[str]) -> None:

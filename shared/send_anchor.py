@@ -21,7 +21,8 @@ WHERE AN ANCHOR COMES FROM, and nowhere else:
   re-checked by the broker at replay.
 
 A cron or connector turn has none, and sends only through a lane, to SMD, or to
-outside recipients.
+outside recipients. A scheduled turn of a skill that authors
+``settings.recipients: roster`` rides that skill's lane (``routine_turn_lane``).
 
 WHERE A LANE COMES FROM. Only the code path that owns it names it, through the
 ``lane=`` keyword of ``shared.send_dispatch.dispatch``; the model's send tool
@@ -145,6 +146,74 @@ def routine_lane(skill: str) -> str:
     return LANE_ESCALATION
 
 
+#: The skill setting that opts a skill's SCHEDULED turns into the roster lane
+#: (``settings.recipients: roster``); the broker admits the seat's exact
+#: ``scope.inbound_allow_from`` addresses under it (participant_fence.py).
+ROSTER_RECIPIENTS_KEY = "recipients"
+ROSTER_RECIPIENTS_VALUE = "roster"
+_ROUTINE_TURN_MODES = frozenset({provenance.MODE_KEYED, provenance.MODE_THREAD})
+
+
+def routine_turn_lane(session_id: str | None = None) -> str | None:
+    """The lane a SCHEDULED turn's own model send rides, or None.
+
+    ``skill:<name>`` only when every one of these holds, else None:
+
+    * the session resolves KEYED or THREAD (never the process singleton, which
+      a turn that noted no session could inherit from a cron turn);
+    * the cron store names the job that fired it ``op-managed:<persona>:<skill>``
+      (``cron_attribution``, the scheduler's fact, never the model's);
+    * the seat authors that persona, that skill ``enabled: true``, a ``cron``
+      row for it, and ``settings.recipients: roster`` on it.
+
+    TRUST: the lane trusts the cron store as an operator-controlled channel, the
+    trade ``spec_gate._routine_skill`` names. The model cannot write it: the
+    ``cronjob`` tool is CODE_EXECUTION, which no seat that opts in authors. A job
+    an operator creates under a managed name rides that skill's lane, which
+    admits only the seat's rostered addresses. Opt-in, so a seat that authors no
+    ``recipients`` (every law-firm seat) is unchanged. Never raises: a failure
+    is no lane, and no lane is the fence's old refusal."""
+    try:
+        resolved, mode = provenance.resolve_session_with_mode(session_id or None)
+        if not resolved or mode not in _ROUTINE_TURN_MODES:
+            return None
+        from shared import cron_attribution  # local import (enforce.py idiom)
+        from shared.customer_config import CustomerConfig
+
+        routine = cron_attribution.resolve_routine(resolved)
+        if routine is None or not routine.persona or not routine.skill:
+            return None
+        if not routine.job_name.startswith("op-managed:"):
+            return None
+        for persona in CustomerConfig.from_volume().personas:
+            if not isinstance(persona, dict):
+                continue
+            if str(persona.get("slug") or persona.get("name") or "").strip() != routine.persona:
+                continue
+            if _roster_opted_in(persona, routine.skill):
+                return skill_lane(routine.skill)
+        return None
+    except Exception:  # noqa: BLE001 - no lane is the safe answer on the send path
+        logger.warning("send_anchor: routine turn lane unresolved", exc_info=True)
+        return None
+
+
+def _roster_opted_in(persona: dict[str, Any], skill: str) -> bool:
+    crons = persona.get("cron") or []
+    if not any(isinstance(c, dict) and str(c.get("skill") or "").strip() == skill for c in crons):
+        return False
+    for entry in persona.get("skills") or []:
+        if not isinstance(entry, dict) or entry.get("name") != skill:
+            continue
+        settings = entry.get("settings")
+        return (
+            entry.get("enabled") is True
+            and isinstance(settings, dict)
+            and settings.get(ROSTER_RECIPIENTS_KEY) == ROSTER_RECIPIENTS_VALUE
+        )
+    return False
+
+
 # An out-of-turn dispatch runs the gate on this thread; a send the gate holds
 # for approval is captured with the dispatch's own anchor and lane, not the
 # turn's. Set only by the trust plugin's internal sender.
@@ -163,11 +232,12 @@ def dispatch_scope(anchor: Anchor | None, lane: str | None) -> Iterator[None]:
 
 def capture_context(session_id: str | None) -> tuple[Anchor | None, str | None]:
     """(anchor, lane) a held send is captured with: the out-of-turn dispatch's
-    when one is running on this thread, else this turn's anchor and no lane."""
+    when one is running on this thread, else this turn's anchor and, on a
+    scheduled turn of an opted-in skill, its roster lane."""
     scoped = getattr(_SCOPE, "value", None)
     if scoped is not None:
         return scoped
-    return turn_anchor(session_id), None
+    return turn_anchor(session_id), routine_turn_lane(session_id)
 
 
 def note_replay(anchor: Anchor | None, lane: str | None, recipients: Any) -> None:
@@ -208,6 +278,9 @@ def envelope_fields(anchor: Anchor | None, lane: str | None) -> dict[str, Any]:
 __all__ = [
     "message_origin",
     "routine_lane",
+    "routine_turn_lane",
+    "ROSTER_RECIPIENTS_KEY",
+    "ROSTER_RECIPIENTS_VALUE",
     "AGENTMAIL_MESSAGE",
     "FENCE_DECISION",
     "GRAPH_MESSAGE",

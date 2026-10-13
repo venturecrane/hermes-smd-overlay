@@ -942,7 +942,10 @@ def _tool_send_fence(
     if replayed is not None:
         return replayed
     raw = kwargs.get("session_id")
-    return send_anchor.turn_anchor(raw if isinstance(raw, str) and raw else None), None
+    sid = raw if isinstance(raw, str) and raw else None
+    # A scheduled turn's lane is the scheduler's fact (send_anchor.routine_turn_lane),
+    # never the model's: nothing in ``payload`` can name or widen it.
+    return send_anchor.turn_anchor(sid), send_anchor.routine_turn_lane(sid)
 
 
 def _scan_approved_send(rec: Any, payload: dict, session_id: str) -> str | None:
