@@ -1135,8 +1135,41 @@ def _persona_config(
     config["tools"] = {"tool_search": {"enabled": "off"}}
     config["approvals"] = {"mode": "manual"}
     config["display"] = {"show_reasoning": False}
+    title_generation = _title_generation_pin(customer)
+    if title_generation:
+        config["auxiliary"] = {"title_generation": title_generation}
 
     return config
+
+
+# The session auto-title runs on a model that accepts a thinking-off request.
+#
+# Hermes titles every new session with one side-call on the MAIN model, and
+# that call always asks for thinking off (agent/title_generator.py
+# reasoning_config={"enabled": False} @ v2026.9.14). Its Anthropic adapter
+# renders that as ``thinking: {"type": "disabled"}`` for every adaptive Claude
+# model outside a hard-coded mandatory-thinking list ("claude-fable" only).
+# Opus 5.5 rejects it with HTTP 400 ("thinking.type.disabled is not
+# supported for this model"), so every session on an Opus 5.5 seat, or an
+# escalation into Opus on a Sonnet seat, lost its title and raised Sentry
+# SMD-OPERATOR-1M (175 events from 2026-08-20). Haiku 4.5 is on the adapter's
+# legacy manual-thinking list, so a disable is rendered as no thinking block
+# at all, and it is the provider's own cheap auxiliary default
+# (_API_KEY_PROVIDER_AUX_MODELS_FALLBACK["anthropic"]). Probed on smd-staging
+# 2026-10-13 with real Hermes code: main claude-opus-5-5 reproduces the 400;
+# with this pin the request carries no thinking block and returns a title.
+#
+# Only the model is pinned. provider stays "auto", so the call keeps the main
+# runtime's Anthropic credential; a non-Claude seat gets nothing, because a
+# Claude model id on another provider would fail the same call differently.
+_TITLE_GENERATION_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _title_generation_pin(customer: dict[str, Any]) -> dict[str, Any]:
+    model = str(customer.get("model") or "").strip().lower()
+    if not model.startswith("claude"):
+        return {}
+    return {"model": _TITLE_GENERATION_MODEL}
 
 
 _SMALL_SEAT_MEMORY_MB = 1024
