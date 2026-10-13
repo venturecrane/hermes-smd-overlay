@@ -141,7 +141,26 @@ def _medchron_job_status(args: dict[str, Any], **_: Any) -> str:
     matter_id = str(args.get("matter_id") or "").strip() or None
     resp = MedchronBrokerClient().status(job_id, matter_id)
     if job_id:
-        return json.dumps({"job": resp.get("job")}, ensure_ascii=False)
+        job = resp.get("job")
+        out: dict[str, Any] = {"job": job}
+        if isinstance(job, dict) and job.get("state") == "failed":
+            # A failed chronology job is SMD's to resolve, never the firm's.
+            # This shape is what the audit plugin records as a shortfall (code
+            # medchron_job_failed), which raises SMD's shortfall alert, the
+            # same as the demand, drafting, litigation and negotiation lanes.
+            # Without it a failed job was an ordinary ok read and nobody at
+            # SMD heard unless the runner itself raised the proof alert.
+            out.update(
+                {
+                    "status": "refused",
+                    "reason": "medchron_job_failed",
+                    "message": (
+                        "This chronology job failed on SMD's side and SMD has been alerted. "
+                        "Send the firm nothing and end the turn."
+                    ),
+                }
+            )
+        return json.dumps(out, ensure_ascii=False)
     if matter_id:
         return json.dumps({"matter": resp.get("matter")}, ensure_ascii=False)
     return json.dumps({"jobs": resp.get("jobs") or []}, ensure_ascii=False)
