@@ -1,0 +1,60 @@
+{
+  "_doc": "The proven-lane rule, pinned in BOTH repos: ss-console operator/contracts/lane-proofs-cases.json (read by operator/runners/medchron/tests/test_lane_proof.py) and hermes-smd-overlay tests/contract/lane_proofs_cases.json (read by tests/test_lane_cards.py). Byte-identical; change both in the same change or neither. A key is proven when the authored file does not revoke it and either its last runtime event is proven or it has none and the authored file proves it. An unreadable or absent authored file proves nothing from the seed.",
+  "cases": [
+    {
+      "name": "the authored seed proves",
+      "authored": {
+        "schema": 1,
+        "lanes": { "demand-letter-drafter": { "evidence": "x" } },
+        "revoked": []
+      },
+      "events": [],
+      "expect": { "demand-letter-drafter": true, "document-drafter.discovery_set": false }
+    },
+    {
+      "name": "a runtime proof adds, a later runtime revoke removes",
+      "authored": {
+        "schema": 1,
+        "lanes": { "litigation-status": { "evidence": "x" } },
+        "revoked": []
+      },
+      "events": [
+        { "event": "proven", "key": "document-drafter.discovery_set" },
+        { "event": "revoked", "key": "litigation-status" }
+      ],
+      "expect": { "document-drafter.discovery_set": true, "litigation-status": false }
+    },
+    {
+      "name": "the last runtime event wins",
+      "authored": { "schema": 1, "lanes": {}, "revoked": [] },
+      "events": [
+        { "event": "proven", "key": "negotiation-watch" },
+        { "event": "revoked", "key": "negotiation-watch" },
+        { "event": "proven", "key": "negotiation-watch" }
+      ],
+      "expect": { "negotiation-watch": true }
+    },
+    {
+      "name": "an authored revocation beats every runtime proof",
+      "authored": {
+        "schema": 1,
+        "lanes": {},
+        "revoked": [{ "key": "document-drafter.memo", "why": "defect" }]
+      },
+      "events": [{ "event": "proven", "key": "document-drafter.memo" }],
+      "expect": { "document-drafter.memo": false }
+    },
+    {
+      "name": "no authored file: only runtime proofs count",
+      "authored": null,
+      "events": [{ "event": "proven", "key": "medical-chronology-maintainer" }],
+      "expect": { "medical-chronology-maintainer": true, "demand-letter-drafter": false }
+    },
+    {
+      "name": "a malformed key never proves",
+      "authored": { "schema": 1, "lanes": { "Demand Letter": { "evidence": "x" } }, "revoked": [] },
+      "events": [{ "event": "proven", "key": "../etc" }],
+      "expect": { "Demand Letter": false, "../etc": false }
+    }
+  ]
+}
