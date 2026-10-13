@@ -35,7 +35,7 @@ import logging
 import os
 from typing import Any
 
-from shared import inbound
+from shared import anthropic_thinking_off, inbound
 
 from . import usage_store
 
@@ -112,6 +112,15 @@ def register(ctx) -> None:
     without one simply has no meter, never a broken turn).
     """
     global _STORE
+
+    # Thinking-off on current Claude models renders as adaptive/low effort,
+    # never the "disabled" Opus 5.5 rejects (shared/anthropic_thinking_off.py,
+    # Sentry SMD-OPERATOR-1M). Installed here because this plugin already sits
+    # on every API request in the gateway process.
+    if anthropic_thinking_off.install():
+        logger.info(
+            "hermes-smd-usage: thinking-off mapped to adaptive/low on adaptive Claude models"
+        )
 
     path = _resolve_db_path()
     if not path:

@@ -1142,27 +1142,24 @@ def _persona_config(
     return config
 
 
-# The session auto-title runs on a model that accepts a thinking-off request.
+# The session auto-title runs on the current Haiku, for cost.
 #
-# Hermes titles every new session with one side-call on the MAIN model, and
-# that call always asks for thinking off (agent/title_generator.py
-# reasoning_config={"enabled": False} @ v2026.9.14). Its Anthropic adapter
-# renders that as ``thinking: {"type": "disabled"}`` for every adaptive Claude
-# model outside a hard-coded mandatory-thinking list ("claude-fable" only).
-# Opus 5.5 rejects it with HTTP 400 ("thinking.type.disabled is not
-# supported for this model"), so every session on an Opus 5.5 seat, or an
-# escalation into Opus on a Sonnet seat, lost its title and raised Sentry
-# SMD-OPERATOR-1M (175 events from 2026-08-20). Haiku 4.5 is on the adapter's
-# legacy manual-thinking list, so a disable is rendered as no thinking block
-# at all, and it is the provider's own cheap auxiliary default
-# (_API_KEY_PROVIDER_AUX_MODELS_FALLBACK["anthropic"]). Probed on smd-staging
-# 2026-10-13 with real Hermes code: main claude-opus-5-5 reproduces the 400;
-# with this pin the request carries no thinking block and returns a title.
+# Hermes titles every new session with one side-call, by default on the MAIN
+# model (agent/title_generator.py @ v2026.9.14). A title is a handful of
+# tokens; on an Opus seat that is Opus pricing for a label. Claude Haiku 5.5 is
+# the current small model ($0.10/$0.50 per MTok against Opus 5.5's $4/$20).
+# The call asks for thinking off; shared/anthropic_thinking_off.py renders that
+# as adaptive thinking at effort "low" on every current Claude model, never the
+# thinking {"type": "disabled"} Opus 5.5 rejects (Sentry SMD-OPERATOR-1M). The
+# title fix does not depend on this pin: an unpinned title on Opus 5.5 goes out
+# adaptive/low too. Probed on smd-staging 2026-10-13 with real Hermes code:
+# the pinned call and the unpinned Opus 5.5 / Sonnet 5.5 / Opus 5 calls all
+# return a title.
 #
 # Only the model is pinned. provider stays "auto", so the call keeps the main
 # runtime's Anthropic credential; a non-Claude seat gets nothing, because a
 # Claude model id on another provider would fail the same call differently.
-_TITLE_GENERATION_MODEL = "claude-haiku-4-5-20251001"
+_TITLE_GENERATION_MODEL = "claude-haiku-5-5"
 
 
 def _title_generation_pin(customer: dict[str, Any]) -> dict[str, Any]:
