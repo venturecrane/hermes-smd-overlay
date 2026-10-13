@@ -358,3 +358,135 @@ def test_a_routine_with_its_own_recipient_rides_its_skill_lane(monkeypatch) -> N
     assert send_anchor.routine_lane("statute-watch") == "skill:statute-watch"
     assert send_anchor.routine_lane("retired") == "escalation"
     assert send_anchor.routine_lane("deadline-miss-escalator") == "escalation"
+
+
+# -- a scheduled turn of an opted-in skill rides its roster lane ------------------------------
+
+_CRON_SID = "cron_abc123def456_20261014_150000"
+
+
+def _roster_persona(**over):
+    skill = {
+        "name": "open-house-visitor-capture",
+        "enabled": True,
+        "initiation": {"manual": True, "scheduled": True, "webhook": False},
+        "settings": {"recipients": "roster"},
+    }
+    skill.update(over.pop("skill", {}))
+    persona = {
+        "slug": "brokery-agent",
+        "skills": [skill],
+        "cron": [{"skill": "open-house-visitor-capture", "schedule": "0 15 * * *"}],
+    }
+    persona.update(over)
+    return persona
+
+
+@pytest.fixture
+def cron_seat(monkeypatch, tmp_path):
+    """A seat whose persona cron store holds one job; returns a setter for the
+    job's name and the authored personas."""
+    import json
+
+    from shared import cron_attribution, customer_config
+
+    store = tmp_path / "profiles" / "brokery-agent" / "cron"
+    store.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cron_attribution._CACHE.clear()
+    state = {"personas": [_roster_persona()]}
+    monkeypatch.setattr(
+        customer_config.CustomerConfig,
+        "from_volume",
+        classmethod(lambda cls, path=None: _Cfg(state["personas"])),
+    )
+
+    def seat(name="op-managed:brokery-agent:open-house-visitor-capture", personas=None):
+        (store / "jobs.json").write_text(
+            json.dumps({"jobs": [{"id": "abc123def456", "name": name, "skills": []}]})
+        )
+        cron_attribution._CACHE.clear()
+        if personas is not None:
+            state["personas"] = personas
+
+    seat()
+    yield seat
+    cron_attribution._CACHE.clear()
+
+
+def test_a_scheduled_turn_of_an_opted_in_skill_rides_its_lane(cron_seat) -> None:
+    assert send_anchor.routine_turn_lane(_CRON_SID) == "skill:open-house-visitor-capture"
+    assert send_anchor.capture_context(_CRON_SID) == (None, "skill:open-house-visitor-capture")
+
+
+@pytest.mark.parametrize(
+    "name, personas",
+    [
+        # an unmanaged job (an ad-hoc name) is not the authored routine
+        ("welcome-tim", None),
+        # a managed name for ANOTHER persona
+        ("op-managed:other:open-house-visitor-capture", None),
+        # the skill does not opt in
+        (None, [_roster_persona(skill={"settings": {}})]),
+        # opts in with some other value
+        (None, [_roster_persona(skill={"settings": {"recipients": "everyone"}})]),
+        # the single-recipient key is not this lane's opt-in
+        (None, [_roster_persona(skill={"settings": {"recipient": "roster"}})]),
+        # disabled
+        (None, [_roster_persona(skill={"enabled": False})]),
+        # no authored cron row for the skill
+        (None, [_roster_persona(cron=[])]),
+    ],
+)
+def test_no_roster_lane_without_every_authored_fact(cron_seat, name, personas) -> None:
+    cron_seat(name=name or "op-managed:brokery-agent:open-house-visitor-capture", personas=personas)
+    assert send_anchor.routine_turn_lane(_CRON_SID) is None
+
+
+def test_a_non_cron_session_has_no_roster_lane(cron_seat) -> None:
+    assert send_anchor.routine_turn_lane("s-interactive") is None
+
+
+def test_a_process_singleton_session_never_inherits_the_roster_lane(cron_seat, monkeypatch) -> None:
+    """FALSIFIER: trust MODE_PROCESS and a turn that noted no session borrows a
+    cron session's lane through the process-wide singleton."""
+    from shared import provenance
+
+    monkeypatch.setattr(
+        provenance, "resolve_session_with_mode", lambda sid: (_CRON_SID, provenance.MODE_PROCESS)
+    )
+    assert send_anchor.routine_turn_lane(None) is None
+    monkeypatch.setattr(
+        provenance, "resolve_session_with_mode", lambda sid: (_CRON_SID, provenance.MODE_THREAD)
+    )
+    assert send_anchor.routine_turn_lane(None) == "skill:open-house-visitor-capture"
+
+
+def test_an_unreadable_config_is_no_lane_never_a_raise(cron_seat, monkeypatch) -> None:
+    from shared import customer_config
+
+    def boom(cls, path=None):
+        raise RuntimeError("volume unreadable")
+
+    monkeypatch.setattr(customer_config.CustomerConfig, "from_volume", classmethod(boom))
+    assert send_anchor.routine_turn_lane(_CRON_SID) is None
+
+
+def test_the_send_tool_on_a_scheduled_turn_sends_under_the_roster_lane(
+    trust, cron_seat, monkeypatch
+) -> None:
+    """The lane is the scheduler's fact: a payload naming another lane changes nothing."""
+    seen: dict = {}
+
+    def fake(payload, **kwargs):
+        seen.update(kwargs)
+        return "<sent@x>"
+
+    monkeypatch.setattr(trust.outbound_send, "send_via_msgraph", fake)
+    out = trust._smd_send_message(
+        {"to": ["tim@brokery.example"], "subject": "s", "text": "t", "lane": "escalation"},
+        session_id=_CRON_SID,
+    )
+    assert out.startswith("Sent")
+    assert seen.get("lane") == "skill:open-house-visitor-capture"
+    assert "anchor" not in seen
