@@ -8,7 +8,13 @@ When a firm person emails an Operator seat, SMD (team@smd.services) gets:
 * a ``no_reply`` alarm when nothing has answered the request within
   :data:`NO_REPLY_AFTER` and nothing else is already handling it;
 * a ``job_done`` card when a demand, drafting, litigation status or chronology job the request started
-  reaches ``delivered``, ``failed`` or ``held``.
+  reaches ``delivered``, ``failed`` or ``held``;
+* a ``lane_unproven`` card the moment a request asks for a kind of job not
+  proven on this seat (the lane-proof gate, ss-console
+  ``docs/runbooks/operator/lane-proof.md``): once per held job, from the hold
+  note the root daemon writes on its ledger row (a scheduled run with no
+  request is carded on its own), and once per seat for an in-turn skill the
+  replying session read that is not proven (answered, never held).
 
 The seat decides; ss-console sends. This module is the seat half, hosted by the
 gate's heartbeat ticker (``shared.heartbeat``): :func:`decide` is the pure
@@ -53,7 +59,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from shared import request_index
+from shared import lane_proofs, request_index
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +334,156 @@ def _lane_rows(conn: sqlite3.Connection, lane: str, horizon: str) -> list:
         return conn.execute(_JOB_SQL_NO_ATTEMPT[lane], (horizon,)).fetchall()
 
 
+#: The rows a lane-proof hold notes, one fixed statement per lane. A held job
+#: is not claimed, so it is still submitted/queued (or failed, when the thing
+#: held was the resume of a failed job).
+_HOLD_SQL = {
+    "demand": (
+        "SELECT id, request_ref, reason, created_at, updated_at, matter_number FROM demand_jobs"
+        " WHERE reason LIKE 'lane_unproven:%' AND state IN ('submitted', 'failed')"
+    ),
+    "drafting": (
+        "SELECT id, request_ref, reason, created_at, updated_at, matter_number FROM drafting_jobs"
+        " WHERE reason LIKE 'lane_unproven:%' AND state IN ('submitted', 'failed')"
+    ),
+    "medchron": (
+        "SELECT id, request_ref, reason, created_at, updated_at, matter_number FROM medchron_jobs"
+        " WHERE reason LIKE 'lane_unproven:%' AND state IN ('submitted', 'failed')"
+    ),
+    "litigation": (
+        "SELECT id, request_ref, reason, created_at, updated_at, NULL AS matter_number FROM litigation_jobs"
+        " WHERE reason LIKE 'lane_unproven:%' AND state IN ('queued', 'failed')"
+    ),
+    "negotiation": (
+        "SELECT id, request_ref, reason, created_at, updated_at, NULL AS matter_number FROM negotiation_jobs"
+        " WHERE reason LIKE 'lane_unproven:%' AND state IN ('queued', 'failed')"
+    ),
+}
+_JOB_ID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
+
+
+def _held_rows(conn: sqlite3.Connection) -> list[dict]:
+    """Every job waiting on its lane's proof. A lane this seat does not run
+    (no table, or a ledger older than the reason column) has none."""
+    out: list[dict] = []
+    for lane, sql in _HOLD_SQL.items():
+        try:
+            rows = conn.execute(sql).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc) or "no such column" in str(exc):
+                continue
+            raise
+        for job_id, ref, reason, created, updated, matter in rows:
+            key = lane_proofs.held_key(reason)
+            if key and isinstance(job_id, str) and _JOB_ID_RE.match(job_id):
+                out.append(
+                    {
+                        "lane": lane,
+                        "id": job_id,
+                        "ref": ref,
+                        "key": key,
+                        "created": created,
+                        "updated": updated,
+                        "matter": matter,
+                    }
+                )
+    return out
+
+
+def _base(req: dict) -> dict:
+    received = datetime.fromtimestamp(float(req["received_at"]), tz=timezone.utc)
+    return {
+        "received_at": _iso(received),
+        "who": _clip(req.get("sender"), 160) or "(unknown sender)",
+        "subject": _clip(req.get("subject"), 200) or "(no subject)",
+    }
+
+
+def _lane_card(prefix: str, base: dict, lane: dict, event_at: datetime, matter: object) -> dict:
+    received = _parse_ts(base["received_at"]) or event_at
+    return {
+        "card_key": f"{prefix}:lane_unproven:{lane['key']}",
+        "kind": "lane_unproven",
+        **base,
+        "event_at": _iso(event_at),
+        "minutes": _minutes(received, event_at),
+        "reply_opening": None,
+        "matter": _clip(matter, 60),
+        "tools": [],
+        "replies": 0,
+        "refused": 0,
+        "failed": 0,
+        "job": None,
+        "lane": lane,
+    }
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _hold_cards(
+    requests: list[dict], conn: sqlite3.Connection, proofs, done: set[str], now: datetime
+) -> list[dict]:
+    """One card per held job: under its request when the request is indexed,
+    else on its own (a scheduled run, or a request the index never saw)."""
+    by_ref: dict[str, dict] = {}
+    for req in requests:
+        by_ref[str(req["vendor_message_id"])] = req
+        if req.get("internet_message_id"):
+            by_ref[str(req["internet_message_id"])] = req
+    cards = []
+    for h in _held_rows(conn):
+        if proofs.is_proven(h["key"]):
+            continue  # proven since; the daemon releases it on its next tick
+        lane = {
+            "key": h["key"],
+            "job_lane": h["lane"],
+            "held_job": h["id"],
+            "why": proofs.why(h["key"]),
+        }
+        req = by_ref.get(str(h["ref"] or ""))
+        if req is not None:
+            prefix, base = _sha(str(req["vendor_message_id"])), _base(req)
+        else:
+            prefix = _sha(f"job:{h['id']}")
+            base = {
+                "received_at": _iso(_parse_ts(h["created"]) or now),
+                "who": "(no indexed request: a scheduled run or an unindexed sender)",
+                "subject": f"{h['key']} job {h['id']}",
+            }
+        card = _lane_card(prefix, base, lane, _parse_ts(h["updated"]) or now, h["matter"])
+        if card["card_key"] not in done:
+            cards.append(card)
+    return cards
+
+
+def _in_turn_cards(
+    requests, sent_by_vid: dict, calls_by_session: dict, proofs, done: set[str], now
+) -> list[dict]:
+    """Once per seat per in-turn skill: the first request whose replying
+    session read a skill procedure that is not proven. Skipped when the proven
+    record could not be read (a page on every skill would be noise, not news)."""
+    if proofs.problems:
+        return []
+    cards: dict[str, dict] = {}
+    for req in requests:
+        sent = sent_by_vid.get(str(req["vendor_message_id"]), [])
+        session = sent[0]["session_id"] if sent and isinstance(sent[0]["session_id"], str) else ""
+        for skill in sorted(
+            {c.procedure for c in calls_by_session.get(session, []) if c.procedure}
+        ):
+            if not lane_proofs.KEY_RE.match(skill) or proofs.skill_proven(skill):
+                continue
+            lane = {"key": skill, "job_lane": None, "held_job": None, "why": proofs.why(skill)}
+            card = _lane_card(
+                _sha(f"lane:{skill}"), _base(req), lane, _parse_ts(sent[0]["ts"]) or now, None
+            )
+            if card["card_key"] not in done:
+                cards.setdefault(card["card_key"], card)
+    return list(cards.values())
+
+
 def _tool_token(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -362,8 +518,12 @@ def decide(
     done: set[str],
     now: datetime,
     done_at: dict[str, float] | None = None,
+    proofs: lane_proofs.Proofs | None = None,
 ) -> list[dict]:
     """The cards due now, oldest event first, as wire-shaped dicts.
+
+    ``proofs`` (the seat's proven lanes, :func:`shared.lane_proofs.load`)
+    turns on the lane_unproven cards; None decides the other kinds only.
 
     ``requests`` are :func:`shared.request_index.read_requests` rows; ``done``
     the card keys already landed; ``done_at`` (key -> when it landed) lets a
@@ -375,8 +535,9 @@ def decide(
     from shared import heartbeat
 
     now = now.astimezone(timezone.utc)
+    held = _hold_cards(requests, audit_conn, proofs, done, now) if proofs is not None else []
     if not requests:
-        return []
+        return held
     horizon = _iso(now - LOOKBACK - timedelta(days=1))[:19]
     replies = _reply_rows(audit_conn, horizon)
     sent_by_vid: dict[str, list[dict]] = {}
@@ -472,6 +633,9 @@ def decide(
                     },
                 }
             )
+    if proofs is not None:
+        cards.extend(held)
+        cards.extend(_in_turn_cards(requests, sent_by_vid, calls_by_session, proofs, done, now))
     cards.sort(key=lambda c: (c["event_at"], c["card_key"]))
     return cards
 
@@ -552,6 +716,7 @@ def send_due_cards(
     requests_db_path: str | None = None,
     now_fn: Callable[[], float] = time.time,
     monotonic_fn: Callable[[], float] = time.monotonic,
+    proofs_dir: str | None = None,
 ) -> int:
     """POST every due card, within the per-tick bounds. Returns how many landed.
 
@@ -566,8 +731,9 @@ def send_due_cards(
         requests = request_index.read_requests(
             now_s - LOOKBACK.total_seconds(), path=requests_db_path
         )
-        if not requests:
-            return 0
+        # No early return on an empty index: a held scheduled run has no
+        # request and still pages (the lane-proof gate).
+        proofs = lane_proofs.load(proofs_dir)
         if not audit_db_path or not os.path.exists(audit_db_path):
             # Without the ledger "no reply" cannot be told from "could not look".
             return 0
@@ -580,7 +746,7 @@ def send_due_cards(
         conn = sqlite3.connect(f"file:{audit_db_path}?mode=ro", uri=True, timeout=5)
         try:
             conn.execute("PRAGMA busy_timeout=2000")
-            cards = decide(requests, conn, done, now, done_at=landed_at)
+            cards = decide(requests, conn, done, now, done_at=landed_at, proofs=proofs)
         finally:
             conn.close()
         started = monotonic_fn()
