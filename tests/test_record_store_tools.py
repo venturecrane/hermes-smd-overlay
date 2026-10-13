@@ -684,7 +684,9 @@ def test_a_non_writer_may_read_but_never_change_it(
     blocked = plugin.on_pre_tool_call(
         tool_name="record_store_write", session_id="s", args=_write_args()
     )
-    assert blocked is not None and "only the people this store names as writers" in blocked["message"]
+    assert (
+        blocked is not None and "only the people this store names as writers" in blocked["message"]
+    )
     assert EDITOR in blocked["message"]
 
 
