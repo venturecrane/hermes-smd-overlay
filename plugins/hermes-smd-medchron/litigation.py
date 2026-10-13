@@ -9,9 +9,11 @@ A turn no email opened submits nothing. The scheduled run is not submitted
 here at all: the seat's pre_run peer submits it to the broker directly, with
 the requester the firm authored.
 
-The model chooses only the scope: the attorneys whose matters the list covers,
-by name (the broker resolves each against the firm's staff and refuses a name
-it cannot), or the whole firm. The broker checks the rest (the skill enabled,
+The model chooses only the scope: the attorneys whose matters the list covers
+and/or the paralegals whose files it covers (the matter's Person Assisting),
+by name (the broker resolves each against the firm's authored lists and
+refuses a name it cannot), or the whole firm. Both named: only the matters
+where both hold. The broker checks the rest (the skill enabled,
 the requester on scope.admins, the filing target, no unfinished litigation job
 for that scope, the monthly cap) and answers with a job id or a reason to relay
 as it comes back.
@@ -30,29 +32,45 @@ from .demand import STRING, _origin, _refuse, _schema
 logger = logging.getLogger(__name__)
 
 MAX_ATTORNEYS = 20
+MAX_PARALEGALS = 20
 MAX_NAME_CHARS = 100
+#: The scope keys a turn may name, each with its cap.
+_NAMED = (("attorneys", MAX_ATTORNEYS), ("paralegals", MAX_PARALEGALS))
 #: What the status read projects: states and counts. Never spend, never a
 #: matter fact: the completion reply carries counts only.
 _STATUS_KEYS = ("job_id", "state", "stage", "matters_total", "matters_reread", "flags_new")
 
 
-def _scope(args: dict[str, Any]) -> dict[str, Any] | str:
-    """The broker scope for the tool's arguments, or a refusal sentence."""
-    names = args.get("attorneys")
-    whole = args.get("all")
-    if names in (None, []):
-        return {"all": True}
-    if whole:
-        return "name attorneys or ask for all of them, not both; nothing was queued"
+def _names(key: str, names: Any, cap: int) -> list[str] | str:
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-        return "attorneys must be a list of names; nothing was queued"
+        return f"{key} must be a list of names; nothing was queued"
     cleaned = [" ".join(n.split()) for n in names]
-    if any(not n or len(n) > MAX_NAME_CHARS for n in cleaned) or len(cleaned) > MAX_ATTORNEYS:
+    if any(not n or len(n) > MAX_NAME_CHARS for n in cleaned) or len(cleaned) > cap:
         return (
-            f"attorneys must be 1 to {MAX_ATTORNEYS} non-empty names of at most "
+            f"{key} must be 1 to {cap} non-empty names of at most "
             f"{MAX_NAME_CHARS} characters; nothing was queued"
         )
-    return {"attorneys": list(dict.fromkeys(cleaned))}
+    return list(dict.fromkeys(cleaned))
+
+
+def _scope(args: dict[str, Any]) -> dict[str, Any] | str:
+    """The broker scope for the tool's arguments, or a refusal sentence.
+    Attorneys and paralegals may be named together: the broker keeps only the
+    matters where both hold (one of the paralegals assisting, one of the
+    attorneys responsible)."""
+    given = {key: args.get(key) for key, _cap in _NAMED if args.get(key) not in (None, [])}
+    if not given:
+        return {"all": True}
+    if args.get("all"):
+        return "name attorneys or paralegals, or ask for all of the firm's cases, not both; nothing was queued"
+    out: dict[str, Any] = {}
+    for key, cap in _NAMED:
+        if key in given:
+            names = _names(key, given[key], cap)
+            if isinstance(names, str):
+                return names
+            out[key] = names
+    return out
 
 
 def litigation_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -> str:
@@ -148,7 +166,9 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
         "Queue the firm's litigation status list for the Named Administrator whose email opened "
         "this turn. Never compile the list in the turn: this queues a job that re-reads the "
         "litigated matters on the Machine's runner and files the workbook. Name the attorneys "
-        "whose matters it covers, or leave them out (or pass all) for the whole firm. Who asked, "
+        "whose matters it covers and/or the paralegals whose files it covers (both named: only "
+        "the matters where both hold, e.g. a paralegal's files on two attorneys' cases), or leave "
+        "them out (or pass all) for the whole firm. Who asked, "
         "the email's id and the request's words are taken from the email itself, never from you. "
         "It answers with a job id, or a reason to relay as it comes back.",
         _schema(
@@ -159,9 +179,19 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
                     "maxItems": MAX_ATTORNEYS,
                     "description": "Attorneys' names as the request gives them; the firm's staff list resolves them.",
                 },
+                "paralegals": {
+                    "type": "array",
+                    "items": STRING,
+                    "maxItems": MAX_PARALEGALS,
+                    "description": (
+                        "Paralegals' names as the request gives them (\"Irma's files\": Irma); the list "
+                        "covers the matters where the paralegal is the person assisting. The firm's "
+                        "paralegal list resolves them."
+                    ),
+                },
                 "all": {
                     "type": "boolean",
-                    "description": "Every litigated matter in the firm (the default when no attorney is named).",
+                    "description": "Every litigated matter in the firm (the default when no attorney or paralegal is named).",
                 },
             }
         ),
