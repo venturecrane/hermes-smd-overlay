@@ -157,6 +157,7 @@ def _list_handler(args: dict[str, Any], **_: Any) -> str:
                 "owner_field": policy.owner_field,
                 "readers": sorted(policy.readers),
                 "index": list(policy.index),
+                "writers": sorted(policy.writers),
             },
             "records": records,
             "count": len(records),
@@ -235,7 +236,7 @@ def _fence_problem(tool_name: str, args: dict[str, Any], session_id: Any) -> str
     # store named ..."), not the fence's: the fence judges ownership, and there
     # is no ownership to judge on a store that does not exist.
     policy = record_store.authored_policies().get(store) if isinstance(store, str) else None
-    if policy is None or not policy.private:
+    if policy is None or not policy.fenced:
         return None
     viewer = _viewer(session_id)
     if viewer is None:

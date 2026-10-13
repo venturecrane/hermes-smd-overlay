@@ -624,7 +624,141 @@ def test_the_list_handler_carries_the_policy(
         "owner_field": "agent",
         "readers": [BROKER],
         "index": ["visitor", "property", "visit_date", "contact"],
+        "writers": [],
     }
     assert out["records"][0]["owner"] == AGENT_A
     assert out["records"][0]["index"]["visitor"] == "Priya Patel"
     assert "PRIVATE NOTES" not in json.dumps(out)
+
+
+# ---------------------------------------------------------------------------
+# writers: a document the whole roster reads and only some may change. The
+# first is a client's pilot program: the broker refines it by email, every
+# agent reads it, and no agent can rewrite it (2026-10-13).
+# ---------------------------------------------------------------------------
+
+EDITOR = "broker@example.com"
+
+
+def _program_seat(monkeypatch: pytest.MonkeyPatch, root: Path, *, sender: str | None) -> Any:
+    plugin = load_plugin("hermes-smd-record-store")
+    policy = record_store.StorePolicy(root=root, writers=frozenset({EDITOR}))
+    monkeypatch.setattr(record_store, "authored_policies", lambda *_, **__: {"program": policy})
+    monkeypatch.setattr(record_store, "authored_stores", lambda *_, **__: {"program": root})
+    monkeypatch.setattr(plugin.SESSION_TAINT, "is_tainted", lambda sid: False)
+
+    class _Origin:
+        sender_address = sender or ""
+
+    monkeypatch.setattr(
+        plugin.SESSION_INBOUND_ORIGIN, "get", lambda sid: _Origin() if sender else None
+    )
+    return plugin
+
+
+def _write_args(content: str = "# Program\nMeetings on Tuesdays.\n") -> dict[str, Any]:
+    return {"store": "program", "name": "pilot-program.md", "content": content, "overwrite": True}
+
+
+def test_a_writer_may_change_the_document(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    plugin = _program_seat(monkeypatch, tmp_path, sender="Broker@Example.com")
+    assert (
+        plugin.on_pre_tool_call(tool_name="record_store_write", session_id="s", args=_write_args())
+        is None
+    )
+
+
+def test_a_non_writer_may_read_but_never_change_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    record_store.write_record(
+        "program", "pilot-program.md", "# Program\n", stores={"program": tmp_path}
+    )
+    plugin = _program_seat(monkeypatch, tmp_path, sender=AGENT_A)
+    read = plugin.on_pre_tool_call(
+        tool_name="record_store_read",
+        session_id="s",
+        args={"store": "program", "name": "pilot-program.md"},
+    )
+    assert read is None
+    blocked = plugin.on_pre_tool_call(
+        tool_name="record_store_write", session_id="s", args=_write_args()
+    )
+    assert (
+        blocked is not None and "only the people this store names as writers" in blocked["message"]
+    )
+    assert EDITOR in blocked["message"]
+
+
+def test_writers_bind_owners_too() -> None:
+    """On a private store that also names writers, an owner who is not a writer
+    cannot change even their own record: the writers list is the outer fence."""
+    policy = record_store.StorePolicy(
+        root=Path("/opt/data/x"), owner_field="agent", writers=frozenset({EDITOR})
+    )
+    problem = record_store.access_problem(
+        policy, action="write", viewer=AGENT_A, existing=None, content=_record(AGENT_A)
+    )
+    assert problem is not None and "writers" in problem
+    assert (
+        record_store.access_problem(
+            policy, action="write", viewer=EDITOR, existing=None, content=_record(EDITOR)
+        )
+        is None
+    )
+
+
+def test_a_store_without_writers_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The falsifier for the outer fence: no writers list, no new refusal."""
+    plugin = load_plugin("hermes-smd-record-store")
+    policy = record_store.StorePolicy(root=tmp_path)
+    assert not policy.fenced
+    monkeypatch.setattr(record_store, "authored_policies", lambda *_, **__: {"program": policy})
+    monkeypatch.setattr(plugin.SESSION_TAINT, "is_tainted", lambda sid: False)
+
+    class _Origin:
+        sender_address = AGENT_A
+
+    monkeypatch.setattr(plugin.SESSION_INBOUND_ORIGIN, "get", lambda sid: _Origin())
+    assert (
+        plugin.on_pre_tool_call(tool_name="record_store_write", session_id="s", args=_write_args())
+        is None
+    )
+
+
+def test_the_seats_own_turns_are_not_fenced_by_writers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    plugin = _program_seat(monkeypatch, tmp_path, sender=None)
+    assert (
+        plugin.on_pre_tool_call(tool_name="record_store_write", session_id="s", args=_write_args())
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "entry, fragment",
+    [
+        ({"writers": ["not-an-address"]}, "writers: 'not-an-address' is not an email address"),
+        ({"writers": "tim@x.example"}, "writers: must be a list"),
+    ],
+)
+def test_writers_are_validated(entry: dict[str, Any], fragment: str) -> None:
+    assert any(fragment in f for f in record_store.policy_problems(entry))
+
+
+def test_writers_parse_lower_cased_without_an_owner_field() -> None:
+    cfg = CustomerConfig(
+        {
+            "customer_id": "s",
+            "record_stores": [
+                {"name": "program", "path": "/opt/data/program", "writers": ["Tim@TheBrokery.com"]}
+            ],
+        }
+    )
+    policy = record_store.authored_policies(cfg)["program"]
+    assert policy.writers == frozenset({"tim@thebrokery.com"})
+    assert policy.fenced and not policy.private
+    assert record_store.policy_problems({"writers": ["tim@thebrokery.com"]}) == []
