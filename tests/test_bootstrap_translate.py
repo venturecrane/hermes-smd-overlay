@@ -1014,25 +1014,69 @@ def test_translate_raises_on_validation_failure(tmp_path):
     assert not (hermes_home / "profiles").exists()
 
 
-def test_translate_raises_on_missing_skill_directory(tmp_path):
-    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
-    # Wipe the seeded skill — pin resolution must refuse.
+def test_translate_skips_missing_skill_and_boots(tmp_path):
+    """Config ahead of image: an enabled skill whose body this image lacks is
+    skipped with a sentinel, not a boot death (2026-10-13 A&P outage)."""
+    import json
     import shutil
 
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
     shutil.rmtree(skills_dir / "inbox-triage")
-    with pytest.raises(TranslateError, match="not found"):
-        translate_customer_yaml(
-            customer_yaml_path=str(customer_yaml),
-            hermes_home=str(hermes_home),
-            skills_dir=str(skills_dir),
-        )
+    slugs = translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    assert slugs == ["marcus"]
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert config["skills"] == []
+    sentinel = json.loads((hermes_home / ".smd" / "config_ahead_of_image.json").read_text())
+    assert [(f["skill"], f["kind"]) for f in sentinel["findings"]] == [
+        ("inbox-triage", "skill_missing")
+    ]
+    assert "Rebuild the seat" in sentinel["summary"]
 
 
-def test_translate_raises_on_pin_mismatch(tmp_path):
-    # Pin the skill to a deliberate wrong value (6 chars, hex shape).
+def test_translate_skips_pin_mismatched_skill_and_boots(tmp_path):
+    """A pin this image's content does not match: the skill is skipped, never
+    run at the wrong content, and the seat still boots."""
+    import json
+
     pinned_bad = VALID_YAML.replace("version: pending", "version: deadbe")
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, customer_yaml_body=pinned_bad)
-    with pytest.raises(TranslateError, match="pinned version"):
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
+    assert config["skills"] == []
+    assert not (hermes_home / "profiles" / "marcus" / "skills" / "inbox-triage").exists()
+    sentinel = json.loads((hermes_home / ".smd" / "config_ahead_of_image.json").read_text())
+    assert sentinel["findings"][0]["kind"] == "skill_pin_mismatch"
+
+
+def test_translate_clears_the_sentinel_when_nothing_is_skipped(tmp_path):
+    """The sentinel describes the CURRENT boot: a clean boot removes it."""
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    stale = hermes_home / ".smd" / "config_ahead_of_image.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}\n")
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+    )
+    assert not stale.exists()
+
+
+def test_translate_raises_when_the_catalog_itself_is_absent(tmp_path):
+    """No catalog at all is a broken image, not skew: still a hard failure."""
+    import shutil
+
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    shutil.rmtree(skills_dir)
+    with pytest.raises(TranslateError, match="catalog"):
         translate_customer_yaml(
             customer_yaml_path=str(customer_yaml),
             hermes_home=str(hermes_home),
@@ -1718,6 +1762,94 @@ def test_translate_stages_pre_run_script_and_registers_ref(tmp_path):
     assert create["script"] == "deadline-miss-escalator/pre_run.py"
     assert create["no_agent"] is False
     assert create["skills"] == ["deadline-miss-escalator"]
+
+
+_TWO_CRON_YAML = _ESCALATOR_YAML.replace(
+    """      - name: deadline-miss-escalator
+        version: pending""",
+    """      - name: connector-auth-check
+        version: pending
+        initiation:
+          manual: false
+          scheduled: true
+          webhook: false
+        enabled: true
+      - name: deadline-miss-escalator
+        version: pending""",
+).replace(
+    """        wake_policy: pre_run_decides
+""",
+    """        wake_policy: pre_run_decides
+      - skill: connector-auth-check
+        schedule: '13 * * * *'
+        pre_run: pre_run.py
+        wake_policy: pre_run_decides
+""",
+)
+
+
+def test_image_without_the_pre_run_boots_and_alerts(tmp_path, monkeypatch):
+    """The 2026-10-13 A&P outage, replayed: the config names a cron whose
+    pre_run.py ships only in a newer image. The boot must skip that one cron,
+    raise the alert, and register every other cron. Before the fix this raised
+    TranslateError("pre_run script not found") and the seat never started."""
+    import json
+
+    assert "connector-auth-check" in _TWO_CRON_YAML  # the fixture replace landed
+    customer_yaml = tmp_path / "customer.yaml"
+    customer_yaml.write_text(_TWO_CRON_YAML)
+    skills_dir = tmp_path / "skills"
+    esc = skills_dir / "deadline-miss-escalator"
+    esc.mkdir(parents=True)
+    (esc / "SKILL.md").write_text("# escalator\n")
+    (esc / "pre_run.py").write_text("print('{\"wakeAgent\": false}')\n")
+    # The older image: the skill dir exists (SKILL.md) but its pre_run does not.
+    auth = skills_dir / "connector-auth-check"
+    auth.mkdir()
+    (auth / "SKILL.md").write_text("# auth check\n")
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+
+    alerts: list[str] = []
+
+    class _Sentry:
+        @staticmethod
+        def capture_message(msg, level=None):
+            alerts.append(f"{level}:{msg}")
+
+        @staticmethod
+        def flush(timeout=None):
+            return None
+
+    import sys
+
+    from shared import sentry_init
+
+    monkeypatch.setattr(sentry_init, "init_sentry", lambda component: True)
+    monkeypatch.setitem(sys.modules, "sentry_sdk", _Sentry)
+
+    stores: dict[str, _RecordingCronStore] = {}
+
+    def store_for(slug: str) -> _RecordingCronStore:
+        return stores.setdefault(slug, _RecordingCronStore())
+
+    translate_customer_yaml(
+        customer_yaml_path=str(customer_yaml),
+        hermes_home=str(hermes_home),
+        skills_dir=str(skills_dir),
+        cron_store_for=store_for,
+    )
+
+    registered = [c["skills"] for c in stores["marcus"].creates]
+    assert registered == [["deadline-miss-escalator"]]
+    sentinel = json.loads((hermes_home / ".smd" / "config_ahead_of_image.json").read_text())
+    assert [(f["skill"], f["kind"]) for f in sentinel["findings"]] == [
+        ("connector-auth-check", "pre_run_missing")
+    ]
+    assert len(alerts) == 1
+    assert alerts[0].startswith("error:CONFIG AHEAD OF IMAGE")
+    assert "marcus/connector-auth-check" in alerts[0]
+    assert "Rebuild the seat" in alerts[0]
 
 
 # ---------------------------------------------------------------------------

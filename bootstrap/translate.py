@@ -266,6 +266,196 @@ def _resolve_skill_pins(
 
 
 # ---------------------------------------------------------------------------
+# Config ahead of image (ss-console, 2026-10-13 A&P outage)
+# ---------------------------------------------------------------------------
+
+#: Volume sentinel naming what this boot skipped. Rewritten every boot; removed
+#: when nothing was skipped, so its presence always describes the current boot.
+CONFIG_AHEAD_SENTINEL = Path(".smd") / "config_ahead_of_image.json"
+
+
+def _drop_unrunnable(
+    personas: list[dict[str, Any]],
+    skills_dir: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Remove the skills and cron entries THIS image cannot run.
+
+    The seat re-fetches customer.yaml from R2 on every boot, and CI publishes a
+    merged config to R2 on merge, so any boot of an image older than the config
+    (a reboot onto the prior release, a plain crash-restart) sees a config that
+    names skills the image does not carry. On 2026-10-13 that was a cron whose
+    ``pre_run.py`` shipped in the newer image: the stager raised, bootstrap died,
+    and the whole A&P seat stayed down for one hourly sign-in check.
+
+    One routine the image lacks must never cost the seat everything else. Three
+    shapes are image skew and are skipped here, each reported as a finding:
+
+    * an enabled skill whose body is absent from the catalog (``skill_missing``);
+    * an enabled skill pinned to a version whose content this image does not
+      carry (``skill_pin_mismatch``) - it is skipped, never run at the wrong
+      content, which is what the pin exists to prevent;
+    * a ``pre_run_decides`` cron entry whose script is absent from its skill body
+      (``pre_run_missing``), and any cron entry whose skill was skipped above
+      (``cron_skill_skipped``).
+
+    Everything else stays fail-closed: a malformed entry, an unsupported wake
+    policy, a cron on a skill without ``initiation.scheduled`` are authoring
+    errors the validator should have refused, not skew, and
+    :mod:`bootstrap.cron_materialize` still raises on them.
+
+    Returns new persona dicts (the inputs are not mutated) and the findings.
+    """
+    findings: list[dict[str, str]] = []
+    kept_personas: list[dict[str, Any]] = []
+    for persona in personas:
+        pslug = str(persona.get("slug") or "?")
+        skipped: set[str] = set()
+        kept_skills: list[Any] = []
+        for skill in persona.get("skills") or []:
+            name = skill.get("name") if isinstance(skill, dict) else None
+            if not (isinstance(skill, dict) and skill.get("enabled") and name):
+                kept_skills.append(skill)
+                continue
+            skill_dir = skills_dir / name
+            pinned = str(skill.get("version", "pending"))
+            if not skill_dir.is_dir():
+                findings.append(
+                    {
+                        "persona": pslug,
+                        "skill": name,
+                        "kind": "skill_missing",
+                        "detail": f"skill body not in this image's catalog ({skill_dir})",
+                    }
+                )
+                skipped.add(name)
+                continue
+            if pinned != "pending":
+                actual = _skill_content_hash(skill_dir)[:6]
+                if actual != pinned:
+                    findings.append(
+                        {
+                            "persona": pslug,
+                            "skill": name,
+                            "kind": "skill_pin_mismatch",
+                            "detail": f"config pins {pinned}, this image carries {actual}",
+                        }
+                    )
+                    skipped.add(name)
+                    continue
+            kept_skills.append(skill)
+
+        kept_cron: list[Any] = []
+        for entry in persona.get("cron") or []:
+            if not isinstance(entry, dict):
+                kept_cron.append(entry)  # malformed: the materializer refuses it
+                continue
+            skill = str(entry.get("skill") or "").strip()
+            wake = str(entry.get("wake_policy") or "").strip()
+            pre_run = str(entry.get("pre_run") or "").strip()
+            if skill in skipped:
+                findings.append(
+                    {
+                        "persona": pslug,
+                        "skill": skill,
+                        "kind": "cron_skill_skipped",
+                        "detail": f"schedule {entry.get('schedule')!r} not registered",
+                    }
+                )
+                continue
+            if (
+                skill
+                and wake == "pre_run_decides"
+                and pre_run
+                and (skills_dir / skill).is_dir()
+                and not (skills_dir / skill / pre_run).is_file()
+            ):
+                findings.append(
+                    {
+                        "persona": pslug,
+                        "skill": skill,
+                        "kind": "pre_run_missing",
+                        "detail": f"{pre_run} not in this image's {skill} skill body",
+                    }
+                )
+                continue
+            kept_cron.append(entry)
+
+        new_persona = dict(persona)
+        if "skills" in persona:
+            new_persona["skills"] = kept_skills
+        if "cron" in persona:
+            new_persona["cron"] = kept_cron
+        kept_personas.append(new_persona)
+    return kept_personas, findings
+
+
+def _alert_config_ahead_of_image(hermes_home: Path, findings: list[dict[str, str]]) -> None:
+    """Make a skipped routine loud: boot log, volume sentinel, and a Sentry error.
+
+    The Sentry event carries the seat's ``tenant`` tag, so the console's
+    ``/api/webhooks/sentry`` pages team@ with it (the existing seat alert path).
+    Every channel is fail-soft: the alert must never become the thing that stops
+    the boot it is reporting on.
+    """
+    sentinel = hermes_home / CONFIG_AHEAD_SENTINEL
+    if not findings:
+        try:
+            sentinel.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("translate: could not clear %s: %s", sentinel, exc)
+        return
+
+    skills = sorted({f"{f['persona']}/{f['skill']}" for f in findings})
+    summary = (
+        f"config names skill(s) this image lacks: {', '.join(skills)}; "
+        "skipped them and booted everything else. Rebuild the seat."
+    )
+    for f in findings:
+        logger.error(
+            "translate: CONFIG AHEAD OF IMAGE: persona %s skill %s skipped (%s): %s",
+            f["persona"],
+            f["skill"],
+            f["kind"],
+            f["detail"],
+        )
+    logger.error("translate: %s", summary)
+
+    try:
+        import json
+        from datetime import UTC, datetime
+
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(
+            json.dumps(
+                {
+                    "ts": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "summary": summary,
+                    "findings": findings,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+    except OSError as exc:
+        logger.warning("translate: could not write %s: %s", sentinel, exc)
+
+    try:
+        from shared import sentry_init
+
+        if sentry_init.init_sentry("bootstrap"):
+            import sentry_sdk
+
+            # Constant prefix + the skill list: one Sentry issue per skew, so the
+            # first boot that hits it pages and repeats group under it.
+            sentry_sdk.capture_message(f"CONFIG AHEAD OF IMAGE: {summary}", level="error")
+            sentry_sdk.flush(timeout=10)
+        else:
+            logger.error("translate: Sentry unavailable; the alert is in this log and %s", sentinel)
+    except Exception as exc:  # noqa: BLE001 - the alert must never stop the boot
+        logger.error("translate: Sentry alert failed (%s); see %s", exc, sentinel)
+
+
+# ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
 
@@ -1797,6 +1987,16 @@ def translate_customer_yaml(
     personas = customer.get("personas") or []
     if not personas:
         raise TranslateError("customer.yaml has no personas to translate")
+
+    # A catalog that is not there at all is a broken image, not skew: nothing
+    # can be judged runnable against it, so that stays a hard failure.
+    if not skills_path.is_dir():
+        raise TranslateError(f"skill catalog {skills_path} is absent; the image is incomplete")
+    # Config ahead of image: skip what this image cannot run, alert, boot the
+    # rest. Downstream (pins, profile install, cron) sees only runnable entries.
+    personas, unrunnable = _drop_unrunnable(personas, skills_path)
+    customer = {**customer, "personas": personas}
+    _alert_config_ahead_of_image(home_path, unrunnable)
 
     resolved_pins = _resolve_skill_pins(personas, skills_path)
 
