@@ -117,11 +117,31 @@ def test_the_schema_has_no_requester_field(lit) -> None:
     schema = mod.TOOLS["litigation_job_submit"][1]
     assert not {"requester", "message_ref", "request_text", "trigger"} & set(schema["properties"])
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) == {"attorneys", "all"}
+    assert set(schema["properties"]) == {"attorneys", "paralegals", "all"}
     assert mod.TOOLS["litigation_job_status"][1]["required"] == ["job_id"]
 
 
-@pytest.mark.parametrize("args", [{}, {"all": True}, {"attorneys": []}])
+@pytest.mark.parametrize(
+    "args,scope",
+    [
+        ({"paralegals": ["Irma"]}, {"paralegals": ["Irma"]}),
+        (
+            {"paralegals": [" Irma  Example "], "attorneys": ["Chris", "Craig", "Chris"]},
+            {"attorneys": ["Chris", "Craig"], "paralegals": ["Irma Example"]},
+        ),
+        ({"paralegals": [], "attorneys": ["Chris"]}, {"attorneys": ["Chris"]}),
+    ],
+)
+def test_paralegals_are_named_alone_or_with_attorneys(lit, args, scope) -> None:
+    mod, client = lit
+    _email()
+    assert json.loads(mod.litigation_job_submit(args))["accepted"] is True
+    assert client.envelopes[0]["scope"] == scope
+
+
+@pytest.mark.parametrize(
+    "args", [{}, {"all": True}, {"attorneys": []}, {"attorneys": [], "paralegals": []}]
+)
 def test_no_attorney_named_is_the_whole_firm(lit, args) -> None:
     mod, client = lit
     _email()
@@ -138,6 +158,11 @@ def test_no_attorney_named_is_the_whole_firm(lit, args) -> None:
         {"attorneys": [7]},
         {"attorneys": ["x" * 101]},
         {"attorneys": [f"A{i}" for i in range(21)]},
+        {"paralegals": ["Irma"], "all": True},
+        {"paralegals": "Irma"},
+        {"paralegals": [""]},
+        {"paralegals": ["Irma"], "attorneys": [7]},
+        {"paralegals": [f"P{i}" for i in range(21)]},
     ],
 )
 def test_a_malformed_scope_submits_nothing(lit, args) -> None:
