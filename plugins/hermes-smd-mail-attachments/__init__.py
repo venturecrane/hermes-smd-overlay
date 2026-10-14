@@ -55,7 +55,13 @@ import json
 import logging
 from typing import Any
 
-from shared import agentmail_broker, attachment_spool, email_adapter, msgraph_attachments
+from shared import (
+    agentmail_broker,
+    attachment_spool,
+    email_adapter,
+    msgraph_attachments,
+    send_anchor,
+)
 from shared.tool_registration import register_wrapped_tool
 
 logger = logging.getLogger(__name__)
@@ -76,9 +82,12 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
         {
             "type": "object",
             "properties": {
-                "message_id": {**STRING, "description": "The message id (on the event)."},
+                "message_id": {
+                    **STRING,
+                    "description": "Leave EMPTY for the email this turn is answering (the usual case): the platform fills in its id, so it cannot be mis-copied. Pass an id only for a different message.",
+                },
             },
-            "required": ["message_id"],
+            "required": [],
             "additionalProperties": False,
         },
     ),
@@ -94,13 +103,16 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
         {
             "type": "object",
             "properties": {
-                "message_id": {**STRING, "description": "The message id."},
+                "message_id": {
+                    **STRING,
+                    "description": "Leave EMPTY for the email this turn is answering (the usual case): the platform fills in its id, so it cannot be mis-copied. Pass an id only for a different message.",
+                },
                 "attachment_id": {
                     **STRING,
                     "description": "From mail_list_attachments on the same message.",
                 },
             },
-            "required": ["message_id", "attachment_id"],
+            "required": ["attachment_id"],
             "additionalProperties": False,
         },
     ),
@@ -118,7 +130,10 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
         {
             "type": "object",
             "properties": {
-                "message_id": {**STRING, "description": "The message id."},
+                "message_id": {
+                    **STRING,
+                    "description": "Leave EMPTY for the email this turn is answering (the usual case): the platform fills in its id, so it cannot be mis-copied. Pass an id only for a different message. A staff mailbox message always needs its id.",
+                },
                 "mailbox": {
                     **STRING,
                     "description": (
@@ -127,7 +142,7 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
                     ),
                 },
             },
-            "required": ["message_id"],
+            "required": [],
             "additionalProperties": False,
         },
     ),
@@ -158,8 +173,67 @@ def _backend() -> Any:
     )
 
 
+def _turn_message_id() -> str:
+    """The id of the email THIS turn is answering, or "" (a wake, a cron, no email).
+
+    Read from the platform's own record of the turn (``send_anchor``), never
+    from the model, so it is the one id a turn cannot mis-copy.
+    """
+    try:
+        anchor = send_anchor.message_origin()
+    except Exception:  # noqa: BLE001 - no anchor is no default, never a crash
+        return ""
+    if not anchor:
+        return ""
+    return str(anchor.get("graph_message_id") or anchor.get("message_id") or "").strip()
+
+
+def _is_mangled_copy(given: str, own: str) -> bool:
+    """True when ``given`` is ``own`` with characters dropped from the middle.
+
+    THE DEFECT (A&P, 2026-10-14 17:57Z). A Graph message id is ~150 characters
+    of base64 with long repeated runs; the turn read the message with the right
+    id, then retyped it into the attachments call with one middle run missing,
+    and Graph answered ErrorInvalidIdMalformed. The repair is deliberately
+    narrow: shorter than the turn's own id, same opening 16 and closing 8
+    characters, and every character present in order. Any other id is passed
+    through untouched, so asking about a DIFFERENT message still works.
+    """
+    if not own or not given or len(given) >= len(own):
+        return False
+    if given[:16] != own[:16] or given[-8:] != own[-8:]:
+        return False
+    rest = iter(own)
+    return all(ch in rest for ch in given)
+
+
+def _message_id(args: dict[str, Any], *, own_mailbox: bool = True) -> str:
+    """The message the call is about: as given, defaulted, or repaired.
+
+    Empty means this turn's own email. A mangled copy of this turn's own id is
+    corrected to it, and the correction is logged. Anything else is the
+    model's to name. A staff mailbox read (``mailbox`` set) is never rewritten,
+    because the turn's own id belongs to the seat's mailbox, not that one.
+    """
+    given = str(args.get("message_id") or "").strip()
+    if not own_mailbox:
+        return given
+    own = _turn_message_id()
+    if not given:
+        return own
+    if given != own and _is_mangled_copy(given, own):
+        logger.warning(
+            "hermes-smd-mail-attachments: message_id was a mangled copy of this turn's "
+            "own email id (%d of %d chars); using the turn's id",
+            len(given),
+            len(own),
+        )
+        return own
+    return given
+
+
 def _list_handler(args: dict[str, Any], **_: Any) -> str:
-    found = _backend().list_attachments(str(args.get("message_id") or ""))
+    found = _backend().list_attachments(_message_id(args))
     return json.dumps({"attachments": found, "count": len(found)}, ensure_ascii=False)
 
 
@@ -179,7 +253,7 @@ _OVER_SIZE_REFUSAL = {
 def _spool_handler(args: dict[str, Any], **_: Any) -> str:
     try:
         receipt = _backend().spool_attachment(
-            str(args.get("message_id") or ""),
+            _message_id(args),
             str(args.get("attachment_id") or ""),
         )
     except attachment_spool.SpoolOverSizeError:
@@ -195,7 +269,8 @@ def _spool_message_handler(args: dict[str, Any], **_: Any) -> str:
             "this seat's mail vendor cannot hand over a whole email as a file; nothing was spooled"
         )
     try:
-        receipt = spool(str(args.get("message_id") or ""), args.get("mailbox") or None)
+        mailbox = args.get("mailbox") or None
+        receipt = spool(_message_id(args, own_mailbox=mailbox is None), mailbox)
     except attachment_spool.SpoolOverSizeError:
         return json.dumps(_OVER_SIZE_REFUSAL, ensure_ascii=False)
     return json.dumps(receipt, ensure_ascii=False)
