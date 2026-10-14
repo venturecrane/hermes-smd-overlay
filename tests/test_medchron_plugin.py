@@ -181,6 +181,39 @@ def test_submit_builds_the_envelope_and_relays_the_ticket(broker):
     assert env["request_ref"] == "t-9" and "injuries" not in env
 
 
+def test_submit_passes_an_update_into_the_delivered_chronology(broker):
+    """ss-console 2026-10-13: the runner files an update INTO the delivered
+    chronology; the tool must carry the update block or the agent can only
+    ever submit a standalone package beside it."""
+    tools = _tools()
+    params = tools["medchron_job_submit"]["schema"]["parameters"]
+    assert params["properties"]["update"]["properties"]["into"]["enum"] == ["delivered_chronology"]
+    tools["medchron_job_submit"]["handler"](
+        {
+            "matter_id": "m-1",
+            "matter_number": "2026-PI-102",
+            "units": [{"client_name": "Alpha Example", "surname": "Example", "dob": "01/02/1980"}],
+            "incident_date": "2026-01-15",
+            "incident_source": "administrator_request",
+            "selection": {"include_file_ids": ["d-1"]},
+            "update": {"into": "delivered_chronology", "chronology_file_id": "doc-9"},
+        }
+    )
+    env = broker.requests[-1]["envelope"]
+    assert env["update"] == {"into": "delivered_chronology", "chronology_file_id": "doc-9"}
+    assert env["selection"] == {"include_file_ids": ["d-1"]}
+    tools["medchron_job_submit"]["handler"](
+        {
+            "matter_id": "m-1",
+            "matter_number": "2026-PI-102",
+            "units": [{"client_name": "Alpha Example", "surname": "Example", "dob": "01/02/1980"}],
+            "incident_date": "2026-01-15",
+            "incident_source": "administrator_request",
+        }
+    )
+    assert "update" not in broker.requests[-1]["envelope"]
+
+
 def test_submit_relays_a_refusal_as_prose(broker):
     broker.answers["medchron_job_submit"] = {
         "ok": True,
