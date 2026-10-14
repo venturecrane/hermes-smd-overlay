@@ -109,6 +109,14 @@ def _medchron_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -
         envelope["selection"] = {
             "include_file_ids": [str(f) for f in selection["include_file_ids"]]
         }
+    # An update INTO the delivered chronology (ss-console 2026-10-13): passed
+    # through in its one known shape; the broker validates it (one client, the
+    # documents named, a document-id shape) and refuses anything else in prose.
+    update = args.get("update")
+    if isinstance(update, dict) and update.get("into"):
+        envelope["update"] = {"into": str(update["into"])}
+        if update.get("chronology_file_id"):
+            envelope["update"]["chronology_file_id"] = str(update["chronology_file_id"])
     resp = MedchronBrokerClient().submit(envelope)
     if not resp.get("accepted"):
         return json.dumps({"accepted": False, "reason": resp.get("reason")}, ensure_ascii=False)
@@ -226,11 +234,30 @@ TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "Append runs only: the new document ids; the "
+                                "Updates only: the document ids to read; the "
                                 "runner pulls nothing else."
                             ),
                         }
                     },
+                    "additionalProperties": False,
+                },
+                "update": {
+                    "type": "object",
+                    "description": (
+                        "On a matter that already holds a delivered chronology: the update goes INTO it, "
+                        "and the runner files one complete updated chronology in its folder."
+                    ),
+                    "properties": {
+                        "into": {"type": "string", "enum": ["delivered_chronology"]},
+                        "chronology_file_id": {
+                            "type": "string",
+                            "description": (
+                                "The delivered chronology document's id on the matter, when known; "
+                                "absent, the runner finds the newest by its file name."
+                            ),
+                        },
+                    },
+                    "required": ["into"],
                     "additionalProperties": False,
                 },
             },
