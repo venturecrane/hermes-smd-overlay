@@ -2565,7 +2565,7 @@ def test_an_unknown_lane_rides_as_the_proof_tool(tmp_path):
 
 def test_the_proof_vocabulary_matches_the_broker_list():
     """Pinned to ss-console ``workspace_broker/delivery_proof.py`` CODES / LANES
-    at ss-console#3152. A code added there and not here rides as
+    at ss-console#3152 (the six *_held/stage_refused codes at ss-console#3176). A code added there and not here rides as
     ``proof:other`` (paged, but unnamed); update both together."""
     assert hb.DELIVERY_PROOF_CODES == {
         "proof_missing",
@@ -2577,6 +2577,12 @@ def test_the_proof_vocabulary_matches_the_broker_list():
         "wake_lost",
         "reply_unproven",
         "reply_not_in_sent_items",
+        "gate_held",
+        "update_held",
+        "upload_held",
+        "stage_refused",
+        "limit_held",
+        "identity_held",
     }
     assert hb.DELIVERY_PROOF_LANES == {
         "medchron",
