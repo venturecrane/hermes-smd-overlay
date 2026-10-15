@@ -177,6 +177,12 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         # not a sentence the Operator composed. A job's counts carry no
         # identifier, so seeding from them certifies nothing.
         "negotiation_job_status",
+        # An SMD note (ss-console note_verbs.py): the text is recorded only by
+        # root on SMD's command (note_record), and every identifier in it was
+        # corroborated against the requesting colleague's own email (the
+        # thread the note answers) at record time, so it vouches for its
+        # identifiers like a negotiation notice. The turn sends it verbatim.
+        "note_job_status",
         "mcp_smokeball_list_matter_types",
         "mcp_smokeball_get_stage_sets",
         "mcp_smokeball_get_stage_to_matter_mappings",

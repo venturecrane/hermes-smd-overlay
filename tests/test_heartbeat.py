@@ -2590,4 +2590,5 @@ def test_the_proof_vocabulary_matches_the_broker_list():
         "drafting",
         "litigation",
         "negotiation",
+        "note",
     }

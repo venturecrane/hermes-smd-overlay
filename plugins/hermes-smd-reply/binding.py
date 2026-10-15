@@ -289,7 +289,8 @@ TOOL_SCHEMA: dict[str, Any] = {
         "job_id": {
             "type": "string",
             "description": (
-                "A demand, drafting, chronology or litigation job's id, from its completion "
+                "A demand, drafting, chronology, litigation, negotiation or note job's id, "
+                "from its completion "
                 "wake: binds to the email that requested it."
             ),
         },

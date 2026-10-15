@@ -749,7 +749,9 @@ DELIVERY_PROOF_CODES = frozenset(
 
 #: The job lanes that write a delivery-proof row (``delivery_proof.LANES``).
 #: An event's tool is ``<lane>_job``, the lane's own status tool's prefix.
-DELIVERY_PROOF_LANES = frozenset({"medchron", "demand", "drafting", "litigation", "negotiation"})
+DELIVERY_PROOF_LANES = frozenset(
+    {"medchron", "demand", "drafting", "litigation", "negotiation", "note"}
+)
 
 #: The ``tool`` a delivery-proof event carries when its lane is not one above.
 PROOF_TOOL = "delivery_proof"
@@ -870,7 +872,7 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
       and message id are read only to join; neither reaches the wire.
     * ``failed`` (job delivery) — a ``DELIVERY_PROOF_FAILED`` row, written by
       the broker when a job lane (chronology, demand, drafting, litigation,
-      negotiation) could not prove its delivery reached the firm: the review
+      negotiation, an SMD note) could not prove its delivery reached the firm: the review
       held it, the far-end read-back failed, a dry run reached the ledger, the
       DELIVER wake was lost, or the requester's reply was not in Sent Items.
       Every row is an event and nothing later clears it: an attempt whose
