@@ -989,6 +989,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # pre_run submits to the broker directly). Status returns a notice's
     # broker-held message (composed in code on the runner) or a job's counts.
     "negotiation_job_status": ActionClass.READ,
+    # An SMD note (hermes-smd-medchron/note.py, ss-console note_verbs.py). No
+    # submit tool exists: root records the note on SMD's command. Status
+    # returns the job's state and the recorded text the wake sends verbatim.
+    "note_job_status": ActionClass.READ,
 }
 
 

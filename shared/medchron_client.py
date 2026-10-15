@@ -100,6 +100,11 @@ class MedchronBrokerClient:
         """A notice's composed message and subject, or a job's state and counts."""
         return self._request({"action": "negotiation_job_status", "job_id": job_id})
 
+    # -- an SMD note (ss-console operator/workspace_broker/note_verbs.py) --
+    def note_status(self, job_id: str) -> dict[str, Any]:
+        """A note job's state and the text SMD recorded, to be sent word for word."""
+        return self._request({"action": "note_job_status", "job_id": job_id})
+
     def list_all(self) -> list[dict[str, Any]]:
         return list(self._request({"action": "medchron_job_list"}).get("jobs") or [])
 

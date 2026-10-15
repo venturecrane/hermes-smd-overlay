@@ -1014,6 +1014,96 @@ def test_a_negotiation_wake_answers_no_email(lane) -> None:
     assert out["bound"] is False and "scheduled wake" in out["reason"]
 
 
+# -- an SMD note (ss-console note_by_smd.py): root records a note on SMD's
+# command and wakes the gateway; the wake answers the colleague's own email
+# through the note job's binding, in their thread, and nothing else.
+
+
+def _note_wake(mod, session: str = WAKE, job: str = JOB) -> None:
+    # The runner's own wake (ss-console operator/runners/medchron/medchron/note_by_smd.py).
+    mod.on_pre_llm_call(
+        session_id=session,
+        sender_id="webhook:handoff",
+        user_message=f"Run the smd-note skill's DELIVER mode for note job {job}.\nKind: note.",
+    )
+
+
+def test_a_note_wake_replies_through_a_note_binding(lane) -> None:
+    """FALSIFIER: drop "note" from the wake regex and the wake is no wake: the
+    job id binds as a demand job, which the broker looks up on the wrong ledger."""
+    mod, d1, broker, _ = lane
+    _note_wake(mod)
+    assert _bind(mod, {"job_id": JOB})["bound"] is True
+    assert broker.binds == [{"kind": "note_job", "job_id": JOB}]
+    _draft(mod, [ADMIN])
+    assert broker.bound_sends == [
+        {"binding": {"kind": "note_job", "job_id": JOB}, "session_id": WAKE}
+    ]
+    sent = [m for a, m in d1.events() if a == "REPLY_SENT"]
+    assert len(sent) == 1 and sent[0]["in_reply_to"] == GRAPH_ID
+
+
+@pytest.mark.parametrize("tool", SEND_TOOLS)
+def test_a_note_wake_may_call_no_send_tool(lane, tool) -> None:
+    """FALSIFIER: drop "note" from the wake regex and a new email to anyone passes."""
+    mod, _d1, _broker, _ = lane
+    _note_wake(mod)
+    verdict = mod.on_pre_tool_call(tool_name=tool, args={"to": [ADMIN]}, session_id=WAKE)
+    assert verdict is not None and verdict["action"] == "block"
+    assert f"note job {JOB}'s completion wake" in verdict["message"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"internet_message_id": "<req@firm.example>"},
+        {"graph_message_id": GRAPH_ID},
+        {"job_id": OTHER_JOB},
+    ],
+)
+def test_a_note_wake_bind_by_email_id_is_refused_before_the_broker(lane, args) -> None:
+    mod, _d1, _broker, _ = lane
+    _note_wake(mod)
+    verdict = mod.on_pre_tool_call(tool_name="reply_bind", args=args, session_id=WAKE)
+    assert verdict is not None and verdict["action"] == "block"
+    assert verdict["message"] == f"this is note job {JOB}'s wake; call reply_bind with job_id={JOB}"
+
+
+def test_a_note_wake_bind_by_its_own_job_id_passes_the_guard(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _note_wake(mod)
+    for tool, args in (
+        ("reply_bind", {"job_id": JOB}),
+        ("note_job_status", {"job_id": JOB}),
+        ("mcp_msgraph_mail_create_draft", {}),
+    ):
+        assert mod.on_pre_tool_call(tool_name=tool, args=args, session_id=WAKE) is None, tool
+
+
+def test_a_demand_binding_is_refused_in_a_note_wake(lane) -> None:
+    mod, _d1, _broker, _ = lane
+    _note_wake(mod)
+    out = json.loads(mod.binding.record_from_result(WAKE, _verdict("demand_job")))
+    assert out["bound"] is False
+    assert out["reason"] == f"this wake is for note job {JOB}; it cannot answer another job"
+
+
+def test_a_note_wake_is_never_scheduled(lane) -> None:
+    """A note answers the colleague's email; it never opens a new message, even
+    if a trigger line were appended."""
+    mod, _d1, _broker, _ = lane
+    mod.on_pre_llm_call(
+        session_id=WAKE,
+        sender_id="webhook:handoff",
+        user_message=(
+            f"Run the smd-note skill's DELIVER mode for note job {JOB}.\nKind: note.\n"
+            "Trigger: scheduled."
+        ),
+    )
+    out = json.loads(mod.binding.record_from_result(WAKE, _new_message_verdict("note_job")))
+    assert out["bound"] is False
+
+
 # -- the duplicate guard: a bound reply is keyed on its binding, not the email
 # (2026-10-12, A&P drafting job: the request email's failure reply committed the
 # email's id, and the job's delivery hours later was held as duplicate_reply and
