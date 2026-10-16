@@ -2530,6 +2530,7 @@ def _dispatch_outcome_letter(
         send=send_dispatch.dispatch,
         session_id=session_id,
         anchor=_rule_anchor(row),
+        row_kind=str(row.get("kind") or "rule"),
     )
     return notification.sent
 
@@ -2849,7 +2850,12 @@ def _sweep_lapses_once() -> lapse_sweeper.SweepResult:
         notify=lambda *, kind, row, by: _notify_requester(kind=kind, row=row, by=by, session_id=""),
         mark=_mark_outcome_reported,
         notify_install=_notify_install_observed,
+        backoff=_SWEEP_BACKOFF,
     )
+
+
+#: One per process, like the sweeper thread it spaces (see ``sweeper.Backoff``).
+_SWEEP_BACKOFF = lapse_sweeper.Backoff(time.monotonic)
 
 
 def start_lapse_sweeper(

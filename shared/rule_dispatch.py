@@ -114,6 +114,39 @@ def _readback(proposal_id: str, text: str) -> str:
     return f"[rule {proposal_id}] {text}"
 
 
+def _passes_scan(body: str) -> bool:
+    """Would the seat's own outbound scan let this body out?
+
+    WHY AN OUTCOME LETTER CHECKS ITSELF (2026-10-16). Every outcome letter
+    quotes the request back verbatim, and a request is whatever the firm typed or
+    the Operator built: on A&P act 7fbf43bb was a records order whose readback
+    carried the vendor's "$100.00" custodian fee. The out-of-turn send runs with
+    an empty session, so no figure is provenance-verified, the scan refused the
+    letter, and the sweeper retried it every thirty seconds for 21 hours while
+    the person it was for heard nothing. A letter that can never pass is not a
+    transient failure. So the letter is composed to pass: the full quotation
+    when it is clean, the bare tag when it is not. The tag is enough, because the
+    letter is anchored to the email the request was made in.
+
+    Most-restrictive scan (no cohort, no vertical, no provenance), the same
+    posture the out-of-turn send gets. A scan that cannot run reads as a hit.
+    """
+    try:
+        from shared.outbound_gate import evaluate
+
+        return bool(evaluate(body, None, None).allowed)
+    except Exception:  # noqa: BLE001 -- unknown means quote less, never more
+        logger.warning("rule_dispatch: outcome letter scan could not run; sending the tag only")
+        return False
+
+
+def _compose(template: str, tagged: str, tag: str, **values: Any) -> str:
+    """``template`` with the full quotation, or with the tag alone if the
+    quotation would be refused by the outbound scan (see :func:`_passes_scan`)."""
+    body = template.format(readback=tagged, **values)
+    return body if _passes_scan(body) else template.format(readback=tag, **values)
+
+
 _ADMIN_SUBJECT = "A rule for the firm to approve [rule {proposal_id}]"
 
 _ADMIN_BODY = """{requester} asked for this to become how the firm's work reads:
@@ -155,6 +188,28 @@ lapsed:
 
 Nothing changed. Say it again if you still want it, and it will be put to an
 administrator again.
+"""
+
+#: An ACT (a ``tool_call`` row: an order, a filing, a send the Operator built
+#: and held for a yes) is not a rule, and "your rule lapsed" about a records
+#: order tells the person something they never asked for. Same news, its own
+#: noun, and no claim about who was meant to answer: the readback itself said.
+_ACT_LAPSED_SUBJECT = "Your request lapsed unconfirmed [act {proposal_id}]"
+
+_ACT_LAPSED_BODY = """Nobody confirmed this request in time, so it lapsed and nothing was done:
+
+{readback}
+
+Say it again if you still want it.
+"""
+
+_ACT_DECLINED_SUBJECT = "Your request was declined [act {proposal_id}]"
+
+_ACT_DECLINED_BODY = """{declined_by} declined this request, so nothing was done:
+
+{readback}
+
+If you think it was misread, say it again.
 """
 
 #: SMD's operations desk, quoted in the lapsed notice so a person whose request
@@ -356,8 +411,14 @@ def notify_outcome(
     by: str = "",
     session_id: str = "",
     anchor: dict[str, str] | None = None,
+    row_kind: str = "rule",
 ) -> Notification:
     """Tell the person who asked how their rule ended.
+
+    ``row_kind`` is the broker row's stored kind. A ``tool_call`` row is an act
+    (an order or a send held for a yes), and its lapse and decline letters say
+    "request", never "rule". An installed act does not exist: an act that ran
+    is answered by the run itself.
 
     ``anchor`` is the rule row (``{"kind": "rule", ...}``): the broker resolves
     it to the email the rule was stated in, recorded when the row was made.
@@ -376,17 +437,25 @@ def notify_outcome(
     requester = _clean(requester)
     if not requester:
         return Notification(sent=False, note="", reason="no requester to tell")
-    readback = _readback(proposal_id, _clean(text))
+    is_act = _clean(row_kind) == "tool_call"
+    tag = f"[{'act' if is_act else 'rule'} {proposal_id}]"
+    readback = f"{tag} {_clean(text)}" if is_act else _readback(proposal_id, _clean(text))
     by = _clean(by) or "An administrator"
     if kind == "installed":
         subject = _INSTALLED_SUBJECT.format(proposal_id=proposal_id)
-        body = _INSTALLED_BODY.format(applied_by=by, readback=readback)
+        body = _compose(_INSTALLED_BODY, readback, tag, applied_by=by)
     elif kind == "declined":
-        subject = _DECLINED_SUBJECT.format(proposal_id=proposal_id)
-        body = _DECLINED_BODY.format(declined_by=by, readback=readback)
+        subject = (_ACT_DECLINED_SUBJECT if is_act else _DECLINED_SUBJECT).format(
+            proposal_id=proposal_id
+        )
+        body = _compose(
+            _ACT_DECLINED_BODY if is_act else _DECLINED_BODY, readback, tag, declined_by=by
+        )
     elif kind == "lapsed":
-        subject = _LAPSED_SUBJECT.format(proposal_id=proposal_id)
-        body = _LAPSED_BODY.format(readback=readback)
+        subject = (_ACT_LAPSED_SUBJECT if is_act else _LAPSED_SUBJECT).format(
+            proposal_id=proposal_id
+        )
+        body = _compose(_ACT_LAPSED_BODY if is_act else _LAPSED_BODY, readback, tag)
     else:  # pragma: no cover — a caller bug, not a runtime state
         raise ValueError(f"unknown outcome kind: {kind!r}")
     result = send(
@@ -455,22 +524,27 @@ def notify_ops_outcome(
     if not requester:
         return Notification(sent=False, note="", reason="no requester to tell")
     readback = _ops_readback(proposal_id, _clean(text))
+    tag = f"[ops {proposal_id}]"
     quoted = _clean(reason)
     if kind == "done":
         subject = _OPS_DONE_SUBJECT.format(proposal_id=proposal_id)
-        body = _OPS_DONE_BODY.format(
-            readback=readback,
+        body = _compose(
+            _OPS_DONE_BODY,
+            readback,
+            tag,
             note=_OPS_DONE_NOTE_LINE.format(reason=quoted) if quoted else "",
         )
     elif kind == "declined":
         subject = _OPS_DECLINED_SUBJECT.format(proposal_id=proposal_id)
-        body = _OPS_DECLINED_BODY.format(
-            readback=readback,
+        body = _compose(
+            _OPS_DECLINED_BODY,
+            readback,
+            tag,
             note=_OPS_REASON_LINE.format(reason=quoted) if quoted else "",
         )
     elif kind == "lapsed":
         subject = _OPS_LAPSED_SUBJECT.format(proposal_id=proposal_id)
-        body = _OPS_LAPSED_BODY.format(readback=readback)
+        body = _compose(_OPS_LAPSED_BODY, readback, tag)
     else:  # pragma: no cover - a caller bug, not a runtime state
         raise ValueError(f"unknown operations outcome kind: {kind!r}")
     result = send(
