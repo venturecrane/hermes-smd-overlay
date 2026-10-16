@@ -61,6 +61,39 @@ DEFAULT_SWEEP_INTERVAL_S = 30.0
 MAX_PER_PASS = 20
 
 
+#: Backoff for a row whose letter did not go (2026-10-16). The first retry
+#: comes one pass later, each further failure doubles the wait, and the wait
+#: never exceeds an hour. Before this a letter the outbound scan would always
+#: refuse was retried every thirty seconds, in each process running a sweeper,
+#: for 21 hours: about 4,900 refusals on A&P, each one an audit row, and a work
+#: health email that read as 25 separate problems. A failure that clears on its
+#: own (a busy claim, an unreachable transport) still clears; one that never
+#: clears now costs 24 attempts a day instead of 2,880.
+BACKOFF_FIRST_S = DEFAULT_SWEEP_INTERVAL_S
+BACKOFF_MAX_S = 3600.0
+
+
+class Backoff:
+    """Per-proposal retry spacing, in memory. A restart forgets it, which costs
+    one early retry per row, never a silence."""
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
+        self._next: dict[str, tuple[float, float]] = {}
+
+    def due(self, proposal_id: str) -> bool:
+        entry = self._next.get(proposal_id)
+        return entry is None or self._clock() >= entry[0]
+
+    def failed(self, proposal_id: str) -> None:
+        _, wait = self._next.get(proposal_id, (0.0, BACKOFF_FIRST_S / 2))
+        wait = min(wait * 2, BACKOFF_MAX_S)
+        self._next[proposal_id] = (self._clock() + wait, wait)
+
+    def cleared(self, proposal_id: str) -> None:
+        self._next.pop(proposal_id, None)
+
+
 #: The kind an operations request is stored under. Mirrors ``OPS_REQUEST_KIND``
 #: in ss-console ``operator/workspace_broker/establishment.py``.
 OPS_REQUEST_KIND = "ops_request"
@@ -127,6 +160,7 @@ def run_sweep_once(
     mark: Callable[[str], None],
     max_per_pass: int = MAX_PER_PASS,
     notify_install: Callable[[str, str], bool] | None = None,
+    backoff: Backoff | None = None,
 ) -> SweepResult:
     """One reporting pass. Pure with respect to I/O injection.
 
@@ -137,11 +171,14 @@ def run_sweep_once(
     that one is once-only against the broker rather than against this pass; a
     sweeper built without it simply leaves installed rows for the next caller.
 
-    A row this cannot send is left UNMARKED and comes back next pass. There is
-    no failure counter and no give-up, on purpose: the failure modes are a
-    refused gate and an unreachable transport, and both are conditions that
-    clear on their own. A row that never clears them is bounded anyway, because
-    the broker deletes it once it is old enough.
+    A row this cannot send is left UNMARKED and comes back, never given up on:
+    a busy claim and an unreachable transport clear on their own. With a
+    ``backoff`` it comes back on a doubling schedule (capped at an hour) rather
+    than every pass, because not every refusal clears: a letter the outbound
+    scan refuses was retried every thirty seconds for 21 hours on A&P
+    (2026-10-16). The letter is now composed to pass the scan
+    (``shared.rule_dispatch``); the backoff is what bounds the next refusal
+    nobody has thought of yet.
 
     ``failed`` ALSO COUNTS A ROW ANOTHER OBSERVER IS SENDING RIGHT NOW
     (ss-console#2546). Since the duplicate on 2026-08-23 every outcome letter is
@@ -163,19 +200,26 @@ def run_sweep_once(
         if not proposal_id or not kind:
             skipped += 1
             continue
+        if backoff is not None and not backoff.due(proposal_id):
+            skipped += 1
+            continue
         if kind == "installed":
             if notify_install is None:
                 skipped += 1
-            elif notify_install("", proposal_id):
-                reported += 1
-            else:
-                failed += 1
-            continue
-        if notify(kind=kind, row=row, by=str(row.get("declined_by") or "")):
-            mark(proposal_id)
+                continue
+            went = notify_install("", proposal_id)
+        else:
+            went = notify(kind=kind, row=row, by=str(row.get("declined_by") or ""))
+            if went:
+                mark(proposal_id)
+        if went:
             reported += 1
+            if backoff is not None:
+                backoff.cleared(proposal_id)
         else:
             failed += 1
+            if backoff is not None:
+                backoff.failed(proposal_id)
     return SweepResult(reported=reported, failed=failed, skipped=skipped)
 
 

@@ -676,6 +676,11 @@ def plugin(monkeypatch, tmp_path):
         getattr(mod, register, {}).clear()
     SESSION_INBOUND_ORIGIN._origins.clear()
     SESSION_TAINT._tainted.clear()
+    # The sweep backoff is per process; give each test its own, on a clock the
+    # test moves (state["clock"]), so "the next sweep" can mean "the next DUE one".
+    clock = [0.0]
+    monkeypatch.setattr(mod, "_SWEEP_BACKOFF", mod.lapse_sweeper.Backoff(lambda: clock[0]))
+    state["clock"] = clock
     yield mod, state
     SESSION_TAINT._tainted.clear()
 
@@ -883,8 +888,8 @@ def test_the_sweeper_reports_then_marks(monkeypatch):
 
 
 def test_a_row_the_sweeper_could_not_send_is_left_unmarked():
-    """It comes back next pass. There is no give-up: the failure modes are a
-    refused gate and an unreachable transport, and both clear on their own."""
+    """It comes back: never given up on, only spaced out (see the backoff test
+    below)."""
     sweeper = load_plugin("hermes-smd-establishment").__dict__["lapse_sweeper"]
     marked: list[str] = []
     result = sweeper.run_sweep_once(
@@ -895,6 +900,40 @@ def test_a_row_the_sweeper_could_not_send_is_left_unmarked():
     assert marked == []
     assert result.failed == 1
     assert result.reported == 0
+
+
+def test_a_failed_row_backs_off_and_a_sent_row_clears_it():
+    """2026-10-16: a letter the scan always refused was retried every pass for
+    21 hours. A failed row now waits one pass, then doubles, capped at an hour."""
+    sweeper = load_plugin("hermes-smd-establishment").__dict__["lapse_sweeper"]
+    now = [0.0]
+    backoff = sweeper.Backoff(lambda: now[0])
+    attempts: list[float] = []
+    went = [False]
+
+    def notify(**_kw):
+        attempts.append(now[0])
+        return went[0]
+
+    def one_pass():
+        return sweeper.run_sweep_once(
+            fetch=lambda: [{"proposal_id": RULE, "state": "lapsed"}],
+            notify=notify,
+            mark=lambda _p: None,
+            backoff=backoff,
+        )
+
+    for _ in range(int(20000 / 30)):
+        one_pass()
+        now[0] += 30.0
+    gaps = [b - a for a, b in zip(attempts, attempts[1:], strict=False)]
+    assert gaps[:4] == [30.0, 60.0, 120.0, 240.0]
+    assert max(gaps) == sweeper.BACKOFF_MAX_S
+    assert len(attempts) < 20
+    went[0] = True
+    now[0] += sweeper.BACKOFF_MAX_S
+    assert one_pass().reported == 1
+    assert backoff.due(RULE)
 
 
 def test_the_sweeper_ignores_anything_that_has_not_ended():
@@ -2445,6 +2484,7 @@ def test_a_refused_letter_releases_the_claim_so_the_next_sweep_retries(plugin):
     assert OPS not in mod._OUTCOME_CLAIMED
 
     state["send_ok"] = True
+    state["clock"][0] += 3600  # the backoff's next due pass
     second = mod._sweep_lapses_once()
     assert second.reported == 1
     assert [s["to"] for s in _ops_notes(state)] == [[PARALEGAL], [PARALEGAL]]
@@ -2649,6 +2689,7 @@ def test_a_failed_send_releases_the_brokers_claim_too(plugin):
 
     state["send_ok"] = True
     _second_process(mod)
+    state["clock"][0] += 3600  # the backoff's next due pass
     second = mod._sweep_lapses_once()
     assert second.reported == 1
     assert state["marked"] == [OPS]
