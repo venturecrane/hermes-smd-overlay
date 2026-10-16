@@ -1323,7 +1323,7 @@ def test_a_participant_fence_refusal_pages_once_naming_its_fence(tmp_path):
     FALSIFIER: keep ``reason = outcome`` and this reads ``refused``."""
 
     def build(led):
-        for fence in ("participants", "participants_unverifiable", "not-a-fence"):
+        for fence in ("participants", "participants_unverifiable", "rehearsal", "not-a-fence"):
             led.add(
                 _ts(2),
                 "CONFIRM_SEND_FAILED",
@@ -1337,11 +1337,12 @@ def test_a_participant_fence_refusal_pages_once_naming_its_fence(tmp_path):
             )
 
     facts = _facts(tmp_path, build)
-    assert facts.count == 3
+    assert facts.count == 4
     assert sorted(e["reason"] for e in facts.events) == [
         "participants",
         "participants_unverifiable",
         "refused",
+        "rehearsal",
     ]
     assert "firm.example" not in json.dumps(facts.events)
 
