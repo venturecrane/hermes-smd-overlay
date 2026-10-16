@@ -721,6 +721,32 @@ REPLY_HOLD_REASONS = frozenset(
 #: to that message already went out, and this second draft was the extra one.
 _REPLY_HOLDS_NOT_A_SHORTFALL = frozenset({"duplicate_reply"})
 
+#: A roster hold of SMD's OWN mail is not a client going unanswered
+#: (2026-10-15: the Captain answered the A&P Operator from his bare
+#: smdurgan.com mailbox, the relay held the reply correctly, and the pager told
+#: SMD the Operator "could not give someone what they asked for"). Only this
+#: reason: any other hold of an SMD address (a content gate, fabrication) is
+#: still a reply that did not go out, and pages.
+_SMD_ROSTER_HOLD_REASON = "sender_not_on_roster"
+
+
+def _is_smd_address(value: object) -> bool:
+    """True iff ``value`` is one address on SMD's own mail domains
+    (``customer_config.OPS_REPLY_DOMAINS``), normalized the way
+    ``CustomerConfig.ops_reply_from`` normalizes it. Read to decide, never sent."""
+    if not isinstance(value, str):
+        return False
+    norm = value.strip().lower()
+    if norm.count("@") != 1:
+        return False
+    local, _, domain = norm.partition("@")
+    if not local:
+        return False
+    from shared.customer_config import OPS_REPLY_DOMAINS
+
+    return domain in OPS_REPLY_DOMAINS
+
+
 #: The ``tool`` a reply event carries when its row names none. The relay's rows
 #: record the reply, not the draft call that triggered it.
 REPLY_RELAY_TOOL = "reply_relay"
@@ -865,7 +891,9 @@ def count_shortfalls(conn: sqlite3.Connection, now: datetime) -> ShortfallFacts:
     * ``failed`` (reply channel) — a ``REPLY_HELD`` or ``REPLY_FAILED`` row:
       the person wrote in and the reply did not reach them. Not an event when
       the hold queued the reply for automatic release (``held_for_release``),
-      when it held a duplicate of a reply already sent, or when a LATER
+      when it held a duplicate of a reply already sent, when it was a roster
+      hold of SMD's own address (``_is_smd_address``: SMD wrote in, not a
+      client), or when a LATER
       ``REPLY_SENT`` answered the same inbound message (the agent redrafted and
       the person got their answer). Code: ``reply_held:<reason>`` from the
       closed ``REPLY_HOLD_REASONS`` (else ``reply_held:other``), or
@@ -1038,7 +1066,8 @@ def _reply_events(
         " json_extract(metadata,'$.in_reply_to') AS in_reply_to,"
         " json_extract(metadata,'$.session_id') AS session_id,"
         " json_extract(metadata,'$.routine') AS routine,"
-        " json_extract(metadata,'$.skill') AS skill"
+        " json_extract(metadata,'$.skill') AS skill,"
+        " json_extract(metadata,'$.recipient') AS recipient"
         " FROM audit_log"
         " WHERE action_type IN ('REPLY_HELD', 'REPLY_FAILED', 'REPLY_SENT')"
         " AND substr(ts,1,19) >= ? AND substr(ts,1,19) <= ?"
@@ -1053,8 +1082,14 @@ def _reply_events(
     out: list[dict] = []
     for row in rows:
         row_id, ts, action_type, skill_name, tool, reason, for_release, message_id = row[:8]
-        session_id, routine, skill = row[9], row[10], row[11]
+        session_id, routine, skill, recipient = row[9], row[10], row[11], row[12]
         if action_type == "REPLY_SENT":
+            continue
+        if (
+            action_type == "REPLY_HELD"
+            and reason == _SMD_ROSTER_HOLD_REASON
+            and _is_smd_address(recipient)
+        ):
             continue
         if action_type == "REPLY_HELD" and (
             for_release in (1, True) or reason in _REPLY_HOLDS_NOT_A_SHORTFALL
