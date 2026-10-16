@@ -1,12 +1,17 @@
 """Agent-facing tool for an SMD note (SMD has the Operator tell a firm colleague
-something, as a reply in a thread they started; ss-console note_verbs.py).
+something; ss-console note_verbs.py): either a reply in a thread they started,
+or ONE new message the broker addresses (its wake carries "Trigger:
+scheduled.", and the reply binding is ``mode: new_message``).
 
 There is NO submit tool: a note is recorded only by root on the seat, on SMD's
-command (ss-console ``note_by_smd.py`` -> broker ``note_record``), after the
-broker corroborated every identifier in its text against the colleague's own
-email. The one tool here is the status read the completion wake uses: the
-job's state and the recorded text, which the wake's turn sends word for word
-to the person the reply binding names. It never words it.
+command (ss-console ``note_by_smd.py`` -> broker ``note_record``). A reply-mode
+note's identifiers were corroborated against the colleague's own email; a
+new-message note has no such email, so every bare matter-number run was
+resolved against Smokeball or declared a plain number by SMD, and the rest
+were listed in the dry run SMD approved. The one tool here is the status read
+the completion wake uses: the job's state and the recorded text, which the
+wake's turn sends word for word to the person the reply binding names. It
+never words it.
 
 A note with no text to send (an unknown id, a broker refusal) is a shortfall
 (code ``note_job_unavailable``) so SMD is alerted; the firm is told nothing.
@@ -59,8 +64,9 @@ def note_job_status(args: dict[str, Any], **_: Any) -> str:
 
 TOOLS: dict[str, tuple[str, dict[str, Any], Any]] = {
     "note_job_status": (
-        "An SMD note by job id: its state and the text SMD recorded for the colleague whose "
-        "email the reply binding names. Send the text word for word; never reword it.",
+        "An SMD note by job id: its state and the text SMD recorded for the person the reply "
+        "binding names (a reply in their thread, or one new message). Send the text word for "
+        "word; never reword it.",
         _schema({"job_id": STRING}, ["job_id"]),
         note_job_status,
     ),

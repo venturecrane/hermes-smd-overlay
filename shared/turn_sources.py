@@ -13,7 +13,8 @@ drafter), "... for chronology job <ULID>." (medical-chronology-maintainer) or
 negotiation job <ULID>." (the negotiation-watch skill; the id is a notice's,
 one wake per new offer, or a failed job's) or "... for note job <ULID>." (the
 smd-note skill: a note SMD recorded on the seat, ss-console note_by_smd.py, sent
-as a reply in the requesting colleague's own thread). The earliest
+as a reply in the requesting colleague's own thread, or, when its wake carries
+"Trigger: scheduled.", as ONE new message the broker addresses). The earliest
 mention decides the kind. It is recorded at ``pre_llm_call`` from the gateway's
 sender id (``webhook:handoff``), never from anything the model writes.
 """
@@ -44,12 +45,16 @@ JOB_KIND = {
     "note": "note_job",
 }
 JOB_KINDS = frozenset(JOB_KIND.values())
-#: The kinds whose wake may be a SCHEDULED run's (no request email).
-SCHEDULED_KINDS = frozenset({"litigation_job", "negotiation_job"})
-#: A litigation or negotiation wake's trigger line (ss-console
-#: litigation_lane.py / negotiation_lane.py, code-authored): "Trigger:
-#: scheduled." Read only from a wake the gateway delivered on the handoff
-#: route, like the job id itself. A negotiation wake is always scheduled.
+#: The kinds whose wake may be a SCHEDULED run's (no request email): a
+#: litigation list the calendar ran, a negotiation notice, and a NEW-MESSAGE
+#: SMD note (no colleague's email to answer; the broker binds it
+#: ``mode: new_message`` and sets its recipient and subject).
+SCHEDULED_KINDS = frozenset({"litigation_job", "negotiation_job", "note_job"})
+#: A litigation, negotiation or note wake's trigger line (ss-console
+#: litigation_lane.py / negotiation_lane.py / note_lane.py, code-authored):
+#: "Trigger: scheduled." Read only from a wake the gateway delivered on the
+#: handoff route, like the job id itself. A negotiation wake is always
+#: scheduled; a reply-mode note's wake carries no trigger line and so is not.
 WAKE_TRIGGER = re.compile(r"^Trigger: (request|scheduled)\.?\s*$", re.MULTILINE)
 
 
@@ -62,7 +67,8 @@ class TurnSources:
     def __init__(self, max_sessions: int = 256) -> None:
         self._max = max_sessions
         self._handoff: OrderedDict[str, tuple[str, str]] = OrderedDict()
-        #: Sessions opened by a SCHEDULED litigation job's wake.
+        #: Sessions opened by a SCHEDULED wake (litigation, negotiation, or a
+        #: new-message note).
         self._scheduled: set[str] = set()
         self._lock = threading.Lock()
 
@@ -85,7 +91,8 @@ class TurnSources:
                 self._scheduled.discard(gone)
 
     def scheduled(self, session_id: str) -> bool:
-        """True in a scheduled litigation job's wake."""
+        """True in a scheduled wake: a litigation run the calendar fired, a
+        negotiation notice, or a new-message note ("Trigger: scheduled.")."""
         with self._lock:
             return session_id in self._scheduled
 

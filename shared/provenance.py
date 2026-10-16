@@ -178,10 +178,15 @@ TENANT_SOURCE_READ_TOOLS: frozenset[str] = frozenset(
         # identifier, so seeding from them certifies nothing.
         "negotiation_job_status",
         # An SMD note (ss-console note_verbs.py): the text is recorded only by
-        # root on SMD's command (note_record), and every identifier in it was
-        # corroborated against the requesting colleague's own email (the
-        # thread the note answers) at record time, so it vouches for its
-        # identifiers like a negotiation notice. The turn sends it verbatim.
+        # root on SMD's command (note_record). A reply-mode note's identifiers
+        # were checked against the requesting colleague's own email (the
+        # thread the note answers) at record time. A new-message note has no
+        # request email: every bare matter-number run in it was resolved
+        # against Smokeball or declared a plain number by SMD, and its other
+        # identifiers (dates, case numbers) were listed in the dry run SMD
+        # approved. Either way the words are SMD-approved verbatim, which is
+        # why this read seeds provenance like a negotiation notice. The turn
+        # sends it verbatim.
         "note_job_status",
         "mcp_smokeball_list_matter_types",
         "mcp_smokeball_get_stage_sets",
