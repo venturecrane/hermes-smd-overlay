@@ -249,7 +249,7 @@ def count_send_refusals(conn: sqlite3.Connection, now: datetime) -> SendRefusalF
 
 
 #: The participant fence's closed vocabulary (ss-console participant_fence.FENCES).
-_FENCE_REASONS = frozenset({"participants", "participants_unverifiable"})
+_FENCE_REASONS = frozenset({"participants", "participants_unverifiable", "rehearsal"})
 
 
 def _refused_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list[dict]:
@@ -313,7 +313,9 @@ def _refused_events(conn: sqlite3.Connection, horizon: str, cutoff: str) -> list
             # it (``refused`` / ``transport_error``) and says the same thing about
             # kind without carrying an address off the seat. A participant-fence
             # refusal (ss-console participant_fence.py) names its fence instead,
-            # ``participants`` or ``participants_unverifiable``, from the same
+            # ``participants``, ``participants_unverifiable`` or ``rehearsal`` (an
+            # email marked as a rehearsal or test that would have reached someone
+            # outside SMD, ss-console rehearsal_fence.py), from the same
             # closed vocabulary: SMD is paged once, here, and knows which rule.
             reason = fence if fence in _FENCE_REASONS else outcome
         else:
