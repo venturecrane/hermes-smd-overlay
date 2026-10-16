@@ -445,10 +445,16 @@ def notify_outcome(
         subject = _INSTALLED_SUBJECT.format(proposal_id=proposal_id)
         body = _compose(_INSTALLED_BODY, readback, tag, applied_by=by)
     elif kind == "declined":
-        subject = (_ACT_DECLINED_SUBJECT if is_act else _DECLINED_SUBJECT).format(proposal_id=proposal_id)
-        body = _compose(_ACT_DECLINED_BODY if is_act else _DECLINED_BODY, readback, tag, declined_by=by)
+        subject = (_ACT_DECLINED_SUBJECT if is_act else _DECLINED_SUBJECT).format(
+            proposal_id=proposal_id
+        )
+        body = _compose(
+            _ACT_DECLINED_BODY if is_act else _DECLINED_BODY, readback, tag, declined_by=by
+        )
     elif kind == "lapsed":
-        subject = (_ACT_LAPSED_SUBJECT if is_act else _LAPSED_SUBJECT).format(proposal_id=proposal_id)
+        subject = (_ACT_LAPSED_SUBJECT if is_act else _LAPSED_SUBJECT).format(
+            proposal_id=proposal_id
+        )
         body = _compose(_ACT_LAPSED_BODY if is_act else _LAPSED_BODY, readback, tag)
     else:  # pragma: no cover — a caller bug, not a runtime state
         raise ValueError(f"unknown outcome kind: {kind!r}")

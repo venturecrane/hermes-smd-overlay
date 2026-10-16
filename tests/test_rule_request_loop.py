@@ -926,7 +926,7 @@ def test_a_failed_row_backs_off_and_a_sent_row_clears_it():
     for _ in range(int(20000 / 30)):
         one_pass()
         now[0] += 30.0
-    gaps = [b - a for a, b in zip(attempts, attempts[1:])]
+    gaps = [b - a for a, b in zip(attempts, attempts[1:], strict=False)]
     assert gaps[:4] == [30.0, 60.0, 120.0, 240.0]
     assert max(gaps) == sweeper.BACKOFF_MAX_S
     assert len(attempts) < 20
