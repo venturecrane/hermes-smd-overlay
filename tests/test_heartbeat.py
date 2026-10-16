@@ -15,6 +15,8 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from shared import heartbeat as hb
 from shared.connector_check import ConnectorCheck
 from shared.scheduler_check import SchedulerCheck
@@ -2374,6 +2376,46 @@ def test_a_send_before_the_hold_does_not_clear_it(tmp_path):
 
     facts = _shortfalls(tmp_path, build)
     assert [e["code"] for e in facts.events] == ["reply_held:sender_not_on_roster"]
+
+
+@pytest.mark.parametrize(
+    "smd", ["scott@smd.services", "Smdurgan@SMDurgan.com ", "team@smd.services"]
+)
+def test_a_roster_hold_of_smds_own_address_is_not_a_shortfall(tmp_path, smd):
+    """FALSIFIER (2026-10-15): the Captain wrote to the A&P Operator from his
+    bare smdurgan.com mailbox; the hold was right and no client went unanswered."""
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _reply_row(
+            led, _ts(2), "REPLY_HELD", reason="sender_not_on_roster", recipient=smd
+        ),
+    )
+    assert facts.count == 0
+
+
+@pytest.mark.parametrize(
+    "other",
+    ["scott@smd.services.example", "someone@notsmd.services", "@smd.services", "x@y@smd.services"],
+)
+def test_a_roster_hold_of_any_other_address_still_pages(tmp_path, other):
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _reply_row(
+            led, _ts(2), "REPLY_HELD", reason="sender_not_on_roster", recipient=other
+        ),
+    )
+    assert [e["code"] for e in facts.events] == ["reply_held:sender_not_on_roster"]
+
+
+def test_any_other_hold_of_an_smd_address_still_pages(tmp_path):
+    """Only the roster reason is exempt: a reply to SMD that a gate held did not go out."""
+    facts = _shortfalls(
+        tmp_path,
+        lambda led: _reply_row(
+            led, _ts(2), "REPLY_HELD", reason="fabrication:blocked", recipient="scott@smd.services"
+        ),
+    )
+    assert [e["code"] for e in facts.events] == ["reply_held:fabrication:blocked"]
 
 
 def test_reply_failed_codes_are_closed(tmp_path):
