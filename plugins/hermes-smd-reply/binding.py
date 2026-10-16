@@ -63,17 +63,18 @@ _JOB_KIND = JOB_KIND
 _WAKE_TRIGGER = WAKE_TRIGGER
 _LABEL = {kind: f"{word} job" for word, kind in _JOB_KIND.items()}
 
-#: A SCHEDULED litigation job has no request email: the calendar ran it. The
-#: broker binds it as ONE new message (``mode: new_message``), and it alone
-#: sets the recipient (the firm's authored scheduled recipient) and the fixed
-#: subject. The overlay takes such a binding only in that job's own scheduled
-#: wake, and never takes a reply-to-an-email binding there.
+#: A SCHEDULED wake has no request email: a litigation list the calendar ran,
+#: a negotiation notice, or a new-message SMD note. The broker binds it as ONE
+#: new message (``mode: new_message``), and it alone sets the recipient (the
+#: firm's authored scheduled recipient, or the note's recorded recipient) and
+#: the subject. The overlay takes such a binding only in that job's own
+#: scheduled wake, and never takes a reply-to-an-email binding there.
 MODE_REPLY = "reply"
 MODE_NEW_MESSAGE = "new_message"
 #: The in-process once-only key of a new-message binding (there is no email id
 #: to key on; an empty key would collide across every scheduled run). It names
 #: the wake's own lane ("litigation-scheduled:<job>",
-#: "negotiation-scheduled:<notice>"), and it is what the REPLY_SENT audit row
+#: "negotiation-scheduled:<notice>", "note-scheduled:<note>"), and it is what the REPLY_SENT audit row
 #: records as in_reply_to: a negotiation send must never read as a litigation
 #: one (2026-10-10, the first live negotiation notice did).
 _WORD_OF_KIND = {kind: word for word, kind in _JOB_KIND.items()}
@@ -254,11 +255,12 @@ def record_from_result(
             return _refused(
                 f"this wake is for {_label(wake_kind)} {source[1]}; it cannot answer another job"
             )
-    # A new message is a scheduled run's ONE channel (a litigation list, or a
-    # negotiation notice: one per new offer), and that wake has no other: the
-    # broker's mode must agree with the wake's own trigger. (Only a litigation
-    # or negotiation wake is ever marked scheduled, and the checks above
-    # already pinned the binding to that wake's own kind and job.)
+    # A new message is a scheduled run's ONE channel (a litigation list, a
+    # negotiation notice: one per new offer, or a new-message SMD note), and
+    # that wake has no other: the broker's mode must agree with the wake's own
+    # trigger. (Only a litigation, negotiation or note wake is ever marked
+    # scheduled, and the checks above already pinned the binding to that
+    # wake's own kind and job.)
     scheduled = source[0] == "handoff" and TURN_SOURCES.scheduled(session_id)
     if mode == MODE_NEW_MESSAGE:
         if not scheduled:
@@ -291,7 +293,8 @@ TOOL_SCHEMA: dict[str, Any] = {
             "description": (
                 "A demand, drafting, chronology, litigation, negotiation or note job's id, "
                 "from its completion "
-                "wake: binds to the email that requested it."
+                "wake: binds to the email that requested it, or, in a scheduled wake, to ONE "
+                "new message the broker addresses."
             ),
         },
         "graph_message_id": {
@@ -313,8 +316,9 @@ TOOL_DESCRIPTION = (
     "operator mailbox, checks its sender may be replied to and that it has had no reply, and "
     "answers with that sender. Then draft one reply with create_draft to that sender; it goes out "
     "in that email's thread, once. Pass exactly one of job_id, graph_message_id, internet_message_id. "
-    "A scheduled litigation job's wake binds by its job_id too: the broker answers with a NEW "
-    "message to the firm's scheduled recipient instead of a thread."
+    "A scheduled wake (a litigation run, a negotiation notice, a new-message note) binds by its "
+    "job_id too: the broker answers with a NEW message to the recipient it sets instead of a "
+    "thread."
 )
 
 #: Tools a demand or drafting job's completion wake may never call: every
@@ -325,8 +329,8 @@ WAKE_FORBIDDEN_TOOLS = frozenset({"smd_send_message", "casework_brief"})
 
 
 def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str | None:
-    """The refusal for ``tool_name`` in a demand, drafting, chronology or
-    litigation job's wake, or None."""
+    """The refusal for ``tool_name`` in a demand, drafting, chronology,
+    litigation, negotiation or note job's wake (request or scheduled), or None."""
     source = TURN_SOURCES.source(session_id) if session_id else None
     if source is None or source[0] != "handoff" or not source[1]:
         return None
@@ -354,7 +358,7 @@ def wake_send_refusal(session_id: str, tool_name: str, args: Any = None) -> str 
     if tool_name in WAKE_FORBIDDEN_TOOLS or sends or cls is ActionClass.REFUSED:
         return (
             f"{tool_name} refused: this is {label} {source[1]}'s completion wake, and its only "
-            "channel is the bound reply to the requester (reply_bind with job_id, then create_draft). "
+            "channel is the bound message (reply_bind with job_id, then create_draft). "
             "If the bind was refused, send nothing to anyone and end the turn stating the refusal."
         )
     return None
