@@ -55,6 +55,16 @@ def _couples(**overrides: Any) -> dict[str, Any]:
     return doc
 
 
+@pytest.fixture(autouse=True)
+def _fresh_calendar_inbox():
+    """The consumed-email register is process-wide; no test inherits a mark."""
+    from shared import calendar_inbox
+
+    calendar_inbox._reset_for_tests()
+    yield
+    calendar_inbox._reset_for_tests()
+
+
 @pytest.fixture
 def cal(monkeypatch, tmp_path):
     """The plugin, a couples seat on disk, a fresh store, and a recording sender."""
@@ -883,4 +893,90 @@ def test_ingest_never_raises_out_of_the_hook(cal, monkeypatch) -> None:
         raise RuntimeError("vendor down")
 
     monkeypatch.setattr(plugin.ingest.agentmail_broker, "list_attachments", boom)
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+
+
+# -- seats without the calendar (A&P and every other seat today) -------------------
+
+
+def test_a_seat_without_the_calendar_never_reads_or_swallows_inbound_mail(
+    monkeypatch, tmp_path
+) -> None:
+    """The A&P shape: no calendar skill. register() returns before wiring any
+    hook (plugins/hermes-smd-calendar/__init__.py register), so Hermes never
+    calls the calendar's pre_gateway_dispatch, the vendor is never asked for
+    attachments, and the router's consumed-check (the only calendar code on the
+    router path) answers False for every email, so it routes as before."""
+    cf.write_seat(
+        monkeypatch,
+        tmp_path,
+        {
+            "customer_id": "firm",
+            "scope": {"inbound_allow_from": ["@firm.example"]},
+            "personas": [{"slug": "ops", "skills": [{"name": "deadline-watch", "enabled": True}]}],
+        },
+    )
+    plugin = load_plugin("hermes-smd-calendar")
+    ctx = FakePluginContext()
+    plugin.register(ctx)
+    assert ctx.registered == {} and ctx.tools == {}
+
+    def never(*_a, **_k):
+        raise AssertionError("a seat without a calendar read the mailbox")
+
+    monkeypatch.setattr(plugin.ingest.agentmail_broker, "list_attachments", never)
+    router = load_plugin("hermes-smd-webhook-router")
+    assert router._consumed_by_calendar(_payload("paralegal@firm.example")) is False
+
+
+def test_an_answer_with_a_note_is_recorded_and_still_reaches_its_turn(cal, audited, monkeypatch):
+    """Over-broad skip guard: "Accepted, but can we start at 7?" is a message."""
+    plugin, _ = cal
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1"]})
+    noted = REPLY.format(uid=made["uid"], partstat="ACCEPTED", attendee=cf.A_EMAIL).replace(
+        "END:VEVENT", "COMMENT:can we start at 7?\r\nEND:VEVENT"
+    )
+    _attach(monkeypatch, plugin, noted)
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+    (row,) = _call(plugin, "calendar_invite_list", {})["events"]
+    assert row["responses"] == {cf.A_EMAIL: "ACCEPTED"}
+    assert audited == []
+
+
+def test_a_stale_mark_never_swallows_an_email() -> None:
+    from shared import calendar_inbox
+
+    calendar_inbox.mark("m-old", now=100.0)
+    assert calendar_inbox.take("m-old", now=100.0 + calendar_inbox.TTL_SECONDS + 1) is False
+    calendar_inbox.mark("m-new", now=100.0)
+    assert calendar_inbox.take("m-new", now=101.0) is True
+    assert calendar_inbox.take("m-new", now=101.0) is False
+
+
+@pytest.mark.parametrize("payload", [None, "not json", {"message": "x"}, {"data": 7}, []])
+def test_the_routers_calendar_check_fails_open_on_any_payload(payload) -> None:
+    """Fail OPEN: a payload the check cannot read is routed exactly as before."""
+    router = load_plugin("hermes-smd-webhook-router")
+    assert router._consumed_by_calendar(payload) is False
+
+
+def test_a_broken_calendar_read_dispatches_the_email_normally(cal, monkeypatch) -> None:
+    """Fail OPEN on a calendar seat too: a parse, store or config failure is
+    never a skip; the email reaches its turn."""
+    plugin, _ = cal
+    _attach(monkeypatch, plugin, "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\n")  # truncated part
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+
+    def broken(*_a, **_k):
+        raise RuntimeError("broken")
+
+    _attach(
+        monkeypatch,
+        plugin,
+        REPLY.format(uid="u-1", partstat="ACCEPTED", attendee=cf.A_EMAIL),
+    )
+    monkeypatch.setattr(plugin.ingest.calendar_store.STORE, "get", broken)
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+    monkeypatch.setattr(plugin.seat_mod, "load_seat", broken)
     assert _dispatch(plugin, cf.A_EMAIL) is None
