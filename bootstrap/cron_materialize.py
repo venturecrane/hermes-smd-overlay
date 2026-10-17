@@ -97,8 +97,8 @@ class _DesiredJob:
     schedule: str
     skill: str
     pre_run: str | None  # pre-run script basename when pre_run_decides, else None
-    space: str | None = None  # canonical run space on space-mode seats (ADR 0091)
-    deliver: str | None = None  # Hermes deliver target derived from the space
+    space: str | None = None  # authored space key on space-mode seats (ADR 0091)
+    deliver: str | None = None  # Hermes deliver target; the resolver reads the run's space from it
 
 
 class CronStore(Protocol):
@@ -154,7 +154,10 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
     never silently drops one.
     """
     by_persona: dict[str, list[_DesiredJob]] = {}
-    spaced = cron_space.space_mode(customer)
+    try:
+        space_cfg = cron_space.space_config(customer)
+    except cron_space.CronSpaceError as exc:
+        raise CronMaterializeError(str(exc)) from exc
     for persona in customer.get("personas") or []:
         pslug = str(persona.get("slug") or persona.get("name") or "").strip()
         scheduled_skills = _scheduled_initiation_skills(persona)
@@ -197,17 +200,17 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
                 )
             if not pslug:
                 raise CronMaterializeError(f"cron entry has no resolvable persona slug: {entry!r}")
-            # ADR 0091: on a space-mode seat the authored ``space`` is both the
-            # run's bound space and its delivery target. A routine with no space
-            # would run unbound (every fence fails closed) and deliver nowhere a
-            # person reads, so it is refused rather than guessed. Seats without
+            # ADR 0091: on a space-mode seat the authored ``space`` becomes the
+            # job's delivery target, and the delivery target is what the space
+            # resolver reads as the run's space. A routine with no space would
+            # run unbound (every fence fails closed) and deliver nowhere a person
+            # reads, so it is refused rather than guessed. Seats without
             # ``people`` ignore ``space`` entirely and stay byte-identical.
             space: str | None = None
             deliver: str | None = None
-            if spaced:
+            if space_cfg is not None:
                 try:
-                    space = cron_space.normalize_space(entry.get("space"), customer)
-                    deliver = cron_space.delivery_for(space, customer)
+                    space, deliver = cron_space.delivery_for(entry.get("space"), space_cfg)
                 except cron_space.CronSpaceError as exc:
                     raise CronMaterializeError(
                         f"persona {pslug!r} skill {skill!r}: {exc}. A space-mode seat "
