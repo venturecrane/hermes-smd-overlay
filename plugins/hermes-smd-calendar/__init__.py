@@ -117,9 +117,10 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
     TOOL_CREATE: (
         "Put a new event on the calendar of people this seat serves, by sending them a "
         "calendar invitation from this seat's inbox; their calendar files it. Invite only "
-        "people the request is for: each attendee is one of this seat's people (by address, "
-        "or by person id on a shared seat). The reply says whether the invitation was sent; "
-        "if it says not sent, nobody's calendar shows the event.",
+        "people the request is for. On a seat people share, name each attendee by person "
+        "id (p1, p2), never by address; on any other seat, by roster address. The reply "
+        "says whether the invitation was sent; if it says not sent, nobody's calendar "
+        "shows the event.",
         {
             "type": "object",
             "properties": {
@@ -128,7 +129,10 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
                 "attendees": {
                     "type": "array",
                     "items": STRING,
-                    "description": "Who to invite: addresses, or person ids on a shared seat.",
+                    "description": (
+                        "Who to invite: person ids (p1, p2) on a seat people share; "
+                        "roster addresses on any other seat."
+                    ),
                 },
             },
             "required": ["title", "start", "attendees"],

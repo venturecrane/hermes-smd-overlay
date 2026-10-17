@@ -33,6 +33,8 @@ from shared.send_dispatch import CALENDAR_ARG, DispatchResult
 from tests import couples_fixtures as cf
 from tests.conftest import FakePluginContext, load_plugin
 
+SMD_ADDRESS = "scott@smd.services"
+
 CALENDAR_PERSONA = {
     "slug": "couples",
     "skills": [{"name": "calendar", "enabled": True, "settings": {"recipients": "roster"}}],
@@ -42,7 +44,9 @@ CALENDAR_PERSONA = {
 def _couples(**overrides: Any) -> dict[str, Any]:
     doc = cf.couples_yaml(
         personas=[CALENDAR_PERSONA],
-        scope={"inbound_allow_from": [cf.A_EMAIL, cf.B_EMAIL]},
+        # SMD's own address is on the roster, as on every seat: the roster lane
+        # admits it at the broker, so only the tool's lock keeps it off an invite.
+        scope={"inbound_allow_from": [cf.A_EMAIL, cf.B_EMAIL, SMD_ADDRESS]},
         connectors={
             "Email": {"adapter": "agentmail", "inbox_address": "couples-demo@agentmail.to"}
         },
@@ -203,10 +207,22 @@ def test_a_refused_send_is_reported_as_not_sent(cal, monkeypatch) -> None:
 # -- the recipient lock --------------------------------------------------------
 
 
-@pytest.mark.parametrize("stranger", ["stranger@example.com", "p3", "@example.com", ""])
-def test_an_address_that_is_not_one_of_the_seats_people_refuses_everything(
+@pytest.mark.parametrize(
+    "stranger",
+    [
+        SMD_ADDRESS,  # on inbound_allow_from, so the broker's roster lane would admit it
+        cf.B_EMAIL,  # a person's own address: on a shared seat people are named by id
+        "stranger@example.com",
+        "p3",
+        "@example.com",
+        "",
+    ],
+)
+def test_anything_but_a_person_id_refuses_the_whole_invitation_before_the_broker(
     cal, monkeypatch, stranger
 ) -> None:
+    """The lock is in tool code (the Brokery rehearsal lesson, 2026-10-16): a
+    model-named address never reaches the sender, even one the broker would pass."""
     plugin, sent = cal
     cf.telegram_group(monkeypatch, cf.A_TG)
     with pytest.raises(RuntimeError, match="not sent to anyone"):
@@ -216,12 +232,14 @@ def test_an_address_that_is_not_one_of_the_seats_people_refuses_everything(
     assert sent == [] and calendar_store.STORE.list() == []
 
 
-def test_the_recipient_lock_admits_the_people_by_address_or_id(cal, monkeypatch) -> None:
-    """Falsifier for the lock above: the same call with only people goes."""
+def test_the_recipient_lock_maps_person_ids_to_their_authored_addresses(cal, monkeypatch) -> None:
+    """Falsifier for the lock above: the same call naming only people goes, to
+    exactly their authored addresses."""
     plugin, sent = cal
     cf.telegram_group(monkeypatch, cf.A_TG)
-    _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", cf.B_EMAIL.upper()]})
+    _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "P2"]})
     assert sent[0]["to"] == [cf.A_EMAIL, cf.B_EMAIL]
+    assert SMD_ADDRESS not in sent[0]["calendar"]["ics"]
 
 
 def test_a_roster_seat_without_people_invites_its_exact_roster_only(monkeypatch, tmp_path) -> None:
@@ -332,6 +350,72 @@ def test_changing_a_shared_event_from_a_private_chat_is_refused_too(cal, monkeyp
     with pytest.raises(RuntimeError, match="private conversation"):
         plugin.tools.run("calendar_invite_update", {"uid": made["uid"], "title": "Moved"}, "s1")
     assert len(sent) == 1
+
+
+def _space_gate(monkeypatch, *, armed: bool, sees_crossing: bool) -> list[tuple]:
+    """Stand in for workstream A's ``shared.space_writes`` (overlay#476): its
+    pre_tool_call hook holds a crossing until "share it", so a crossing call that
+    reaches the handler is one it released."""
+    import sys
+    import types
+
+    seen: list[tuple] = []
+    fake = types.ModuleType("shared.space_writes")
+    fake.gate_armed = lambda: armed
+
+    def crossing(tool_name, args, current, cfg):
+        seen.append((tool_name, dict(args), current.key))
+        return object() if sees_crossing else None
+
+    fake.crossing = crossing
+    monkeypatch.setitem(sys.modules, "shared.space_writes", fake)
+    import shared
+
+    monkeypatch.setattr(shared, "space_writes", fake, raising=False)
+    return seen
+
+
+def test_a_crossing_released_by_the_armed_space_gate_is_sent(cal, monkeypatch) -> None:
+    plugin, sent = cal
+    seen = _space_gate(monkeypatch, armed=True, sees_crossing=True)
+    cf.telegram_dm(monkeypatch, cf.A_TG)
+    args = {**DATE_NIGHT, "attendees": ["p1", "p2"]}
+    out = _call(plugin, "calendar_invite_create", args)
+    assert out["sent"] and sent[0]["to"] == [cf.A_EMAIL, cf.B_EMAIL]
+    assert seen == [("calendar_invite_create", args, "person:p1")]
+    assert calendar_store.STORE.get(out["uid"]).space == "shared"
+
+
+@pytest.mark.parametrize(
+    ("armed", "sees"), [(False, True), (True, False)], ids=["not-armed", "gate-disagrees"]
+)
+def test_a_crossing_the_space_gate_did_not_hold_is_refused(cal, monkeypatch, armed, sees) -> None:
+    """Not armed, or armed but blind to this crossing: either way the gate did
+    not hold it for the person's confirmation, so tool code refuses."""
+    plugin, sent = cal
+    _space_gate(monkeypatch, armed=armed, sees_crossing=sees)
+    cf.telegram_dm(monkeypatch, cf.A_TG)
+    with pytest.raises(RuntimeError, match="private conversation"):
+        plugin.tools.run("calendar_invite_create", {**DATE_NIGHT, "attendees": ["p2"]}, "s1")
+    assert sent == []
+
+
+def test_calendar_reach_answers_the_way_the_tool_resolves(cal, monkeypatch) -> None:
+    from shared import calendar_reach
+
+    plugin, _ = cal
+    reach = calendar_reach.invite_reach
+    assert reach("calendar_invite_create", {"attendees": ["p1", "P2"]}) == {cf.A_EMAIL, cf.B_EMAIL}
+    assert reach("calendar_invite_list", {}) == frozenset()
+    for bad in ({"attendees": [SMD_ADDRESS]}, {"attendees": ["p9"]}, {"attendees": "p1"}):
+        with pytest.raises(calendar_reach.ReachUnknown):
+            reach("calendar_invite_create", bad)
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
+    for tool in ("calendar_invite_update", "calendar_invite_cancel"):
+        assert reach(tool, {"uid": made["uid"]}) == {cf.A_EMAIL, cf.B_EMAIL}
+        with pytest.raises(calendar_reach.ReachUnknown):
+            reach(tool, {"uid": "nope"})
 
 
 @pytest.mark.parametrize(

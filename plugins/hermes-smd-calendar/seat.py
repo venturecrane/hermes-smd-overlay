@@ -128,9 +128,17 @@ def load_seat(config: CustomerConfig | None = None) -> Seat:
 
 
 def resolve_attendees(seat: Seat, requested: Any) -> list[str]:
-    """The invitees, as addresses, from what the model asked: addresses, or (on a
-    space-mode seat) person ids. Every one must be someone this seat may invite;
-    one that is not refuses the whole invitation, never a partial send."""
+    """The invitees, as addresses, from what the model asked.
+
+    On a space-mode seat the model names PERSON IDS (``p1``, ``p2``) and nothing
+    else; this code maps each to its authored ``people[].email``. An address is
+    refused there even when it is on ``scope.inbound_allow_from`` (an SMD
+    address is, on every seat): the roster lane admits the whole roster at the
+    broker, so the lock that keeps an invitation to the seat's people is HERE,
+    in code, before any send (the 2026-10-16 Brokery rehearsal reached the real
+    client because a model picked a rostered address). On any other calendar
+    seat the model names exact roster addresses. One name that does not resolve
+    refuses the whole invitation, never a partial send."""
     if not isinstance(requested, list) or not requested:
         raise CalendarRefused("name at least one person to invite")
     out: list[str] = []
@@ -140,14 +148,18 @@ def resolve_attendees(seat: Seat, requested: Any) -> list[str]:
             refused.append(repr(item))
             continue
         value = item.strip().lower()
-        address = seat.person_emails.get(value, value)
-        if address not in seat.audience:
+        address = seat.person_emails.get(value) if seat.space_mode else value
+        if not address or address not in seat.audience:
             refused.append(item.strip())
             continue
         if address not in out:
             out.append(address)
     if refused:
-        who = "the people on this seat" if seat.space_mode else "the people on this seat's roster"
+        who = (
+            f"the seat's people, named by id ({', '.join(sorted(seat.person_emails))})"
+            if seat.space_mode
+            else "the people on this seat's roster"
+        )
         raise CalendarRefused(
             f"an invitation goes only to {who}; not sent to anyone: {', '.join(refused)}"
         )
@@ -192,21 +204,56 @@ R1_PENDING_REFUSAL = (
 )
 
 
-def private_to_shared_gate(turn: space.Space | None, target_key: str, *, act: str) -> str | None:
+def _released_by_the_space_gate(turn: space.Space, tool_name: str, args: dict[str, Any]) -> bool:
+    """True only when workstream A's R1 gate (``shared.space_writes``, the
+    ``hermes-smd-space-gate`` pre_tool_call hook) is armed on this seat AND it
+    sees this very call as a crossing. Its hook runs before every other gate and
+    holds a crossing until the same person says "share it", so a crossing call
+    that reaches this handler is one it released. A call it does NOT see as a
+    crossing, while this code does, is a disagreement between the two, and the
+    answer to a disagreement is to refuse. Any part of the API missing (A's gate
+    not merged, not armed, renamed) is also a refusal."""
+    try:
+        from shared import space_writes  # type: ignore[attr-defined]
+    except ImportError:
+        return False
+    armed = getattr(space_writes, "gate_armed", None)
+    crossing = getattr(space_writes, "crossing", None)
+    if not callable(armed) or not callable(crossing):
+        return False
+    try:
+        cfg = space.space_config()
+        return (
+            bool(armed()) and cfg is not None and crossing(tool_name, args, turn, cfg) is not None
+        )
+    except Exception:  # noqa: BLE001 - a gate that cannot answer has not released anything
+        logger.warning("hermes-smd-calendar: space gate check failed; refusing", exc_info=True)
+        return False
+
+
+def private_to_shared_gate(
+    turn: space.Space | None,
+    target_key: str,
+    *,
+    act: str,
+    args: dict[str, Any] | None = None,
+) -> str | None:
     """THE R1 HOOK: a calendar act from a private space into ``shared``.
 
-    ADR 0091 R1 says such a write becomes a pending act the same person confirms
-    (bound with the overlay#465 binding). That gate is workstream A's and is not
-    published yet (``shared.space`` carries only the ``is_private_to_shared``
-    predicate). Until it is, this refuses every crossing: fail closed, so a
-    private conversation can never reach the partner through an invitation.
-    Wiring A's gate means replacing the body below with its pending-act call;
-    every caller already routes through here. Returns the refusal, or ``None``."""
+    ADR 0091 R1: such a write is held until the same person confirms it, and that
+    gate is workstream A's (``shared.space_writes``, overlay#476). This is the
+    backstop in tool code: a crossing proceeds only when A's gate is armed and
+    released it (:func:`_released_by_the_space_gate`); otherwise it is refused.
+    So until A's gate is on the seat every crossing refuses (fail closed), and
+    after, nothing reaches the partner that A's gate did not hold. ``act`` is the
+    tool name and ``args`` the call's own arguments, as A's gate saw them.
+    Returns the refusal, or ``None``."""
     if not space.is_private_to_shared(turn, target_key):
         return None
-    logger.info(
-        "hermes-smd-calendar: %s from a private space into shared refused (R1 pending)", act
-    )
+    assert turn is not None  # is_private_to_shared is False for None
+    if _released_by_the_space_gate(turn, act, dict(args or {})):
+        return None
+    logger.info("hermes-smd-calendar: %s from a private space into shared refused", act)
     return R1_PENDING_REFUSAL
 
 
