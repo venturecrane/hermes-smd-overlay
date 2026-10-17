@@ -9,7 +9,8 @@ approval; an agent/sub-agent message never presents an allowlisted telegram
 ``sender_id``).
 
 This module decides whether a given ``pre_llm_call`` is such an approval and, if
-so, marks the single pending send approved. Kept separate from the hook wiring so
+so, approves the pending send that sender raised in that chat (never another
+principal's, never one raised in a different chat). Kept separate from the hook wiring so
 the matching logic is unit-testable without the runtime.
 
 Matching is deliberately STRICT (the critique's requirement): the WHOLE message,
@@ -25,7 +26,9 @@ import logging
 import os
 import re
 
-from shared.pending_send import PENDING_SEND
+from shared import turn_principal
+from shared.pending_send import PENDING_SEND, PendingSend
+from shared.turn_principal import Principal
 
 logger = logging.getLogger(__name__)
 
@@ -93,28 +96,56 @@ def _allowlisted_senders() -> frozenset[str]:
     return frozenset(uid.strip() for uid in raw.split(",") if uid.strip())
 
 
-def maybe_capture_approval(
+def capture_approval(
     platform: str | None, sender_id: str | None, user_message: str | None
-) -> str | None:
-    """Mark the single pending send approved iff this is a trusted approval.
+) -> PendingSend | None:
+    """Approve the pending send THIS sender raised in THIS chat; return it.
 
-    Returns the approval source (``"telegram:<id>"``) when it marked an approval,
-    else ``None``. Requires: Telegram platform, an allowlisted ``sender_id``, and a
-    bare-affirmative whole message. Idempotent — safe to call on every inner
-    ``pre_llm_call`` of the turn; a no-op when nothing is pending.
+    Requires: Telegram platform, an allowlisted ``sender_id``, and a
+    bare-affirmative whole message. The approval is bound (``shared.pending_send``
+    ``_may_approve``): the approver is the sender plus the chat this turn arrived
+    in, read from Hermes' session context, so one allowlisted partner cannot
+    approve the other's send and a group "yes" cannot release a DM-raised send.
+    Idempotent — safe to call on every inner ``pre_llm_call`` of the turn; a
+    no-op when nothing this approver may approve is pending.
     """
     if platform != _TELEGRAM_PLATFORM:
         return None
     sid = str(sender_id).strip() if sender_id is not None else ""
-    if not sid or sid not in _allowlisted_senders():
+    allowlist = _allowlisted_senders()
+    if not sid or sid not in allowlist:
         return None
     if not is_bare_affirmative(user_message or ""):
         return None
+    turn = turn_principal.current()
+    if turn.user_id and turn.user_id != sid:
+        # The hook's sender and the session's bound user disagree. Neither can be
+        # chosen over the other, so nothing is approved.
+        logger.warning("trust: approval refused; the turn's sender and session user disagree")
+        return None
+    approver = Principal(
+        platform=_TELEGRAM_PLATFORM, user_id=sid, chat_id=turn.chat_id, chat_type=turn.chat_type
+    )
     source = f"telegram:{sid}"
-    if PENDING_SEND.mark_approved(source):
-        logger.info(
-            "trust: current-turn approval captured from %s for the pending send (ADR 0071 #1806)",
-            source,
-        )
-        return source
-    return None
+    rec = PENDING_SEND.approve(source, approver, sole_principal=len(allowlist) == 1)
+    if rec is None:
+        if PENDING_SEND.peek() is not None:
+            logger.info(
+                "trust: affirmative from %s matched no pending send it raised in this chat",
+                source,
+            )
+        return None
+    logger.info(
+        "trust: current-turn approval captured from %s for its pending send (ADR 0071 #1806)",
+        source,
+    )
+    return rec
+
+
+def maybe_capture_approval(
+    platform: str | None, sender_id: str | None, user_message: str | None
+) -> str | None:
+    """:func:`capture_approval`, returning the approval source
+    (``"telegram:<id>"``) when it approved a send, else ``None``."""
+    rec = capture_approval(platform, sender_id, user_message)
+    return rec.approval_source if rec is not None else None

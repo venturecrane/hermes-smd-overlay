@@ -141,7 +141,7 @@ def test_mark_approved_on_empty_register_is_noop():
 def test_expired_record_cannot_be_approved():
     reg = _reg()
     reg.capture(TOOL, _args(), {"bob@acme.com"})
-    reg._record.created_at -= reg.ttl_seconds + 1  # backdate past the TTL
+    reg.peek().created_at -= reg.ttl_seconds + 1  # backdate past the TTL
     assert reg.mark_approved("telegram:7367659986") is False
 
 
@@ -149,7 +149,7 @@ def test_expired_record_is_not_consumed_even_if_approved():
     reg = _reg()
     reg.capture(TOOL, _args(), {"bob@acme.com"})
     reg.mark_approved("telegram:7367659986")
-    reg._record.created_at -= reg.ttl_seconds + 1
+    reg.peek().created_at -= reg.ttl_seconds + 1
     assert reg.take_for_send(TOOL, {"bob@acme.com"}) is None
     # expiry clears the stale record.
     assert reg.peek() is None
