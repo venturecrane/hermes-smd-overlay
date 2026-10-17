@@ -31,8 +31,16 @@ _SELECT_COLS = "id, peer_id, persona_slug, preference, why, how_to_apply, source
 
 
 def ensure_schema(client: Any) -> None:
-    """Create the peer_preferences table + indexes idempotently."""
-    for ddl in schemas.PEER_MEMORY_DDLS:
+    """Create the peer_preferences table, add any column a table created before
+    it lacks (``schemas.PEER_PREFERENCES_ADDED_COLUMNS``), then the indexes.
+    Idempotent: a second run finds every column present and adds nothing."""
+    for ddl in schemas.PEER_MEMORY_TABLE_DDLS:
+        client.execute(ddl)
+    present = {str(row.get("name")) for row in client.query("PRAGMA table_info(peer_preferences)")}
+    for column, ddl in schemas.PEER_PREFERENCES_ADDED_COLUMNS:
+        if column not in present:
+            client.execute(ddl)
+    for ddl in schemas.PEER_MEMORY_INDEX_DDLS:
         client.execute(ddl)
 
 
@@ -87,31 +95,44 @@ def record_preference(
     source: str,
     session_id: str,
     new_id: str | None = None,
+    space: str = "",
+    kind: str = "preference",
 ) -> str:
     """Insert one active preference for a peer; return its id.
 
-    Recency wins: any active row for the same (customer, peer, persona) whose
-    preference text matches case-insensitively/trimmed is marked
+    Recency wins: any active row for the same (customer, peer, persona, space,
+    kind) whose text matches case-insensitively/trimmed is marked
     ``superseded_by`` the new id first, so re-statements don't pile duplicates
     while genuinely different preferences coexist. Captain prunes via the admin
     Learned lane. ``recorded_at`` is left to the table default (``datetime('now')``).
+
+    ``space`` and ``kind`` (ADR 0091) default to the values every row written
+    before them carries, so a seat with no spaces writes and supersedes exactly
+    as before. A restatement in one space never supersedes the same words kept
+    in another: the two rows have different readers.
     """
+    if kind not in schemas.KINDS:
+        raise ValueError(f"kind must be one of {sorted(schemas.KINDS)}")
     pref_id = new_id or uuid.uuid4().hex
 
     client.execute(
         "UPDATE peer_preferences SET superseded_by = ? "
         "WHERE customer_slug = ? AND peer_id = ? AND persona_slug = ? "
+        "AND space = ? AND kind = ? "
         "AND superseded_by IS NULL AND lower(trim(preference)) = lower(trim(?))",
         pref_id,
         customer_slug,
         peer_id,
         persona_slug,
+        space,
+        kind,
         preference,
     )
     client.execute(
         "INSERT INTO peer_preferences "
-        "(id, customer_slug, peer_id, persona_slug, preference, why, how_to_apply, source, session_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, customer_slug, peer_id, persona_slug, preference, why, how_to_apply, source, "
+        "session_id, space, kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         pref_id,
         customer_slug,
         peer_id,
@@ -121,6 +142,8 @@ def record_preference(
         how_to_apply,
         source,
         session_id,
+        space,
+        kind,
     )
     return pref_id
 
@@ -216,9 +239,134 @@ def render_preference_block(rows: list[dict[str, Any]], *, peer_id: str) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Space mode (ADR 0091, ss-console #3264): a seat several people share.
+# ---------------------------------------------------------------------------
+
+#: Memories injected per turn, newest first.
+_MEMORY_RENDER_CAP = 40
+
+
+def parse_remember_args(args: Any) -> tuple[str | None, str | None]:
+    """Validate the agent-supplied ``remember`` args: ``(fact, None)`` or
+    ``(None, error)``. The tool takes the fact only; WHERE it is kept is never
+    an argument (it is the turn's space, resolved structurally)."""
+    if not isinstance(args, dict):
+        return None, "args must be an object"
+    fact = args.get("fact")
+    if not isinstance(fact, str) or not fact.strip():
+        return None, "fact is required and must be a non-empty string"
+    return fact.strip()[:_FIELD_CAP], None
+
+
+def space_rows(
+    client: Any,
+    *,
+    readable: frozenset[str] | set[str],
+    speaker: str | None,
+    persona_slug: str | None = None,
+    limit: int = 200,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(memories, preferences)`` a turn may see, newest first.
+
+    Only rows whose ``space`` is in ``readable`` are read; the SQL carries the
+    set, so a row outside it never leaves the database. Memories are the space's
+    (anyone in it may see them, whichever persona kept them); preferences are
+    additionally the speaker's own and, as on any seat, the active persona's.
+    An empty ``readable`` reads nothing and does not query.
+    """
+    keys = sorted(k for k in readable if isinstance(k, str) and k)
+    if not keys:
+        return [], []
+    marks = ", ".join("?" for _ in keys)
+    persona_clause = " AND persona_slug = ?" if persona_slug else ""
+    persona_args = (persona_slug,) if persona_slug else ()
+    cols = f"{_SELECT_COLS}, space, kind"
+    memories = client.query(
+        f"SELECT {cols} FROM peer_preferences "
+        f"WHERE kind = 'memory' AND space IN ({marks}) AND superseded_by IS NULL "
+        "ORDER BY recorded_at DESC, rowid DESC LIMIT ?",
+        *keys,
+        limit,
+    )
+    preferences: list[dict[str, Any]] = []
+    if speaker:
+        preferences = client.query(
+            f"SELECT {cols} FROM peer_preferences "
+            f"WHERE kind = 'preference' AND peer_id = ? AND space IN ({marks}) "
+            f"AND superseded_by IS NULL{persona_clause} "
+            "ORDER BY recorded_at DESC, rowid DESC LIMIT ?",
+            speaker,
+            *keys,
+            *persona_args,
+            limit,
+        )
+    # Defense in depth: the SQL already filtered, and a row that somehow did not
+    # match is dropped rather than shown.
+    allowed = set(keys)
+    return (
+        [r for r in memories if r.get("space") in allowed],
+        [r for r in preferences if r.get("space") in allowed],
+    )
+
+
+_REMEMBER_NUDGE = (
+    "To keep something for later, use the remember tool. It is kept in the "
+    "space this conversation is in: said in one person's private chat, it stays "
+    "private to them; said in the shared group, both people can see it. Never "
+    "carry anything from one person's private chat into the shared group or to "
+    "the other person."
+)
+
+_PRIVATE_SPACE_NOTE = (
+    "This is a private conversation with one person. What they tell you here is "
+    "theirs: never repeat it to the other person or in the shared group unless "
+    "they explicitly ask you to and confirm the exact words."
+)
+
+
+def render_space_block(
+    memories: list[dict[str, Any]],
+    preferences: list[dict[str, Any]],
+    *,
+    private: bool,
+) -> str:
+    """The per-turn context block on a space-mode seat. Each memory is labeled
+    with whether it is shared or private to the person in this conversation."""
+    lines: list[str] = []
+    if private:
+        lines.extend([_PRIVATE_SPACE_NOTE, ""])
+    if memories:
+        lines.append("Things you were asked to remember (newest first):")
+        for row in memories[:_MEMORY_RENDER_CAP]:
+            tag = "shared" if row.get("space") == "shared" else "private to this person"
+            lines.append(f"- [{tag}] {row['preference']}")
+        lines.append("")
+    if preferences:
+        lines.append(
+            "How the person you are replying to likes you to work with them "
+            "(captured from what they have stated or demonstrated, never assumed). "
+            "Apply these in how you respond:"
+        )
+        for row in preferences[:_RENDER_CAP]:
+            line = f"- {row['preference']}"
+            if row.get("why"):
+                line += f" (why: {row['why']})"
+            if row.get("how_to_apply"):
+                line += f" [apply: {row['how_to_apply']}]"
+            lines.append(line)
+        lines.append("")
+    lines.append(_REMEMBER_NUDGE)
+    lines.append(_CAPTURE_NUDGE)
+    return "\n".join(lines)
+
+
 __all__ = [
     "VALID_SOURCES",
     "active_preferences",
+    "parse_remember_args",
+    "render_space_block",
+    "space_rows",
     "ensure_schema",
     "parse_capture_args",
     "record_preference",

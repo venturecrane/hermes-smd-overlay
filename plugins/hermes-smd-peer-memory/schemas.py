@@ -34,9 +34,31 @@ CREATE TABLE IF NOT EXISTS peer_preferences (
         CHECK (source IN ('stated', 'demonstrated')),
     session_id      TEXT NOT NULL DEFAULT '',
     recorded_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    superseded_by   TEXT
+    superseded_by   TEXT,
+    space           TEXT NOT NULL DEFAULT '',
+    kind            TEXT NOT NULL DEFAULT 'preference'
 );
 """
+
+# Privacy by space (ADR 0091, ss-console #3264). Added after the table shipped
+# to seats: a database created before has neither column, and CREATE TABLE IF
+# NOT EXISTS does not add one. ``store.ensure_schema`` adds each missing column
+# with these statements, and that IS this table's migration (the plugin owns
+# its schema; the Machine bootstrap runs no per-customer migrations). Every
+# older row reads ``space = ''`` and ``kind = 'preference'``: a preference
+# captured on a seat with no spaces, the only thing an older row ever was. A
+# seat in space mode never injects a row whose space is '' (it is in no space).
+#
+# ``space``  ``person:<id>`` or ``shared`` on a space-mode seat; '' elsewhere.
+# ``kind``   ``preference`` (record_peer_preference: how a person likes to work)
+#            or ``memory`` (remember: a fact kept for the space it was said in).
+PEER_PREFERENCES_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("space", "ALTER TABLE peer_preferences ADD COLUMN space TEXT NOT NULL DEFAULT ''"),
+    ("kind", "ALTER TABLE peer_preferences ADD COLUMN kind TEXT NOT NULL DEFAULT 'preference'"),
+)
+
+#: The values ``kind`` may hold.
+KINDS: frozenset[str] = frozenset({"preference", "memory"})
 
 PEER_PREFERENCES_ACTIVE_INDEX_DDL: str = """
 CREATE INDEX IF NOT EXISTS peer_preferences_active
@@ -51,15 +73,32 @@ CREATE INDEX IF NOT EXISTS peer_preferences_by_persona
 """
 
 
-PEER_MEMORY_DDLS: tuple[str, ...] = (
-    PEER_PREFERENCES_DDL,
+PEER_PREFERENCES_BY_SPACE_INDEX_DDL: str = """
+CREATE INDEX IF NOT EXISTS peer_preferences_by_space
+    ON peer_preferences (space, kind, recorded_at)
+    WHERE superseded_by IS NULL;
+"""
+
+
+#: Run by ``store.ensure_schema`` in this order: the table, then each added
+#: column a pre-existing table lacks, then the indexes (the space index names a
+#: column that exists only after the migration).
+PEER_MEMORY_TABLE_DDLS: tuple[str, ...] = (PEER_PREFERENCES_DDL,)
+PEER_MEMORY_INDEX_DDLS: tuple[str, ...] = (
     PEER_PREFERENCES_ACTIVE_INDEX_DDL,
     PEER_PREFERENCES_BY_PERSONA_INDEX_DDL,
+    PEER_PREFERENCES_BY_SPACE_INDEX_DDL,
 )
+PEER_MEMORY_DDLS: tuple[str, ...] = (*PEER_MEMORY_TABLE_DDLS, *PEER_MEMORY_INDEX_DDLS)
 
 
 __all__ = [
+    "KINDS",
     "PEER_MEMORY_DDLS",
+    "PEER_MEMORY_INDEX_DDLS",
+    "PEER_MEMORY_TABLE_DDLS",
+    "PEER_PREFERENCES_ADDED_COLUMNS",
+    "PEER_PREFERENCES_BY_SPACE_INDEX_DDL",
     "PEER_PREFERENCES_ACTIVE_INDEX_DDL",
     "PEER_PREFERENCES_BY_PERSONA_INDEX_DDL",
     "PEER_PREFERENCES_DDL",

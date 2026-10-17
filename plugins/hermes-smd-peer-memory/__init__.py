@@ -28,6 +28,13 @@ tool's source enum is the only provenance).
 Per AGENTS.md hard rule #3 every hook is exception-safe: a failure logs a
 warning and degrades to no-op (``None`` for pre_llm_call) — peer memory never
 breaks the agent loop.
+
+SPACE MODE (ADR 0091, ss-console #3264). On a seat that authors ``people:``
+(several people share it) every row is kept in the space it was said in, the
+turn sees only the spaces it may read, a person's channels resolve to one
+``person:<id>``, and a ``remember`` tool keeps facts in the current space. The
+whole lane lives in ``space_memory``; on every other seat this plugin behaves
+exactly as before (the space branch is never entered).
 """
 
 from __future__ import annotations
@@ -38,11 +45,12 @@ import os
 from collections import OrderedDict
 from typing import Any
 
+from shared import space as space_mod
 from shared.d1_client import D1Client
 from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT
 from shared.tool_registration import register_wrapped_tool
 
-from . import schemas, store  # noqa: F401 — surface module imports for tests
+from . import schemas, space_memory, store  # noqa: F401 — surface module imports for tests
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +103,9 @@ TOOL_SCHEMA: dict[str, Any] = {
 # ``None`` means "store not active" — the hooks degrade to no-op rather than raise.
 _D1: D1Client | None = None
 _CUSTOMER_SLUG: str | None = None
+# Whether this seat authors ``people:``, decided once at register (``people``
+# is rebuild-class: it cannot change under a running process).
+_SPACE_MODE: bool = False
 
 # sender_id stash, keyed by session_id. Hermes carries sender_id only on
 # pre_llm_call; the capture path (post_tool_call) reads it back from here so the
@@ -104,16 +115,21 @@ _MAX_SESSIONS = 4096
 _sender_by_session: OrderedDict[str, str] = OrderedDict()
 
 
-def bind_runtime(*, customer_slug: str, client: D1Client | None) -> None:
+def bind_runtime(
+    *, customer_slug: str, client: D1Client | None, space_mode: bool | None = None
+) -> None:
     """Bind the runtime collaborators that make the hooks active.
 
     Called by :func:`register` after it constructs the D1 client, and directly
     by tests that inject a client against a tmp sqlite file. Until this runs (or
-    if ``client`` is ``None``), capture/inject no-op.
+    if ``client`` is ``None``), capture/inject no-op. ``space_mode`` is left as
+    it was when ``None``.
     """
-    global _D1, _CUSTOMER_SLUG
+    global _D1, _CUSTOMER_SLUG, _SPACE_MODE
     _D1 = client
     _CUSTOMER_SLUG = customer_slug
+    if space_mode is not None:
+        _SPACE_MODE = space_mode
     logger.info(
         "hermes-smd-peer-memory: runtime bound customer=%s store=%s",
         customer_slug,
@@ -188,6 +204,8 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
     fills if nothing tells the agent to record; ss #1941). ``None`` only when
     there is no sender to attribute or the store is inactive. Exception-safe.
     """
+    if _SPACE_MODE:
+        return _space_pre_llm_call(kwargs)
     try:
         session_id = kwargs.get("session_id") or ""
         sender_id = kwargs.get("sender_id") or ""
@@ -204,6 +222,45 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
     except Exception:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-peer-memory: pre_llm_call failed", exc_info=True)
         return None
+
+
+def _space_pre_llm_call(kwargs: dict[str, Any]) -> dict | None:
+    """Space mode: stash the speaker's ``person:<id>`` (or forget a stale one) and
+    inject only what the turn's space may read. Unresolved space: nothing."""
+    try:
+        session_id = kwargs.get("session_id") or ""
+        sender_id = str(kwargs.get("sender_id") or "")
+        current = space_memory.resolve(session_id)
+        peer = space_memory.speaker(current, sender_id)
+        if session_id:
+            if peer:
+                _stash_sender(session_id, peer)
+            else:
+                _sender_by_session.pop(session_id, None)
+        if _D1 is None or not _CUSTOMER_SLUG:
+            return None
+        block = space_memory.context_block(_D1, current, peer, _persona_slug())
+        return {"context": block} if block else None
+    except Exception:  # noqa: BLE001 — never raise out of a hook
+        logger.warning("hermes-smd-peer-memory: pre_llm_call failed", exc_info=True)
+        return None
+
+
+def on_pre_tool_call(**kwargs: Any) -> dict | None:
+    """Space mode: refuse a memory write whose space is unresolved or whose turn
+    is tainted, so the model is told rather than acked. A no-op on every other
+    seat and for every other tool. Exception-safe: a hook that cannot decide
+    refuses."""
+    if not _SPACE_MODE:
+        return None
+    tool_name = kwargs.get("tool_name") or ""
+    if tool_name not in (TOOL_NAME, space_memory.REMEMBER_TOOL):
+        return None
+    try:
+        return space_memory.pre_tool_block(tool_name, str(kwargs.get("session_id") or ""))
+    except Exception:  # noqa: BLE001 — refusing is the safe shape
+        logger.warning("hermes-smd-peer-memory: pre_tool_call failed; refusing", exc_info=True)
+        return {"action": "block", "message": f"{tool_name} refused: memory is unavailable"}
 
 
 def record_peer_preference_tool(args: dict[str, Any], **_: Any) -> str:
@@ -239,6 +296,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
     injected content; reads and drafts on a tainted turn are unaffected.
     Exception-safe.
     """
+    if _SPACE_MODE:
+        _space_post_tool_call(kwargs)
+        return
     try:
         if (kwargs.get("tool_name") or "") != TOOL_NAME:
             return
@@ -287,6 +347,31 @@ def on_post_tool_call(**kwargs: Any) -> None:
         logger.warning("hermes-smd-peer-memory: post_tool_call failed", exc_info=True)
 
 
+def _space_post_tool_call(kwargs: dict[str, Any]) -> None:
+    """Space mode: write a remember / preference into the turn's own space."""
+    try:
+        tool_name = kwargs.get("tool_name") or ""
+        if tool_name not in (TOOL_NAME, space_memory.REMEMBER_TOOL):
+            return
+        if _D1 is None or not _CUSTOMER_SLUG:
+            logger.warning("hermes-smd-peer-memory: %s skipped (store inactive)", tool_name)
+            return
+        session_id = kwargs.get("session_id") or ""
+        raw_args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
+        space_memory.write(
+            _D1,
+            customer_slug=_CUSTOMER_SLUG,
+            tool_name=tool_name,
+            args=raw_args,
+            session_id=session_id,
+            stashed_peer=_sender_by_session.get(session_id),
+            persona=_persona_slug(raw_args),
+            status=kwargs.get("status"),
+        )
+    except Exception:  # noqa: BLE001 — never raise out of a hook
+        logger.warning("hermes-smd-peer-memory: post_tool_call failed", exc_info=True)
+
+
 def on_session_end(**kwargs: Any) -> None:
     """Evict the session's stashed sender. Exception-safe."""
     try:
@@ -297,7 +382,8 @@ def on_session_end(**kwargs: Any) -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point. Wires three hooks + the capture tool, then binds D1.
+    """Plugin entry point. Wires four hooks + the capture tool (and, on a seat that
+    authors ``people:``, the ``remember`` tool), then binds D1.
 
     Always registers the hooks and the tool (so Hermes' contract holds), then
     resolves the customer slug + agent-state binding and creates the table
@@ -305,6 +391,7 @@ def register(ctx) -> None:
     says so at WARNING — never a silent healthy-looking no-op.
     """
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
     ctx.register_hook("on_session_end", on_session_end)
     register_wrapped_tool(
@@ -317,6 +404,19 @@ def register(ctx) -> None:
         description=TOOL_DESCRIPTION,
         emoji="",
     )
+    global _SPACE_MODE
+    space_mode = _SPACE_MODE = _decide_space_mode()
+    if space_mode:
+        register_wrapped_tool(
+            ctx,
+            name=space_memory.REMEMBER_TOOL,
+            toolset="relationship",
+            schema=space_memory.REMEMBER_SCHEMA,
+            handler=space_memory.remember_tool,
+            requires_env=["SMD_CUSTOMER_SLUG"],
+            description=space_memory.REMEMBER_DESCRIPTION,
+            emoji="",
+        )
 
     slug = os.environ.get("SMD_CUSTOMER_SLUG") or None
     if not slug:
@@ -353,6 +453,17 @@ def register(ctx) -> None:
         logger.error(
             "hermes-smd-peer-memory: store init failed; capture/inject will no-op: %s", exc
         )
+
+
+def _decide_space_mode() -> bool:
+    """Whether this seat authors ``people:``. A block that cannot be read counts
+    as space mode: then nothing is injected and every write is refused, which is
+    the closed side of "could not tell"."""
+    try:
+        return space_mod.space_mode()
+    except space_mod.SpaceConfigError:
+        logger.error("hermes-smd-peer-memory: people block unreadable; space mode, fail closed")
+        return True
 
 
 def _set_inactive_slug(slug: str | None) -> None:
