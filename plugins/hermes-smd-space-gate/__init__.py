@@ -12,10 +12,14 @@ Two hooks:
 
 ``pre_tool_call``  classifies the call (``shared.space_writes.crossing``). A
     crossing from a private Telegram DM is held in ``SPACE_WRITES`` bound to
-    that person and chat, and the call is blocked with the exact payload for the
-    model to show. When the person has confirmed, the re-invoked call is matched
-    by tool and target, its arguments are REPLACED by the stored payload, the
-    approval is spent, and the call proceeds through every other gate. A
+    that person and chat. The seat itself posts the exact payload to that chat
+    through the Bot API (``space_writes.post_notice``), so the person reads the
+    words that will land, not the model's re-telling; if the notice cannot be
+    sent, nothing is held. When the person has confirmed, the re-invoked call is
+    matched by tool and target, its arguments are REPLACED by the stored
+    payload, the approval is spent, a release is noted for the tool's own
+    in-handler check (``space_writes.in_tool_gate``), and the call proceeds
+    through every other gate. A
     crossing from an email turn or a cron run is refused outright: there is no
     chat in which the same person could confirm it. A candidate call on an
     unresolved space is refused.
@@ -107,11 +111,16 @@ _TOO_LONG = (
 )
 _HELD = (
     "HELD, not done: this would put what was said in this private conversation "
-    "into {where}, where the other person can see it. Show the person the exact "
-    'payload below, word for word, and ask them to reply "share it" here if '
-    "that is what they want shared. Once they do, call {tool} again with the same "
-    "arguments: exactly this payload is what will be written, whatever is passed "
-    "the second time.\n\n{payload}"
+    "into {where}, where the other person can see it. The seat has just sent the "
+    'person the exact words in this chat and asked them to reply "share it". Do '
+    'not restate or reword them. If the person replies "share it", call {tool} '
+    "again with the same arguments: exactly the words they were shown are what "
+    "will be written, whatever is passed the second time."
+)
+_NOT_SHOWN = (
+    "{tool} refused: this would put what was said in a private conversation into "
+    "{where}, and the exact words could not be shown to the person for them to "
+    "confirm. Nothing was written."
 )
 _CONFIRMED = (
     "The person confirmed the held write to {where}. Call {tool} again now with "
@@ -160,6 +169,9 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             if isinstance(args, dict):
                 args.clear()
                 args.update(copy.deepcopy(held.args))
+            # A tool that checks the crossing again in its handler (the calendar
+            # tools) learns from this that the person confirmed this very call.
+            space_writes.note_release(tool_name, turn)
             logger.info("hermes-smd-space-gate: confirmed write released (%s)", tool_name)
             return None
         payload = space_writes.exact_text(args)
@@ -168,12 +180,20 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
                 "action": "block",
                 "message": _TOO_LONG.format(tool=tool_name, where=cross.where),
             }
+        # The person sees the exact payload from the seat itself, never a
+        # re-telling by the model. If it cannot be shown, nothing is held: a
+        # confirmation of words the person never saw is not a confirmation.
+        try:
+            space_writes.post_notice(turn.chat_id, space_writes.notice_text(payload))
+        except Exception:  # noqa: BLE001 — not shown means not held
+            logger.warning("hermes-smd-space-gate: confirmation notice not sent; write refused")
+            return {
+                "action": "block",
+                "message": _NOT_SHOWN.format(tool=tool_name, where=cross.where),
+            }
         space_writes.SPACE_WRITES.capture(tool_name, args, cross.targets, requester=turn)
         logger.info("hermes-smd-space-gate: private-to-shared write held (%s)", tool_name)
-        return {
-            "action": "block",
-            "message": _HELD.format(tool=tool_name, where=cross.where, payload=payload),
-        }
+        return {"action": "block", "message": _HELD.format(tool=tool_name, where=cross.where)}
     except Exception:  # noqa: BLE001 — a hook that cannot decide refuses
         logger.exception("hermes-smd-space-gate: pre_tool_call failed; refusing %s", tool_name)
         return {"action": "block", "message": _UNRESOLVED.format(tool=tool_name)}

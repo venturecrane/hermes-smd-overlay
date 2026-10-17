@@ -17,8 +17,10 @@ returns the :class:`Crossing` the call would make, or ``None``. It knows:
   with no owner field, or a record stamped ``shared``);
 * ``send_message`` (Hermes): a target that is not the requester's own DM;
 * any email send (``to``/``cc``/``bcc``): a recipient who is another person;
-* a calendar invite (any tool whose name starts ``calendar_invite``): an
-  attendee who is not the requester;
+* a calendar invitation (``calendar_invite_create`` / ``_update`` /
+  ``_cancel``): a reach, read the way the tool resolves it
+  (``shared.calendar_reach``: person ids, or a stored event's attendees by
+  uid), that includes anyone but the requester; an unreadable reach crosses;
 * every non-read ``workspace_*`` tool: Google holds shared items only (R5).
 
 A crossing from the SHARED space is not a crossing (the words are already
@@ -35,6 +37,7 @@ lands is the STORED payload, never a re-composition.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,7 +70,7 @@ _WORKSPACE_READS = frozenset(
     }
 )
 
-#: Arg keys a calendar invite may name its attendees under.
+#: Arg keys a calendar invite may name attendee addresses under.
 _ATTENDEE_KEYS = ("attendees", "to", "invitees", "recipients", "emails")
 
 #: The longest payload a person is asked to confirm in chat. Anything larger
@@ -255,8 +258,132 @@ def exact_text(args: Any) -> str:
     )
 
 
+def target_space(
+    tool_name: str, args: Any, current: space_mod.Space | None, cfg: space_mod.SpaceConfig
+) -> str | None:
+    """The space key a call writes into, as this module judges it: ``shared``
+    when it crosses out of a private space, else the turn's own key; ``None``
+    when the turn's space is unresolved."""
+    if current is None:
+        return None
+    return space_mod.SHARED if crossing(tool_name, args, current, cfg) else current.key
+
+
+# ---------------------------------------------------------------------------
+# Release tokens: how a tool's own R1 check learns the gate released THIS call.
+#
+# The gate (plugins/hermes-smd-space-gate) holds and releases in pre_tool_call.
+# A tool that also checks the crossing itself, in its handler (the calendar
+# tools, overlay #475, seat.private_to_shared_gate), asks :func:`in_tool_gate`,
+# which passes a crossing only when the gate released this tool for this person
+# in this chat moments ago, and spends that release. Without it the handler's
+# own check would refuse the very call the person just confirmed.
+# ---------------------------------------------------------------------------
+
+_RELEASE_TTL_S = 120.0
+_releases: dict[tuple[str, str, str], float] = {}
+
+IN_TOOL_REFUSAL = (
+    "this would put something from a private conversation in front of the other "
+    "person, and it was not confirmed. Nothing was sent. The person confirms by "
+    'replying "share it" in their own chat when the seat shows them the exact words.'
+)
+
+
+def note_release(tool_name: str, principal: Any) -> None:
+    """Called by the gate when it releases a confirmed call."""
+    key = (
+        tool_name,
+        str(getattr(principal, "user_id", "") or ""),
+        str(getattr(principal, "chat_id", "") or ""),
+    )
+    _releases[key] = time.monotonic() + _RELEASE_TTL_S
+
+
+def take_release(tool_name: str, principal: Any) -> bool:
+    """Spend the release the gate noted for this tool, person and chat."""
+    now = time.monotonic()
+    for k in [k for k, exp in _releases.items() if exp < now]:
+        _releases.pop(k, None)
+    key = (
+        tool_name,
+        str(getattr(principal, "user_id", "") or ""),
+        str(getattr(principal, "chat_id", "") or ""),
+    )
+    if not key[1] or key not in _releases:
+        return False
+    _releases.pop(key, None)
+    return True
+
+
+def in_tool_gate(act: str, current: space_mod.Space | None, target_key: str) -> str | None:
+    """The R1 check for a tool's own handler. ``None`` when the write stays in
+    its space, or when the space gate released this call after the person
+    confirmed it; otherwise the refusal to return to the model."""
+    if not space_mod.is_private_to_shared(current, target_key):
+        return None
+    from shared import turn_principal
+
+    if take_release(act, turn_principal.current()):
+        return None
+    return IN_TOOL_REFUSAL
+
+
+# ---------------------------------------------------------------------------
+# The confirmation notice: the exact payload, sent by code, never by the model.
+# ---------------------------------------------------------------------------
+
+NOTICE_HEAD = "About to share with both of you:"
+NOTICE_TAIL = "Reply 'share it' to send."
+_TELEGRAM_API = "https://api.telegram.org"
+_TIMEOUT_S = 10.0
+
+
+def notice_text(payload: str) -> str:
+    """The fixed frame around the stored payload, which appears unchanged."""
+    return f"{NOTICE_HEAD}\n\n{payload}\n\n{NOTICE_TAIL}"
+
+
+def post_notice(chat_id: str, text: str) -> None:
+    """Send ``text`` to a Telegram chat through the Bot API. Raises on any failure.
+
+    ``urllib``, not ``httpx`` (httpx logs request URLs, and a Bot API URL holds
+    the token); an error is re-raised without the URL. Same posture as
+    ``shared.group_audience``."""
+    import urllib.parse
+    import urllib.request
+
+    from shared.secrets import get_secret
+
+    token = get_secret("TELEGRAM_BOT_TOKEN").strip()
+    if not token or not chat_id:
+        raise RuntimeError("no bot token or no chat to send the notice to")
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+    # Scheme and host are the constant _TELEGRAM_API; only the token varies.
+    req = urllib.request.Request(
+        f"{_TELEGRAM_API}/bot{token}/sendMessage", data=data, method="POST"
+    )
+    try:
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+        with urllib.request.urlopen(req, timeout=_TIMEOUT_S) as resp:  # noqa: S310
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 — strip the URL (it holds the token)
+        raise RuntimeError(f"Bot API sendMessage failed: {type(exc).__name__}") from None
+    if not isinstance(body, dict) or not body.get("ok"):
+        raise RuntimeError("Bot API sendMessage returned not ok")
+
+
 __all__ = [
     "CALENDAR_INVITE_PREFIX",
+    "IN_TOOL_REFUSAL",
+    "NOTICE_HEAD",
+    "NOTICE_TAIL",
+    "in_tool_gate",
+    "note_release",
+    "notice_text",
+    "post_notice",
+    "take_release",
+    "target_space",
     "Crossing",
     "MAX_CONFIRM_CHARS",
     "RECORD_WRITE",

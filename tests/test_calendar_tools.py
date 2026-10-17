@@ -368,6 +368,7 @@ def _space_gate(monkeypatch, *, armed: bool, sees_crossing: bool) -> list[tuple]
         return object() if sees_crossing else None
 
     fake.crossing = crossing
+    fake.take_release = lambda tool_name, principal: True
     monkeypatch.setitem(sys.modules, "shared.space_writes", fake)
     import shared
 
@@ -414,6 +415,9 @@ def real_gate(monkeypatch):
     from shared import space_writes
 
     space_writes.SPACE_WRITES.clear()
+    space_writes._releases.clear()
+    # The gate posts the exact words through the Bot API; record instead.
+    monkeypatch.setattr(space_writes, "post_notice", lambda chat, text: None)
     gate = load_plugin("hermes-smd-space-gate")
     gate.register(FakePluginContext())  # arms space_writes
     yield gate
@@ -454,6 +458,24 @@ def test_the_real_space_gate_holds_an_invite_to_the_partner_until_share_it(
     out = _through_the_real_gate(plugin, real_gate, name, dict(args))
     assert out and out["ran"]["sent"] is True
     assert sent[0]["to"] == [cf.A_EMAIL, cf.B_EMAIL]
+    # One confirmation, one send: the same call again is held, and a handler
+    # reached without the gate's release refuses.
+    sent.clear()
+    again = _through_the_real_gate(plugin, real_gate, name, dict(args))
+    assert again and again["message"].startswith("HELD") and sent == []
+
+
+def test_a_crossing_that_skips_the_gate_is_refused_even_when_armed(
+    cal, real_gate, monkeypatch
+) -> None:
+    """The gate is armed and sees the crossing, but it never released this call
+    (no "share it", so no release noted): the handler's backstop refuses.
+    FALSIFIER: drop the take_release requirement in seat._released_by_the_space_gate."""
+    plugin, sent = cal
+    cf.telegram_dm(monkeypatch, cf.A_TG)
+    with pytest.raises(RuntimeError, match="private conversation"):
+        plugin.tools.run("calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]}, "s")
+    assert sent == []
 
 
 def test_the_real_space_gate_lets_a_private_invite_through_unheld(
