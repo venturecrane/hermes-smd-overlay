@@ -400,6 +400,74 @@ def test_a_crossing_the_space_gate_did_not_hold_is_refused(cal, monkeypatch, arm
     assert sent == []
 
 
+def _through_the_real_gate(plugin, gate, tool: str, args: dict[str, Any]) -> dict | None:
+    """Run the call the way the gateway does: the space gate's pre_tool_call
+    first, then (when it does not block) the handler, on the args it left."""
+    blocked = gate.on_pre_tool_call(tool_name=tool, args=args, session_id="s")
+    if blocked:
+        return blocked
+    return {"ran": _call(plugin, tool, args, "s")}
+
+
+@pytest.fixture
+def real_gate(monkeypatch):
+    from shared import space_writes
+
+    space_writes.SPACE_WRITES.clear()
+    gate = load_plugin("hermes-smd-space-gate")
+    gate.register(FakePluginContext())  # arms space_writes
+    yield gate
+    space_writes.SPACE_WRITES.clear()
+    monkeypatch.setattr(space_writes, "_ARMED", False)
+
+
+@pytest.mark.parametrize("tool", ["create", "update", "cancel"])
+def test_the_real_space_gate_holds_an_invite_to_the_partner_until_share_it(
+    cal, real_gate, monkeypatch, tool
+) -> None:
+    """End to end with workstream A's gate (overlay#476): from Ana's DM, an
+    invitation that reaches Ben, including an update or cancel of a shared event
+    whose arguments name only its uid, is held; nothing is sent; Ana's "share it"
+    in her DM releases exactly that call, and only then does it send."""
+    plugin, sent = cal
+    if tool == "create":
+        args: dict[str, Any] = {**DATE_NIGHT, "attendees": ["p1", "p2"]}
+    else:
+        cf.telegram_group(monkeypatch, cf.A_TG)
+        made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
+        sent.clear()
+        args = {"uid": made["uid"], **({"title": "Moved"} if tool == "update" else {})}
+    name = f"calendar_invite_{tool}"
+    cf.telegram_dm(monkeypatch, cf.A_TG)
+    held = _through_the_real_gate(plugin, real_gate, name, dict(args))
+    assert held and held["action"] == "block" and held["message"].startswith("HELD")
+    assert sent == []
+    monkeypatch.setenv("HERMES_SESSION_ID", "s")
+    released = real_gate.on_pre_llm_call(
+        session_id="s",
+        turn_id="t2",
+        user_message="share it",
+        platform="telegram",
+        sender_id=cf.A_TG,
+    )
+    assert released and "confirmed" in released["context"]
+    out = _through_the_real_gate(plugin, real_gate, name, dict(args))
+    assert out and out["ran"]["sent"] is True
+    assert sent[0]["to"] == [cf.A_EMAIL, cf.B_EMAIL]
+
+
+def test_the_real_space_gate_lets_a_private_invite_through_unheld(
+    cal, real_gate, monkeypatch
+) -> None:
+    """Falsifier for the hold above: an invite only to the requester is not a crossing."""
+    plugin, sent = cal
+    cf.telegram_dm(monkeypatch, cf.A_TG)
+    out = _through_the_real_gate(
+        plugin, real_gate, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1"]}
+    )
+    assert out and out["ran"]["sent"] is True and sent[0]["to"] == [cf.A_EMAIL]
+
+
 def test_calendar_reach_answers_the_way_the_tool_resolves(cal, monkeypatch) -> None:
     from shared import calendar_reach
 
