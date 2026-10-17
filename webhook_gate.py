@@ -491,6 +491,19 @@ def _breaker_hard_stopped() -> bool:
         return False
 
 
+#: Said in every clear response because the behaviour it describes is easy to
+#: misread as a failed clear. ``StickyStopMachine.clear()`` deliberately KEEPS
+#: the day's spend (``cost_cents_today``), so after a cost trip the very next
+#: charged turn or job segment puts the Machine back at HARD_STOP until the UTC
+#: day rolls over. Unchanged behaviour (overlay review J4, 2026-10-17); this only
+#: makes the endpoint say so.
+STICKY_STOP_CLEAR_COST_NOTE = (
+    "Clearing does not reset today's recorded spend. If the stop was the daily "
+    "cost cap, the next charged turn or job segment will stop the Operator again "
+    "until the spend day resets at 00:00 UTC."
+)
+
+
 def _sticky_stop_clear(req: dict) -> tuple[int, dict]:
     """Pure core of the Captain clear endpoint (ADR 0062 §6).
 
@@ -513,7 +526,11 @@ def _sticky_stop_clear(req: dict) -> tuple[int, dict]:
         # resume is a governance action, audited control-plane-side by the
         # console's admin clear endpoint (which authenticated the Captain).
         cleared = clear_hard_stops(captain_id=captain_id, reason=reason)
-        return 200, {"cleared": cleared, "level": read_level() or "OK"}
+        return 200, {
+            "cleared": cleared,
+            "level": read_level() or "OK",
+            "cost_note": STICKY_STOP_CLEAR_COST_NOTE,
+        }
     except Exception as exc:  # noqa: BLE001 — surface the failure honestly
         logger.error("sticky-stop clear failed: %s", exc)
         return 500, {"error": "clear failed", "detail": str(exc)}
