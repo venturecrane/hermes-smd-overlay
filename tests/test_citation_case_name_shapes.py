@@ -17,6 +17,8 @@ The ``versus`` pattern is case-SENSITIVE in its parties, unlike ``CASE_NAME_RE``
 "apples versus oranges" must pass; "Palsgraf versus Long Island Railroad" must not.
 """
 
+import pytest
+
 from shared import provenance
 from shared.citation_filter import canonical_caption, contains_citation, scan
 from shared.identifier_filter import ProvenanceRegister
@@ -71,6 +73,38 @@ def test_versus_caption_blocks_without_allowlist() -> None:
 def test_versus_caption_passes_when_the_v_form_is_allowlisted() -> None:
     """A caption read as "Espinoza v. Kaviani" also exempts the longhand form."""
     assert not contains_citation(_VERSUS_BODY, allowed_case_names=["ESPINOZA v. Kaviani"])
+
+
+_CAPTION = ["Alvarez v. Draper"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Alvarez v. Draper follows Smith v. Jones here.",
+        "Under Alvarez v. Draper and Palsgraf v. Long Island the duty is clear.",
+        "Smith v. Jones follows Alvarez v. Draper.",
+        "Alvarez versus Draper follows Smith v. Jones here.",
+    ],
+)
+def test_fabricated_case_beside_the_allowlisted_caption_still_blocks(body: str) -> None:
+    """OSA-1: the case-name regex swallows the caption AND the neighbouring
+    fabricated case into one hit; containment of the caption must not exempt
+    the whole hit."""
+    assert contains_citation(body, allowed_case_names=_CAPTION)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Alvarez v. Draper",
+        "Discovery capture on Alvarez v. Draper is our matter.",
+        "The Alvarez v. Draper deposition is Friday.",
+        "Alvarez versus Draper compares apples versus oranges.",
+    ],
+)
+def test_allowlisted_caption_with_ordinary_prose_still_passes(body: str) -> None:
+    assert not contains_citation(body, allowed_case_names=_CAPTION)
 
 
 def test_every_separator_spelling_canonicalizes_the_same() -> None:

@@ -61,7 +61,11 @@ _COPY = _REPO_ROOT / "shared" / "escalation_ledger.py"
 # with the attorney's name" has a field to be true in. Both halves are required
 # together: a name with no key is unjoinable, a key with no name cannot be
 # written into a memo a human reads.
-CANONICAL_SHA256 = "4f99f46510d67ee5522226e0631252d6849b8fa21eb09e96507ae7afe6b6bf9e"
+# 2026-10-17 (J-b, overlay review): validate_append refuses an `acked` whose token
+# is not token_for(item_key), so item B's ACK code can no longer acknowledge item
+# A. Paired ss-console branch fix/twins-osa carries the identical canonical and
+# skill copies; it lands with the OVERLAY_REF bump.
+CANONICAL_SHA256 = "16ed2eb3408a154415524f3c2d277290816074d655e22cb0c0ea37e74665f8be"
 
 CANONICAL_PATH = "operator/workspace_broker/escalation_ledger.py"
 CANONICAL_REPO = "venturecrane/ss-console"

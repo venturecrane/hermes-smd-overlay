@@ -227,7 +227,7 @@ def _base_ack() -> dict:
         "item_key": "k1",
         "event": "acked",
         "attempt": 0,
-        "token": "ACK-ABC123",
+        "token": escalation_ledger.token_for("k1"),
     }
 
 

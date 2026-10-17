@@ -675,6 +675,16 @@ def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
     if kind == "acked":
         token = new_event.get("token")
         key = str(new_event.get("item_key") or "")
+        if token is not None and str(token) != token_for(key):
+            # The token is derived from the item_key, so a mismatch means the ack
+            # names one item and quotes another's code. Matching the raise by
+            # token alone let item B's code acknowledge item A (derive_state
+            # folds by item_key), silencing an alarm nobody confirmed.
+            raise ValueError(
+                "that ACK code belongs to a different item than this acknowledgement "
+                "names; derive the item from the code before recording the ack. Do "
+                "not report it as acknowledged"
+            )
         raised = False
         stale_only = False
         for prior in existing_events:

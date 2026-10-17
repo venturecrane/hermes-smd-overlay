@@ -97,6 +97,28 @@ def test_not_legal_advice_disclaimers_pass(text) -> None:
             "Nothing here is legal advice; the contract is attached for signature.",
             "contract",
         ),
+        # OSA-2: the triggers sit BETWEEN the negation and the phrase. The old
+        # carve-out blanked that whole span, so both of these read as clear.
+        (
+            "No need to sign anything, we will wire the $40,000 settlement Friday, "
+            "and nothing here is legal advice",
+            "money",
+        ),
+        (
+            "I read the agreement and we will wire the $40,000 settlement Friday; "
+            "treat none of this as legal advice",
+            "money",
+        ),
+        (
+            "No need to sign anything, we will wire the $40,000 settlement Friday, "
+            "and nothing here is legal advice",
+            "contract",
+        ),
+        (
+            "No need to sign anything, we will wire the $40,000 settlement Friday, "
+            "and nothing here is legal advice",
+            "legal",
+        ),
     ],
 )
 def test_disclaimer_does_not_launder_other_sensitive_content(text, category) -> None:

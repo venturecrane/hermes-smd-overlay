@@ -601,6 +601,6 @@ def test_the_ledger_twin_is_not_edited_for_this_feature():
         item_key="aaaaaa",
         event="acked",
         attempt=1,
-        token="ACK-AAAAAA",
+        token=escalation_ledger.token_for("aaaaaa"),
     )
     escalation_ledger.validate_append([_raise("aaaaaa", 1)], event, send_witness=lambda _e: True)
