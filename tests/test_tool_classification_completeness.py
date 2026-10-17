@@ -508,6 +508,18 @@ def test_every_record_store_tool_is_classified_and_the_write_is_a_write() -> Non
     assert TOOL_ACTION_CLASS_MAP["record_store_list"] is ActionClass.READ
 
 
+def test_every_calendar_tool_is_classified_and_the_changes_are_writes() -> None:
+    """hermes-smd-calendar (ss-console#3264): unclassified means REFUSED, and a
+    change classed READ would run under no ceiling. The invitation each change
+    sends is gated separately, as the trust plugin's own send."""
+    names = frozenset(load_plugin("hermes-smd-calendar").TOOLS)
+    assert names, "no calendar tools discovered; this guard would pass vacuously"
+    assert sorted(t for t in names if not _is_decided(t)) == []
+    for name in ("calendar_invite_create", "calendar_invite_update", "calendar_invite_cancel"):
+        assert TOOL_ACTION_CLASS_MAP[name] is ActionClass.INTERNAL_WRITE
+    assert TOOL_ACTION_CLASS_MAP["calendar_invite_list"] is ActionClass.READ
+
+
 def test_the_voice_note_tool_is_classified_as_a_read() -> None:
     """hermes-smd-voice-notes registers one tool; unclassified means REFUSED
     and a voice memo would again be answered as if it had not arrived."""

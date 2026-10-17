@@ -96,6 +96,15 @@ class CodeFixedRecipients:
         )
 
 
+#: The payload key a calendar invitation rides from the out-of-turn sender to
+#: the AgentMail transport (``hermes-smd-calendar``, ss-console#3264). In the
+#: PAYLOAD rather than only a keyword so a send the gate holds for approval is
+#: captured with its invitation and replays with it. Set only by the trust
+#: plugin's internal sender; the trust plugin's pre_tool_call strips it from
+#: every model tool call, exactly as it strips the templated-body key, so a
+#: model cannot name an invitation of its own.
+CALENDAR_ARG = "_smd_calendar"
+
 #: ``(payload, session_id) -> DispatchResult``. Published by the trust plugin.
 Sender = Callable[..., DispatchResult]
 
@@ -133,6 +142,7 @@ def dispatch(
     cc: list[str] | None = None,
     templated: bool = True,
     attachments: list[dict[str, str]] | None = None,
+    calendar: dict[str, str] | None = None,
     **extra: Any,
 ) -> DispatchResult:
     """Send one message through the seat's own gate. Never raises.
@@ -141,6 +151,11 @@ def dispatch(
     key: see :mod:`shared.outbound_attachment`. Forwarded only when non-empty,
     so a sender that predates it is called exactly as before on every send
     that carries none.
+
+    ``calendar`` (ss-console#3264) is one invitation, ``{"method": "REQUEST" |
+    "CANCEL", "ics": <calendar text>}``, from ``hermes-smd-calendar``'s code,
+    never from a payload. The broker validates it and builds the only part an
+    AgentMail send carries. Forwarded only when set, like ``attachments``.
 
     ``anchor`` and ``lane`` are REQUIRED and keyword-only, ``None`` included, so
     a call site that never decided them fails in tests rather than on a seat
@@ -171,6 +186,8 @@ def dispatch(
         return DispatchResult(sent=False, reason="no recipient")
     if attachments:
         extra["attachments"] = list(attachments)
+    if calendar:
+        extra["calendar"] = dict(calendar)
     try:
         return sender(
             to=list(to),
@@ -192,4 +209,12 @@ def dispatch(
         )
 
 
-__all__ = ["CodeFixedRecipients", "DispatchResult", "Sender", "available", "dispatch", "set_sender"]
+__all__ = [
+    "CALENDAR_ARG",
+    "CodeFixedRecipients",
+    "DispatchResult",
+    "Sender",
+    "available",
+    "dispatch",
+    "set_sender",
+]

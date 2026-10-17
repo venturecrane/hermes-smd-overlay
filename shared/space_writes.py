@@ -178,19 +178,7 @@ def crossing(
             return None
         return Crossing(name, frozenset({f"chat:{target}"}), "a chat outside this private one")
     if name.startswith(CALENDAR_INVITE_PREFIX):
-        attendees: set[str] = set()
-        for key in _ATTENDEE_KEYS:
-            attendees |= _emails(args.get(key))
-        mine = cfg.person(me or "")
-        own_email = mine.email if mine is not None else ""
-        others = {a for a in attendees if a != own_email}
-        if not others:
-            return None
-        return Crossing(
-            name,
-            frozenset(f"invite:{a}" for a in sorted(others)),
-            "a calendar invite the other person receives",
-        )
+        return _calendar_crossing(name, args, cfg, me)
     if name.startswith(WORKSPACE_PREFIX) and name not in _WORKSPACE_READS:
         return Crossing(
             name, frozenset({f"workspace:{name}"}), "a shared Google calendar, doc or folder"
@@ -203,6 +191,59 @@ def crossing(
             name, frozenset(f"mail:{a}" for a in sorted(to_others)), "an email to the other person"
         )
     return None
+
+
+def _calendar_crossing(
+    name: str, args: dict[str, Any], cfg: space_mod.SpaceConfig, me: str | None
+) -> Crossing | None:
+    """A calendar call that reaches anyone but the requester.
+
+    The tool's arguments do not name its reach: ``calendar_invite_create`` takes
+    PERSON IDS on a shared seat, and ``calendar_invite_update`` /
+    ``calendar_invite_cancel`` take only a ``uid``, reaching the stored event's
+    attendees. ``shared.calendar_reach`` answers the way the tool resolves it.
+    Addresses written into the arguments count too. A reach that cannot be read
+    and names nobody is a crossing (``invite:unresolved``): it is held, never
+    waved through, and the tool refuses it after if it is still unresolvable."""
+    from shared import calendar_reach
+
+    attendees: set[str] = set()
+    for key in _ATTENDEE_KEYS:
+        attendees |= _emails(args.get(key))
+    unresolved = False
+    try:
+        attendees |= calendar_reach.invite_reach(name, args)
+    except calendar_reach.ReachUnknown:
+        unresolved = not attendees
+    mine = cfg.person(me or "")
+    own_email = mine.email if mine is not None else ""
+    others = {a for a in attendees if a != own_email}
+    if unresolved:
+        others.add("unresolved")
+    if not others:
+        return None
+    return Crossing(
+        name,
+        frozenset(f"invite:{a}" for a in sorted(others)),
+        "a calendar invite the other person receives",
+    )
+
+
+#: Set when the space gate plugin registers its hooks on this process. The
+#: calendar tools' own R1 backstop (``hermes-smd-calendar/seat.py``) lets a
+#: crossing through only when this is set AND :func:`crossing` sees the call,
+#: because then this gate held it and a person released it.
+_ARMED = False
+
+
+def arm() -> None:
+    """Called by ``hermes-smd-space-gate.register``."""
+    global _ARMED
+    _ARMED = True
+
+
+def gate_armed() -> bool:
+    return _ARMED
 
 
 def exact_text(args: Any) -> str:
@@ -222,7 +263,9 @@ __all__ = [
     "SEND_MESSAGE",
     "SPACE_WRITES",
     "WORKSPACE_PREFIX",
+    "arm",
     "crossing",
     "exact_text",
+    "gate_armed",
     "is_candidate",
 ]

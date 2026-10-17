@@ -226,6 +226,8 @@ def register(ctx: Any) -> None:
     seat's behavior."""
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    # The calendar tools' backstop defers to this gate only once it is armed.
+    space_writes.arm()
     logger.info("hermes-smd-space-gate registered (inert unless people: is authored)")
 
 

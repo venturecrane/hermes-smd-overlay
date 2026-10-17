@@ -449,7 +449,54 @@ def spool_attachment(message_id: str, attachment_id: str) -> dict[str, Any]:
     )
 
 
+#: A calendar invitation is a few kilobytes. The broker caps what a seat SENDS
+#: at the same size (ss-console ``agentmail_calendar.MAX_ICS_BYTES``).
+MAX_CALENDAR_BYTES = 64 * 1024
+
+
+def is_calendar_attachment(entry: dict[str, Any]) -> bool:
+    """True when an attachment record (``list_attachments``) is a calendar part."""
+    ctype = str(entry.get("content_type") or "").strip().lower()
+    name = str(entry.get("filename") or "").strip().lower()
+    return ctype.startswith("text/calendar") or (
+        ctype in ("", "application/octet-stream") and name.endswith(".ics")
+    )
+
+
+def read_calendar_attachment(message_id: str, attachment_id: str) -> str:
+    """The text of one received calendar part (ss-console#3264, the seat's
+    calendar ingest). Read with the inbox-scoped key, never spooled, never more
+    than :data:`MAX_CALENDAR_BYTES`. The text is SENDER-AUTHORED: the caller
+    keeps it only for a sender the seat already treats as one of its people."""
+    for label, value in (("message_id", message_id), ("attachment_id", attachment_id)):
+        if not isinstance(value, str) or not value.strip():
+            raise AgentMailReadError(f"{label} is required")
+    path = _message_path(own_inbox(), message_id.strip(), "attachments", attachment_id.strip())
+    receipt_body, _ = _get(path, accept="application/json")
+    try:
+        receipt = json.loads(receipt_body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AgentMailReadError(
+            "agentmail returned an attachment record that is not JSON"
+        ) from exc
+    url = receipt.get("download_url") if isinstance(receipt, dict) else None
+    if not isinstance(url, str) or not url.strip():
+        raise AgentMailReadError("agentmail's attachment record carries no download_url")
+    blob = _download(url.strip())
+    if len(blob) > MAX_CALENDAR_BYTES:
+        raise AgentMailReadError(
+            f"a calendar part over {MAX_CALENDAR_BYTES} bytes is not an invitation"
+        )
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AgentMailReadError("the calendar part is not UTF-8 text") from exc
+
+
 __all__ = [
+    "MAX_CALENDAR_BYTES",
+    "is_calendar_attachment",
+    "read_calendar_attachment",
     "AgentMailBrokerUnavailable",
     "DOWNLOAD_HOSTS",
     "own_inbox",

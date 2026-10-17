@@ -42,7 +42,7 @@ from shared.outbound_recipient import extract_send_recipients
 from shared.pending_acts import PENDING_ACTS, tool_call_failed
 from shared.pending_send import PENDING_SEND, PendingSend
 from shared.secrets import get_secret
-from shared.send_dispatch import CodeFixedRecipients, DispatchResult, set_sender
+from shared.send_dispatch import CALENDAR_ARG, CodeFixedRecipients, DispatchResult, set_sender
 from shared.spec_gate import TEMPLATED_BODY_ARG
 from shared.spec_status import SPEC_STATUS
 from shared.tool_registration import register_wrapped_tool
@@ -345,6 +345,11 @@ def on_pre_tool_call(**kwargs: Any) -> dict | None:
         # Left in place it would let a model skip the output checklist (and the
         # spec gate's templated posture) by naming its own prose a template.
         args.pop(TEMPLATED_BODY_ARG, None)
+
+        # And the calendar-invitation key (ss-console#3264): only the out-of-turn
+        # dispatcher sets it, from hermes-smd-calendar's own rendering, so a value
+        # on a model's tool call is the model naming an invitation of its own.
+        args.pop(CALENDAR_ARG, None)
 
         # Operator-pause wall (ss#2003). While the sticky-stop ladder is at
         # HARD_STOP — a system trip OR an operator-initiated pause — every
@@ -1152,6 +1157,7 @@ def _dispatch_internal_message(
     attachments: list[dict[str, str]] | None = None,
     anchor: dict[str, str] | None = None,
     lane: str | None = None,
+    calendar: dict[str, str] | None = None,
 ) -> DispatchResult:
     """Send one seat-authored message OUT OF TURN, through the full gate.
 
@@ -1222,6 +1228,14 @@ def _dispatch_internal_message(
     attachment; the caller may then send the message again without it. The
     send's row carries ``attachment_sha256``, stamped here from the validated
     bytes (a caller cannot pre-stamp it).
+
+    ``calendar`` (ss-console#3264) is one invitation, ``{"method", "ics"}``,
+    from ``hermes-smd-calendar``. It rides the payload as ``CALENDAR_ARG``
+    through the same gate and scans as the body, so a send held for approval
+    replays WITH it; the AgentMail transport forwards it as the broker's
+    ``calendar`` field, and the broker validates it, builds the part and stamps
+    the row's ``attachment_sha256`` from the bytes it sent. A Graph seat
+    refuses it (its verb carries no invitation).
     """
     recipients = tuple(a for a in (to or ()) if isinstance(a, str) and a.strip())
     if not recipients:
@@ -1267,6 +1281,8 @@ def _dispatch_internal_message(
     }
     if cc:
         payload["cc"] = [a for a in cc if isinstance(a, str) and a.strip()]
+    if calendar is not None:
+        payload[CALENDAR_ARG] = dict(calendar)
     if templated:
         # Read by enforce -> spec_gate. A key rather than a global because two
         # of these can be in flight in one process (the sweeper thread and a

@@ -1,0 +1,10 @@
+name: hermes-smd-calendar
+version: "0.1.0"
+description: "The seat's own calendar: four tools that send, update, cancel and list iMIP calendar invitations through the audited broker send path, and an ingest that keeps the invitations a seat's own people send it. A seat that does not author the calendar skill on the roster lane gets nothing."
+author: VentureCrane
+# Empty on purpose: the gate is register(), which asks whether the seat authors
+# the calendar skill. A failing requires_env would drop the tools silently.
+# No hooks list, like hermes-smd-record-store: pre_tool_call and pre_llm_call are
+# wired only on a seat that authors the calendar, so a static declaration would
+# be false on every other seat (tests/test_hook_parity.py).
+requires_env: []

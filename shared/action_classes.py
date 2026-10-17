@@ -350,6 +350,19 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "record_store_list": ActionClass.READ,
     "record_store_read": ActionClass.READ,
     "record_store_write": ActionClass.INTERNAL_WRITE,
+    # The seat's own calendar (plugins/hermes-smd-calendar, ss-console#3264).
+    # The three changes are INTERNAL_WRITE: each writes an event into the seat's
+    # calendar store, and the invitation it sends is NOT this call's send. It
+    # goes out through the trust plugin's out-of-turn sender, which classifies
+    # and gates THAT message as ``smd_send_message`` against its recipients (the
+    # exposure ceiling, taint gate, content floor and scans), and the broker
+    # fences it again. Classing the tool a send would gate the same message
+    # twice under two different classes. The list is READ, unfenced by design
+    # (tests/test_inbound_fence_completeness.py says why).
+    "calendar_invite_create": ActionClass.INTERNAL_WRITE,
+    "calendar_invite_update": ActionClass.INTERNAL_WRITE,
+    "calendar_invite_cancel": ActionClass.INTERNAL_WRITE,
+    "calendar_invite_list": ActionClass.READ,
     # A rostered sender's voice memo as text (plugins/hermes-smd-voice-notes,
     # 2026-09-29, ss-console#2793). READ: it spools the seat's own mail
     # attachment to the scratch spool and runs the seat's speech-to-text on
