@@ -10,10 +10,14 @@ that would be a defect if it flipped.
 
 from __future__ import annotations
 
+import email.message
 import hashlib
 import io
 import json
+import urllib.error
 import urllib.parse
+import urllib.request
+import urllib.response
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +50,10 @@ MESSAGE = {
 
 PDF = b"%PDF-1.7 vendor invoice body"
 
+# Captured before the autouse fixture below swaps it, for the one test that
+# drives _download through the real opener.
+_REAL_OPEN_DOWNLOAD = broker._open_download
+
 SEAT_INBOX = "pilot@seat.example"
 
 DOWNLOAD_URL = "https://cdn.agentmail.to/attachments/att_1?Expires=1&Signature=x"
@@ -71,6 +79,19 @@ class _Response(io.BytesIO):
 
     def __exit__(self, *_: Any) -> None:
         self.close()
+
+
+@pytest.fixture(autouse=True)
+def _download_through_patched_urlopen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tests below script every fetch by patching ``urlopen``. The download
+    path uses its own opener (allowlisted redirects); route it through whatever
+    ``urlopen`` is at call time so one scripted fake still serves both. The
+    opener itself is pinned by the redirect tests at the end of this file."""
+    monkeypatch.setattr(
+        broker,
+        "_open_download",
+        lambda req, *, timeout: broker.urllib.request.urlopen(req, timeout=timeout),
+    )
 
 
 @pytest.fixture
@@ -402,6 +423,76 @@ def test_a_link_off_the_vendors_hosts_is_refused(
     monkeypatch.setattr(broker.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(broker.AgentMailReadError, match="not one the vendor serves"):
         broker.spool_attachment("msg_123", "att_1")
+
+
+class _ScriptedHTTPS(urllib.request.BaseHandler):
+    """Stands in for the network under the REAL redirect machinery: answers each
+    https URL from a script (a redirect target, or bytes), recording every hop.
+    Ordered ahead of the default HTTPSHandler so nothing reaches the network."""
+
+    handler_order = 100
+
+    def __init__(self, script: dict[str, Any]) -> None:
+        self.script = script
+        self.hops: list[str] = []
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        url = req.full_url
+        self.hops.append(url)
+        answer = self.script[url]
+        headers = email.message.Message()
+        if isinstance(answer, str):
+            headers["Location"] = answer
+            resp = urllib.response.addinfourl(io.BytesIO(b""), headers, url, 302)
+            resp.msg = "Found"
+        else:
+            resp = urllib.response.addinfourl(io.BytesIO(answer), headers, url, 200)
+            resp.msg = "OK"
+        return resp
+
+
+def _opener_with(script: dict[str, Any]) -> tuple[Any, _ScriptedHTTPS]:
+    net = _ScriptedHTTPS(script)
+    return urllib.request.build_opener(broker._AllowlistedRedirects, net), net
+
+
+def test_the_download_opener_checks_the_host_on_every_redirect() -> None:
+    """J-f: urlopen's default handler follows a 30x anywhere, so the first-URL
+    host check could be walked around. The module's opener must carry the
+    allowlisted handler in place of the default one."""
+    handlers = broker._DOWNLOAD_OPENER.handlers
+    redirect = [h for h in handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+    assert len(redirect) == 1 and isinstance(redirect[0], broker._AllowlistedRedirects)
+
+
+def test_a_redirect_off_the_vendors_hosts_is_refused_before_any_fetch() -> None:
+    opener, net = _opener_with({DOWNLOAD_URL: "https://evil.example/x"})
+    with pytest.raises(urllib.error.HTTPError, match="allowlist"):
+        opener.open(urllib.request.Request(DOWNLOAD_URL), timeout=5)
+    assert net.hops == [DOWNLOAD_URL]  # the off-list host was never asked
+
+
+def test_a_redirect_to_plain_http_on_a_vendor_host_is_refused() -> None:
+    opener, net = _opener_with({DOWNLOAD_URL: "http://cdn.agentmail.to/x"})
+    with pytest.raises(urllib.error.HTTPError):
+        opener.open(urllib.request.Request(DOWNLOAD_URL), timeout=5)
+    assert net.hops == [DOWNLOAD_URL]
+
+
+def test_a_redirect_between_vendor_hosts_still_fetches() -> None:
+    target = "https://download.agentmail.to/att_1?sig=y"
+    opener, net = _opener_with({DOWNLOAD_URL: target, target: PDF})
+    with opener.open(urllib.request.Request(DOWNLOAD_URL), timeout=5) as response:
+        assert response.read() == PDF
+    assert net.hops == [DOWNLOAD_URL, target]
+
+
+def test_a_refused_redirect_surfaces_as_a_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    opener, _net = _opener_with({DOWNLOAD_URL: "https://evil.example/x"})
+    monkeypatch.setattr(broker, "_DOWNLOAD_OPENER", opener)
+    monkeypatch.setattr(broker, "_open_download", _REAL_OPEN_DOWNLOAD)
+    with pytest.raises(broker.AgentMailReadError, match="HTTP 302"):
+        broker._download(DOWNLOAD_URL)
 
 
 # ---------------------------------------------------------------------------

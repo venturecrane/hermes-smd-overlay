@@ -68,12 +68,19 @@ def apply_click(token: str, decide: Any) -> tuple[int, str]:
         return 400, _page("That link is incomplete", "Open the approval email again.")
     try:
         verdict = decide(token=token)
-    except Exception:  # noqa: BLE001 — an unreachable broker decided nothing
-        logger.warning("approve: broker unreachable", exc_info=True)
+    except Exception:  # noqa: BLE001 — no verdict came back; the outcome is unknown
+        # A transport fault here does NOT mean nothing happened: the broker may
+        # have received the token and transmitted before the socket timed out or
+        # dropped (msgraph_broker: "the outcome is unknown, never refused"). So
+        # the page must not tell the approver "nothing was sent". ERROR, not
+        # WARNING: the gate's Sentry logging integration turns it into an event,
+        # which is what makes "SMD has been told" true.
+        logger.error("approve: no verdict from the broker; outcome unknown", exc_info=True)
         return 503, _page(
-            "Nothing was done",
-            "This seat could not record your answer just now, so nothing was sent. "
-            "Try again in a minute, or reply to the approval email instead.",
+            "We could not confirm what happened",
+            "Your answer reached this seat, but no result came back, so we cannot say "
+            "whether the email went out. SMD has been told and will check. Look in your "
+            "Sent folder before pressing again or replying to the approval email.",
         )
     status = str((verdict or {}).get("status") or "").upper()
     reason = str((verdict or {}).get("reason") or "").strip()

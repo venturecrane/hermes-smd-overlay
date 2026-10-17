@@ -27,6 +27,9 @@ Durability + safety:
     restart resumes where it left off; on a 410 cursor reset the batch is a
     re-sync and the seen-id ledger DEDUPES it so old mail is not replayed as new
     turns.
+  * A missing / unreadable / corrupt state file starts from NOW (a load-time
+    watermark), never from the inbox's history: the cursorless first delta is a
+    re-list, and unseen mail received before the baseline is skipped, loudly.
   * Self-sent mail (``from_addr == mailbox``) is skipped so a reply the operator
     itself sent can never wake it in a loop (mirrors the AgentMail echo posture).
   * Exception-safe: a poll failure logs and skips the cycle; the thread never
@@ -101,6 +104,11 @@ def _parse_iso(value: Any) -> datetime | None:
     return parsed
 
 
+def _baseline_now() -> str:
+    """The instant a cursorless state starts from, in Graph's ISO-Z form."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # ---------------------------------------------------------------------------
 # Durable per-seat cursor + seen-id ledger
 # ---------------------------------------------------------------------------
@@ -144,19 +152,52 @@ class DeltaState:
         # forgery check needs and was refused. ``None`` = recorded before this field
         # existed, which is itself stale.
         self.delta_select: str | None = None
-        self._load()
+        # Why there is no usable cursor ("missing" / "unreadable" / "corrupt"), or
+        # None when the stored state carries a cursor or a watermark.
+        self.baseline_reason: str | None = None
+        reason = self._load()
+        if self.delta_link is None and self.watermark is None:
+            self._baseline(reason or "no_cursor")
 
-    def _load(self) -> None:
+    def _baseline(self, reason: str) -> None:
+        """No cursor and no watermark: start from NOW, never from the inbox's past.
+
+        A delta query with no cursor lists the WHOLE inbox. With an empty seen
+        ledger every one of those messages would be forwarded as a fresh turn,
+        so a lost or corrupt state file (or a seat first pointed at a mailbox
+        with history) would replay years of mail into the agent. Instead the
+        watermark is set to the moment of load: the first cycle is treated as a
+        re-list, unseen items received before this instant are marked seen and
+        skipped (held/failing ids still retry), and anything newer forwards. The
+        watermark is persisted with the first write, so a restart before the
+        first clean cycle keeps the same baseline rather than moving it forward.
+        """
+        self.baseline_reason = reason
+        self.watermark = _baseline_now()
+        log = logger.warning if reason in ("missing", "no_cursor") else logger.error
+        log(
+            "msgraph poller: no usable delta cursor (%s, %s); starting from %s. Inbox mail "
+            "received before then will NOT be forwarded as new turns.",
+            reason,
+            self._path,
+            self.watermark,
+        )
+
+    def _load(self) -> str | None:
+        """Load the stored state. Returns why nothing usable was loaded, else None."""
         try:
             with open(self._path, encoding="utf-8") as fh:
                 data = json.load(fh)
-        except (FileNotFoundError, OSError):
-            return
+        except FileNotFoundError:
+            return "missing"
+        except OSError:
+            return "unreadable"
         except (ValueError, TypeError):
-            logger.warning("msgraph poller: cursor file %s unparseable; starting fresh", self._path)
-            return
+            logger.error("msgraph poller: cursor file %s unparseable", self._path)
+            return "corrupt"
         if not isinstance(data, dict):
-            return
+            logger.error("msgraph poller: cursor file %s is not an object", self._path)
+            return "corrupt"
         link = data.get("delta_link")
         self.delta_link = link if isinstance(link, str) and link else None
         seen = data.get("seen_ids")
@@ -176,6 +217,7 @@ class DeltaState:
             self.watermark = watermark
         select = data.get("delta_select")
         self.delta_select = select if isinstance(select, str) and select else None
+        return None
 
     def has_seen(self, message_id: str) -> bool:
         return message_id in self._seen_set
@@ -418,6 +460,14 @@ class MsGraphPoller:
             return False
         self._client = client
         self._state = DeltaState(self._state_path)
+        if self._state.baseline_reason in ("corrupt", "unreadable"):
+            # A seat that HAD a cursor and lost it: page, because unseen mail
+            # received before this restart is skipped rather than replayed.
+            self._sentry_note(
+                "msgraph poller: delta state unusable; restarted from now",
+                "error",
+                tags={"reason": self._state.baseline_reason},
+            )
         return True
 
     # ---- one poll cycle ---------------------------------------------------
@@ -449,6 +499,11 @@ class MsGraphPoller:
             cursor_reset = True
         elif cursor_reset:
             logger.info("msgraph poller: delta cursor reset (410); re-syncing with dedupe")
+        elif new_chain:
+            # No stored cursor: the delta lists the whole inbox, which is a
+            # re-list like a 410 and gets the same watermark skip (the watermark
+            # is the load-time baseline when nothing better was stored).
+            cursor_reset = True
 
         forwarded = 0
         watermark_skipped = 0
@@ -476,7 +531,7 @@ class MsGraphPoller:
                 failures.append((raw, message_id, exc))
         if watermark_skipped:
             logger.info(
-                "msgraph poller: cursor reset re-list — %d pre-watermark item(s) dedupe-skipped",
+                "msgraph poller: re-list (no/reset cursor) — %d pre-watermark item(s) dedupe-skipped",
                 watermark_skipped,
             )
 
@@ -544,7 +599,7 @@ class MsGraphPoller:
         return forwarded
 
     def _watermark_skip(self, raw: Any, state: DeltaState) -> bool:
-        """On a 410 re-list only: mark-seen-and-skip an UNSEEN item that is older
+        """On a re-list only (410, stale select, or no stored cursor): mark-seen-and-skip an UNSEEN item that is older
         than the clean-cycle watermark — unless it is currently held/failing, in
         which case it must retry normally. Anything unparseable forwards (fail
         open to delivery)."""
