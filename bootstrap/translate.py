@@ -989,7 +989,18 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
     return {"webhook": {"enabled": True, "extra": {"port": 8644, "routes": routes}}}
 
 
-def _materialize_telegram_platform(customer: dict[str, Any]) -> dict[str, Any]:
+def _telegram_token_present() -> bool:
+    """True when the seat carries a Telegram bot token (Fly secret ``TELEGRAM_BOT_TOKEN``).
+
+    Presence only; the value is never read into anything else. Translate runs in
+    bootstrap.sh step 7 on the Machine, where Fly secrets are in the environment.
+    """
+    return bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
+
+
+def _materialize_telegram_platform(
+    customer: dict[str, Any], *, token_present: bool | None = None
+) -> dict[str, Any]:
     """Build the Hermes-native top-level ``telegram:`` config block from customer.yaml.
 
     Reads ``customer["telegram"]`` (``enabled``, ``allow_from``, ``require_mention``,
@@ -999,17 +1010,47 @@ def _materialize_telegram_platform(customer: dict[str, Any]) -> dict[str, Any]:
     native polling platform. This block authors the ALLOWLIST as reviewable
     config (the source of truth) rather than a loose Fly secret. See ADR 0033.
 
-    **FAIL-CLOSED:** if ``telegram.enabled`` is true but ``allow_from`` is empty we
+    **``allowed_users`` (deprecated alias, phase 1 of 3).** Seats were authored
+    with ``telegram.allowed_users``, which nothing read, so the authored allowlist
+    was silently ignored and the Fly secret ``TELEGRAM_ALLOWED_USERS`` was the only
+    gate. It is now unioned into ``allow_from`` (order kept, deduped). A block that
+    authors ``allowed_users`` with NO ``enabled`` key counts as enabled only when
+    the seat has a bot token: with no token there is no bot to restrict and the
+    config stays byte-identical to before. An explicit ``enabled: false`` always
+    wins. Phase 2 migrates authored configs to ``enabled: true`` + ``allow_from``;
+    phase 3 rejects ``allowed_users`` (ss-console sections-telegram.ts).
+
+    **FAIL-CLOSED:** if ``telegram.enabled`` is true but the allowlist is empty we
     ``raise`` — the pinned Hermes ref's authorizer returns ``True`` (allow ALL) when
     ``TELEGRAM_ALLOWED_USERS`` is unset (``telegram.py``: ``if not allowed_csv: return True``),
-    so an enabled-but-unrestricted Telegram bot must never be materialized. Returns
-    ``{}`` when there is no enabled telegram block, keeping configs byte-identical.
+    so an enabled-but-unrestricted Telegram bot must never be materialized. An
+    alias-IMPLIED enable with an empty list returns ``{}`` instead of raising: that
+    is exactly what the block materialized before the alias existed, and
+    ``ensure-telegram-allowlist.py`` still refuses boot if no allowlist resolves.
+    Returns ``{}`` when there is no enabled telegram block, keeping configs
+    byte-identical.
     """
     tg = customer.get("telegram")
-    if not isinstance(tg, dict) or not tg.get("enabled"):
+    if not isinstance(tg, dict):
         return {}
-    allow_from = [str(uid).strip() for uid in (tg.get("allow_from") or []) if str(uid).strip()]
+    legacy = tg.get("allowed_users")
+    enabled = tg.get("enabled")
+    implied = False
+    if "enabled" not in tg and legacy is not None:
+        if token_present is None:
+            token_present = _telegram_token_present()
+        enabled = implied = token_present
+    if not enabled:
+        return {}
+    allow_from: list[str] = []
+    for source in (tg.get("allow_from"), legacy):
+        for uid in source or []:
+            uid_s = str(uid).strip()
+            if uid_s and uid_s not in allow_from:
+                allow_from.append(uid_s)
     if not allow_from:
+        if implied:
+            return {}
         raise ValueError(
             "customer.yaml telegram.enabled is true but allow_from is empty. The pinned "
             "Hermes ref allows ALL Telegram users when the allowlist is unset (fail-open); "

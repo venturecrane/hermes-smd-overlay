@@ -562,6 +562,17 @@ vars:
     requirement: optional
     consumed_by: [bootstrap-translate]
     note: skills-dir override during customer.yaml translation
+  TELEGRAM_BOT_TOKEN:
+    discovery: static
+    stage: boot-helper
+    requirement: optional
+    consumed_by: [bootstrap-translate]
+    note: >-
+      PRESENCE only, never the value. translate._materialize_telegram_platform
+      treats a customer.yaml telegram block that authors the deprecated
+      `allowed_users` alias with no `enabled` key as enabled only when the seat
+      has a bot token, so token-less seats stay byte-identical. Provisioning
+      disposition lives in ss-console operator/contracts/env-consumption.yaml.
   SMD_D1_OBSERVATIONS_BINDING:
     discovery: static
     stage: agent
