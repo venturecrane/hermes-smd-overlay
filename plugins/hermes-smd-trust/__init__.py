@@ -40,7 +40,7 @@ from shared.casework_acts import CASEWORK_ACTS
 from shared.casework_steps import STEP_WITNESS
 from shared.outbound_recipient import extract_send_recipients
 from shared.pending_acts import PENDING_ACTS, tool_call_failed
-from shared.pending_send import PENDING_SEND
+from shared.pending_send import PENDING_SEND, PendingSend
 from shared.secrets import get_secret
 from shared.send_dispatch import CodeFixedRecipients, DispatchResult, set_sender
 from shared.spec_gate import TEMPLATED_BODY_ARG
@@ -999,7 +999,9 @@ def _scan_approved_send(rec: Any, payload: dict, session_id: str) -> str | None:
     )
 
 
-def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
+def _dispatch_approved_send(
+    session_id: str, customer_slug: str, rec: PendingSend | None = None
+) -> str | None:
     """Execute an approved confirm send OUT OF BAND (ADR 0071 #1806 harden).
 
     Called from pre_llm_call the moment a trusted approval is captured. The LLM
@@ -1015,8 +1017,14 @@ def _dispatch_approved_send(session_id: str, customer_slug: str) -> str | None:
     approved-but-money/legal send still withholds/drafts exactly as on the tool
     path. The consume also means a later agent re-invoke finds no approval and
     withholds, so there is no double-send.
+
+    ``rec`` is the record this turn's approval marked. Several sends can be
+    pending at once (one per requester binding), so the newest one is not
+    necessarily the approved one; ``peek()`` is only the fallback for callers
+    that hold no record.
     """
-    rec = PENDING_SEND.peek()
+    if rec is None:
+        rec = PENDING_SEND.peek()
     if rec is None or not rec.approved:
         return None
     recipients = ", ".join(sorted(rec.recipients)) or "(unresolved)"
@@ -1543,9 +1551,9 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
        resolver's first-tool-call gap and refreshes the id at every turn.
     2. Confirm-approval capture (ADR 0071 #1806). This is the trusted seam where an
        allowlisted owner's Telegram DM ("yes send it") arrives as native principal
-       input. ``approval.maybe_capture_approval`` marks the single pending send
-       approved iff platform is Telegram, ``sender_id`` is allowlisted, and the whole
-       message is a bare affirmative — so the send's re-invocation (pre_tool_call,
+       input. ``approval.capture_approval`` approves the pending send this sender
+       raised in this chat iff platform is Telegram, ``sender_id`` is allowlisted,
+       and the whole message is a bare affirmative — so the send's re-invocation (pre_tool_call,
        later this turn) can release exactly the withheld payload. The agent cannot
        forge this: SEC-36 strips agent-supplied approval, and an agent/sub-agent
        message never presents an allowlisted telegram sender_id.
@@ -1622,12 +1630,12 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
     except Exception:  # noqa: BLE001 — delivery is best-effort; the GATE is the guarantee
         logger.debug("hermes-smd-trust: spec pointer refresh failed", exc_info=True)
     try:
-        source = approval.maybe_capture_approval(
+        approved = approval.capture_approval(
             kwargs.get("platform"),
             kwargs.get("sender_id"),
             kwargs.get("user_message"),
         )
-        if source is not None:
+        if approved is not None:
             # Approval captured — dispatch the send OUT OF BAND (the LLM does not
             # reliably re-invoke). The gate re-authorizes + consumes; on success we
             # inject a note so the agent knows it is done and does not re-send.
@@ -1637,7 +1645,7 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
                     customer_slug = get_secret("SMD_CUSTOMER_SLUG")
                 except KeyError:
                     customer_slug = ""
-            context = _dispatch_approved_send(session_id, customer_slug)
+            context = _dispatch_approved_send(session_id, customer_slug, approved)
             if context:
                 context_notes.append(context)
     except Exception:  # noqa: BLE001 — hook callbacks must be exception-safe

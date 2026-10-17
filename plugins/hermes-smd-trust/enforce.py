@@ -57,7 +57,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from shared import act_broker, content_floor, matter_gate, read_volume, send_anchor, spec_gate
+from shared import (
+    act_broker,
+    content_floor,
+    matter_gate,
+    read_volume,
+    send_anchor,
+    spec_gate,
+    turn_principal,
+)
 from shared.action_classes import (
     BANNED_TOOLS,
     TOOL_ACTION_CLASS_MAP,
@@ -1583,9 +1591,11 @@ def _evaluate_tool_call(
         )
         send_recips = _resolve_send_recipients(tool_name, args, session_id) if is_send else set()
         approved_replay = False
-        if send_recips and PENDING_SEND.has_approved_match(tool_name, send_recips):
-            stored = PENDING_SEND.peek()
-            if stored is not None and isinstance(args, dict):
+        stored = PENDING_SEND.approved_match(tool_name, send_recips) if send_recips else None
+        if stored is not None:
+            # The MATCHED record, never the newest: several sends can be pending
+            # at once (one per requester binding, shared.pending_send).
+            if isinstance(args, dict):
                 args.clear()
                 args.update(copy.deepcopy(stored.args))
             approved_replay = True
@@ -1709,7 +1719,16 @@ def _evaluate_tool_call(
         # the approval arrives on another turn, and the broker re-reads THIS
         # anchor at replay.
         held_anchor, held_lane = send_anchor.capture_context(session_id)
-        PENDING_SEND.capture(tool_name, args, send_recips, anchor=held_anchor, lane=held_lane)
+        # Bound to the person and chat that raised it, so only they can approve
+        # it (shared.turn_principal; the two-principal seat, 2026-10-17).
+        PENDING_SEND.capture(
+            tool_name,
+            args,
+            send_recips,
+            anchor=held_anchor,
+            lane=held_lane,
+            requester=turn_principal.requester(),
+        )
 
     # Staff send-as (ss ADR 0089): the whole path ends here, one way or the
     # other. A refused ceiling refuses; the confirm ceiling proposes, which runs
