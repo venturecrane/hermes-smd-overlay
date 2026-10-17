@@ -45,8 +45,22 @@ what a scheduled wake may do through the ``record_store_*`` tools (viewer-less
 turns stay unfenced there). A seat that authors no store never loads this
 fence: ``register`` gates it.
 
-FAIL-CLOSED. A path that cannot be resolved, a read with no path, a hook
-fault: all refuse.
+THE WRITE SIDE (2026-10-17, follow-on). ``write_file`` and ``patch`` are not on
+the email surface, but a scheduled wake is offered the ``file`` toolset, and a
+``write_file`` into a store skips everything ``record_store_write`` enforces:
+the owner stamp, the writers list, the no-silent-overwrite rule, the taint
+refusal. The same allowlist shape governs them: a write lands only under a
+root in :data:`WRITABLE_ROOTS`, store roots are denied first, and anything the
+fence cannot resolve refuses. The list is EMPTY on purpose. No skill a
+record-keeping seat runs writes a file (the open-house skill says outright that
+``write_file`` is not available), so the honest allowlist is none, and a
+record changes only through ``record_store_write``. A V4A ``patch`` carries its
+paths inside the patch text; it is refused rather than parsed. A seat that
+someday needs a scratch directory adds it to :data:`WRITABLE_ROOTS` here, in
+review, and the store-first denial still holds inside it.
+
+FAIL-CLOSED. A path that cannot be resolved, a read or write with no path, a
+hook fault: all refuse.
 """
 
 from __future__ import annotations
@@ -62,8 +76,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 #: Tools whose arguments name a file to read, or run code that can.
-FENCED_TOOLS = frozenset({"read_file", "search_files", "skill_view", "terminal", "execute_code"})
 CODE_TOOLS = frozenset({"terminal", "execute_code"})
+WRITE_TOOLS = frozenset({"write_file", "patch"})
+FENCED_TOOLS = frozenset({"read_file", "search_files", "skill_view"}) | CODE_TOOLS | WRITE_TOOLS
+
+#: Where a file tool may write on a seat that keeps records. Empty: see the
+#: module docstring, THE WRITE SIDE.
+WRITABLE_ROOTS: tuple[str, ...] = ()
 
 #: The image's and the volume's skill roots. Mirrors ``SKILL_ROOTS`` in
 #: ``hermes-smd-initiation/skill_fence.py`` (plugins share no import path).
@@ -82,6 +101,11 @@ REFUSAL = (
     "and specs. Records are opened with record_store_list and record_store_read, which "
     "apply each store's owner rules. Say plainly that it could not be read, and never "
     "guess at what it holds."
+)
+WRITE_REFUSAL = (
+    "could not write that file: on this seat a file tool writes nowhere. A record is kept "
+    "or changed only with record_store_write, which applies the store's owner rules. Say "
+    "plainly that the file was not written."
 )
 CODE_REFUSAL = (
     "terminal and execute_code are not available on this seat: it keeps private records, "
@@ -218,6 +242,35 @@ def _skill_view_problem(args: dict[str, Any]) -> bool:
     return False
 
 
+def _write_problem(
+    tool_name: str, args: dict[str, Any], store_roots: list[str], kwargs: dict[str, Any]
+) -> bool:
+    """True when this write may not land: no path, a V4A patch, or any place
+    the path could resolve to that is in a store or outside every writable root."""
+    if tool_name == "patch" and (
+        str(args.get("mode") or "replace") != "replace"
+        or (isinstance(args.get("patch"), str) and args["patch"].strip())
+    ):
+        return True  # a V4A patch names its files inside the text: refused, not parsed
+    paths = [
+        args[k].strip() for k in _PATH_KEYS if isinstance(args.get(k), str) and args[k].strip()
+    ]
+    if not paths:
+        return True
+    task_id = str(kwargs.get("task_id") or "")
+    for path in paths:
+        for resolved in _candidates(path, task_id):
+            if not resolved or not os.path.isabs(resolved):
+                return True
+            for store in store_roots:
+                if any(_under(resolved, form) for form in (store, os.path.realpath(store))):
+                    return True
+            writable = [form for root in WRITABLE_ROOTS for form in (root, os.path.realpath(root))]
+            if not any(_under(resolved, root) for root in writable):
+                return True
+    return False
+
+
 def check(
     tool_name: str, args: Any, store_roots: Iterable[str], kwargs: dict[str, Any]
 ) -> str | None:
@@ -230,6 +283,8 @@ def check(
         return REFUSAL
     if tool_name == "skill_view":
         return REFUSAL if _skill_view_problem(args) else None
+    if tool_name in WRITE_TOOLS:
+        return WRITE_REFUSAL if _write_problem(tool_name, args, list(store_roots), kwargs) else None
     roots = list(store_roots)
     task_id = str(kwargs.get("task_id") or "")
     session_key = _session_key(kwargs)
@@ -291,6 +346,9 @@ def make_hooks(
 __all__ = [
     "CODE_REFUSAL",
     "CODE_TOOLS",
+    "WRITABLE_ROOTS",
+    "WRITE_REFUSAL",
+    "WRITE_TOOLS",
     "FENCED_TOOLS",
     "REFUSAL",
     "SKILL_ROOTS",

@@ -47,8 +47,9 @@ A RECORD IS NEVER READ BY PATH (``path_fence``, 2026-10-17). The owner fence
 above guards these three tools only; ``read_file`` is on the email surface and
 Hermes' read guard knows nothing of stores, so a colleague's record was one
 path away. On a seat that authors a store, the file tools read only an
-allowlist (skills, specs, this session's own spillover), and ``terminal`` /
-``execute_code`` are refused. See that module.
+allowlist (skills, specs, this session's own spillover), ``write_file`` and
+``patch`` write nowhere (a record changes only through ``record_store_write``),
+and ``terminal`` / ``execute_code`` are refused. See that module.
 
 Exception-safe is NOT the contract for the handlers (that rule governs
 hooks): a tool that cannot write must say so to the model, so these raise a
