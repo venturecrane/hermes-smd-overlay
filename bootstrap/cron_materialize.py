@@ -48,6 +48,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from shared import cron_space
+
 logger = logging.getLogger(__name__)
 
 MANAGED_PREFIX = "op-managed"
@@ -91,10 +93,12 @@ class RoutineChange:
 class _DesiredJob:
     """One authored cron entry resolved to its materialization inputs."""
 
-    name: str  # managed name (op-managed:<persona>:<skill>)
+    name: str  # managed name (op-managed:<persona>:<skill>[@<space>])
     schedule: str
     skill: str
     pre_run: str | None  # pre-run script basename when pre_run_decides, else None
+    space: str | None = None  # canonical run space on space-mode seats (ADR 0091)
+    deliver: str | None = None  # Hermes deliver target derived from the space
 
 
 class CronStore(Protocol):
@@ -150,6 +154,7 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
     never silently drops one.
     """
     by_persona: dict[str, list[_DesiredJob]] = {}
+    spaced = cron_space.space_mode(customer)
     for persona in customer.get("personas") or []:
         pslug = str(persona.get("slug") or persona.get("name") or "").strip()
         scheduled_skills = _scheduled_initiation_skills(persona)
@@ -192,12 +197,36 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
                 )
             if not pslug:
                 raise CronMaterializeError(f"cron entry has no resolvable persona slug: {entry!r}")
+            # ADR 0091: on a space-mode seat the authored ``space`` is both the
+            # run's bound space and its delivery target. A routine with no space
+            # would run unbound (every fence fails closed) and deliver nowhere a
+            # person reads, so it is refused rather than guessed. Seats without
+            # ``people`` ignore ``space`` entirely and stay byte-identical.
+            space: str | None = None
+            deliver: str | None = None
+            if spaced:
+                try:
+                    space = cron_space.normalize_space(entry.get("space"), customer)
+                    deliver = cron_space.delivery_for(space, customer)
+                except cron_space.CronSpaceError as exc:
+                    raise CronMaterializeError(
+                        f"persona {pslug!r} skill {skill!r}: {exc}. A space-mode seat "
+                        "(people authored) needs every cron entry to name its space."
+                    ) from exc
+            name = cron_space.name_with_space(managed_name(pslug, skill), space)
+            if any(e.name == name for e in entries):
+                raise CronMaterializeError(
+                    f"persona {pslug!r}: two cron entries resolve to the same managed "
+                    f"name {name!r}; one would silently replace the other."
+                )
             entries.append(
                 _DesiredJob(
-                    name=managed_name(pslug, skill),
+                    name=name,
                     schedule=schedule,
                     skill=skill,
                     pre_run=pre_run if wake == WAKE_PRE_RUN_DECIDES else None,
+                    space=space,
+                    deliver=deliver,
                 )
             )
         if entries:
@@ -312,6 +341,8 @@ def materialize_cron(
                 "skills": [job.skill],
                 "no_agent": False,
             }
+            if job.deliver is not None:
+                kwargs["deliver"] = job.deliver
             ref = staged_refs.get((pslug, job.name))
             if ref is not None:
                 # no_agent stays False: when the gate wakes the agent it runs the
@@ -359,10 +390,11 @@ def _report_routine_changes(
         )
     for name in sorted(before - after):
         # A removed job's skill is recoverable from its managed name
-        # (op-managed:<persona>:<skill>) — the store row is already gone.
+        # (op-managed:<persona>:<skill>[@<space>]) — the store row is already gone.
+        base, _space = cron_space.split_name(name)
         _emit_routine_change(
             on_routine_change,
-            RoutineChange(persona_slug, name.split(":", 2)[-1], False, None),
+            RoutineChange(persona_slug, base.split(":", 2)[-1], False, None),
         )
 
 

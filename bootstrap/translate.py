@@ -1062,7 +1062,110 @@ def _materialize_telegram_platform(
         block["require_mention"] = bool(tg["require_mention"])
     if "reactions" in tg:
         block["reactions"] = bool(tg["reactions"])
+    block.update(_telegram_group_keys(customer, tg))
     return block
+
+
+def _id_list(raw: Any, key: str) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"customer.yaml telegram.{key} must be a list of Telegram ids")
+    out: list[str] = []
+    for item in raw:
+        item_s = str(item).strip()
+        if item_s and item_s not in out:
+            out.append(item_s)
+    return out
+
+
+def _telegram_group_keys(customer: dict[str, Any], tg: dict[str, Any]) -> dict[str, Any]:
+    """The group half of the Telegram block (ADR 0091, couples role).
+
+    Authored keys map to the pinned Hermes keys (ref 345cd2b) as:
+
+    * ``group_allow_from`` -> ``group_allow_from``: the SENDER allowlist for group
+      messages. The adapter's intake prefilter treats it as the sole authority
+      for group/forum/channel chats (``adapter.py`` ``_is_user_authorized_from_message``),
+      so a sender outside it is dropped before any turn.
+    * ``group_chats`` -> ``allowed_chats``: the CHAT allowlist, the hard gate in
+      ``_should_process_message`` (other groups pass only by ``guest_mode``,
+      which we never author). Deliberately NOT ``group_allowed_chats``: that key
+      is a chat-scoped GRANT in the runner (``authz_mixin.py`` ``_chat_scoped_grant``)
+      that authorizes every member of the chat with no sender check, which is
+      the opposite of "the group answers only people".
+    * ``group_sessions_per_user`` -> ``group_sessions_per_user``: emitted here
+      for the adapter (``config.extra``) and at the config root by the caller,
+      which is what the runner's session key reads (``gateway/config.py``).
+
+    FAIL-CLOSED: ``group_chats`` with an empty ``group_allow_from`` raises; an
+    allowed chat with no sender allowlist falls through to the runner's general
+    allowlist, which is not the authored intent.
+
+    SPACE MODE (``people:`` authored): the group senders must be people
+    (a non-person id raises), and the bot answers only in
+    ``spaces.shared_telegram_chat`` (an authored ``group_chats`` naming any other
+    chat raises). While the shared chat is unset, ``group_allow_from`` is
+    materialized EMPTY, which the prefilter reads as "deny every group sender",
+    with a WARNING; an empty ``allowed_chats`` would instead mean "every group".
+
+    Seats that author none of these keys and no ``people`` get ``{}``: their
+    block is byte-identical to before.
+    """
+    out: dict[str, Any] = {}
+    group_allow = _id_list(tg.get("group_allow_from"), "group_allow_from")
+    group_chats = _id_list(tg.get("group_chats"), "group_chats")
+
+    people = customer.get("people")
+    if isinstance(people, list) and people:
+        person_ids = {
+            str(p.get("telegram_id") or "").strip() for p in people if isinstance(p, dict)
+        } - {""}
+        outsiders = [uid for uid in group_allow if uid not in person_ids]
+        if outsiders:
+            raise ValueError(
+                "customer.yaml telegram.group_allow_from names Telegram ids that are not "
+                f"in people[].telegram_id ({len(outsiders)} id(s)); on a space-mode seat "
+                "the group answers only people."
+            )
+        spaces = customer.get("spaces") if isinstance(customer.get("spaces"), dict) else {}
+        shared_chat = str(spaces.get("shared_telegram_chat") or "").strip()
+        stray = [c for c in group_chats if c != shared_chat]
+        if stray:
+            raise ValueError(
+                "customer.yaml telegram.group_chats names a chat other than "
+                "spaces.shared_telegram_chat; on a space-mode seat the bot answers in "
+                "the shared group only."
+            )
+        if shared_chat:
+            if not group_allow:
+                raise ValueError(
+                    "customer.yaml spaces.shared_telegram_chat is set but "
+                    "telegram.group_allow_from is empty; author the people's Telegram ids."
+                )
+            out["group_allow_from"] = group_allow
+            out["allowed_chats"] = [shared_chat]
+        else:
+            logger.warning(
+                "translate: spaces.shared_telegram_chat is not bound yet; the bot "
+                "answers no group sender until it is"
+            )
+            out["group_allow_from"] = []
+        out["group_sessions_per_user"] = bool(tg.get("group_sessions_per_user", False))
+        return out
+
+    if group_chats and not group_allow:
+        raise ValueError(
+            "customer.yaml telegram.group_chats is set but group_allow_from is empty. "
+            "Author group_allow_from with the Telegram ids allowed to speak in the group."
+        )
+    if "group_allow_from" in tg:
+        out["group_allow_from"] = group_allow
+    if group_chats:
+        out["allowed_chats"] = group_chats
+    if "group_sessions_per_user" in tg:
+        out["group_sessions_per_user"] = bool(tg["group_sessions_per_user"])
+    return out
 
 
 _AUTHORED_EXPOSURE_ACTION_CLASSES = (
@@ -1266,6 +1369,10 @@ def _persona_config(
     telegram_block = _materialize_telegram_platform(customer)
     if telegram_block:
         config["telegram"] = telegram_block
+        # The runner keys group sessions off the ROOT key (gateway/config.py
+        # GatewayConfig.group_sessions_per_user); the block copy reaches the adapter.
+        if "group_sessions_per_user" in telegram_block:
+            config["group_sessions_per_user"] = telegram_block["group_sessions_per_user"]
 
     # Tool-surface trim (2026-07-15 cost forensics, vfy_01KXKJEEV1R4EPYFKA6J7YDH16):
     # every enabled tool's JSON schema rides every API call and is re-written to
