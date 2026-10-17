@@ -242,6 +242,25 @@ def _mark_handled(route: str, request_id: str) -> None:
         _replay_record(request_id)
 
 
+def _route_untriggered(route: str) -> bool:
+    """True when the live customer.yaml reads and no ``webhook_triggers`` entry
+    names ``route`` as its source. Translate emits no Hermes route for such a
+    connector, so forwarding would only 404 and invite vendor retries; the gate
+    acknowledges and suppresses instead. A config that will not read returns
+    False (forward; the adapter decides), matching the other live-config
+    checks here."""
+    try:
+        from shared.customer_config import CustomerConfig
+
+        triggers = CustomerConfig.from_volume()._data.get("webhook_triggers")  # noqa: SLF001 — raw-dict seam, as gate_trigger_throttle
+    except Exception:  # noqa: BLE001
+        logger.warning("gate: live config read failed; forwarding %s", route, exc_info=True)
+        return False
+    if not isinstance(triggers, list):
+        return True
+    return not any(isinstance(t, dict) and t.get("source") == route for t in triggers)
+
+
 def _route_secret(route: str) -> str | None:
     """Per-vendor secret env: ``WEBHOOK_SECRET_<ROUTE>`` (route == adapter slug)."""
     env = f"WEBHOOK_SECRET_{route.upper().replace('-', '_')}"
@@ -1458,6 +1477,16 @@ class _Handler(BaseHTTPRequestHandler):
             )
             _mark_handled(route, request_id)
             self._json(202, {"accepted": True, "suppressed": suppress_reason})
+            return
+
+        # No trigger names this route: translate emitted no Hermes route for it,
+        # so there is nothing to wake. Acknowledge (202, no vendor retry storm),
+        # audit, and do not forward.
+        if _route_untriggered(route):
+            _audit_suppression(route=route, request_id=request_id, reason="untriggered-route")
+            logger.info("gate: suppressed %s/%s (untriggered route)", route, request_id)
+            _mark_handled(route, request_id)
+            self._json(202, {"accepted": True, "suppressed": "untriggered-route"})
             return
 
         # Per-(trigger, matter) cooldown (ss-console #1781): after a delivery

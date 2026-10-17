@@ -78,10 +78,10 @@ def resolve_throttles(config: Any) -> dict[tuple[str, str], int]:
     a malformed one) get :data:`DEFAULT_COOLDOWN_SECONDS`; an authored
     ``cooldown_minutes: 0`` disables the throttle for that trigger. Triggers
     that are not authored at all are absent from the map and are NOT throttled.
-    Note that an unauthored (source, event_type) still forwards and wakes the
-    agent whenever translate emitted its route (any enabled connector with a
-    ``webhook_url``): core delivers the turn whether or not the router names a
-    skill. The router fences and taints such a delivery; it does not stop it."""
+    A route no trigger names at all is never forwarded (translate emits no route
+    for it and the gate suppresses it); an unauthored event_type on a triggered
+    route is filtered by the route's ``events`` list. Anything that does reach
+    the router is fenced and tainted there, routed or not."""
     out: dict[tuple[str, str], int] = {}
     if not isinstance(config, dict):
         return out

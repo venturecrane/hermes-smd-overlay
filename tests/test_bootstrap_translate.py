@@ -1056,6 +1056,51 @@ def test_translate_skips_pin_mismatched_skill_and_boots(tmp_path):
     assert sentinel["findings"][0]["kind"] == "skill_pin_mismatch"
 
 
+def test_translate_removes_a_skill_the_persona_stops_enabling(tmp_path):
+    """OY-1: the install only ever added, so a skill a persona disabled stayed
+    installed, and loadable, in its profile's skills dir. A builtin dir that is
+    not a catalog skill is left alone.
+
+    FALSIFIER: drop the prune loop in _install_persona_skills and the disabled
+    body survives the second translate.
+    """
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    kw = {"hermes_home": str(hermes_home), "skills_dir": str(skills_dir)}
+    translate_customer_yaml(customer_yaml_path=str(customer_yaml), **kw)
+    profile_skills = hermes_home / "profiles" / "marcus" / "skills"
+    assert (profile_skills / "inbox-triage" / "SKILL.md").is_file()
+    (profile_skills / "productivity").mkdir()  # a Hermes builtin category dir
+
+    customer_yaml.write_text(VALID_YAML.replace("enabled: true", "enabled: false"))
+    translate_customer_yaml(customer_yaml_path=str(customer_yaml), **kw)
+    assert not (profile_skills / "inbox-triage").exists()
+    assert (profile_skills / "productivity").is_dir()
+
+
+def test_translate_removes_last_boots_copy_of_a_skipped_skill(tmp_path):
+    """OY-1: a skill skipped as unrunnable (its body absent from this image)
+    must not keep running from the copy the previous boot installed."""
+    import shutil
+
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
+    kw = {"hermes_home": str(hermes_home), "skills_dir": str(skills_dir)}
+    translate_customer_yaml(customer_yaml_path=str(customer_yaml), **kw)
+    shutil.rmtree(skills_dir / "inbox-triage")
+    translate_customer_yaml(customer_yaml_path=str(customer_yaml), **kw)
+    assert not (hermes_home / "profiles" / "marcus" / "skills" / "inbox-triage").exists()
+
+
+def test_a_trigger_naming_a_skipped_skill_is_dropped():
+    """OY-1: a webhook trigger whose skill was skipped this boot must not keep
+    its route (and ``skills:`` list) alive."""
+    personas = [{"slug": "op", "skills": [{"name": "kept", "enabled": True}]}]
+    triggers = [
+        {"source": "agentmail", "event_type": "m", "skill": "kept", "persona": "op"},
+        {"source": "smokeball", "event_type": "u", "skill": "skipped", "persona": "op"},
+    ]
+    assert _wh._triggers_for_runnable(triggers, personas) == [triggers[0]]
+
+
 def test_translate_clears_the_sentinel_when_nothing_is_skipped(tmp_path):
     """The sentinel describes the CURRENT boot: a clean boot removes it."""
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path)
@@ -1487,6 +1532,35 @@ def test_webhook_platform_materialized_when_secret_present(monkeypatch):
     assert route["events"] == ["message.received"]
     assert route["skills"] == ["inbox-triage"]
     assert "untrusted" in route["prompt"].lower()
+
+
+def test_no_route_for_a_connector_no_trigger_names(monkeypatch):
+    """OY-2 (ashton-price's posture): a connector with a webhook_url and no
+    trigger used to get a route with events [] (allow-all), no skills and the
+    email-reply prompt, so every vendor delivery woke the agent. No route now.
+
+    FALSIFIER: remove the trigger_sources check and the smokeball route returns.
+    """
+    monkeypatch.setenv("WEBHOOK_SECRET_SMOKEBALL", "x")
+    monkeypatch.setenv("WEBHOOK_SECRET_MSGRAPH", "y")
+    cust = {
+        "connectors": {
+            "PracticeManagement": {
+                "adapter": "smokeball",
+                "backend": "mcp:smokeball",
+                "enabled": True,
+                "webhook_url": "https://hermes-x.fly.dev/webhooks/smokeball",
+            },
+            "Email": {"adapter": "msgraph", "backend": "mcp:msgraph-mail", "enabled": True},
+        },
+        "webhook_triggers": [
+            {"source": "msgraph", "event_type": "message.received", "skill": "r", "persona": "o"}
+        ],
+    }
+    routes = _wh._materialize_webhook_platform(cust)["webhook"]["extra"]["routes"]
+    assert set(routes) == {"msgraph"}
+    # Untriggered and alone: no platform at all.
+    assert _wh._materialize_webhook_platform({**cust, "webhook_triggers": []}) == {}
 
 
 def test_webhook_platform_fail_closed_without_secret(monkeypatch):

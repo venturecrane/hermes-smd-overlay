@@ -416,6 +416,62 @@ def test_a_smokeball_retry_after_a_failed_forward_is_not_a_replay(monkeypatch):
     gate._replay_seen.clear()
 
 
+def test_route_untriggered_reads_the_live_triggers(monkeypatch):
+    from shared import customer_config
+
+    class _Cfg:
+        def __init__(self, data):
+            self._data = data
+
+    def use(data):
+        monkeypatch.setattr(
+            customer_config.CustomerConfig, "from_volume", classmethod(lambda cls: _Cfg(data))
+        )
+
+    use({"webhook_triggers": [{"source": "agentmail"}]})
+    assert gate._route_untriggered("smokeball") is True
+    assert gate._route_untriggered("agentmail") is False
+    use({})
+    assert gate._route_untriggered("agentmail") is True
+
+    def broken(cls):
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(customer_config.CustomerConfig, "from_volume", classmethod(broken))
+    assert gate._route_untriggered("smokeball") is False  # cannot tell: forward
+
+
+def test_an_untriggered_route_is_acknowledged_and_not_forwarded(monkeypatch):
+    """OY-2 gate half: translate emits no Hermes route for an untriggered
+    connector, so the gate answers 202 and forwards nothing (no 404, no vendor
+    retry storm)."""
+    gate._replay_seen.clear()
+    monkeypatch.setenv("WEBHOOK_SECRET_SMOKEBALL", _SB_SECRET)
+    monkeypatch.setenv("WEBHOOK_SMOKEBALL_CLIENT_ID", _SB_CID)
+    monkeypatch.setattr(gate, "_INBOUND_GUARD", None)
+    monkeypatch.setattr(gate.gate_trigger_exclusions, "live_exclusions", lambda: {})
+    monkeypatch.setattr(gate, "_route_untriggered", lambda route: True)
+    forwarded: list = []
+
+    class _Conn:
+        def __init__(self, *a, **k) -> None:
+            forwarded.append(a)
+
+    monkeypatch.setattr(gate.http.client, "HTTPConnection", _Conn)
+    ticks = str((int(time.time()) + 62_135_596_800) * 10_000_000)
+    rid = "untriggered-1"
+    headers = {
+        "Timestamp": ticks,
+        "RequestId": rid,
+        "Signature": _sb_sig(ticks, rid, _SB_CID, _SB_SECRET),
+    }
+    h = _SbHandler(headers, b'{"type":"matter.updated","payload":{"id":"m"}}')
+    gate._Handler.do_POST(h)
+    assert h.answers == [202]
+    assert forwarded == []
+    gate._replay_seen.clear()
+
+
 def test_smokeball_route_verify_uses_configured_clientid_and_returns_rid(monkeypatch):
     gate._replay_seen.clear()
     monkeypatch.setenv("WEBHOOK_SMOKEBALL_CLIENT_ID", _SB_CID)

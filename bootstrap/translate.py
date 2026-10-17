@@ -65,7 +65,7 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -272,6 +272,39 @@ def _resolve_skill_pins(
 #: Volume sentinel naming what this boot skipped. Rewritten every boot; removed
 #: when nothing was skipped, so its presence always describes the current boot.
 CONFIG_AHEAD_SENTINEL = Path(".smd") / "config_ahead_of_image.json"
+
+
+def _triggers_for_runnable(triggers: Any, personas: list[dict[str, Any]]) -> Any:
+    """The authored webhook triggers minus any whose skill is not enabled on its
+    persona after :func:`_drop_unrunnable`. A trigger naming a skipped skill
+    would otherwise keep its route (and its ``skills:`` list) alive for a skill
+    this boot did not install. A non-list is returned as-is (the validator's
+    concern)."""
+    if not isinstance(triggers, list):
+        return triggers
+    enabled: dict[str, set[str]] = {}
+    for persona in personas:
+        names = enabled.setdefault(str(persona.get("slug") or ""), set())
+        for skill in persona.get("skills") or []:
+            if isinstance(skill, dict) and skill.get("enabled") and skill.get("name"):
+                names.add(str(skill["name"]))
+    kept: list[Any] = []
+    for trig in triggers:
+        if isinstance(trig, dict):
+            persona = str(trig.get("persona") or "")
+            skill = str(trig.get("skill") or "")
+            if skill not in enabled.get(persona, set()):
+                logger.warning(
+                    "translate: webhook_trigger %s/%s names skill %r, not runnable on "
+                    "persona %r this boot; trigger dropped",
+                    trig.get("source"),
+                    trig.get("event_type"),
+                    skill,
+                    persona,
+                )
+                continue
+        kept.append(trig)
+    return kept
 
 
 def _drop_unrunnable(
@@ -819,6 +852,14 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
     skill, persona}``). For each connector with a ``webhook_url`` we emit one
     route under ``platforms.webhook.extra.routes.<route>`` carrying:
 
+    A connector route is emitted ONLY when a ``webhook_triggers`` entry names its
+    adapter as ``source``. An untriggered route used to be emitted anyway, with
+    ``events: []`` (Hermes reads that as allow-all), no skills and the email-reply
+    prompt: every delivery on it woke the agent to act on vendor data with no
+    skill and no cooldown (ashton-price's Smokeball route, 2026-10-17). The gate
+    acknowledges and suppresses deliveries for such a route rather than
+    forwarding them (``webhook_gate``), so the vendor sees no failure.
+
     * ``secret`` — the per-vendor HMAC secret, read from ``WEBHOOK_SECRET_<SOURCE>``
       (a Fly secret). **Fail-closed:** if the secret is unset the route is NOT
       emitted — no public webhook without a verifying secret.
@@ -834,6 +875,7 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
     """
     connectors = customer.get("connectors") or {}
     triggers = customer.get("webhook_triggers") or []
+    trigger_sources = {str(t.get("source", "")) for t in triggers if isinstance(t, dict)}
 
     # adapter -> route name, from connectors that declare a webhook_url
     routes: dict[str, dict[str, Any]] = {}
@@ -845,6 +887,14 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
         if not route:
             continue
         adapter = str(record.get("adapter", "")) or route
+        if adapter not in trigger_sources:
+            logger.info(
+                "translate: connector route %r is named by no webhook_trigger; route "
+                "NOT emitted (an untriggered route would wake the agent on every "
+                "delivery with no skill)",
+                route,
+            )
+            continue
         secret_env = f"WEBHOOK_SECRET_{adapter.upper().replace('-', '_')}"
         try:
             secret = get_secret(secret_env)
@@ -874,7 +924,6 @@ def _materialize_webhook_platform(customer: dict[str, Any]) -> dict[str, Any]:
     # outbound-only msgraph Email never wakes the agent and needs no route).
     # Fail-closed on WEBHOOK_SECRET_MSGRAPH exactly like a vendor route; the poller
     # signs its loopback POST with the same secret so the adapter re-verifies.
-    trigger_sources = {str(t.get("source", "")) for t in triggers if isinstance(t, dict)}
     for record in connectors.values():
         if not isinstance(record, dict) or not record.get("enabled"):
             continue
@@ -2053,6 +2102,7 @@ def _install_persona_skills(
     profile_dir: Path,
     skills_dir: Path,
     spec_block: str = "",
+    prune: Iterable[str] = (),
 ) -> int:
     """Copy each enabled persona skill body into the profile's own skills dir.
 
@@ -2066,7 +2116,11 @@ def _install_persona_skills(
 
     Only the persona's *enabled* skills are copied (per-persona scoping per
     ADR 0007); the rest of the base catalog stays invisible to this profile.
-    Existing builtin category dirs in the profile are left untouched.
+    A catalog skill the persona does not enable (disabled, dropped, or skipped
+    as unrunnable this boot) is REMOVED from the profile, along with any name in
+    ``prune``: the copy used to only ever add, so a skill a persona stopped
+    enabling stayed on disk and loadable from the profile. Existing builtin
+    category dirs (names not in the catalog) are left untouched.
 
     Args:
         persona: One persona block from ``customer.yaml``.
@@ -2087,12 +2141,14 @@ def _install_persona_skills(
     dest_root = profile_dir / "skills"
     dest_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     installed = 0
+    enabled: set[str] = set()
     for skill in persona.get("skills", []) or []:
         if not skill.get("enabled"):
             continue
         name = skill.get("name")
         if not name:
             continue
+        enabled.add(str(name))
         src = skills_dir / name
         if not src.is_dir():
             raise TranslateError(
@@ -2108,6 +2164,20 @@ def _install_persona_skills(
         # stamp must replace rather than append (see _stamp_skill_md).
         _stamp_skill_md(dest_root / name / "SKILL.md", spec_block)
         installed += 1
+    # Prune: a skill this profile no longer enables must not stay loadable here.
+    removable = {p.name for p in skills_dir.iterdir() if p.is_dir()} | set(prune)
+    for child in sorted(dest_root.iterdir()):
+        if child.name in enabled or child.name not in removable:
+            continue
+        if child.is_symlink() or not child.is_dir():
+            child.unlink()
+        else:
+            shutil.rmtree(child)
+        logger.info(
+            "translate: removed skill %r from profile %s (not enabled for this persona)",
+            child.name,
+            persona.get("slug"),
+        )
     return installed
 
 
@@ -2195,7 +2265,11 @@ def translate_customer_yaml(
     # Config ahead of image: skip what this image cannot run, alert, boot the
     # rest. Downstream (pins, profile install, cron) sees only runnable entries.
     personas, unrunnable = _drop_unrunnable(personas, skills_path)
-    customer = {**customer, "personas": personas}
+    customer = {
+        **customer,
+        "personas": personas,
+        "webhook_triggers": _triggers_for_runnable(customer.get("webhook_triggers"), personas),
+    }
     _alert_config_ahead_of_image(home_path, unrunnable)
 
     resolved_pins = _resolve_skill_pins(personas, skills_path)
@@ -2246,6 +2320,9 @@ def translate_customer_yaml(
             profile_dir=profile_dir,
             skills_dir=skills_path,
             spec_block=spec_block,
+            # A skill skipped as unrunnable may be absent from this image's
+            # catalog; last boot's copy is removed by name.
+            prune={f["skill"] for f in unrunnable if f.get("persona") == slug},
         )
         # Every already-staged pre-run script now matches the skill copy just
         # installed, whether or not its skill still has a cron entry.
