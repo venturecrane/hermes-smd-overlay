@@ -26,12 +26,17 @@ the part, and writes the CONFIRM_SEND row with the invitation's sha256, so the
 unaudited-send reconciler sees every one. The participant fence admits the
 seat's people through the lane ``skill:calendar``, which this code names.
 
-WHO MAY BE INVITED (``seat.py``). The seat's people (space mode) or its exact
-roster; one address that is not refuses the whole invitation. On a seat more
-than one person shares, an event belongs to a space; an invitation from a
-private conversation that reaches the other person is a private-to-shared
-write, and :func:`seat.private_to_shared_gate` decides it (the R1 hook: it
-refuses until workstream A's confirmation gate is published).
+WHO MAY BE INVITED (``seat.py``). On a seat people share, person ids mapped to
+``people[].email`` in code (never an address the model names); elsewhere the
+exact roster. One name that does not resolve refuses the whole invitation. An
+event belongs to a space; an invitation from a private conversation that
+reaches the other person is held by workstream A's space gate
+(``hermes-smd-space-gate``) until that person says "share it", and
+:func:`seat.private_to_shared_gate` refuses any crossing that gate did not hold.
+
+WHAT ARRIVES BY EMAIL (``ingest.py``, ``pre_gateway_dispatch``). A person's
+invitation is kept in their space; a person's Accept/Decline (METHOD:REPLY) is
+recorded on the event and never wakes a turn.
 
 WHERE EVENTS LIVE (``shared.calendar_store``). ``/opt/data/smd/calendar.db``.
 The file tools are refused on that path here, on every seat with the tools
@@ -268,18 +273,57 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     return None
 
 
-def on_pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
-    """Keep the invitations the email that opened this turn carries."""
+#: The audit transport, bound at register when the seat's audit env is set.
+_AUDIT: Any | None = None
+
+
+def _audit_response(message_id: str, outcome: ingest.Outcome) -> None:
+    """One WEBHOOK_SUPPRESSED row for a calendar response that woke no turn:
+    what each REPLY did (recorded / dropped and why). Never the email's text,
+    never an address. Best effort: the suppression stands either way."""
+    if _AUDIT is None:
+        logger.info("hermes-smd-calendar: calendar response suppressed; no audit client, log only")
+        return
+    try:
+        from shared.audit_contract import INSERT_SQL, agent_event_params
+
+        params = agent_event_params(
+            action_type="WEBHOOK_SUPPRESSED",
+            metadata={
+                "reason": ingest.SUPPRESSED_REASON,
+                "message_id": message_id,
+                "replies": list(outcome.replies),
+            },
+        )
+        _AUDIT.execute(INSERT_SQL, *params)
+    except Exception:  # noqa: BLE001 - an audit failure never wakes the turn back up
+        logger.warning("hermes-smd-calendar: suppression audit write failed", exc_info=True)
+
+
+def on_pre_gateway_dispatch(**kwargs: Any) -> dict[str, Any] | None:
+    """Apply an inbound email's calendar parts (``ingest``). An email that is only
+    a calendar response is consumed: the router is told to leave it, the turn is
+    skipped, and the act is audited. Exception-safe: a failure dispatches the
+    email as it would have been."""
     try:
         seat = seat_mod.load_seat()
-        return ingest.context_for(_session(kwargs), seat)
+        result = ingest.process(ingest._payload(kwargs), seat)
+        if result is None:
+            return None
+        message_id, outcome = result
+        if not outcome.response_only:
+            return None
+        ingest.calendar_inbox.mark(message_id)
+        _audit_response(message_id, outcome)
+        return {"action": "skip", "reason": ingest.SUPPRESSED_REASON}
     except Exception:  # noqa: BLE001 - never raise out of a hook
-        logger.warning("hermes-smd-calendar: invitation ingest failed", exc_info=True)
+        logger.warning("hermes-smd-calendar: inbound calendar parts not read", exc_info=True)
         return None
 
 
 def register(ctx: Any) -> None:
-    """Register the four tools and the two hooks on a seat that authors a
+    """Register the four tools and the two hooks (pre_tool_call,
+    pre_gateway_dispatch) on a seat that authors a
     calendar; nothing anywhere else."""
     try:
         authored = seat_mod.calendar_authored(CustomerConfig.from_volume())
@@ -300,7 +344,17 @@ def register(ctx: Any) -> None:
             emoji="",
         )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
-    ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    ctx.register_hook("pre_gateway_dispatch", on_pre_gateway_dispatch)
+    global _AUDIT
+    try:
+        from shared.audit_client import audit_client_from_env
+        from shared.secrets import require
+
+        _AUDIT = audit_client_from_env(
+            customer_slug=require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")["SMD_CUSTOMER_SLUG"]
+        )
+    except Exception:  # noqa: BLE001 - no audit env: suppressions are logged only
+        _AUDIT = None
     logger.info("hermes-smd-calendar registered %d tools", len(TOOLS))
 
 
@@ -313,7 +367,7 @@ __all__ = [
     "TOOL_LIST",
     "TOOL_UPDATE",
     "WRITE_TOOLS",
-    "on_pre_llm_call",
+    "on_pre_gateway_dispatch",
     "on_pre_tool_call",
     "register",
 ]
