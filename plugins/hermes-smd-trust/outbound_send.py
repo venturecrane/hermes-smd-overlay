@@ -28,6 +28,7 @@ from collections.abc import Callable
 from typing import Any
 
 from shared import agentmail_broker, msgraph_broker, outbound_attachment, send_anchor
+from shared.send_dispatch import CALENDAR_ARG
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +93,27 @@ def _attachment_copies(attachments: list[dict[str, Any]]) -> list[dict[str, str]
 
 
 def _send_body(payload: dict[str, Any]) -> dict[str, Any]:
-    """The AgentMail send body from a stored send payload — allowlisted fields only."""
+    """The AgentMail send body from a stored send payload — allowlisted fields only.
+
+    Plus one invitation (ss-console#3264) when the payload carries the
+    out-of-turn sender's ``CALENDAR_ARG``: forwarded as the broker's
+    ``calendar`` field, which the broker validates and builds into the only
+    part an AgentMail send carries. A model's tool args never reach here with
+    that key (the trust hook strips it)."""
     body: dict[str, Any] = {}
     for key in _SEND_BODY_FIELDS:
         value = payload.get(key)
         if value not in (None, "", [], {}):
             body[key] = value
+    calendar = payload.get(CALENDAR_ARG)
+    if calendar is not None:
+        if not (
+            isinstance(calendar, dict)
+            and set(calendar) == {"method", "ics"}
+            and all(isinstance(v, str) and v for v in calendar.values())
+        ):
+            raise AgentMailSendError("refusing to send: the calendar invitation is malformed")
+        body["calendar"] = {"method": calendar["method"], "ics": calendar["ics"]}
     return body
 
 
@@ -241,6 +257,12 @@ def send_via_msgraph(
     ``fileAttachment``. A broker refusal that names the attachment raises
     :class:`MsGraphAttachmentError` so the caller can retry without it.
     """
+    if payload.get(CALENDAR_ARG) is not None:
+        # The Graph verb carries no invitation (ss-console#3264): refused loudly,
+        # never sent as a message that says "invitation" with nothing attached.
+        raise MsGraphSendError(
+            "refusing to send: this seat's mail transport carries no calendar invitation"
+        )
     body = {
         k: payload.get(k) for k in _MSGRAPH_SEND_FIELDS if payload.get(k) not in (None, "", [], {})
     }

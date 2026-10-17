@@ -104,6 +104,15 @@ UNFENCED_READ_BY_DESIGN: frozenset[str] = frozenset(
         # record. The filenames it returns are that same sender's, reduced by
         # safe_filename.
         "voice_note_transcribe",
+        # The seat's own calendar (hermes-smd-calendar, ss-console#3264).
+        # Unfenced because of how the store is written: an event is either one
+        # this seat composed (calendar_invite_create/update/cancel, which the
+        # plugin's own hook refuses on a tainted turn), or an invitation the
+        # ingest kept ONLY when its verified sender is one of the seat's people
+        # AND its ORGANIZER is that same sender, so a forwarded third-party
+        # invitation is never kept. Fencing it would taint every turn that
+        # answers "what is on our calendar" and close the reply.
+        "calendar_invite_list",
     }
 )
 
@@ -220,6 +229,7 @@ def test_unfenced_by_design_has_no_stale_entries() -> None:
         "hermes-smd-escalation",
         "hermes-smd-record-store",
         "hermes-smd-voice-notes",
+        "hermes-smd-calendar",
     ):
         registered |= set(load_plugin(plugin_dir).TOOLS)
     classified = set(TOOL_ACTION_CLASS_MAP)

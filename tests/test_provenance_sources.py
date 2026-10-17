@@ -370,6 +370,11 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # into a record store, and THAT read (record_store_read) is the source.
         # A number spoken into a phone has not been read from anything yet.
         "voice_note_transcribe",
+        # The seat's own calendar (hermes-smd-calendar, ss-console#3264). Most
+        # of what it lists is what this seat composed and sent, and the rest is
+        # what a person typed into an invitation. A time the Operator wrote
+        # into an event and read back has not been read from any record.
+        "calendar_invite_list",
         "job_status",
         # ss-console #2614: broker-authored counts and states of the chronology
         # runner's jobs (documents read, pages, cents, a folder id). Not a
