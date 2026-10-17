@@ -92,13 +92,19 @@ def speaker(space: space_mod.Space | None, sender_id: str) -> str | None:
 
 
 def context_block(
-    client: Any, space: space_mod.Space | None, peer: str | None, persona: str
+    client: Any,
+    space: space_mod.Space | None,
+    peer: str | None,
+    persona: str,
+    *,
+    customer_slug: str,
 ) -> str | None:
     """The block to inject on this turn, or None (unresolved: nothing at all)."""
     if space is None:
         return None
     memories, preferences = store.space_rows(
         client,
+        customer_slug=customer_slug,
         readable=space_mod.readable_spaces(space),
         speaker=peer,
         persona_slug=persona or None,

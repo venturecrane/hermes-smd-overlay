@@ -360,3 +360,57 @@ def test_restatement_supersedes_only_within_its_space(mod):
 
 def test_session_origin_register_is_clean_between_tests():
     assert SESSION_INBOUND_ORIGIN.get("mail-a") is None
+
+
+# ---------------------------------------------------------------------------
+# Customer scope: person ids are seat-local slugs
+# ---------------------------------------------------------------------------
+
+
+def _keep(mod, slug: str, peer: str, text: str, **kw) -> None:
+    mod.store.record_preference(
+        mod._D1,
+        customer_slug=slug,
+        peer_id=peer,
+        persona_slug="",
+        preference=text,
+        why=None,
+        how_to_apply=None,
+        source="stated",
+        session_id="s",
+        **kw,
+    )
+
+
+def test_two_seats_sharing_a_table_never_see_each_others_p1(mod, monkeypatch):
+    """Every couples seat calls its first partner p1. If two seats' rows ever
+    share a table, couple 2's p1 must not be shown couple 1's p1 memories.
+    FALSIFIER: drop ``customer_slug = ?`` from the store.space_rows queries
+    and the customer term in its ``ok`` filter."""
+    _keep(mod, "captain-mark", "person:p1", A_SECRET, space="person:p1", kind="memory")
+    _keep(mod, "other-couple", "person:p1", "Other couple secret", space="person:p1", kind="memory")
+    telegram_dm(monkeypatch, A_TG)
+    ctx = _turn_context(mod, "dm-a", A_TG)
+    assert A_SECRET in ctx and "Other couple secret" not in ctx
+    rows, _ = mod.store.space_rows(
+        mod._D1, customer_slug="other-couple", readable={"person:p1"}, speaker=None
+    )
+    assert [r["preference"] for r in rows] == ["Other couple secret"]
+    empty = mod.store.space_rows(mod._D1, customer_slug="", readable={"person:p1"}, speaker=None)
+    assert empty == ([], [])
+
+
+def test_two_seats_preferences_for_the_same_person_id_are_isolated(mod, monkeypatch):
+    _keep(mod, "other-couple", "person:p1", "Other couple pref", space="person:p1")
+    telegram_dm(monkeypatch, A_TG)
+    assert "Other couple pref" not in _turn_context(mod, "dm-a", A_TG)
+
+
+def test_legacy_read_is_scoped_to_the_customer(mod):
+    """The address-keyed read on a seat without spaces is scoped the same way."""
+    for slug in ("captain-mark", "other-couple"):
+        _keep(mod, slug, "same@example.com", f"pref of {slug}")
+    got = mod.store.active_preferences(
+        mod._D1, peer_id="same@example.com", customer_slug="other-couple"
+    )
+    assert [r["preference"] for r in got] == ["pref of other-couple"]
