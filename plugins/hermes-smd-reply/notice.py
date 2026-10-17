@@ -93,6 +93,12 @@ _REASON_HINTS: dict[str, str] = {
         "The reply carried something a paralegal would correct before sending it. "
         "Correct exactly what is listed and draft the reply again."
     ),
+    "send_failed": (
+        "The transport refused or failed while sending, so delivery is not "
+        "confirmed. Do not resend the same draft: a send that half-succeeded "
+        "would reach the person twice. Escalate so a person confirms whether it "
+        "arrived and reaches them if it did not."
+    ),
     "no_inbox_id": "No inbox was recorded for the original message, so there is nothing to thread into.",
 }
 
@@ -204,6 +210,12 @@ class HoldNoticeStore:
                 attempt=attempt,
                 detail=detail if isinstance(detail, str) else "",
             )
+
+    def pending(self, tool_call_id: str) -> bool:
+        """Whether a notice is waiting for this call (not yet taken)."""
+        key = tool_call_id if isinstance(tool_call_id, str) else ""
+        with self._lock:
+            return key in self._pending
 
     def take(self, tool_call_id: str) -> HoldNotice | None:
         key = tool_call_id if isinstance(tool_call_id, str) else ""

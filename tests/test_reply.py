@@ -703,6 +703,75 @@ def test_send_failure_audits_failed(relay_mod, monkeypatch) -> None:
     assert any(a == "REPLY_FAILED" for a, _ in d1.events())
 
 
+def _failed_send_through_transform(mod, monkeypatch, exc, tool_call_id):
+    """Drive one draft whose transmit raises ``exc``, through the transform hook
+    (the seam the model reads), and return (hook output, pages sent)."""
+    mod._HOLD_NOTICES._reset_for_tests()
+    _record_origin(sender="greg@whitfield.example")
+
+    def _boom(**_kw):
+        raise exc
+
+    pages: list[str] = []
+    monkeypatch.setattr(mod.relay, "send_reply", _boom)
+    monkeypatch.setattr(mod, "_notify_hold", lambda **kw: pages.append(kw["reason"]))
+    out = mod.on_transform_tool_result(
+        tool_name="agentmail:create_draft",
+        args=_draft(["greg@whitfield.example"]),
+        result='{"draft_id": "dft_fail"}',
+        session_id="s1",
+        tool_call_id=tool_call_id,
+    )
+    return out, pages
+
+
+def test_a_failed_send_is_told_to_the_agent_and_paged(relay_mod, monkeypatch) -> None:
+    """A transport refusal used to write REPLY_FAILED and nothing else: the turn
+    read ``create_draft -> ok`` and the person who wrote in heard nothing (the
+    ss-console#2367 silence, reached through the transport)."""
+    mod, d1, sent = relay_mod
+    out, pages = _failed_send_through_transform(
+        mod, monkeypatch, mod.relay.RelaySendError("broker refused: HTTP 502"), "tc_fail"
+    )
+    assert sent == []
+    assert any(a == "REPLY_FAILED" for a, _ in d1.events())
+    assert isinstance(out, str)
+    assert "WAS NOT SENT" in out
+    assert "send_failed" in out
+    assert "Do not resend" in out
+    assert "dft_fail" in out
+    # The transport's error text stays in the row, never in the model's context.
+    assert "HTTP 502" not in out
+    assert pages == ["send_failed"]
+
+
+def test_an_unexpected_transmit_fault_is_told_and_paged(relay_mod, monkeypatch) -> None:
+    """Not only the typed refusal: any fault inside the transmit is a reply
+    nobody got, and used to vanish into the catch-all's log line."""
+    mod, d1, _sent = relay_mod
+    out, pages = _failed_send_through_transform(
+        mod, monkeypatch, RuntimeError("socket closed"), "tc_fault"
+    )
+    assert isinstance(out, str) and "WAS NOT SENT" in out
+    assert any(a == "REPLY_FAILED" for a, _ in d1.events())
+    assert pages == ["send_failed"]
+
+
+def test_a_fault_before_transmit_is_told_and_paged(relay_mod, monkeypatch) -> None:
+    """A fault after the email resolved but before any byte reached the
+    transport lands in the outer catch-all; the agent is still told."""
+    mod, _d1, sent = relay_mod
+
+    def _explode(*_a, **_kw):
+        raise RuntimeError("policy read exploded")
+
+    monkeypatch.setattr(mod.send_policy, "live_send_policy", _explode)
+    out, pages = _failed_send_through_transform(mod, monkeypatch, AssertionError(), "tc_pre")
+    assert sent == []
+    assert isinstance(out, str) and "WAS NOT SENT" in out
+    assert pages == ["send_failed"]
+
+
 # ---------------------------------------------------------------------------
 # Pure-logic units (relay.py)
 # ---------------------------------------------------------------------------

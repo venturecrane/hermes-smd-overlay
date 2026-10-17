@@ -229,15 +229,45 @@ def test_send_failure_marks_failed_and_continues(store) -> None:
     assert any(a == "REPLY_FAILED" for a, _ in rec.events)
 
 
-def test_disabled_release_is_a_no_op(store) -> None:
-    """Unauthored held_release ⇒ the sweeper does nothing (pre-#2070 parity)."""
+def test_disabled_release_releases_nothing(store) -> None:
+    """Unauthored held_release ⇒ the sweeper sends nothing (pre-#2070 parity)
+    and a row inside its TTL simply keeps waiting."""
     limiter = relay.RateLimiter()
     rec = _Recorder()
     _enqueue(store)
     result = _sweep(store, limiter, rec, policy=DEFAULT_SEND_POLICY)
-    assert result == sweeper.SweepResult()
+    assert result.released == 0 and result.expired == 0 and result.failed == 0
     assert store.pending_count() == 1
+    assert rec.sent == [] and rec.events == []
+
+
+def test_disabled_release_still_expires_a_stranded_row(store) -> None:
+    """A row enqueued while release was on, then release switched off, used to
+    sit forever: never expired, never reported, its body kept on the volume."""
+    limiter = relay.RateLimiter()
+    rec = _Recorder()
+    row_id = _enqueue(store)
+    policy = SendPolicy(
+        **{**DEFAULT_SEND_POLICY.__dict__, "held_release_enabled": False, "held_ttl_s": 10.0}
+    )
+    result = _sweep(store, limiter, rec, policy=policy, now=_created_at(store, row_id) + 11.0)
+    assert result.expired == 1 and result.released == 0
     assert rec.sent == []
+    assert rec.events[-1][0] == "REPLY_FAILED"
+    assert rec.notified and rec.notified[-1]["reason"] == "hold_expired"
+    assert store.get(row_id)["send_text"] is None
+    assert store.pending_count() == 0
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_every_pass_purges_terminal_rows(store, monkeypatch, enabled) -> None:
+    """``purge_terminal`` existed and nothing called it, so terminal rows (and
+    the volume they occupy) grew without bound."""
+    calls: list[int] = []
+    monkeypatch.setattr(store, "purge_terminal", lambda *a, **k: calls.append(1) or 0)
+    policy = SendPolicy(**{**RELEASE_ON.__dict__, "held_release_enabled": enabled})
+    _sweep(store, relay.RateLimiter(), _Recorder(), policy=policy)
+    assert calls == [1]
 
 
 def _created_at(store, row_id: int) -> float:

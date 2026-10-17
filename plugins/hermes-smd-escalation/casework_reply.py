@@ -183,6 +183,16 @@ def _ask(verdicts: dict, approve: set[int], holds: set[int], valid: list[int]) -
             f"I read {_numbers(both)} as both yes and leave it. Which did you mean? "
             "Nothing has changed yet.",
         )
+    asked = sorted(n for n in verdicts.get("asked", ()) if n)
+    if verdicts.get("asked"):
+        # A question about a line is not a yes to it (reply_items._asked_about):
+        # approving here would close or reassign a task on a guess.
+        about = f" about {_numbers(asked)}" if asked else ""
+        return _reply(
+            reply_items.NOTHING_PARSED,
+            f"I read that as a question{about}, not a yes, so nothing has changed yet. "
+            'To go ahead with a line, reply with its number, for example "yes on 1".',
+        )
     unknown = sorted((approve | holds) - set(valid))
     if unknown:
         if len(valid) > 1:

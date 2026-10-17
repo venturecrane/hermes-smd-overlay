@@ -504,6 +504,61 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
         logger.warning("hermes-smd-reply: hold notice not recorded (%s)", exc)
 
 
+# The notice/page reason for a reply whose transmit failed. One closed value:
+# the transport's own error text stays in the audit row, never in the model's
+# context or the monitoring tags.
+_SEND_FAILED_REASON = "send_failed"
+
+
+def _send_failed(
+    why: str,
+    origin: inbound.InboundOrigin,
+    *,
+    adapter: str = "",
+    sender_class: str = "unclassified",
+    body_digest: str = "",
+    matter_ref: str | None = None,
+) -> None:
+    """A reply that did not go out: the row, the telling, and the page.
+
+    Until this existed a failed transmit wrote ``REPLY_FAILED`` and nothing
+    else, so the agent read ``create_draft -> ok`` and the person who wrote in
+    heard nothing: the ss-console#2367 silence, reached through the transport
+    instead of a gate. A failure is told exactly as a hold is (the notice the
+    transform hook appends to the draft's result) and paged through the same
+    notifier holds use. Never raises.
+    """
+    try:
+        recipient, device = _reply_recipient(origin)
+        _emit_reply_event(
+            action_type="REPLY_FAILED",
+            metadata={
+                "reason": why,
+                "adapter": adapter,
+                "recipient": recipient,
+                "message_id": origin.message_id,
+                **device,
+            },
+            matter_ref=matter_ref,
+        )
+        _HOLD_NOTICES.record(
+            tool_call_id=getattr(_CURRENT_CALL, "tool_call_id", "") or "",
+            reason=_SEND_FAILED_REASON,
+            recipient=recipient,
+            message_id=origin.message_id,
+        )
+        _notify_hold(
+            reason=_SEND_FAILED_REASON,
+            sender=recipient,
+            sender_class=sender_class,
+            adapter=adapter,
+            message_id=origin.message_id,
+            body_digest=body_digest,
+        )
+    except Exception as exc:  # noqa: BLE001 — telling must never break the hook
+        logger.warning("hermes-smd-reply: send failure not surfaced (%s)", exc)
+
+
 def _checklist_violations(
     text: str, *, internal: bool, tool_name: str, session_id: str
 ) -> tuple[str, str] | None:
@@ -761,6 +816,12 @@ def _relay_draft(**kwargs: Any) -> None:
         # The device-redirect target, resolved after the roster check below.
         # Empty until then, so an early hold is recorded against the sender.
         _CURRENT_CALL.reply_to = ""
+        # Which email this call answers, and whether its bytes reached the
+        # transport. The catch-all below reads both: an unexpected fault after
+        # the origin resolved and before a transmit is a reply nobody got, and
+        # the agent must be told so (ss-console#2367), never left reading "ok".
+        _CURRENT_CALL.origin = None
+        _CURRENT_CALL.transmitted = False
 
         # (0) The draft must actually exist. ``post_tool_call`` fires after every
         # dispatch, including one that returned an error, and the relay used to
@@ -812,6 +873,7 @@ def _relay_draft(**kwargs: Any) -> None:
             # so there is nobody to reply to. A create_draft that did NOT
             # originate from this turn's inbound email never relays.
             return
+        _CURRENT_CALL.origin = origin
 
         # (0b) One inbound message, at most one reply out. The hook fires per
         # tool CALL, so an agent that drafts twice in a turn arrives here twice
@@ -1199,20 +1261,18 @@ def _relay_draft(**kwargs: Any) -> None:
                     session_id=session_id,
                     matter_ref=cited_matter_ref,
                 )
-        except relay.RelaySendError as exc:
-            _emit_reply_event(
-                action_type="REPLY_FAILED",
-                metadata={
-                    "reason": str(exc),
-                    "adapter": adapter,
-                    "recipient": reply_to,
-                    "message_id": origin.message_id,
-                    **_reply_recipient(origin)[1],
-                },
-                session_id=session_id,
+        except Exception as exc:  # noqa: BLE001 - RelaySendError or a fault: either way not sent
+            why = str(exc) if isinstance(exc, relay.RelaySendError) else type(exc).__name__
+            _send_failed(
+                why,
+                origin,
+                adapter=adapter,
+                sender_class=sender_class,
+                body_digest=body_digest,
                 matter_ref=cited_matter_ref,
             )
             return
+        _CURRENT_CALL.transmitted = True
 
         # (f) The reply for this inbound is now committed — record it before the
         # audit emission so a retry cannot race between the send and the mark.
@@ -1264,10 +1324,23 @@ def _relay_draft(**kwargs: Any) -> None:
         _discard_drafts(_WORKING_DRAFTS.take(session_id, reply_key))
     except Exception as exc:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-reply: post_tool_call handler error: %s", exc)
+        # A fault between resolving the email and handing bytes to the
+        # transport is a reply nobody received. Tell the turn and page, unless
+        # this call already recorded a hold the agent will read.
+        origin = getattr(_CURRENT_CALL, "origin", None)
+        call_id = getattr(_CURRENT_CALL, "tool_call_id", "") or ""
+        if (
+            origin is not None
+            and not getattr(_CURRENT_CALL, "transmitted", False)
+            and not _HOLD_NOTICES.pending(call_id)
+        ):
+            _send_failed(f"relay_error: {type(exc).__name__}", origin)
     finally:
         _CURRENT_CALL.tool_call_id = ""
         _CURRENT_CALL.session_id = ""
         _CURRENT_CALL.reply_to = ""
+        _CURRENT_CALL.origin = None
+        _CURRENT_CALL.transmitted = False
 
 
 def on_transform_tool_result(**kwargs: Any) -> str | None:
