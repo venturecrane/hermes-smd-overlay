@@ -11,6 +11,9 @@ the agent-side write and the gate-side read interoperate over the store, which i
 the heart of the synchronous bridge.
 """
 
+import os
+import time
+
 import pytest
 
 import webhook_gate as gate
@@ -54,6 +57,24 @@ def test_prune_removes_stale_results():
     mcp_result_store.put("fresh", {"answer": "new"}, now=1e12)
     assert mcp_result_store.take("stale") is None
     assert mcp_result_store.take("fresh") == {"answer": "new"}
+
+
+def test_result_prune_never_deletes_thread_transcripts():
+    """OSA-3: the result store's 300 s prune shares the directory with the thread
+    store (2 h TTL). Storing a result must not wipe a conversation that has only
+    been idle for 10 minutes."""
+    key = mcp_thread_store.thread_key("user_1", "conv1")
+    assert mcp_thread_store.append(key, "hello", "hi")
+    thread_file = next(mcp_thread_store.store_dir().glob("thread-*.json"))
+    ten_min_ago = time.time() - 600
+    os.utime(thread_file, (ten_min_ago, ten_min_ago))
+
+    assert mcp_result_store.put("req1", {"a": 1})
+
+    assert len(mcp_thread_store.history(key)) == 2
+    # The thread store still ages the transcript out on its own TTL.
+    assert mcp_thread_store.append("other:t", "x", "y", now=time.time() + 7201)
+    assert mcp_thread_store.history(key) == []
 
 
 # --- result-sink plugin (agent side) ------------------------------------------

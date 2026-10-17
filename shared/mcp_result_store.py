@@ -55,6 +55,12 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # gate's long-poll budget, so a result is never pruned out from under a poll
 # that is still waiting for it.
 _TTL_SECONDS = 300
+# The thread store (``mcp_thread_store``) shares this directory and names its
+# files ``thread-<key>.json`` with a much longer (2 h) idle TTL. This store's
+# prune must never touch them, or every MCP conversation loses its history the
+# first time a result is stored after 5 idle minutes. Correlation ids are
+# gate-minted uuid hex, so a result file never carries this prefix.
+_THREAD_FILE_PREFIX = "thread-"
 
 
 def store_dir() -> Path:
@@ -147,13 +153,19 @@ def take(correlation_id: str) -> dict | None:
 
 
 def _prune(directory: Path, *, now: float | None = None) -> None:
-    """Remove result files older than the TTL. Best-effort, never raises."""
+    """Remove result files older than the TTL. Best-effort, never raises.
+
+    Only this store's own files: thread transcripts sharing the directory are
+    owned (and TTL'd) by ``mcp_thread_store``.
+    """
     reference = time.time() if now is None else now
     try:
         entries = list(directory.glob("*.json"))
     except OSError:
         return
     for entry in entries:
+        if entry.name.startswith(_THREAD_FILE_PREFIX):
+            continue
         try:
             if reference - entry.stat().st_mtime > _TTL_SECONDS:
                 entry.unlink(missing_ok=True)
