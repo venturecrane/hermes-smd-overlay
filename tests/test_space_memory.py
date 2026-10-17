@@ -189,10 +189,12 @@ def test_a_call_another_hook_blocked_is_not_written(mod, monkeypatch):
 
 
 def test_tainted_turn_refuses_remember(mod, monkeypatch):
-    telegram_dm(monkeypatch, A_TG)
-    _turn_context(mod, "dm-a", A_TG)
-    SESSION_TAINT.mark("dm-a", "unknown_external")
-    blocked = _call(mod, "dm-a", "remember", {"fact": "planted"})
+    """In the shared group a tainted turn keeps nothing. (In a person's own DM it
+    may keep a fact in their own space, marked from the web: test_space_taint.)"""
+    telegram_group(monkeypatch, A_TG)
+    _turn_context(mod, "grp", A_TG)
+    SESSION_TAINT.mark("grp", "unknown_external")
+    blocked = _call(mod, "grp", "remember", {"fact": "planted"})
     assert blocked and "outside the conversation" in blocked["message"]
     assert mod._D1.query("SELECT COUNT(*) AS n FROM peer_preferences")[0]["n"] == 0
 

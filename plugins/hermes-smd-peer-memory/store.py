@@ -97,6 +97,7 @@ def record_preference(
     new_id: str | None = None,
     space: str = "",
     kind: str = "preference",
+    from_web: bool = False,
 ) -> str:
     """Insert one active preference for a peer; return its id.
 
@@ -131,8 +132,8 @@ def record_preference(
     client.execute(
         "INSERT INTO peer_preferences "
         "(id, customer_slug, peer_id, persona_slug, preference, why, how_to_apply, source, "
-        "session_id, space, kind) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "session_id, space, kind, from_web) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         pref_id,
         customer_slug,
         peer_id,
@@ -144,6 +145,7 @@ def record_preference(
         session_id,
         space,
         kind,
+        1 if from_web else 0,
     )
     return pref_id
 
@@ -290,7 +292,7 @@ def space_rows(
     marks = ", ".join("?" for _ in keys)
     persona_clause = " AND persona_slug = ?" if persona_slug else ""
     persona_args = (persona_slug,) if persona_slug else ()
-    cols = f"{_SELECT_COLS}, customer_slug, space, kind"
+    cols = f"{_SELECT_COLS}, customer_slug, space, kind, from_web"
     memories = client.query(
         f"SELECT {cols} FROM peer_preferences "
         f"WHERE customer_slug = ? AND kind = 'memory' AND space IN ({marks}) "
@@ -353,6 +355,8 @@ def render_space_block(
         lines.append("Things you were asked to remember (newest first):")
         for row in memories[:_MEMORY_RENDER_CAP]:
             tag = "shared" if row.get("space") == "shared" else "private to this person"
+            if row.get("from_web"):
+                tag += ", from a web search"
             lines.append(f"- [{tag}] {row['preference']}")
         lines.append("")
     if preferences:
