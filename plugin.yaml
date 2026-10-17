@@ -4,6 +4,11 @@ description: "Plugin overlay for the Nous Hermes Agent — adds audit emission, 
 author: VentureCrane
 plugins:
   - plugins/hermes-smd-audit
+  # space-gate registers BEFORE every other pre_tool_call gate: when a held
+  # private-to-shared write is released it REPLACES the call's arguments with
+  # the confirmed payload, and the trust gate and the record-store fence must
+  # judge that payload, not whatever the model passed the second time.
+  - plugins/hermes-smd-space-gate
   - plugins/hermes-smd-trust
   - plugins/hermes-smd-voice
   - plugins/hermes-smd-memory-mirror

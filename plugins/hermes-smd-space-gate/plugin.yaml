@@ -1,0 +1,11 @@
+name: hermes-smd-space-gate
+version: "0.1.0"
+description: "Private-to-shared write gate (ADR 0090 R1, ADR 0091). On a seat several people share, a write from one person's private space into a space someone else reads (the shared store or list, the group, a calendar invite, a shared doc, an email to the other person) is held and released only when that person, in that same chat, confirms the exact payload. Inert on seats that author no people:."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - pre_tool_call
+  - pre_llm_call
+hooks:
+  - pre_tool_call
+  - pre_llm_call
