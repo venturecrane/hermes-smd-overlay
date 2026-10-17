@@ -62,8 +62,12 @@ _DEFAULT_HERMES_HOME = "/opt/data"
 # silence, which is the failure class the handoff exists to end.
 _CRON_SESSION_RE = re.compile(r"^cron_(?P<job_id>.+)_(?P<date>\d{8})_(?P<time>\d{6})$")
 
-# ``op-managed:<persona>:<skill>`` per bootstrap/cron_materialize.py.
-_MANAGED_NAME_RE = re.compile(r"^op-managed:(?P<persona>[^:]+):(?P<skill>.+)$")
+# ``op-managed:<persona>:<skill>`` per bootstrap/cron_materialize.py, plus an
+# optional ``@<space>`` on space-mode seats (``shared/cron_space.py``). The skill
+# stays bare so every reader of ``RoutineIdentity.skill`` is unchanged.
+_MANAGED_NAME_RE = re.compile(
+    r"^op-managed:(?P<persona>[^:]+):(?P<skill>[^@]+)(?:@(?P<space>.+))?$"
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,7 @@ class RoutineIdentity:
     job_name: str  # the stable managed name, or the raw name for unmanaged jobs
     persona: str | None  # parsed from the managed name; None for unmanaged jobs
     skill: str | None  # the skill the job runs; None when the job names none
+    space: str | None = None  # the authored run space on space-mode seats, else None
 
 
 # path -> (mtime_ns, {job_id: RoutineIdentity})
@@ -127,10 +132,12 @@ def _identity_from_job(job: dict[str, Any]) -> RoutineIdentity | None:
 
     persona: str | None = None
     skill: str | None = None
+    space: str | None = None
     managed = _MANAGED_NAME_RE.match(name or "")
     if managed:
         persona = managed.group("persona")
         skill = managed.group("skill")
+        space = managed.group("space")
     else:
         # Unmanaged job (agent- or operator-created): take the declared skill.
         skills = job.get("skills")
@@ -139,7 +146,9 @@ def _identity_from_job(job: dict[str, Any]) -> RoutineIdentity | None:
         elif isinstance(job.get("skill"), str) and job["skill"]:
             skill = job["skill"]
 
-    return RoutineIdentity(job_id=job_id, job_name=name or job_id, persona=persona, skill=skill)
+    return RoutineIdentity(
+        job_id=job_id, job_name=name or job_id, persona=persona, skill=skill, space=space
+    )
 
 
 def _load_store(path: Path) -> dict[str, RoutineIdentity]:
