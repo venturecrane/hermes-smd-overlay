@@ -856,6 +856,10 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # through the active session callback; it is not arbitrary external send.
     "todo": ActionClass.INTERNAL_WRITE,
     "record_peer_preference": ActionClass.INTERNAL_WRITE,
+    # Space memory (hermes-smd-peer-memory, ADR 0091): a fact kept in the turn's
+    # own space, never an argument-chosen one. Registered only on a seat that
+    # authors people:.
+    "remember": ActionClass.INTERNAL_WRITE,
     "clarify": ActionClass.INTERNAL_WRITE,
     # File mutation — internal write (not code-exec, but not read either).
     "write_file": ActionClass.INTERNAL_WRITE,
