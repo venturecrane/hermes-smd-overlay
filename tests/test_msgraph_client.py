@@ -10,6 +10,7 @@ env builder.
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -62,7 +63,7 @@ class _Opener:
             item = self._token.pop(0)
         else:
             item = self._graph.pop(0)
-        if isinstance(item, urllib.error.HTTPError):
+        if isinstance(item, BaseException):
             raise item
         return item
 
@@ -320,6 +321,61 @@ def test_auth_failure_records_conn_class(ledger_path):
     entry = _ledger_entry(ledger_path)
     assert entry["consecutive_failures"] == 1
     assert "last_conn_error_ts" in entry
+
+
+class _HangingResp(_Resp):
+    """Connected and sent, then the response read times out (a hung Graph)."""
+
+    def read(self, *args: object) -> bytes:
+        raise TimeoutError("timed out")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _HangingResp(200),
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        ConnectionResetError(54, "Connection reset by peer"),
+    ],
+    ids=["read-timeout", "remote-disconnected", "connection-reset"],
+)
+def test_response_phase_failure_is_typed_and_paged(ledger_path, failure):
+    """OSA-4: urllib wraps only CONNECT failures in URLError. A timeout or reset
+    after the request is sent surfaces bare; it must still become the typed
+    error (status 0, conn-class) and land in the health ledger, or a hung Graph
+    silently stops msgraph inbound with no page."""
+    opener = _Opener(graph_script=[failure])
+    with pytest.raises(MsGraphApiError) as exc:
+        _client(opener).get_message("m1")
+    assert exc.value.status == 0
+    entry = _ledger_entry(ledger_path)
+    assert entry["consecutive_failures"] == 1
+    assert "last_conn_error_ts" in entry
+
+
+def test_response_phase_failure_on_a_send_is_not_retried(ledger_path):
+    """A sendMail whose response timed out may already have been accepted;
+    retrying it could send the letter twice. One attempt, then the error."""
+    opener = _Opener(graph_script=[_HangingResp(202), _Resp(202)])
+    client = _client(opener)
+    with pytest.raises(MsGraphApiError):
+        client.request("POST", client._mail_url("sendMail"), json_body={"message": {}})
+    assert [m for m, u in opener.calls if "oauth2" not in u] == ["POST"]
+
+
+def test_response_phase_failure_on_bytes_path_is_typed_and_paged(ledger_path):
+    opener = _Opener(graph_script=[_HangingResp(200)])
+    client = _client(opener)
+    with pytest.raises(MsGraphApiError):
+        client.request_bytes("GET", client._mail_url("messages/m1/$value"), max_bytes=10)
+    assert "last_conn_error_ts" in _ledger_entry(ledger_path)
+
+
+def test_token_mint_response_timeout_is_auth_error_and_paged(ledger_path):
+    opener = _Opener(token_responses=[_HangingResp(200)])
+    with pytest.raises(MsGraphAuthError):
+        _client(opener).get_message("m1")
+    assert "last_conn_error_ts" in _ledger_entry(ledger_path)
 
 
 def test_ledger_failure_never_breaks_the_mail_path(ledger_path, monkeypatch):

@@ -999,8 +999,8 @@ def _scan_approved_send(rec: Any, payload: dict, session_id: str) -> str | None:
         )
     logger.info("hermes-smd-trust: approved send to %s refused by outbound scan", recipients)
     return (
-        f"[Your approved send to {recipients} was not dispatched: {reason}{told} The "
-        "approval was used; a corrected send needs a fresh approval.]"
+        f"[Your approved send to {recipients} was not dispatched: {reason}{told} "
+        "Nothing was sent; a corrected send needs a fresh approval.]"
     )
 
 
@@ -1041,6 +1041,35 @@ def _dispatch_approved_send(
     # approval turn is not the turn that composed it, so its email vouches for
     # nobody here; the broker re-reads the held anchor at the send below.
     fence_anchor, fence_lane = rec.anchor, rec.lane
+    # The outbound scans FIRST, under the session that COMPOSED the send, and
+    # before the gate below spends the approval.
+    #
+    # DECISION (overlay PR #399, closing the question PR #309 left open): an
+    # approved send meets the SAME outbound scans as every other send.
+    # evaluate_tool_call alone never ran the fabrication scan, the identifier
+    # gate or the output checklist, which live in outbound.check_outbound_send
+    # and fire from a hook this lane never crosses. A person approving a send
+    # approves its recipients and its intent; they did not read it for a UTC
+    # clock or an internal id, and an approval must not launder one.
+    #
+    # WHOSE SESSION. The identifier and matter gates judge a body against what
+    # the session READ. The approval arrives on another turn (a Telegram DM)
+    # whose read register is empty, so scanning there refused every correct
+    # body that cited what the composing turn read (send_as.py documents the
+    # same hazard). The record carries the composing session; a record captured
+    # without one falls back to this turn, as before.
+    #
+    # A refusal sends nothing, writes its own audit rows, and sends a fixed
+    # withheld notice to the approver (when the approval named an address) and
+    # to the send's own recipients when they are staff. The approval is
+    # withdrawn, not spent: the record stays pending, and nothing ships without
+    # a fresh "yes".
+    scan_session = getattr(rec, "session_id", None) or session_id
+    with send_anchor.dispatch_scope(fence_anchor, fence_lane):
+        scan_block = _scan_approved_send(rec, payload, scan_session)
+    if scan_block is not None:
+        rec.approved = False
+        return scan_block
     try:
         with send_anchor.dispatch_scope(fence_anchor, fence_lane):
             block = enforce.evaluate_tool_call(
@@ -1059,25 +1088,8 @@ def _dispatch_approved_send(
             "hermes-smd-trust: approved send withheld by gate for %s (%s)", recipients, reason
         )
         return f"[Your approved send to {recipients} was not dispatched: {reason}]"
-    # Gate allowed + consumed the approval; `payload` now holds the approved payload.
-    #
-    # DECISION (overlay PR #399, closing the question PR #309 left open): an
-    # approved send meets the SAME outbound scans as every other send, run here
-    # after evaluate_tool_call exactly as the out-of-turn dispatcher runs them.
-    # evaluate_tool_call alone never ran the fabrication scan, the identifier
-    # gate or the output checklist, which live in outbound.check_outbound_send
-    # and fire from a hook this lane never crosses. A person approving a send
-    # approves its recipients and its intent; they did not read it for a UTC
-    # clock or an internal id, and an approval must not launder one. A refusal
-    # here sends nothing, the scan writes its own audit rows, and a fixed
-    # withheld notice goes to the approver (when the approval named an address)
-    # and to the send's own recipients when they are staff, so nobody who was
-    # waiting on it hears silence. The approval is already consumed; the model
-    # is told, and a corrected send needs a fresh approval.
-    with send_anchor.dispatch_scope(fence_anchor, fence_lane):
-        scan_block = _scan_approved_send(rec, payload, session_id)
-    if scan_block is not None:
-        return scan_block
+    # Gate allowed + consumed the approval; `payload` now holds the approved
+    # payload, which the scans above already passed.
     # Same post-gate html attach as the tool path. This path needs its own call:
     # the pending record was stored by the gate BEFORE the tool path's attach ran,
     # so a withheld-then-approved report arrives here as markdown-only.

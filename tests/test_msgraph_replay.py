@@ -11,11 +11,19 @@ import hashlib
 import hmac
 import json
 
-from shared import msgraph_replay
+import pytest
+
+from shared import msgraph_poller, msgraph_replay
 from shared.msgraph_poller import MsGraphPoller
 
 _SECRET = "whook-secret"
 _MAILBOX = "op@client.example"
+
+
+@pytest.fixture(autouse=True)
+def _baseline_before_fixture_mail(monkeypatch):
+    # A cursorless poller state starts from "now"; the fixture mail is 2026-07.
+    monkeypatch.setattr(msgraph_poller, "_baseline_now", lambda: "2026-01-01T00:00:00Z")
 
 
 def _raw(mid: str, frm: str) -> dict:

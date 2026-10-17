@@ -312,15 +312,107 @@ def test_smokeball_signature_is_case_insensitive_hex():
 def test_smokeball_replay_cache_rejects_duplicate_request_id():
     gate._replay_seen.clear()
     now = 1700000000
-    assert gate._replay_check_and_record("rid-A", now=now) is True
-    assert gate._replay_check_and_record("rid-A", now=now) is False  # dup
+    assert gate._replay_seen_recently("rid-A", now=now) is False
+    gate._replay_record("rid-A", now=now)
+    assert gate._replay_seen_recently("rid-A", now=now) is True  # dup
     # A different id is fresh.
-    assert gate._replay_check_and_record("rid-B", now=now) is True
-    # Past the TTL the entry is pruned and the id is fresh again.
+    assert gate._replay_seen_recently("rid-B", now=now) is False
+    # Past the TTL the entry no longer counts.
     later = now + gate._REPLAY_TTL_SECONDS + 1
-    assert gate._replay_check_and_record("rid-A", now=later) is True
+    assert gate._replay_seen_recently("rid-A", now=later) is False
     # An empty id is never deduped (signature already validated it).
-    assert gate._replay_check_and_record("", now=now) is True
+    gate._replay_record("", now=now)
+    assert gate._replay_seen_recently("", now=now) is False
+    gate._replay_seen.clear()
+
+
+class _SbHandler:
+    """Just enough of the request-handler surface for do_POST on /webhooks/smokeball."""
+
+    def __init__(self, headers: dict, body: bytes) -> None:
+        import io
+
+        self.path = "/webhooks/smokeball"
+        self.headers = dict(headers, **{"Content-Length": str(len(body))})
+        self.rfile = io.BytesIO(body)
+        self.wfile = io.BytesIO()
+        self.answers: list[int] = []
+
+    def _json(self, status: int, payload: dict) -> None:
+        self.answers.append(status)
+
+    def send_response(self, status: int) -> None:
+        self.answers.append(status)
+
+    def send_header(self, *_a) -> None:
+        pass
+
+    def end_headers(self) -> None:
+        pass
+
+
+def test_a_smokeball_retry_after_a_failed_forward_is_not_a_replay(monkeypatch):
+    """J1: the RequestId used to be recorded at verification, before the
+    forward. A forward that failed answered 503 ("retry"), and the vendor's retry
+    of that same delivery then met 401 as a replay: the one delivery never
+    handled was the one refused. It is recorded only once handled.
+
+    FALSIFIER: record inside _smokeball_route_verify again and the retry is 401.
+    """
+    gate._replay_seen.clear()
+    monkeypatch.setenv("WEBHOOK_SECRET_SMOKEBALL", _SB_SECRET)
+    monkeypatch.setenv("WEBHOOK_SMOKEBALL_CLIENT_ID", _SB_CID)
+    monkeypatch.setattr(gate, "_INBOUND_GUARD", None)
+    monkeypatch.setattr(gate.gate_trigger_exclusions, "live_exclusions", lambda: {})
+    monkeypatch.setattr(gate.gate_trigger_throttle, "live_throttles", lambda: {})
+
+    outcomes = iter(["down", 200, 200])
+
+    class _Conn:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        def request(self, *a, **k) -> None:
+            self._next = next(outcomes)
+            if self._next == "down":
+                raise ConnectionRefusedError("gateway booting")
+
+        def getresponse(self):
+            status = self._next
+
+            class _R:
+                def read(self_inner) -> bytes:
+                    return b"{}"
+
+            r = _R()
+            r.status = status
+            return r
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(gate.http.client, "HTTPConnection", _Conn)
+    ticks = str((int(time.time()) + 62_135_596_800) * 10_000_000)
+    rid = "retry-rid-1"
+    headers = {
+        "Timestamp": ticks,
+        "RequestId": rid,
+        "Signature": _sb_sig(ticks, rid, _SB_CID, _SB_SECRET),
+    }
+    body = b'{"type":"matter.updated","payload":{"id":"m-1"}}'
+
+    first = _SbHandler(headers, body)
+    gate._Handler.do_POST(first)
+    assert first.answers == [503]
+
+    retry = _SbHandler(headers, body)
+    gate._Handler.do_POST(retry)
+    assert retry.answers == [200], "the vendor's retry of an unforwarded delivery was refused"
+
+    # Once handled, the same RequestId IS a replay.
+    replay = _SbHandler(headers, body)
+    gate._Handler.do_POST(replay)
+    assert replay.answers == [401]
     gate._replay_seen.clear()
 
 

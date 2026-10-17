@@ -55,11 +55,21 @@ def test_a_refusal_is_reported_without_inventing_an_outcome():
     assert "expired" in page and "Sent" not in page
 
 
-def test_an_unreachable_broker_says_nothing_was_sent():
-    decide = _Decider(OSError("no socket"))
-    status, page = approve_page.apply_click(TOKEN, decide)
-    assert status == 503
-    assert "nothing was sent" in page
+def test_no_verdict_says_the_outcome_is_unknown_never_nothing_was_sent(caplog):
+    # J-e: a socket timeout after the broker took the token may follow a real
+    # transmit. The page must not claim nothing went out, and SMD must be told
+    # (an ERROR record is what the gate's Sentry integration pages on).
+    from shared import msgraph_broker
+
+    for exc in (OSError("no socket"), msgraph_broker.MsGraphBrokerUnavailable("timed out")):
+        caplog.clear()
+        status, page = approve_page.apply_click(TOKEN, _Decider(exc))
+        assert status == 503
+        assert "nothing was sent" not in page.lower()
+        assert "Nothing was done" not in page
+        assert "cannot say whether the email went out" in page
+        assert "SMD has been told" in page
+        assert any(r.levelname == "ERROR" for r in caplog.records)
 
 
 def test_a_missing_or_oversized_token_never_reaches_the_broker():

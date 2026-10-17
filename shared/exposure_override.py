@@ -259,6 +259,32 @@ def read_overrides(persona: str, path: str | None = None) -> dict[str, str]:
         conn.close()
 
 
+def effective_exposure(
+    persona_slug: str, exposure: dict[str, str], ceiling: dict[str, str]
+) -> dict[str, str]:
+    """The EFFECTIVE exposure ``{action_class: ceiling}``: the authored map with
+    this persona's runtime overrides layered on, each clamped to its bound.
+
+    The single read-side path. The trust gate enforces it and the seat's own
+    self-description (``operator_seat_facts``) reports it, so what a firm is
+    told about send posture is what the gate does. ``exposure`` / ``ceiling``
+    are the authored string maps. Bound per class: the authored ceiling, else
+    the authored exposure value, else ``refused`` (:func:`max_allowed`). An
+    override is narrowed to its bound, never honored above it; an unreadable
+    bound counts as ``refused``. A store fault propagates (see
+    :func:`read_overrides`).
+    """
+    overrides = read_overrides(persona_slug)
+    effective = dict(exposure)
+    for action, value in overrides.items():
+        if value not in RESTRICTIVENESS:
+            continue
+        bound = max_allowed(action, exposure, ceiling)
+        bound_rank = RESTRICTIVENESS.get(bound, RESTRICTIVENESS["refused"])
+        effective[action] = value if RESTRICTIVENESS[value] >= bound_rank else bound
+    return effective
+
+
 def read_all(path: str | None = None) -> list[dict[str, Any]]:
     """Every override row on this Machine — the gate's read surface for the
     console display and the live probes. Missing file => empty list."""

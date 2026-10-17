@@ -77,9 +77,11 @@ def resolve_throttles(config: Any) -> dict[tuple[str, str], int]:
     ``webhook_triggers[]`` entry. Entries without a ``throttle`` block (or with
     a malformed one) get :data:`DEFAULT_COOLDOWN_SECONDS`; an authored
     ``cooldown_minutes: 0`` disables the throttle for that trigger. Triggers
-    that are not authored at all are absent from the map (an unauthored
-    (source, event_type) never wakes the agent anyway — the router has no
-    target)."""
+    that are not authored at all are absent from the map and are NOT throttled.
+    Note that an unauthored (source, event_type) still forwards and wakes the
+    agent whenever translate emitted its route (any enabled connector with a
+    ``webhook_url``): core delivers the turn whether or not the router names a
+    skill. The router fences and taints such a delivery; it does not stop it."""
     out: dict[tuple[str, str], int] = {}
     if not isinstance(config, dict):
         return out
