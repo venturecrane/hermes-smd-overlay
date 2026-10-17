@@ -162,7 +162,7 @@ hooks:
 
 ### 6. `pre_gateway_dispatch`
 
-**Purpose (overlay):** webhook routing + inbound envelope attach (`hermes-smd-webhook-router`, ADR 0021 Stream E / ADR 0027), and — for a verified sender on the authored `scope.admins` list — the SENDER STATUS work-request paragraph inserted into the dispatched turn prompt (ss-console#2416; roster membership authorizes a reply, never the direction of the firm's work, so it is NOT the gate).
+**Purpose (overlay):** webhook routing + inbound envelope attach (`hermes-smd-webhook-router`, ADR 0021 Stream E / ADR 0027), and — for a verified sender on the authored `scope.admins` list — the SENDER STATUS work-request paragraph inserted into the dispatched turn prompt (ss-console#2416; roster membership authorizes a reply, never the direction of the firm's work, so it is NOT the gate). Also the calendar's inbound parts (`hermes-smd-calendar`, ss-console#3264): an email that is only a METHOD:REPLY (a person's Accept/Decline) is recorded and returns `skip`, so no turn wakes. Every callback runs before the results are read (`gateway/run_inbound.py` at the pinned ref), so the calendar plugin registers ahead of the router and marks the message consumed (`shared/calendar_inbox.py`) for the router to leave alone.
 
 **Firing site:** `gateway/run.py:5796-5814` (inside `handle_message`, BEFORE authorization so plugins can handle unauthorized senders). Kwargs: `event` (a `MessageEvent`), `gateway`, `session_store`. There is no `payload` / `headers` / `raw_body` kwarg; the parsed webhook body lives at `event.raw_message`, and the rendered route prompt lives at `event.text` (`gateway/platforms/webhook.py:409-413` renders it, `:553-559` builds the `MessageEvent`).
 

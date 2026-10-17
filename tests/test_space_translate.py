@@ -34,12 +34,24 @@ spaces:
 """
 
 
+def _roles_dir(tmp_path) -> str:
+    """A role seat fails closed without its package (bootstrap/role_persona.py),
+    so every role these tests name gets a minimal one."""
+    roles = tmp_path / "roles"
+    for role in ("couples", "open-house"):
+        (roles / role).mkdir(parents=True, exist_ok=True)
+        (roles / role / "role.yaml").write_text(f"role: {role}\npersona: persona.md\n")
+        (roles / role / "persona.md").write_text(f"# {role} persona\n")
+    return str(roles)
+
+
 def _config(tmp_path, body: str) -> dict:
     customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
+        roles_dir=_roles_dir(tmp_path),
     )
     return yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
 
@@ -50,6 +62,7 @@ def _rendered(tmp_path, body: str) -> bytes:
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
         skills_dir=str(skills_dir),
+        roles_dir=_roles_dir(tmp_path),
     )
     return (hermes_home / "profiles" / "marcus" / "config.yaml").read_bytes()
 
