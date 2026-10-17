@@ -6,6 +6,12 @@ eye against RFC 5545/5546 and the live-proven shape (vfy_01M55T51PV1YB4D56PW7KK8
 vfy_01M55THDN2KSHQ8YKAN0QQKPTE, vfy_01M55TK7D5M02RNYGZ85WZAQR5). A change to the
 renderer that changes a byte fails here; regenerate only on purpose, with
 ``UPDATE_CALENDAR_GOLDEN=1``, and read the diff.
+
+MIRRORED. ss-console ``operator/workspace_broker/tests/fixtures/calendar/``
+holds a copy of these files, and its broker validator must accept every one
+(``test_every_invitation_the_overlay_renders_passes_this_validator``). The
+broker cannot pull them: regenerating here means copying them there in the
+same change.
 """
 
 from __future__ import annotations
