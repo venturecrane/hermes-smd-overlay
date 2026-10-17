@@ -174,3 +174,31 @@ def test_a_missing_profiles_root_is_survivable(tmp_path, monkeypatch):
     spec_stamp._reset_for_tests()
     monkeypatch.setenv(spec_manifest.SPEC_DIR_ENV, str(tmp_path / "specs"))
     assert spec_stamp.refresh_profile_stamps(tmp_path / "nope") == 0
+
+
+def test_one_unwritable_skill_does_not_stop_the_rest(profiles, tmp_path, monkeypatch):
+    """The except clause promised "one unwritable skill must not abort the rest"
+    and then returned. Sorted order meant one bad skill early in the tree left
+    every later skill unstamped on every turn."""
+    for name in ("aaa-broken", "zzz-later"):
+        skill = profiles / "crane" / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"# {name}\n")
+    spec_dir = tmp_path / "specs"
+    spec_dir.mkdir()
+    monkeypatch.setenv(spec_manifest.SPEC_DIR_ENV, str(spec_dir))
+    _write_manifest(spec_dir, BODY)
+
+    real = spec_stamp.stamp_skill_md
+
+    def flaky(skill_md, block):
+        if skill_md.parent.name == "aaa-broken":
+            raise PermissionError("read-only")
+        return real(skill_md, block)
+
+    monkeypatch.setattr(spec_stamp, "stamp_skill_md", flaky)
+    assert spec_stamp.refresh_profile_stamps(profiles) == 2
+    later = profiles / "crane" / "skills" / "zzz-later" / "SKILL.md"
+    assert spec_stamp.SPEC_STAMP_BEGIN in later.read_text()
+    # Not a clean pass, so the fingerprint is not recorded and the next turn retries.
+    assert spec_stamp._LAST_STAMPED is None
