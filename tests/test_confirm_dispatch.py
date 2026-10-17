@@ -247,3 +247,80 @@ def test_an_approved_send_with_a_clean_body_still_goes_out(monkeypatch, checklis
     assert len(sent) == 1
     assert checklist_rows() == []
     assert notices == []
+
+
+# ---------------------------------------------------------------------------
+# The approved send is scanned under the session that COMPOSED it (OT-2)
+# ---------------------------------------------------------------------------
+
+_VISIT_BODY = "Thanks for visiting the open house on 2026-09-12. Happy to answer questions"
+
+
+def _arm_identifier_gate(monkeypatch, trust, *, sent):
+    """Confirm exposure with the identifier gate live and every other content
+    gate stubbed open, so only the read register decides the scan."""
+    enforce = trust.enforce
+    monkeypatch.setenv("HERMES_ACTIVE_PROFILE", "agent")
+    monkeypatch.setattr(
+        enforce,
+        "_resolve_persona_exposure",
+        lambda slug="": {enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.CONFIRM},
+    )
+    monkeypatch.setattr(enforce, "_resolve_roster", lambda: [])
+    monkeypatch.setattr(enforce, "_resolve_typed_roster", lambda: [])
+    monkeypatch.setattr(enforce, "_resolve_vertical_floors", lambda: {})
+    monkeypatch.setattr(enforce, "_apply_content_floor", lambda *a, **k: None)
+    monkeypatch.setattr(enforce.voice_gate, "check_voice_gate", lambda **k: None)
+    monkeypatch.setattr(enforce.spec_gate, "check_spec_gate", lambda **k: None)
+    monkeypatch.setattr(enforce.spec_gate, "check_structure_floor", lambda **k: None)
+    monkeypatch.setattr(trust, "_seat_email_adapter", lambda: "agentmail")
+    monkeypatch.setattr(
+        trust.outbound_send, "send_message", lambda *, payload, **k: sent.append(payload) or "m"
+    )
+
+
+def _hold_and_approve(trust, compose_session):
+    trust.enforce.evaluate_tool_call(
+        "smd_send_message",
+        {"to": ["visitor@example.com"], "subject": "Open house", "text": _VISIT_BODY},
+        "brokery",
+        session_id=compose_session,
+    )
+    assert PENDING_SEND.peek() is not None
+    PENDING_SEND.mark_approved(f"telegram:{ALLOWED}")
+
+
+def test_an_approval_in_another_session_scans_under_the_composing_session(monkeypatch):
+    """The approval arrives on a Telegram DM whose read register is empty. The
+    identifier gate must judge the body against what the COMPOSING session read,
+    or every correct body citing a read date is refused after approval.
+
+    FALSIFIER: scan under the dispatch ``session_id`` instead of
+    ``rec.session_id`` and this send is refused IDENTIFIER_UNVERIFIED.
+    """
+    from shared import provenance
+
+    trust = _trust()
+    sent: list = []
+    _arm_identifier_gate(monkeypatch, trust, sent=sent)
+    provenance.record_read("cron_compose", "Visitor record: visit date 2026-09-12")
+    _hold_and_approve(trust, "cron_compose")
+    ctx = trust._dispatch_approved_send("telegram_dm", "brokery")
+    assert len(sent) == 1, ctx
+    assert sent[0]["text"] == _VISIT_BODY
+    assert PENDING_SEND.peek() is None  # spent only once it passed
+
+
+def test_a_body_that_fails_in_its_own_session_is_still_refused(monkeypatch):
+    """The fix moves WHERE the scan runs, not WHETHER: a date the composing
+    session never read is refused, nothing is sent, and the approval is
+    withdrawn rather than spent (the record stays pending for a fresh yes)."""
+    trust = _trust()
+    sent: list = []
+    _arm_identifier_gate(monkeypatch, trust, sent=sent)
+    _hold_and_approve(trust, "cron_unread")
+    ctx = trust._dispatch_approved_send("telegram_dm", "brokery")
+    assert sent == []
+    assert ctx is not None and "not dispatched" in ctx
+    rec = PENDING_SEND.peek()
+    assert rec is not None and not rec.consumed and not rec.approved

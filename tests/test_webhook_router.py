@@ -588,6 +588,9 @@ def _registered_router(fake_ctx, monkeypatch, with_customer_yaml, *, with_secret
 
 
 _MATCH_PAYLOAD = {"source": "filevine", "event_type": "matter.created"}
+# A delivery that fails verification is DROPPED, not passed through unrouted
+# (core delivers a passed-through webhook turn regardless of route_to_skill).
+_SKIP = {"action": "skip"}
 
 
 def test_refuses_to_route_when_no_signing_secret(fake_ctx, monkeypatch, with_customer_yaml):
@@ -604,7 +607,7 @@ def test_refuses_to_route_on_missing_signature(fake_ctx, monkeypatch, with_custo
     mod = _registered_router(fake_ctx, monkeypatch, with_customer_yaml, with_secret=True)
     # Matching payload but no signature header at all.
     result = mod.on_pre_gateway_dispatch(payload=dict(_MATCH_PAYLOAD), headers={})
-    assert result is None
+    assert result == _SKIP
     assert mod._D1_CLIENT.calls == []
 
 
@@ -617,7 +620,7 @@ def test_refuses_to_route_on_bad_signature(fake_ctx, monkeypatch, with_customer_
         raw_body=raw,
         headers={"X-Webhook-Signature": "deadbeef", "X-Webhook-Id": "evt-1"},
     )
-    assert result is None
+    assert result == _SKIP
     assert mod._D1_CLIENT.calls == []
 
 
@@ -630,7 +633,7 @@ def test_refuses_to_route_on_forged_payload_same_signature(
     signed = signed_kwargs(dict(_MATCH_PAYLOAD), event_id="evt-1")
     signed["raw_body"] = signed["raw_body"] + b'{"tamper":true}'
     result = mod.on_pre_gateway_dispatch(**signed)
-    assert result is None
+    assert result == _SKIP
 
 
 def test_refuses_to_route_on_stale_timestamp(fake_ctx, monkeypatch, with_customer_yaml):
@@ -638,7 +641,7 @@ def test_refuses_to_route_on_stale_timestamp(fake_ctx, monkeypatch, with_custome
     # Timestamp far in the past — signature valid but outside the window.
     stale = signed_kwargs(dict(_MATCH_PAYLOAD), event_id="evt-1", timestamp="1000000000")
     result = mod.on_pre_gateway_dispatch(**stale)
-    assert result is None
+    assert result == _SKIP
 
 
 def test_refuses_to_route_on_replayed_event_id(fake_ctx, monkeypatch, with_customer_yaml):
@@ -650,7 +653,7 @@ def test_refuses_to_route_on_replayed_event_id(fake_ctx, monkeypatch, with_custo
     assert first["skill"] == "law-pi-intake-triage"
     # Identical replay is rejected.
     second = mod.on_pre_gateway_dispatch(**kwargs)
-    assert second is None
+    assert second == _SKIP
 
 
 def test_routes_on_valid_signed_timestamped_webhook(fake_ctx, monkeypatch, with_customer_yaml):

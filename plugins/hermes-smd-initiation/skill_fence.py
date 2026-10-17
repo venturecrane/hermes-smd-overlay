@@ -11,8 +11,8 @@ removed the skill from the index and nothing from the disk.
 THE FENCE. A ``pre_tool_call`` block on every tool that reads a file the model
 names: ``read_file``, ``search_files``, ``skill_view`` and ``terminal`` (and
 ``execute_code``, whose source can read too). Any path that RESOLVES (symlinks
-and ``..`` collapsed) into a skills root (``/app/skills``, ``/opt/data/skills``)
-must name a skill the LIVE customer.yaml enables; a skill root itself (a search
+and ``..`` collapsed) into a skills root (``/app/skills``, ``/opt/data/skills``,
+or a profile's own ``/opt/data/profiles/<p>/skills``) must name a skill the LIVE customer.yaml enables; a skill root itself (a search
 across every skill) is refused too. The refusal is the router's own sentence:
 "could not load" the skill, said plainly, never approximated.
 
@@ -44,6 +44,10 @@ from shared.customer_config import CustomerConfig
 logger = logging.getLogger(__name__)
 
 SKILL_ROOTS: tuple[str, ...] = ("/app/skills", "/opt/data/skills")
+#: Every profile carries its own skills root, ``<this>/<profile>/skills``:
+#: translate copies enabled skills in on each boot and never removes one, so a
+#: skill later disabled stays on disk there.
+PROFILES_DIR = "/opt/data/profiles"
 FENCED_TOOLS = frozenset({"read_file", "search_files", "skill_view", "terminal", "execute_code"})
 _PATH_KEYS = ("path", "file_path", "filename", "directory", "dir", "target", "pattern", "glob")
 _WORKDIR_KEYS = ("workdir", "cwd", "working_directory")
@@ -51,7 +55,9 @@ _COMMAND_KEYS = ("command", "cmd", "code", "script")
 _CODE_TOOLS = frozenset({"terminal", "execute_code"})
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 #: Any mention of a skills root inside a command or a search pattern.
-_ROOT_IN_TEXT = re.compile(r"(?:/app|/opt/data)/+skills(?:/+([^/\s'\"`;|&)]*))?")
+_ROOT_IN_TEXT = re.compile(
+    r"(?:/app|/opt/data(?:/+profiles/+[^/\s'\"`;|&)]+)?)/+skills(?:/+([^/\s'\"`;|&)]*))?"
+)
 _RELATIVE_IN_COMMAND = re.compile(r"(?:^|[\s'\"=:(])(?:\./)?skills/+([a-z0-9][a-z0-9-]{0,63})")
 #: A command that could reach a skills root without spelling it: a root's
 #: parent, a glob, a find, or the bare word next to a path separator.
@@ -109,6 +115,16 @@ def _slug_under_root(path: str, base: str | None = None) -> str | None:
                 return resolved[len(candidate_root) + 1 :].split(os.sep, 1)[0]
             if candidate_root.startswith(resolved.rstrip(os.sep) + os.sep):
                 return ""
+    for profiles in {PROFILES_DIR, os.path.realpath(PROFILES_DIR)}:
+        if resolved == profiles:
+            return ""  # a search across every profile's skills
+        if not resolved.startswith(profiles + os.sep):
+            continue
+        parts = resolved[len(profiles) + 1 :].split(os.sep)
+        if len(parts) == 1:
+            return ""  # a profile home: its skills root sits under it
+        if parts[1] == "skills":
+            return parts[2] if len(parts) > 2 else ""
     return None
 
 

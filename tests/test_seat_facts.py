@@ -824,6 +824,62 @@ def test_send_posture_is_read_per_class_not_asserted(sf, tmp_path):
     assert "never state a review promise" in rules["send_posture_note"].lower()
 
 
+def _with_bounds(exposure, ceiling):
+    raw = _raw_config()
+    raw["personas"][0]["entitlements"] = {"exposure": exposure, "exposure_ceiling": ceiling}
+    return raw
+
+
+def test_send_posture_reports_the_runtime_override_the_gate_enforces(sf, tmp_path, monkeypatch):
+    """A Named Administrator's tier change (shared.exposure_override) moves what
+    the gate enforces. The seat must report THAT, or it tells a firm "a person
+    reviews it" about a class the gate now sends on its own.
+
+    FALSIFIER: report ``entitlements.exposure`` as authored and the raised class
+    reads ``draft_for_review`` while the gate enforces ``autonomous``.
+    """
+    from shared import exposure_override
+
+    monkeypatch.setattr(
+        exposure_override,
+        "read_overrides",
+        lambda persona, path=None: {
+            "external_send_client": "autonomous",  # within its ceiling: honored
+            "external_send": "autonomous",  # no ceiling, bound = authored: clamped
+        },
+    )
+    raw = _with_bounds(
+        {"external_send": "draft_for_review", "external_send_client": "draft_for_review"},
+        {"external_send_client": "autonomous"},
+    )
+    rules = _build(sf, tmp_path, raw=raw)["working_rules"]
+    posture = {p["action_class"]: p["exposure"] for p in rules["send_posture"]}
+    assert posture == {"external_send": "draft_for_review", "external_send_client": "autonomous"}
+
+    # Parity with the gate: the same inputs resolve the same posture there.
+    enforce = load_plugin("hermes-smd-trust").enforce
+    ent = raw["personas"][0]["entitlements"]
+    gate = enforce._overlay_runtime_overrides(
+        raw["personas"][0]["slug"],
+        enforce._parse_exposure_map(ent["exposure"]),
+        enforce._parse_exposure_map(ent["exposure_ceiling"]),
+    )
+    assert {a.value: c.value for a, c in gate.items()} == posture
+
+
+def test_send_posture_degrades_when_the_override_store_will_not_read(sf, tmp_path, monkeypatch):
+    """A broken store must not fall back to the authored value: that could
+    re-state a posture the client lowered. The section degrades instead."""
+    from shared import exposure_override
+
+    def _broken(persona, path=None):
+        raise RuntimeError("database disk image is malformed")
+
+    monkeypatch.setattr(exposure_override, "read_overrides", _broken)
+    raw = _with_exposure(external_send="autonomous")
+    assert _build(sf, tmp_path, raw=raw)["working_rules"]["read"] is False
+
+
 def test_unauthored_exposure_reads_as_refused_never_as_unrestricted(sf, tmp_path):
     """The empty list is the trap. Unconfigured is a safety state, not an
     identity (ADR 0037 tenet 3), so an empty posture must render as "I cannot

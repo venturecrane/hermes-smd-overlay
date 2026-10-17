@@ -72,6 +72,13 @@ def _call(mod, tool, args):
         ("execute_code", {"code": "p = '/app/' + 'skills/' + name; print(open(p).read())"}),
         ("skill_view", {"name": f"{ENABLED}/../{OMITTED}"}),
         ("skill_view", {"name": f"../{OMITTED}"}),
+        # J2: each profile's own skills root, where translate never removes a
+        # skill that was later disabled.
+        ("read_file", {"path": f"/opt/data/profiles/operator/skills/{OMITTED}/SKILL.md"}),
+        ("search_files", {"pattern": "demand", "path": "/opt/data/profiles/operator/skills"}),
+        ("search_files", {"pattern": "demand", "path": "/opt/data/profiles/operator"}),
+        ("search_files", {"pattern": "demand", "path": "/opt/data/profiles"}),
+        ("terminal", {"command": f"cat /opt/data/profiles/operator/skills/{OMITTED}/SKILL.md"}),
     ],
 )
 def test_an_omitted_skill_cannot_be_read(fence, tool, args) -> None:
@@ -88,6 +95,8 @@ def test_an_omitted_skill_cannot_be_read(fence, tool, args) -> None:
         ("read_file", {"path": f"/app/skills/{ENABLED}/references/routing-rubric.md"}),
         ("skill_view", {"name": ENABLED}),
         ("search_files", {"pattern": "x", "path": f"/opt/data/skills/{ENABLED}"}),
+        ("read_file", {"path": f"/opt/data/profiles/operator/skills/{ENABLED}/SKILL.md"}),
+        ("read_file", {"path": "/opt/data/profiles/operator/memories/MEMORY.md"}),
         ("read_file", {"path": "/tmp/notes.txt"}),
         ("terminal", {"command": "ls /var/lib"}),
         ("write_file", {"path": f"/app/skills/{OMITTED}/SKILL.md"}),

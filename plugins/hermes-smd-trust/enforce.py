@@ -604,16 +604,16 @@ def _overlay_runtime_overrides(
     actions. Falling back to authored on a broken read is not safe in either
     direction: it could re-raise a posture the client lowered.
     """
-    from shared.exposure_override import read_overrides  # local import, test-patchable
+    # One implementation, shared with operator_seat_facts, so the posture the
+    # seat describes is the posture enforced here.
+    from shared.exposure_override import effective_exposure  # local import, test-patchable
 
-    overrides = read_overrides(persona_slug)
-    if not overrides:
-        return authored
-    effective = dict(authored)
-    for action, ceiling in _parse_exposure_map(overrides).items():
-        bound = ceiling_map.get(action) or authored.get(action) or Ceiling.REFUSED
-        effective[action] = _most_restrictive(ceiling, bound)
-    return effective
+    effective = effective_exposure(
+        persona_slug,
+        {a.value: c.value for a, c in authored.items()},
+        {a.value: c.value for a, c in ceiling_map.items()},
+    )
+    return _parse_exposure_map(effective)
 
 
 def _resolve_persona_exposure(persona_slug: str) -> dict[ActionClass, Ceiling]:
@@ -1728,6 +1728,9 @@ def _evaluate_tool_call(
             anchor=held_anchor,
             lane=held_lane,
             requester=turn_principal.requester(),
+            # The scans at approval judge the body against what THIS session
+            # read (see trust _dispatch_approved_send).
+            session_id=session_id,
         )
 
     # Staff send-as (ss ADR 0089): the whole path ends here, one way or the
