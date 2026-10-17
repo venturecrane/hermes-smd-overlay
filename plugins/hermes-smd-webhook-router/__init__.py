@@ -20,8 +20,8 @@ Per ADR 0016 mirror-don't-gate: a successful route emits one
 router is observation + dispatch-rewrite only; it never blocks the
 dispatch on audit failure.
 
-ADR 0027 inbound convergence: on a verified route the router also attaches
-an :class:`shared.inbound.InboundEnvelope` (item_id, trust_class=
+ADR 0027 inbound convergence: on EVERY verified webhook delivery, routed to a
+skill or not, the router attaches an :class:`shared.inbound.InboundEnvelope` (item_id, trust_class=
 unknown_external, source, surface, ingested_at, verification, content_digest)
 to the dispatch directive, emits an ``INBOUND_RECEIVED`` audit row, and
 records the item in :data:`shared.inbound.PENDING` so the ``hermes-smd-inbound``
@@ -442,10 +442,9 @@ def _verification_failure(kwargs: dict[str, Any], payload: Any) -> str | None:
     """Return a human-readable reason the inbound webhook is unverified,
     or ``None`` when it verifies. Routing proceeds only on ``None``.
 
-    Refusing to route on any failure is the safe default (issue #13): a
-    forged or replayed event must not drive skill actions. The dispatch
-    is not blocked — it simply passes through as an ordinary message that
-    the agent loop (and the trust ceiling) still governs.
+    A failure drops the delivery (issue #13): a forged or replayed event must
+    not reach the model at all, routed or not. Declining only to route never
+    stopped delivery, because core ignores ``route_to_skill``.
     """
     if _SIGNING_SECRET is None:
         return (
@@ -513,6 +512,45 @@ def _webhook_payload(kwargs: dict[str, Any]) -> Any:
 # Source label the MCP gate stamps on a conversational ask_operator turn
 # (webhook_gate.py forwards ``{"source": "mcp", ...}``).
 _MCP_SOURCE = "mcp"
+# Source label the gate stamps on a console/runner async handoff
+# (webhook_gate.HANDOFF_ROUTE).
+_HANDOFF_SOURCE = "handoff"
+
+
+def _webhook_source(payload: Any) -> str | None:
+    """The ``source`` a webhook delivery carries (top level, else under
+    ``metadata``), or ``None`` when the dispatch is not a webhook delivery."""
+    if not isinstance(payload, dict):
+        return None
+    for holder in (payload, payload.get("metadata")):
+        if isinstance(holder, dict):
+            value = holder.get("source")
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _quarantine_unverified(kwargs: dict[str, Any], payload: Any, source: str) -> None:
+    """Fence + taint a delivery the router could not verify. Always
+    ``unknown_external`` (an unverified sender claim earns no roster standing),
+    no recipient-lock origin, no sender-status framing. Never raises."""
+    try:
+        content = _inbound_content_for(payload)
+        envelope = inbound.make_envelope(
+            content=content,
+            source=source,
+            surface="webhook",
+            verification=inbound.VERIFICATION_UNVERIFIED,
+            trust_class=inbound.TRUST_CLASS_UNKNOWN_EXTERNAL,
+        )
+        session_id = kwargs.get("session_id")
+        if not isinstance(session_id, str):
+            session_id = ""
+        inbound.PENDING.enqueue(
+            inbound.InboundItem(session_id=session_id, content=content, envelope=envelope)
+        )
+    except Exception as exc:  # noqa: BLE001 — provenance must not break dispatch
+        logger.warning("hermes-smd-webhook-router: unverified inbound quarantine failed (%s)", exc)
 
 
 def _quarantine_inbound_mcp(kwargs: dict[str, Any], payload: Any) -> None:
@@ -563,8 +601,9 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     trusts that upstream verification and applies replay-protection only (a
     header-bearing invocation still gets the full signature check).
 
-    Returns a rewrite directive on a matched AND verified webhook, or
-    ``None`` to pass through unchanged. The rewrite directive shape:
+    Returns a rewrite directive on a matched AND verified webhook,
+    ``{"action": "skip"}`` on a delivery that fails verification, or ``None``
+    to pass through. The rewrite directive shape:
 
         {"action": "route_to_skill",
          "persona": "<persona-slug>",
@@ -582,10 +621,13 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     contract (``gateway/run.py:5796-5833`` at the pinned ref). Every other
     sender dispatches byte-identically to before.
 
-    A matched route is verified (HMAC signature + timestamp freshness +
-    event-ID dedupe) before it fires (issue #13). Verification failure
-    does NOT block the dispatch — it declines to auto-invoke the skill,
-    so a forged or replayed event cannot drive skill actions.
+    EVERY webhook delivery is verified (HMAC signature + timestamp freshness +
+    event-ID dedupe; issue #13) and fenced on its sender class, whether or not a
+    trigger names it: core delivers the turn regardless of ``route_to_skill``,
+    so the routing decision must never decide the fence. A verification failure
+    is dropped (``skip``). With no signing secret the delivery is fenced as
+    unverified and not routed. The console handoff route keeps its prior,
+    unfenced behavior unless a trigger names it.
 
     Exception-safe: any failure logs at warning level and returns
     ``None``. Per AGENTS.md hard rule #3, the callback never raises.
@@ -605,44 +647,65 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         _quarantine_inbound_mcp(kwargs, payload)
         return None
 
+    # Not a webhook delivery at all (a Telegram DM, a CLI turn): nothing to
+    # route, fence, or verify here. Every webhook route the gate or the msgraph
+    # poller forwards carries a string ``source`` (webhook_gate._stamp_source).
+    source = _webhook_source(payload)
+    if source is None:
+        return None
+
     # Rebuild the routing table live from customer.yaml (ADR 0044 WS2): editing
     # webhook_triggers applies on the next dispatch with no restart. The build is
-    # lenient (returns an empty table on any read/parse failure), so a transient
-    # bad file fails safe to "no routing" rather than raising.
-    table = router.build_routing_table(_YAML_PATH)
-    if table.size() == 0:
-        return None
-
+    # lenient (returns an empty table on any read/parse failure). The routing
+    # decision ONLY chooses a skill; it never decides whether the delivery is
+    # fenced. Core ignores ``route_to_skill`` (the webhook route's ``skills:``
+    # list loads the skill) and delivers the turn either way, so declining to
+    # route never kept an untriggered sender away from the model. Every early
+    # return that used to sit here skipped the quarantine below instead.
+    trigger: router.WebhookTrigger | None = None
+    matched_key: tuple[str, str] | None = None
     try:
-        decision = router.decide_route(table, payload)
+        decision = router.decide_route(router.build_routing_table(_YAML_PATH), payload)
+        trigger, matched_key = decision.trigger, decision.matched_key
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "hermes-smd-webhook-router: decide_route failed (%s); passing through",
+            "hermes-smd-webhook-router: decide_route failed (%s); delivery is fenced unrouted",
             exc,
         )
+
+    # The console's async handoff (and the runner daemon's wakes) is SMD's own
+    # bearer-authenticated channel, carries no replay id, and has never been
+    # fenced; it keeps its prior behavior unless a trigger names it.
+    if trigger is None and source == _HANDOFF_SOURCE:
         return None
 
-    if decision.trigger is None:
+    # No signing secret: the delivery cannot be verified here, so it is not
+    # routed and every sender is treated as unknown (fenced + tainted, no reply
+    # anchor). Delivered rather than dropped, so a mis-provisioned seat stays
+    # reachable but never acts on an unverified instruction.
+    if _SIGNING_SECRET is None:
+        logger.warning(
+            "hermes-smd-webhook-router: SMD_WEBHOOK_SIGNING_SECRET not configured; "
+            "delivery from %r fenced as unverified and not routed",
+            source,
+        )
+        _quarantine_unverified(kwargs, payload, source)
         return None
 
-    # Verify the inbound webhook before routing (issue #13). An attacker
-    # who learns the dispatch URL must not be able to drive skill actions
-    # with forged or replayed events.
+    # Verify the inbound webhook (issue #13), routed or not. A forged, stale, or
+    # replayed delivery is DROPPED (Hermes ``skip``): passing it through
+    # unrouted would hand forged text to the model.
     try:
         failure = _verification_failure(kwargs, payload)
     except Exception as exc:  # noqa: BLE001 - never let verification raise
-        logger.warning(
-            "hermes-smd-webhook-router: verification raised (%s); refusing to route",
-            exc,
-        )
-        return None
+        failure = f"verification raised ({exc})"
     if failure is not None:
         logger.warning(
-            "hermes-smd-webhook-router: refusing to route %s — %s",
-            decision.matched_key,
+            "hermes-smd-webhook-router: refusing delivery %s — %s",
+            matched_key or source,
             failure,
         )
-        return None
+        return {"action": "skip"}
 
     # ADR 0027 — attach an inbound provenance envelope to the dispatched
     # content and record it for the pre_llm_call quarantine chokepoint. The
@@ -673,7 +736,7 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         # is attached to the dispatch below — nothing downstream re-parses the raw
         # provider payload. normalize_inbound is fail-closed (unknown source →
         # None) and never raises.
-        dto = inbound_message.normalize_inbound(decision.trigger.source, payload)
+        dto = inbound_message.normalize_inbound(source, payload)
         origin = _origin_from_dto(dto, content=content)
         trust_class = inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
         # SEPARATE FACT, SEPARATE LIST (ss#2416 iteration 5). Roster membership
@@ -696,7 +759,7 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
                 is_admin = False
         envelope = inbound.make_envelope(
             content=content,
-            source=decision.trigger.source,
+            source=source,
             surface="webhook",
             verification="verified",
             verification_detail=(inbound.ADMIN_VERIFICATION_DETAIL if is_admin else None),
@@ -711,7 +774,7 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         # an unbound route claimed at the session's first pre_llm_call. The
         # register ignores every non-gated skill. Never breaks routing.
         try:
-            read_volume.record_route(session_id, getattr(decision.trigger, "skill", "") or "")
+            read_volume.record_route(session_id, getattr(trigger, "skill", "") or "")
         except Exception:  # noqa: BLE001 — must never perturb routing
             logger.debug(
                 "hermes-smd-webhook-router: read_volume route record failed", exc_info=True
@@ -806,11 +869,12 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     # are observability.
     if _D1_CLIENT is not None and _CUSTOMER_SLUG is not None:
         try:
-            _emit_webhook_routed(
-                client=_D1_CLIENT,
-                customer=_CUSTOMER_SLUG,
-                trigger=decision.trigger,
-            )
+            if trigger is not None:
+                _emit_webhook_routed(
+                    client=_D1_CLIENT,
+                    customer=_CUSTOMER_SLUG,
+                    trigger=trigger,
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "hermes-smd-webhook-router: WEBHOOK_ROUTED emission failed (%s); "
@@ -839,10 +903,17 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     # the only text a card carries; record_inbound never raises.
     _index_request(envelope, dto)
 
+    if trigger is None:
+        # Fenced, tainted, recorded; nothing to route. Only the in-place
+        # sender-status fallback needs a directive.
+        if rewrite_text is not None:
+            return {"action": "rewrite", "text": rewrite_text}
+        return None
+
     directive: dict[str, Any] = {
         "action": "route_to_skill",
-        "persona": decision.trigger.persona,
-        "skill": decision.trigger.skill,
+        "persona": trigger.persona,
+        "skill": trigger.skill,
         "payload": payload,
     }
     if envelope is not None:

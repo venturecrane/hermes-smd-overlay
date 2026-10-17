@@ -390,8 +390,22 @@ def _working_rules_section(cfg: Any) -> dict[str, Any]:
         persona = _persona(cfg)
         entitlements = persona.get("entitlements")
         exposure = entitlements.get("exposure") if isinstance(entitlements, dict) else None
+        ceiling = entitlements.get("exposure_ceiling") if isinstance(entitlements, dict) else None
         if isinstance(exposure, dict):
-            for action, value in sorted(exposure.items()):
+            # The EFFECTIVE posture, through the gate's own override path: a
+            # Named Administrator's runtime tier change (shared.exposure_override)
+            # moves what the gate enforces, so reporting the authored value
+            # alone would tell the firm "a person reviews it" about a class the
+            # gate now sends autonomously. A store fault degrades this section
+            # (the except below) rather than falling back to the authored value.
+            from shared import exposure_override
+
+            effective = exposure_override.effective_exposure(
+                str(persona.get("slug") or ""),
+                {str(k): str(v) for k, v in exposure.items()},
+                {str(k): str(v) for k, v in ceiling.items()} if isinstance(ceiling, dict) else {},
+            )
+            for action, value in sorted(effective.items()):
                 if not str(action).startswith("external_send"):
                     continue
                 posture.append({"action_class": str(action), "exposure": str(value)})

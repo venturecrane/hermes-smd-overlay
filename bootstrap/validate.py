@@ -1396,10 +1396,16 @@ def _validate_email_seam(cfg: dict[str, Any], errors: list[str]) -> None:
     reach the model unfenced (the F1 bypass). The ONLY push-style wake path is
     ``webhook_triggers`` — an Email connector whose adapter is named as a
     ``webhook_triggers[].source`` carries gate→router inbound, so it must be
-    fenceable. An Email connector NOT wired as a trigger source is outbound-only /
-    read MCP tooling: it never wakes the agent, and its tool-result reads are
-    already quarantined at ``transform_tool_result``, so leaving it unfenced is
-    safe. The delegated ``microsoft-graph`` adapter stays legitimate for
+    fenceable. An Email connector NOT wired as a trigger source is normally
+    outbound-only / read MCP tooling whose tool-result reads are quarantined at
+    ``transform_tool_result``. It CAN still wake the agent: translate emits a
+    webhook route for every enabled connector carrying a ``webhook_url``, trigger
+    or not, and core delivers that turn. Such a delivery is not unfenced: the
+    router fences and taints EVERY webhook delivery on its sender class whether
+    or not a trigger names it (an unrecognized body shape is fenced whole, as
+    ``unknown_external``). What a seam normalizer adds is the sender identity
+    (roster classification, the reply anchor), which only a routed source needs.
+    The delegated ``microsoft-graph`` adapter stays legitimate for
     read/draft tooling — ADR 0078 rejected it only as the SENSITIVE-seat
     mail-identity default, not wholesale — so outlawing it here would be wrong.
 

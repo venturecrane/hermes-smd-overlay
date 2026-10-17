@@ -86,6 +86,12 @@ class PendingSend:
     #: captured WHEN IT WAS HELD. ``UNBOUND`` when the holding turn had no chat
     #: identity (no session context, an email turn). See :func:`_may_approve`.
     requester: Principal = UNBOUND
+    #: The session that COMPOSED the send, captured WHEN IT WAS HELD. The
+    #: outbound scans (identifier gate, matter gate) judge a body against what
+    #: that session read; the approval turn read nothing, so the out-of-band
+    #: replay scans under this id, never the approver's. ``None`` when the
+    #: holding call carried no session id.
+    session_id: str | None = None
 
 
 def _overlaps(a: Principal, b: Principal) -> bool:
@@ -165,6 +171,7 @@ class PendingSendRegister:
         anchor: dict[str, str] | None = None,
         lane: str | None = None,
         requester: Principal | None = None,
+        session_id: str | None = None,
     ) -> None:
         """Record a pending send, SUPERSEDING every record it overlaps.
 
@@ -186,6 +193,7 @@ class PendingSendRegister:
                 anchor=dict(anchor) if anchor else None,
                 lane=lane,
                 requester=req,
+                session_id=session_id or None,
             )
         )
 

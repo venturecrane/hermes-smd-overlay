@@ -205,20 +205,41 @@ _replay_lock = threading.Lock()
 _replay_seen: dict[str, float] = {}
 
 
-def _replay_check_and_record(request_id: str, now: float | None = None) -> bool:
-    """Return True if ``request_id`` is fresh (record it); False if seen within
-    the TTL. An empty id is treated as fresh (nothing to dedupe on — the
-    signature already validated)."""
+def _replay_seen_recently(request_id: str, now: float | None = None) -> bool:
+    """True if ``request_id`` was RECORDED within the TTL. Check only: the entry
+    is written by :func:`_replay_record` once the delivery has been handled. An
+    empty id is never a replay."""
     if not request_id:
-        return True
+        return False
     reference = time.time() if now is None else now
     with _replay_lock:
-        for k in [k for k, exp in _replay_seen.items() if exp <= reference]:
-            del _replay_seen[k]
-        if request_id in _replay_seen:
-            return False
+        exp = _replay_seen.get(request_id)
+        return exp is not None and exp > reference
+
+
+def _replay_record(request_id: str, now: float | None = None) -> None:
+    """Record ``request_id`` as handled (forwarded 2xx, parked, or suppressed).
+
+    Recording at verification, before the forward, turned the vendor's retry of
+    a delivery we answered 503 (gateway still booting) into a 401 "replay": the
+    one delivery that was never handled was the one we refused. Two concurrent
+    identical deliveries can both pass the check; the adapter's X-Request-ID
+    idempotency dedupes those."""
+    if not request_id:
+        return
+    reference = time.time() if now is None else now
+    with _replay_lock:
         _replay_seen[request_id] = reference + _REPLAY_TTL_SECONDS
-        return True
+
+
+#: Routes whose vendor id is guarded at the edge (metadata-only signatures).
+_EDGE_REPLAY_ROUTES: frozenset[str] = frozenset({"smokeball"})
+
+
+def _mark_handled(route: str, request_id: str) -> None:
+    """Record an edge-guarded route's delivery id once the gate has handled it."""
+    if route in _EDGE_REPLAY_ROUTES:
+        _replay_record(request_id)
 
 
 def _route_secret(route: str) -> str | None:
@@ -397,8 +418,11 @@ def _smokeball_route_verify(headers: Any, body: bytes, secret: str) -> tuple[boo
     request_id = headers.get("RequestId", "")
     signature = headers.get("Signature", "")
     ok = verify_smokeball_signature(body, timestamp, request_id, client_id, signature, secret)
-    if ok and not _replay_check_and_record(request_id):
-        logger.warning("gate: smokeball replay rejected (RequestId already seen)")
+    # Check only. The entry is recorded once the delivery is handled
+    # (_replay_record), so a retry of a delivery we failed to forward is not
+    # mistaken for a replay.
+    if ok and _replay_seen_recently(request_id):
+        logger.warning("gate: smokeball replay rejected (RequestId already handled)")
         ok = False
     return ok, request_id
 
@@ -1411,6 +1435,7 @@ class _Handler(BaseHTTPRequestHandler):
         if _INBOUND_GUARD is not None:
             forward, park_reason = _INBOUND_GUARD.check(route=route, request_id=request_id)
             if not forward:
+                _mark_handled(route, request_id)
                 self._json(202, {"accepted": True, "parked": park_reason})
                 return
 
@@ -1431,6 +1456,7 @@ class _Handler(BaseHTTPRequestHandler):
                 request_id,
                 suppress_reason,
             )
+            _mark_handled(route, request_id)
             self._json(202, {"accepted": True, "suppressed": suppress_reason})
             return
 
@@ -1453,6 +1479,7 @@ class _Handler(BaseHTTPRequestHandler):
                 request_id,
                 throttle_reason,
             )
+            _mark_handled(route, request_id)
             self._json(202, {"accepted": True, "suppressed": throttle_reason})
             return
 
@@ -1479,6 +1506,8 @@ class _Handler(BaseHTTPRequestHandler):
             conn.request("POST", f"/webhooks/{route}", body=body, headers=headers)
             resp = conn.getresponse()
             payload = resp.read()
+            if 200 <= resp.status < 300:
+                _mark_handled(route, request_id)
             self.send_response(resp.status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
