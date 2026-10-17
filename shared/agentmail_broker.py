@@ -370,8 +370,40 @@ def list_attachments(message_id: str) -> list[dict[str, Any]]:
 
 
 #: Hosts the vendor's own attachment links live on. The signed URL is the
-#: credential, so no Authorization header is sent and no redirect is followed.
+#: credential, so no Authorization header is sent, and a redirect is followed
+#: only to another https URL on this same list (``_AllowlistedRedirects``).
 DOWNLOAD_HOSTS = ("cdn.agentmail.to", "download.agentmail.to")
+
+
+def _is_download_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in DOWNLOAD_HOSTS
+
+
+class _AllowlistedRedirects(urllib.request.HTTPRedirectHandler):
+    """Re-check the host allowlist on every redirect hop.
+
+    ``urlopen``'s default handler follows a 30x to ANY host, so checking only the
+    first URL let a redirect walk the fetch off the vendor's hosts (the bytes
+    then spool as if they were the client's attachment). A hop to anything off
+    the list is refused, which surfaces as an ``HTTPError`` and so as an
+    ``AgentMailReadError``: nothing is fetched from the off-list host.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        if not _is_download_url(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, "redirect off the attachment host allowlist refused", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_DOWNLOAD_OPENER = urllib.request.build_opener(_AllowlistedRedirects)
+
+
+def _open_download(req: urllib.request.Request, *, timeout: float) -> Any:
+    """The attachment-link fetch: urlopen's handlers, allowlist-checked redirects."""
+    return _DOWNLOAD_OPENER.open(req, timeout=timeout)  # noqa: S310 - host checked per hop
 
 
 def _download(url: str) -> bytes:
@@ -382,15 +414,15 @@ def _download(url: str) -> bytes:
     the read stops one byte past the spool ceiling so an oversized file never
     lands in memory whole.
     """
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in DOWNLOAD_HOSTS:
+    if not _is_download_url(url):
         raise AgentMailReadError(
-            f"attachment link host {parsed.hostname!r} is not one the vendor serves attachments from"
+            f"attachment link host {urllib.parse.urlparse(url).hostname!r} is not one the "
+            "vendor serves attachments from"
         )
     req = urllib.request.Request(url, method="GET")  # noqa: S310 - host checked above
     try:
-        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-        with urllib.request.urlopen(req, timeout=READ_TIMEOUT_SECONDS) as response:  # noqa: S310
+        # Host re-checked on every redirect hop by the opener, not just here.
+        with _open_download(req, timeout=READ_TIMEOUT_SECONDS) as response:
             blob = response.read(attachment_spool.MAX_SPOOL_BYTES + 1)
     except urllib.error.HTTPError as exc:
         raise AgentMailReadError(f"attachment download failed: HTTP {exc.code}") from exc

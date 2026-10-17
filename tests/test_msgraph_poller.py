@@ -20,9 +20,21 @@ import hmac
 import json
 import time
 
+import pytest
+
+from shared import msgraph_poller
 from shared.msgraph_poller import DeltaState, MsGraphPoller
 
 _SECRET = "whook-secret"
+# A cursorless state starts from "now" (J-d). The fixtures' mail is dated
+# 2026-07; pin the baseline before it so the tests below exercise forwarding,
+# and test the baseline itself explicitly (test_cursorless_state_*).
+_FIXTURE_BASELINE = "2026-01-01T00:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _baseline_before_fixture_mail(monkeypatch):
+    monkeypatch.setattr(msgraph_poller, "_baseline_now", lambda: _FIXTURE_BASELINE)
 
 
 def _rid(message_id: str) -> str:
@@ -856,3 +868,70 @@ def test_held_restart_does_not_bless_the_old_cursor(tmp_path):
     assert saved.get("delta_select") is None
     poller.poll_once()
     assert client.calls == [None, None]
+
+
+# ---------------------------------------------------------------------------
+# J-d: a cursorless state (missing / corrupt file) starts from NOW, never
+# replays the inbox's history as fresh turns.
+# ---------------------------------------------------------------------------
+
+
+def _inbox_with_history() -> list[dict]:
+    return [
+        _raw_at("old-1", "a@x.example", "2025-03-01T10:00:00Z"),
+        _raw_at("old-2", "b@x.example", "2025-11-20T10:00:00Z"),
+        _raw_at("new-1", "c@x.example", "2026-08-01T10:00:00Z"),
+    ]
+
+
+def test_cursorless_state_does_not_replay_inbox_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(msgraph_poller, "_baseline_now", lambda: "2026-06-01T00:00:00Z")
+    client = _FakeClient("op@client.example", [(_inbox_with_history(), "delta-1", False)])
+    fwd = _Forwarder()
+    poller = _poller(tmp_path, client, fwd)
+    poller._ready()
+    assert poller._state.baseline_reason == "missing"
+    assert poller.poll_once() == 1
+    assert [json.loads(p["body"])["event_id"] for p in fwd.posts] == ["new-1"]
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] == "delta-1"
+    assert {"old-1", "old-2"} <= set(saved["seen_ids"])
+
+
+def test_corrupt_state_starts_from_now_and_pages(tmp_path, monkeypatch):
+    captures = _fake_sentry(monkeypatch)
+    monkeypatch.setattr(msgraph_poller, "_baseline_now", lambda: "2026-06-01T00:00:00Z")
+    (tmp_path / "state.json").write_text("{not json")
+    client = _FakeClient("op@client.example", [(_inbox_with_history(), "delta-1", False)])
+    fwd = _Forwarder()
+    poller = _poller(tmp_path, client, fwd)
+    poller._ready()
+    assert poller._state.baseline_reason == "corrupt"
+    assert [c.get("level") for c in captures] == ["error"]
+    assert poller.poll_once() == 1
+    assert [json.loads(p["body"])["event_id"] for p in fwd.posts] == ["new-1"]
+
+
+def test_cursorless_baseline_survives_a_restart_before_the_first_clean_cycle(tmp_path, monkeypatch):
+    # The first cycle holds an item (forward fails), so no cursor is stored.
+    # The restart must keep the ORIGINAL baseline (persisted) rather than move
+    # it to the new "now" and skip the held item, and must still not replay
+    # the inbox's history.
+    monkeypatch.setattr(msgraph_poller, "_baseline_now", lambda: "2026-06-01T00:00:00Z")
+    held = _raw_at("held-1", "d@x.example", "2026-07-01T10:00:00Z")
+    client = _FakeClient("op@client.example", [([held], "delta-1", False)])
+    poller = _poller(tmp_path, client, _FlakyForwarder(fail_first=99))
+    poller._ready()
+    assert poller.poll_once() == 0
+    saved = json.loads((tmp_path / "state.json").read_text())
+    assert saved["delta_link"] is None
+    assert saved["watermark"] == "2026-06-01T00:00:00Z"
+
+    monkeypatch.setattr(msgraph_poller, "_baseline_now", lambda: "2026-12-31T00:00:00Z")
+    client2 = _FakeClient("op@client.example", [([*_inbox_with_history(), held], "d-2", False)])
+    fwd = _Forwarder()
+    poller2 = _poller(tmp_path, client2, fwd)
+    poller2._ready()
+    assert poller2._state.baseline_reason is None
+    assert poller2.poll_once() == 2
+    assert sorted(json.loads(p["body"])["event_id"] for p in fwd.posts) == ["held-1", "new-1"]

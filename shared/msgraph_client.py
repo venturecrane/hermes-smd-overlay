@@ -29,6 +29,7 @@ live path reporting success.
 from __future__ import annotations
 
 import html
+import http.client
 import json
 import logging
 import time
@@ -399,6 +400,12 @@ class MsGraphClient:
             raise MsGraphAuthError(
                 f"token request to {self._token_host()} failed: {exc.reason}"
             ) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # A read timeout / dropped connection after the request was sent
+            # surfaces bare, not as URLError (see _request_inner).
+            raise MsGraphAuthError(
+                f"token request to {self._token_host()} failed: {type(exc).__name__}"
+            ) from exc
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -521,6 +528,19 @@ class MsGraphClient:
                 raise MsGraphApiError(method, url, exc.code, _truncate_body(last_body)) from exc
             except urllib.error.URLError as exc:
                 raise MsGraphApiError(method, url, 0, f"unreachable: {exc.reason}") from exc
+            except (OSError, http.client.HTTPException) as exc:
+                # URLError only wraps failures while CONNECTING. Once the
+                # request is sent, a read timeout or a dropped connection
+                # surfaces bare (TimeoutError, ConnectionResetError,
+                # RemoteDisconnected, IncompleteRead). Uncaught, those escape
+                # both typed errors and the health ledger, so a hung Graph
+                # silently stops the channel with no page. Same handling as
+                # unreachable: status 0 (conn-class), and NOT retried, because
+                # the request may already have been acted on (a sendMail that
+                # timed out after Graph accepted it must not be sent twice).
+                raise MsGraphApiError(
+                    method, url, 0, f"connection failed: {type(exc).__name__}: {exc}"
+                ) from exc
         raise MsGraphApiError(method, url, last_status, _truncate_body(last_body))
 
     def request_bytes(
