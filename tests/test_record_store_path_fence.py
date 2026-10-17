@@ -394,3 +394,118 @@ def test_a_malformed_record_stores_block_wires_the_fence_and_no_tools(
     target = tmp_path / "r.md"
     target.write_text("x\n")
     assert any(h(tool_name="read_file", args={"path": str(target)}, session_id="s") for h in hooks)
+
+
+# ---------------------------------------------------------------------------
+# the write side: write_file and patch
+# ---------------------------------------------------------------------------
+
+
+def _hermes_write_file() -> Any:
+    _hermes_read_file()  # same import gate (skip locally, required in CI)
+    from tools.file_tools import write_file_tool
+
+    return write_file_tool
+
+
+def test_a_scheduled_wake_cannot_write_a_record_by_path(seat: dict[str, Any]) -> None:
+    """The write falsifier: a cron turn (no inbound sender) writing straight
+    into the store would skip the owner stamp, the writers list and the
+    no-overwrite rule. Pre-fix nothing refused it."""
+    _as_sender(seat, None)
+    target = seat["visitors"] / "alice.md"
+    forged = _record(BOB)  # Bob's stamp over Alice's record, no overwrite flag
+    blocked = _pre(seat, "write_file", {"path": str(target), "content": forged}, session_id="cron")
+    assert blocked is not None and "record_store_write" in blocked["message"]
+    new = seat["visitors"] / "planted.md"
+    assert _blocked(seat, "write_file", {"path": str(new), "content": forged}, session_id="cron")
+    assert _blocked(
+        seat,
+        "patch",
+        {"mode": "replace", "path": str(target), "old_string": ALICE, "new_string": BOB},
+        session_id="cron",
+    )
+    # what the fence stands in front of: Hermes' own write_file lands it
+    scratch = seat["visitors"] / "hermes-would-write.md"
+    out = json.loads(_hermes_write_file()(str(scratch), forged))
+    assert "error" not in out, out
+    assert scratch.read_text() == forged
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "cron/jobs.json",
+        "cron/output/job-1/2026-10-16.md",
+        "state.db",
+        "sessions/sess-1.jsonl",
+        "memories/MEMORY.md",
+        "logs/agent.log",
+        "config.yaml",
+        "skills/open-house-visitor-capture/SKILL.md",
+    ],
+)
+def test_no_file_tool_writes_anywhere_on_a_seat_that_keeps_records(
+    seat: dict[str, Any], rel: str
+) -> None:
+    for sender in (None, BOB, BROKER):
+        _as_sender(seat, sender)
+        target = str(seat["home"] / rel)
+        assert _blocked(seat, "write_file", {"path": target, "content": "x"})
+        assert _blocked(
+            seat, "patch", {"mode": "replace", "path": target, "old_string": "a", "new_string": "b"}
+        )
+
+
+def test_writes_that_cannot_be_judged_refuse(seat: dict[str, Any]) -> None:
+    v4a = "*** Begin Patch\n*** Update File: /opt/data/open-house/visitors/a.md\n*** End Patch\n"
+    assert _blocked(seat, "patch", {"mode": "patch", "patch": v4a})
+    assert _blocked(seat, "patch", {"patch": v4a})  # mode defaulted, text still present
+    assert _blocked(seat, "write_file", {"content": "x"})  # no path
+    os_cwd = os.getcwd()
+    try:
+        os.chdir(seat["visitors"])
+        assert _blocked(seat, "write_file", {"path": "rel.md", "content": "x"})
+    finally:
+        os.chdir(os_cwd)
+
+
+def test_a_writable_root_admits_writes_but_never_into_a_store(
+    seat: dict[str, Any], tmp_path: Path
+) -> None:
+    """The allowlist is a real mechanism, not a blanket refusal: a listed root
+    admits a write, and a store under it, or a symlink into one, still refuses."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    seat["monkeypatch"].setattr(seat["plugin"].path_fence, "WRITABLE_ROOTS", (str(scratch),))
+    assert not _blocked(seat, "write_file", {"path": str(scratch / "note.txt"), "content": "x"})
+    assert not _blocked(
+        seat,
+        "patch",
+        {
+            "mode": "replace",
+            "path": str(scratch / "note.txt"),
+            "old_string": "x",
+            "new_string": "y",
+        },
+    )
+    (scratch / "into-store").symlink_to(seat["visitors"])
+    assert _blocked(
+        seat, "write_file", {"path": str(scratch / "into-store" / "a.md"), "content": "x"}
+    )
+    seat["monkeypatch"].setattr(
+        record_store, "authored_stores", lambda *_, **__: {"odd": scratch / "kept"}
+    )
+    assert _blocked(seat, "write_file", {"path": str(scratch / "kept" / "r.md"), "content": "x"})
+
+
+def test_a_seat_with_no_store_is_not_fenced_for_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a seat that authors no store wires no hook, so write_file and
+    patch (and every read) are judged exactly as before this plugin's fence."""
+    monkeypatch.setattr(record_store, "authored_stores", lambda *_, **__: {})
+    ctx = FakePluginContext()
+    plugin = load_plugin("hermes-smd-record-store")
+    plugin.register(ctx)
+    assert ctx.registered == {} and ctx.tools == {}
+    # and the fence itself, consulted directly, never judges a non-fenced tool
+    assert plugin.path_fence.check("web_search", {"query": "x"}, [], {}) is None
