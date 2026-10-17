@@ -51,6 +51,16 @@ allowlist (skills, specs, this session's own spillover), ``write_file`` and
 ``patch`` write nowhere (a record changes only through ``record_store_write``),
 and ``terminal`` / ``execute_code`` are refused. See that module.
 
+ON A SEAT SEVERAL PEOPLE SHARE THE VIEWER IS THE SPACE (ADR 0091, ss-console
+#3264). On a seat that authors ``people:`` the address viewer above is replaced
+by the turn's space (``shared.space``), resolved on every turn, Telegram and
+cron included: there is no "seat's own turn" left unfenced. A private store's
+owner field names a person id or ``shared``; a turn lists, reads and writes only
+records in spaces it may read, writes only into its own space or the shared one,
+and never moves a record between spaces. An unresolved space lists, reads and
+writes nothing. The handlers repeat the judgement rather than trust hook order.
+Seats without ``people:`` keep the address fence exactly as it was.
+
 Exception-safe is NOT the contract for the handlers (that rule governs
 hooks): a tool that cannot write must say so to the model, so these raise a
 reason Hermes surfaces. The hook IS exception-safe, and its failure mode is
@@ -64,6 +74,7 @@ import logging
 from typing import Any
 
 from shared import record_store
+from shared import space as space_mod
 from shared.customer_config import CustomerConfigError
 from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT
 from shared.tool_registration import register_wrapped_tool
@@ -155,12 +166,20 @@ def _policy(store: Any) -> record_store.StorePolicy:
     return policies[store]
 
 
-def _list_handler(args: dict[str, Any], **_: Any) -> str:
+def _list_handler(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         policy = _policy(args.get("store"))
         records = record_store.list_records(str(args.get("store") or ""), policy=policy)
     except record_store.RecordStoreError as exc:
         raise RuntimeError(str(exc)) from exc
+    in_space_mode, current = _space_view(kwargs.get("session_id"))
+    if in_space_mode:
+        problem = record_store.space_access_problem(
+            policy, action="list", space=current, existing=None
+        )
+        if problem:
+            raise RuntimeError(f"{TOOL_LIST} refused: {problem}")
+        records = _visible_in_space(records, policy, current)
     return json.dumps(
         {
             "store": args.get("store"),
@@ -177,7 +196,12 @@ def _list_handler(args: dict[str, Any], **_: Any) -> str:
     )
 
 
-def _read_handler(args: dict[str, Any], **_: Any) -> str:
+def _read_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    # Defense in depth: the pre_tool_call fence already judged this read; on a
+    # shared seat the handler judges it again rather than trust hook order.
+    problem = _space_fence_problem(TOOL_READ, args, kwargs.get("session_id"))
+    if problem:
+        raise RuntimeError(f"{TOOL_READ} refused: {problem}")
     try:
         text = record_store.read_record(str(args.get("store") or ""), str(args.get("name") or ""))
     except record_store.RecordStoreError as exc:
@@ -188,7 +212,10 @@ def _read_handler(args: dict[str, Any], **_: Any) -> str:
     )
 
 
-def _write_handler(args: dict[str, Any], **_: Any) -> str:
+def _write_handler(args: dict[str, Any], **kwargs: Any) -> str:
+    problem = _space_fence_problem(TOOL_WRITE, args, kwargs.get("session_id"))
+    if problem:
+        raise RuntimeError(f"{TOOL_WRITE} refused: {problem}")
     try:
         receipt = record_store.write_record(
             str(args.get("store") or ""),
@@ -265,6 +292,85 @@ def _fence_problem(tool_name: str, args: dict[str, Any], session_id: Any) -> str
     )
 
 
+def _space_view(session_id: Any) -> tuple[bool, space_mod.Space | None]:
+    """``(space mode?, the turn's space)``. A people block that cannot be read is
+    space mode with no space: every record is then refused, never opened."""
+    try:
+        if not space_mod.space_mode():
+            return False, None
+        return True, space_mod.resolve_space(str(session_id or "") or None)
+    except space_mod.SpaceConfigError:
+        logger.exception("hermes-smd-record-store: people block unreadable; space unresolved")
+        return True, None
+
+
+def _space_writer_address(current: space_mod.Space | None) -> str | None:
+    if current is None or not current.private:
+        return None
+    try:
+        cfg = space_mod.space_config()
+    except space_mod.SpaceConfigError:
+        return None
+    person = cfg.person(current.person_id or "") if cfg is not None else None
+    return person.email if person is not None and person.email else None
+
+
+def _space_fence_problem(tool_name: str, args: dict[str, Any], session_id: Any) -> str | None:
+    """The space fence for one list/read/write on a shared seat, or ``None``
+    (passes, or the seat is not in space mode). Raises when the store policy
+    cannot be resolved, which the hook turns into a refusal."""
+    in_space_mode, current = _space_view(session_id)
+    if not in_space_mode:
+        return None
+    store = args.get("store")
+    policy = record_store.authored_policies().get(store) if isinstance(store, str) else None
+    if policy is None:
+        # An unauthored store is the handler's refusal; but an unresolved space
+        # refuses before anything is said about what the seat holds.
+        return None if current is not None else record_store.UNRESOLVED_SPACE
+    action = {TOOL_LIST: "list", TOOL_READ: "read"}.get(tool_name, "write")
+    existing: str | None = None
+    name = args.get("name")
+    if action != "list" and isinstance(name, str) and record_store.RECORD_NAME_RE.match(name):
+        try:
+            existing = record_store.read_record(str(store), name, stores={str(store): policy.root})
+        except record_store.RecordStoreError:
+            existing = None
+    content = args.get("content") if isinstance(args.get("content"), str) else None
+    return record_store.space_access_problem(
+        policy,
+        action=action,
+        space=current,
+        existing=existing,
+        content=content,
+        writer_address=_space_writer_address(current),
+    )
+
+
+def _visible_in_space(
+    records: list[dict[str, Any]],
+    policy: record_store.StorePolicy,
+    current: space_mod.Space | None,
+) -> list[dict[str, Any]]:
+    """The listing a turn in ``current`` may see: on a private store, only the
+    records whose owner space it may read, each labeled with that space. Index
+    fields of another person's record are frontmatter content, so the record is
+    left out entirely rather than shown without its notes."""
+    if not policy.private:
+        return records
+    readable = space_mod.readable_spaces(current)
+    out: list[dict[str, Any]] = []
+    for row in records:
+        try:
+            text = record_store.read_record("", row["name"], stores={"": policy.root})
+        except record_store.RecordStoreError:
+            continue
+        owner = record_store.owner_space(text, policy)
+        if owner is not None and owner in readable:
+            out.append({**row, "owner": owner})
+    return out
+
+
 def _turn_is_tainted(session_id: Any) -> bool:
     """True when this session ingested content from outside the firm.
 
@@ -282,7 +388,19 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     a write that crosses the owner fence on a private store. Exception-safe:
     a hook that cannot decide refuses."""
     tool_name = kwargs.get("tool_name") or ""
-    if tool_name not in (TOOL_READ, TOOL_WRITE):
+    if tool_name not in (TOOL_LIST, TOOL_READ, TOOL_WRITE):
+        return None
+    args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
+    if tool_name == TOOL_LIST:
+        # Listing is fenced only on a shared seat (ADR 0091); everywhere else it
+        # stays open to the roster, as before.
+        try:
+            problem = _space_fence_problem(tool_name, args, kwargs.get("session_id"))
+        except Exception:  # noqa: BLE001 — an unresolvable policy refuses, never opens
+            logger.exception("hermes-smd-record-store: space fence unresolved; refusing list")
+            return {"action": "block", "message": _FENCE_UNRESOLVED}
+        if problem:
+            return {"action": "block", "message": f"{tool_name} refused: {problem}"}
         return None
     try:
         if tool_name == TOOL_WRITE and _turn_is_tainted(kwargs.get("session_id")):
@@ -291,9 +409,10 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     except Exception:  # noqa: BLE001 — a hook must never raise; refusing is the safe shape
         logger.exception("hermes-smd-record-store: pre_tool_call failed; refusing write")
         return {"action": "block", "message": _TAINTED_MESSAGE}
-    args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
     try:
-        problem = _fence_problem(tool_name, args, kwargs.get("session_id"))
+        problem = _space_fence_problem(tool_name, args, kwargs.get("session_id"))
+        if problem is None and not _space_view(kwargs.get("session_id"))[0]:
+            problem = _fence_problem(tool_name, args, kwargs.get("session_id"))
     except Exception:  # noqa: BLE001 — an unresolvable policy refuses, never opens
         logger.exception("hermes-smd-record-store: owner fence unresolved; refusing %s", tool_name)
         return {"action": "block", "message": _FENCE_UNRESOLVED}
