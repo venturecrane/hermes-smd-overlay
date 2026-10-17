@@ -112,11 +112,14 @@ def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
     Detection coverage: a MUTATED chained row fails its own recomputation; a
     DELETED chained row leaves its successor's ``prev_hash`` dangling (no such
-    parent); an INSERTED row cannot produce a valid link without the broker's
+    parent); deleting the LEADING chained rows leaves a start whose
+    ``prev_hash`` is neither GENESIS nor the legacy anchor of any pre-chain row
+    in the export; an INSERTED row cannot produce a valid link without the broker's
     write path; a FORKED chain (two rows naming the same parent) is reported.
     """
     chained: dict[str, Mapping[str, Any]] = {}
     legacy = 0
+    legacy_anchors: set[str] = set()
     breaks: list[dict[str, str]] = []
 
     by_prev: dict[str, list[Mapping[str, Any]]] = {}
@@ -125,6 +128,7 @@ def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         prev_hash = row.get("prev_hash")
         if row_hash is None and prev_hash is None:
             legacy += 1
+            legacy_anchors.add(legacy_anchor(str(row.get("id"))))
             continue
         if row_hash is None or prev_hash is None:
             breaks.append(
@@ -150,6 +154,20 @@ def verify_chain(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         for r in starts[1:]:
             breaks.append(
                 {"id": str(r.get("id")), "reason": "multiple chain starts (fork or deleted parent)"}
+            )
+    # A start must be JUSTIFIED: GENESIS, or the legacy anchor of a pre-chain
+    # row present in this export. Without this, deleting the leading chained
+    # rows (rows[1:]) left a successor whose dangling prev_hash read as a
+    # legacy anchor, and the truncated chain verified clean.
+    for r in starts[:1]:
+        prev = r.get("prev_hash")
+        if prev != GENESIS and prev not in legacy_anchors:
+            breaks.append(
+                {
+                    "id": str(r.get("id")),
+                    "reason": "chain start anchors to no GENESIS or legacy row in this "
+                    "export (leading rows deleted)",
+                }
             )
 
     head: str | None = None

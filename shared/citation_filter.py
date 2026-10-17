@@ -246,6 +246,30 @@ def _canonical_allowlist(
         return ()
 
 
+def _residual_after_allowlist(hit_text: str, allow: tuple[re.Pattern[str], ...]) -> str:
+    """The case-name hit with every allowlisted caption cut out of it.
+
+    Containment alone exempted too much: the case-name regex swallows adjacent
+    prose (IGNORECASE parties absorb lowercase connectives), so "Alvarez v.
+    Draper follows Smith v. Jones" is ONE hit that CONTAINS the registered
+    caption, and the fabricated "Smith v. Jones" rode the exemption out. The
+    caller re-scans this residual and keeps the hit if a case name survives.
+
+    The residual folds only "v"/"vs", never "versus": CASE_NAME_RE is
+    IGNORECASE, so folding "versus" here would refuse "apples versus oranges"
+    sitting next to the caption. A caption the hit spells with "versus" is
+    therefore not cut, which is harmless: CASE_NAME_RE does not match "versus".
+    Each cut leaves a ";" so the parties on either side cannot fuse into a new
+    case name across the gap.
+    """
+    s = _normalize_encoding_bypass(hit_text)
+    s = re.sub(r"\s+", " ", s).strip().casefold()
+    s = re.sub(r"\bvs?\.?\s", "v. ", s)
+    for p in allow:
+        s = p.sub(" ; ", s)
+    return s
+
+
 def scan(text: str, allowed_case_names: Iterable[str] | None = None) -> list[Hit]:
     """Return every citation-shaped hit in `text`. Empty list = clean.
 
@@ -260,7 +284,10 @@ def scan(text: str, allowed_case_names: Iterable[str] | None = None) -> list[Hit
     not fabricating authority. The exemption is deliberately narrow —
     reporter cites, statutes, and rules are NEVER allowlisted, so an
     allowlisted caption followed by a reporter cite ("Alvarez v. Draper, 123
-    Cal.App.5th 456") still blocks on the reporter-cite pattern.
+    Cal.App.5th 456") still blocks on the reporter-cite pattern. A hit that
+    contains the caption AND another case name ("Alvarez v. Draper follows
+    Smith v. Jones") is kept: only the caption itself is exempt, never prose
+    the regex swallowed alongside it.
     """
     allow = _canonical_allowlist(allowed_case_names)
     seen_matches: set[tuple[str, str]] = set()
@@ -270,7 +297,9 @@ def scan(text: str, allowed_case_names: Iterable[str] | None = None) -> list[Hit
             for m in pat.finditer(source_text):
                 if label == "case-name" and allow:
                     canon_hit = canonical_caption(m.group(0))
-                    if any(p.search(canon_hit) for p in allow):
+                    if any(p.search(canon_hit) for p in allow) and not CASE_NAME_RE.search(
+                        _residual_after_allowlist(m.group(0), allow)
+                    ):
                         continue
                 key = (label, m.group(0))
                 if key in seen_matches:

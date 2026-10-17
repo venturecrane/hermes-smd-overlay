@@ -137,3 +137,27 @@ def test_fork_is_detected():
     report = verify_chain([*rows, fork])
     assert report["ok"] is False
     assert any("fork" in b["reason"] for b in report["breaks"])
+
+
+def test_deleting_the_leading_rows_is_detected():
+    # rows[1:] used to verify clean: the new first row's prev_hash names a
+    # deleted row, which the walk read as a legacy anchor. A start must be
+    # GENESIS or the anchor of a legacy row actually present in the export.
+    rows = _chain(4)
+    for keep_from in (1, 2):
+        report = verify_chain(rows[keep_from:])
+        assert report["ok"] is False
+        assert any("leading rows deleted" in b["reason"] for b in report["breaks"])
+
+
+def test_deleting_the_legacy_tail_after_upgrade_is_detected():
+    legacy = {
+        **dict(zip(CHAIN_COLUMNS, _values(99), strict=True)),
+        "prev_hash": None,
+        "row_hash": None,
+    }
+    chained = _chain(2, first_prev=legacy_anchor(str(legacy["id"])))
+    assert verify_chain([legacy, *chained])["ok"] is True
+    report = verify_chain(chained)  # the anchoring legacy row removed
+    assert report["ok"] is False
+    assert any("leading rows deleted" in b["reason"] for b in report["breaks"])
