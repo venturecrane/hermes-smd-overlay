@@ -65,7 +65,9 @@ _COPY = _REPO_ROOT / "shared" / "escalation_ledger.py"
 # is not token_for(item_key), so item B's ACK code can no longer acknowledge item
 # A. Paired ss-console branch fix/twins-osa carries the identical canonical and
 # skill copies; it lands with the OVERLAY_REF bump.
-CANONICAL_SHA256 = "16ed2eb3408a154415524f3c2d277290816074d655e22cb0c0ea37e74665f8be"
+# 2026-10-17b: the J-b check moved into _refuse_foreign_ack_token, identical
+# behaviour, so validate_append stays under ss-console's function-size ratchet.
+CANONICAL_SHA256 = "9f194e724ebdea79b3b1d6f7b5259a706ebbb8dfcd4a3acb923396b9247c0c1c"
 
 CANONICAL_PATH = "operator/workspace_broker/escalation_ledger.py"
 CANONICAL_REPO = "venturecrane/ss-console"

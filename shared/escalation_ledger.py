@@ -608,6 +608,23 @@ def _validate_determination(determination) -> None:
         )
 
 
+def _refuse_foreign_ack_token(token, key: str) -> None:
+    """Refuse an ``acked`` whose ACK code is not the code of the item it names.
+
+    The token is derived from the item_key (``token_for``), so a mismatch means
+    the ack names one item and quotes another's code. Matching the raise by
+    token alone let item B's code acknowledge item A (``derive_state`` folds by
+    item_key), silencing an alarm nobody confirmed. A tokenless ack is left to
+    the item_key match.
+    """
+    if token is not None and str(token) != token_for(key):
+        raise ValueError(
+            "that ACK code belongs to a different item than this acknowledgement "
+            "names; derive the item from the code before recording the ack. Do "
+            "not report it as acknowledged"
+        )
+
+
 def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
     """Raise ValueError unless ``new_event`` is a well-formed event that may be
     appended. Three load-bearing rules, one per door into silence:
@@ -675,16 +692,7 @@ def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
     if kind == "acked":
         token = new_event.get("token")
         key = str(new_event.get("item_key") or "")
-        if token is not None and str(token) != token_for(key):
-            # The token is derived from the item_key, so a mismatch means the ack
-            # names one item and quotes another's code. Matching the raise by
-            # token alone let item B's code acknowledge item A (derive_state
-            # folds by item_key), silencing an alarm nobody confirmed.
-            raise ValueError(
-                "that ACK code belongs to a different item than this acknowledgement "
-                "names; derive the item from the code before recording the ack. Do "
-                "not report it as acknowledged"
-            )
+        _refuse_foreign_ack_token(token, key)
         raised = False
         stale_only = False
         for prior in existing_events:
