@@ -564,11 +564,15 @@ vars:
     note: skills-dir override during customer.yaml translation
   TELEGRAM_BOT_TOKEN:
     discovery: static
-    stage: boot-helper
+    stage: agent
     requirement: optional
-    consumed_by: [bootstrap-translate]
+    consumed_by: [bootstrap-translate, group-audience]
     note: >-
-      PRESENCE only, never the value. translate._materialize_telegram_platform
+      Two readers. shared/group_audience.py reads the VALUE in the agent process
+      (ss-console env-consumption marks it agent_env: held) to call the Bot API
+      getChatMemberCount / sendMessage for the couples shared group (ADR 0091
+      R7); the token rides only in the request path, never a log. On the boot
+      side, PRESENCE only, never the value: translate._materialize_telegram_platform
       treats a customer.yaml telegram block that authors the deprecated
       `allowed_users` alias with no `enabled` key as enabled only when the seat
       has a bot token, so token-less seats stay byte-identical. Provisioning
