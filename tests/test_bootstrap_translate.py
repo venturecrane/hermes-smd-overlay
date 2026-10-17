@@ -1604,6 +1604,85 @@ def test_telegram_block_lands_in_persona_config():
     assert config["telegram"]["require_mention"] is False
 
 
+# ---- telegram.allowed_users: deprecated alias of allow_from (phase 1 of 3) ----
+# Seats authored ``telegram.allowed_users`` (ss-console _hosted-template, scott)
+# while the materializer read only ``enabled`` + ``allow_from``, so the authored
+# allowlist was silently ignored and the Fly secret was the only gate. The alias
+# is now read; an alias-only block (no ``enabled``) is live only when the seat has
+# a bot token, so token-less seats stay byte-identical.
+
+_SCOTT_TELEGRAM = {"telegram": {"allowed_users": ["7367659986"]}}
+
+
+def test_telegram_alias_materializes_when_token_present():
+    # FALSIFIER: fails if allowed_users is ignored again (returns {}).
+    block = _wh._materialize_telegram_platform(_SCOTT_TELEGRAM, token_present=True)
+    assert block == {"allow_from": ["7367659986"]}
+
+
+def test_telegram_alias_inert_without_token():
+    # No token = no bot: config stays exactly what it was before the alias.
+    assert _wh._materialize_telegram_platform(_SCOTT_TELEGRAM, token_present=False) == {}
+
+
+def test_telegram_alias_reads_token_presence_from_env(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert _wh._materialize_telegram_platform(_SCOTT_TELEGRAM) == {}
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "  ")
+    assert _wh._materialize_telegram_platform(_SCOTT_TELEGRAM) == {}
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token-not-real")
+    assert _wh._materialize_telegram_platform(_SCOTT_TELEGRAM) == {"allow_from": ["7367659986"]}
+
+
+def test_telegram_alias_unions_with_allow_from_dedup_in_order():
+    cust = {
+        "telegram": {
+            "enabled": True,
+            "allow_from": ["1", " 2 "],
+            "allowed_users": ["2", "3", ""],
+        }
+    }
+    # Explicit enabled: token presence is irrelevant (unchanged behavior).
+    for token in (True, False):
+        block = _wh._materialize_telegram_platform(cust, token_present=token)
+        assert block == {"allow_from": ["1", "2", "3"]}
+
+
+def test_telegram_alias_satisfies_explicit_enabled():
+    # FALSIFIER: an enabled block whose ONLY list is allowed_users must not raise.
+    cust = {"telegram": {"enabled": True, "allowed_users": ["7367659986"]}}
+    assert _wh._materialize_telegram_platform(cust, token_present=False) == {
+        "allow_from": ["7367659986"]
+    }
+
+
+def test_telegram_alias_never_overrides_explicit_disable():
+    cust = {"telegram": {"enabled": False, "allowed_users": ["7367659986"]}}
+    assert _wh._materialize_telegram_platform(cust, token_present=True) == {}
+
+
+def test_telegram_alias_implied_enable_with_empty_list_stays_inert():
+    # An alias-implied enable never raises: before the alias this block
+    # materialized {}, and ensure-telegram-allowlist.py still guards boot.
+    for empty in ([], ["", " "], None):
+        cust = {"telegram": {"allowed_users": empty}}
+        assert _wh._materialize_telegram_platform(cust, token_present=True) == {}
+    # An EXPLICIT enable with only empty lists still fails closed.
+    with pytest.raises(ValueError, match="allow_from is empty"):
+        _wh._materialize_telegram_platform(
+            {"telegram": {"enabled": True, "allowed_users": []}}, token_present=True
+        )
+
+
+def test_telegram_alias_lands_in_persona_config(monkeypatch):
+    persona = {"slug": "scott", "name": "Scott", "status": "active", "skills": []}
+    cust = {"customer_id": "scott", **_SCOTT_TELEGRAM}
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert "telegram" not in _wh._persona_config(persona, cust, {})
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token-not-real")
+    assert _wh._persona_config(persona, cust, {})["telegram"] == {"allow_from": ["7367659986"]}
+
+
 def test_webhook_platform_toolsets_emitted_with_the_platform(monkeypatch):
     """ss-console#2145 CONFIG half. Without this block the webhook platform
     falls back to Hermes' ``hermes-webhook`` composite, which carries no
