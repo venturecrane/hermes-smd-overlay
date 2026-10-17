@@ -48,6 +48,10 @@ dev = [
     # boto3 already lands botocore as a transitive dep; pinned here so
     # the dev extra is self-contained.
     "botocore>=1.34",
+    # The record-store path-fence falsifier (tests/test_record_store_path_fence.py)
+    # reads through the REAL pinned Hermes read_file_tool; Hermes' file-tool
+    # import chain needs requests, which nothing else here pulls in.
+    "requests>=2.31",
 ]
 
 [project.urls]

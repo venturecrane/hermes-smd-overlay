@@ -43,6 +43,13 @@ write in. ``record_store_list`` stays open to everyone on the roster and
 carries the authored index fields, so a capture can notice that a colleague
 already holds this visitor without opening the colleague's notes.
 
+A RECORD IS NEVER READ BY PATH (``path_fence``, 2026-10-17). The owner fence
+above guards these three tools only; ``read_file`` is on the email surface and
+Hermes' read guard knows nothing of stores, so a colleague's record was one
+path away. On a seat that authors a store, the file tools read only an
+allowlist (skills, specs, this session's own spillover), and ``terminal`` /
+``execute_code`` are refused. See that module.
+
 Exception-safe is NOT the contract for the handlers (that rule governs
 hooks): a tool that cannot write must say so to the model, so these raise a
 reason Hermes surfaces. The hook IS exception-safe, and its failure mode is
@@ -56,8 +63,11 @@ import logging
 from typing import Any
 
 from shared import record_store
+from shared.customer_config import CustomerConfigError
 from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT
 from shared.tool_registration import register_wrapped_tool
+
+from . import path_fence
 
 logger = logging.getLogger(__name__)
 
@@ -292,14 +302,44 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     return None
 
 
+def _store_roots() -> list[str]:
+    """Every authored store root, for the path fence. Raises when the block
+    cannot be read, which the fence turns into a refusal."""
+    return [str(root) for root in record_store.authored_stores().values()]
+
+
+def _register_path_fence(ctx: Any) -> None:
+    """The file-tool allowlist (``path_fence``): a record is never read by path."""
+    pre, post = path_fence.make_hooks(_store_roots)
+    ctx.register_hook("pre_tool_call", pre)
+    ctx.register_hook("post_tool_call", post)
+
+
 def register(ctx: Any) -> None:
-    """Register the trio on a seat that authors at least one record store."""
+    """Register the trio, and the file-tool path fence, on a seat that authors
+    at least one record store.
+
+    A ``record_stores`` block that is present but malformed registers the
+    fence and no tools: the records may still be on the volume, and "could not
+    tell" must not leave them readable by path. A customer.yaml that cannot be
+    read at all registers nothing, as before: that is not a seat this plugin
+    can say anything about (the test fan-out and a bare image both look like
+    it), and every other gate on a real seat already refuses without it.
+    """
     try:
         stores = record_store.authored_stores()
     except record_store.RecordStoreError as exc:
+        if isinstance(exc.__cause__, CustomerConfigError):
+            logger.warning(
+                "hermes-smd-record-store: customer.yaml unreadable (%s); nothing registered", exc
+            )
+            return
         logger.warning(
-            "hermes-smd-record-store: record_stores unreadable (%s); registering no tools", exc
+            "hermes-smd-record-store: record_stores unreadable (%s); registering no tools, "
+            "path fence on",
+            exc,
         )
+        _register_path_fence(ctx)
         return
     if not stores:
         logger.info("hermes-smd-record-store: no record store authored on this seat; no tools")
@@ -315,6 +355,7 @@ def register(ctx: Any) -> None:
             emoji="",
         )
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
+    _register_path_fence(ctx)
     logger.info(
         "hermes-smd-record-store registered %d tools over stores %s",
         len(TOOLS),
