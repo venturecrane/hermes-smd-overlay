@@ -9,9 +9,12 @@ Five steps, every side effect injected so the module is fully unit-testable:
 recover from, and even then the installed tree is untouched.
 
 THE SOURCE OBJECT. ``vaults/<slug>/output-classes.json``, written by the portal
-and by nothing else. The git→R2 config publisher (ss-console #2082) writes
-``customer.yaml`` and is structurally barred from this key: two writers, two key
-spaces, never the same object. That separation is why a portal edit can reach a
+AND by the root-side establishment intake (``establish_intake``), which
+merge-writes the adjustments and provenance a conversational establishment
+produces, after its compiler gates pass. The git→R2 config publisher
+(ss-console #2082) writes ``customer.yaml`` and is structurally barred from this
+key: the vault object and the config object are separate key spaces, never the
+same object. That separation is why a portal edit can reach a
 seat at all without a portal actor being able to write git.
 
 WHAT THE DECLARED HASH IS AND IS NOT. Each spec body carries a ``sha256`` its
