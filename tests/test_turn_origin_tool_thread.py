@@ -274,8 +274,9 @@ def test_a_later_wake_turn_on_the_email_session_submits_nothing(seat) -> None:
 
 def test_an_email_turn_whose_origin_cannot_bind_is_loud(seat, caplog) -> None:
     """An email-opened turn whose origin did not bind (here: the router never
-    recorded it) still queues a chronology, without a requester, and says so
-    at WARNING so the break is visible."""
+    recorded it) queues NOTHING, as the sibling lanes refuse, and says so at
+    WARNING so the break is visible. The model's requester values are never a
+    substitute for the verified email's."""
     from bootstrap.translate import _INBOUND_EMAIL_PROMPT_MSGRAPH
 
     prompt = _hermes_render(_INBOUND_EMAIL_PROMPT_MSGRAPH, _graph_payload())
@@ -284,10 +285,16 @@ def test_an_email_turn_whose_origin_cannot_bind_is_loud(seat, caplog) -> None:
         out = _call_tool(
             seat["tools"],
             "medchron_job_submit",
-            {"matter_id": MATTER["matter_id"], "matter_number": "900201", "units": []},
+            {
+                "matter_id": MATTER["matter_id"],
+                "matter_number": "900201",
+                "units": [],
+                "requested_by": "someone@elsewhere.example",
+                "request_ref": "<model-chosen@x>",
+            },
         )
-    assert out["accepted"] is True
-    assert "requested_by" not in seat["client"].medchron[0]
+    assert out["accepted"] is False and "nothing was queued" in out["reason"]
+    assert seat["client"].medchron == []
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
         "medchron_job_submit" in r.getMessage() and "email" in r.getMessage() for r in warnings

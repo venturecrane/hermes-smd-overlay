@@ -536,3 +536,30 @@ def test_apply_no_op_when_config_unchanged(tmp_path):
     # re-write is harmless and the epoch advances).
     assert result.outcome is ApplyOutcome.APPLIED
     assert result.changed == ()
+
+
+@pytest.mark.parametrize(
+    "current",
+    [b"model: [unclosed\n", b"- just\n- a list\n", b"", b"\xff\xfe not utf-8"],
+    ids=["unparseable", "not-a-mapping", "empty", "undecodable"],
+)
+def test_apply_refuses_when_the_current_config_is_unreadable(tmp_path, current):
+    """An existing but unreadable current file is NOT an initial seed. FALSIFIER:
+    the old ``_load_current`` returned ``{}`` here, the safety gate read that as
+    a first seed and skipped the live-writable check, and a rebuild-class change
+    (here: the model) was written onto a live Machine."""
+    volume = tmp_path / "customer.yaml"
+    volume.write_bytes(current)
+    new_doc = _valid_doc()
+    new_doc["model"] = "claude-opus-4-8"
+    new = yaml.safe_dump(new_doc, sort_keys=False).encode()
+    result = apply(
+        s3_client=FakeS3({KEY: new}),
+        bucket=BUCKET,
+        slug=SLUG,
+        volume_path=volume,
+        audit_client=FakeAudit(),
+    )
+    assert result.outcome is ApplyOutcome.REJECTED
+    assert any("unreadable" in r for r in result.reasons)
+    assert volume.read_bytes() == current
