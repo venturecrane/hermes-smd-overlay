@@ -369,6 +369,48 @@ SPEC_PROPERTIES = ("voice", "format")
 #: a restart clears it, and an unclassified session fails CLOSED at the gate.
 _ADMIN_STASH: dict[str, dict[str, Any]] = {}
 
+#: Who holds this session's establishment READ exemption (ADR 0085; the fence is
+#: shared/matter_gate.py). The exemption lifts the read-time matter-mixing fence,
+#: so it must cover establishment WORK and nothing else. It used to be marked on
+#: every admin turn and never cleared, which turned the fence off for ordinary
+#: drafting by any admin (on A&P the admins are the firm staff doing the work)
+#: and kept it off after a non-admin took over the session. Now it is marked only
+#: when establishment is actually underway (the admin asked for it in their own
+#: words, or an establishment tool cleared its admin gate) and it is CLEARED the
+#: moment the session's attributed sender is anyone other than that admin.
+_EXEMPT_OWNER: dict[str, str] = {}
+
+#: An admin's own words asking for voice or shape establishment, or for the
+#: survey that precedes it. Narrow on purpose: a miss costs a recoverable
+#: refusal ("read the other matter in a new session"); a false hit lifts the
+#: mixing fence on ordinary work. Bare "establish" is NOT enough, because
+#: "establish liability" is ordinary legal drafting.
+_ESTABLISHMENT_INTENT = re.compile(
+    r"\bestablish\w*\b(?:\W+\w+){0,5}?\W+(?:voice|style|shape|format|writing)\b"
+    r"|\b(?:voice|shape)[- ]establishment\b"
+    r"|\bsurvey\b(?:\W+\w+){0,3}?\W+(?:documents|letters|files|writing|correspondence)\b"
+    r"|\bhouse style\b"
+    r"|\b(?:firm'?s?|our|my)\s+(?:writing\s+)?voice\b"
+    r"|\bhow\s+(?:we|the firm)\s+(?:write|writes|sound|sounds)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_for_establishment(user_message: Any) -> bool:
+    return isinstance(user_message, str) and bool(_ESTABLISHMENT_INTENT.search(user_message))
+
+
+def _grant_read_exemption(session_id: str, sender: str) -> None:
+    if session_id and sender:
+        _EXEMPT_OWNER[session_id] = sender
+        matter_gate.mark_establishment_read_exempt(session_id)
+
+
+def _revoke_read_exemption(session_id: str) -> None:
+    _EXEMPT_OWNER.pop(session_id, None)
+    matter_gate.clear_establishment_read_exempt(session_id)
+
+
 #: Readbacks this session owes the person, written when ``establish_propose``
 #: returns and cleared when a send-shaped call carries one verbatim
 #: (ss-console#2529, critique point 1). The recipient-lock pattern applied to
@@ -4524,18 +4566,25 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         sender_id = _resolve_attributed_sender(session_id, str(raw_sender))
         cfg = _load_config()
         is_admin = bool(cfg is not None and cfg.sender_is_admin(sender_id))
+        # Revoke FIRST, before anything below can raise: a session whose
+        # attributed sender is no longer the admin who began establishment must
+        # not keep the read exemption for even one turn (fail closed).
+        if not is_admin or _EXEMPT_OWNER.get(session_id) != str(sender_id):
+            _revoke_read_exemption(session_id)
         _ADMIN_STASH[session_id] = {"sender": str(sender_id), "is_admin": is_admin}
         lines: list[str] = []
         if is_admin:
             # Firm-voice establishment reads the firm's own letters ACROSS
-            # matters by design (ADR 0085). Exempt this admin session from the
-            # READ-time matter-mixing fence (shared/matter_gate.py) so the survey
-            # can run; the SEND-time fence is untouched and establishment never
-            # sends. Set at turn start (pre_llm_call), so it is in place before
-            # the survey's first cross-matter read. Marked only after the seat
-            # classified the sender as a firm admin — the same allow-list that
-            # gates the establishment tools.
-            matter_gate.mark_establishment_read_exempt(session_id)
+            # matters by design (ADR 0085), and the survey reads them BEFORE
+            # anything is staged, so the READ-time matter-mixing fence
+            # (shared/matter_gate.py) is lifted at turn start - but only when
+            # this admin asked for establishment in their own words. An ordinary
+            # admin turn keeps the fence. Once granted it holds across this
+            # admin's later turns (the blessing turn says only "yes, those") and
+            # is revoked above when anyone else speaks. The SEND-time fence is
+            # untouched and establishment never sends.
+            if _asks_for_establishment(kwargs.get("user_message")):
+                _grant_read_exemption(session_id, str(sender_id))
             lines.append(_ADMIN_DOCUMENTS_LINE)
             if _maybe_confirm_possession(cfg, sender_id, kwargs.get("user_message")):
                 lines.append(_POSSESSION_CONFIRMED_NOTE.format(sender=str(sender_id)))
@@ -4599,6 +4648,13 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
             "(the pre_tool_call gate fails closed on a missing stash)",
             exc_info=True,
         )
+        # A turn this hook could not classify keeps no read exemption.
+        try:
+            session_id = kwargs.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                _revoke_read_exemption(session_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("hermes-smd-establishment: exemption revoke failed", exc_info=True)
         return None
 
 
@@ -5074,6 +5130,10 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             withheld = _possession_gate(str(entry.get("sender") or ""), tool_name)
             if withheld is not None:
                 return withheld
+            # A firm establishment tool cleared its admin gate: establishment is
+            # underway in this session, so its cross-matter reads are the job.
+            if isinstance(session_id, str):
+                _grant_read_exemption(session_id, str(entry.get("sender") or ""))
             if tool_name == TOOL_STAGE:
                 return _prepare_reference_stage(session_id, args)
             return None
