@@ -6,7 +6,8 @@ Three things, each with a falsifier:
   and refuses the shapes that would open the group to non-people;
 * a cron ``space`` decides delivery (a person's DM, or the shared group) and
   never guesses a chat that is not bound yet;
-* the cron run's space is readable back from the job (``shared.cron_space``).
+* the delivery target is what ``shared.space.resolve_space`` reads as the
+  run's space, so the round trip lands in the authored space.
 
 Seats without ``people`` are pinned unchanged (the scott and Brokery shapes).
 """
@@ -21,7 +22,7 @@ import pytest
 
 from bootstrap import translate as _wh
 from bootstrap.cron_materialize import CronMaterializeError, materialize_cron
-from shared import cron_attribution, cron_space
+from shared import cron_attribution, space
 
 P1, P2, GROUP = "1111111111", "2222222222", "-1001234567890"
 
@@ -240,7 +241,7 @@ def test_unbound_person_delivers_locally_never_to_a_guessed_chat(caplog):
         jobs = _run(_with_cron(cust, [{**CHECKIN, "space": "person:p1"}]))
     job = jobs["op-managed:couple:couples-checkin@person:p1"]
     assert job["deliver"] == "local"
-    assert "people[p1].telegram_id is not bound yet" in caplog.text
+    assert "the person:p1 chat is not bound yet" in caplog.text
 
 
 def test_unbound_shared_chat_delivers_locally():
@@ -285,95 +286,50 @@ def test_removed_spaced_routine_reports_the_bare_skill():
     assert [(c.skill, c.enabled) for c in seen] == [("couples-checkin", False)]
 
 
-# --------------------------------------------------------- bound run space
+# ------------------------------------------- delivery -> resolver round trip
 
 
 @pytest.fixture(autouse=True)
-def _clear_attribution_cache():
+def _clear_caches():
     cron_attribution._CACHE.clear()
+    space._reset_cache_for_tests()
     yield
     cron_attribution._CACHE.clear()
+    space._reset_cache_for_tests()
 
 
-def _store_on_disk(home, jobs):
-    d = home / "profiles" / "couple" / "cron"
-    d.mkdir(parents=True)
-    (d / "jobs.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
-
-
-def test_attribution_reads_space_and_keeps_skill_bare(tmp_path):
-    _store_on_disk(
-        tmp_path,
-        [
-            {"id": "aaa111", "name": "op-managed:couple:couples-checkin@person:p1"},
-            {"id": "bbb222", "name": "op-managed:operator:inbox-triage"},
-        ],
-    )
-    spaced = cron_attribution.resolve_routine(
-        "cron_aaa111_20261019_150000", hermes_home=str(tmp_path)
-    )
-    assert (spaced.persona, spaced.skill, spaced.space) == (
-        "couple",
-        "couples-checkin",
-        "person:p1",
-    )
-    plain = cron_attribution.resolve_routine(
-        "cron_bbb222_20261019_150000", hermes_home=str(tmp_path)
-    )
-    assert (plain.skill, plain.space) == ("inbox-triage", None)
-
-
-def _cron_env(monkeypatch, chat_id: str):
+def _as_hermes_publishes(monkeypatch, deliver: str) -> None:
+    """What Hermes' scheduler does with a job's ``deliver`` before the agent runs
+    (``cron/scheduler.py`` ``_reload_dotenv_and_publish_delivery_target``)."""
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", "telegram")
-    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", chat_id)
+    platform, _, chat = deliver.partition(":")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", platform if chat else "")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", chat)
 
 
-def test_bound_space_from_the_job_name(tmp_path, monkeypatch):
-    _store_on_disk(
-        tmp_path, [{"id": "aaa111", "name": "op-managed:couple:couples-checkin@person:p1"}]
-    )
-    _cron_env(monkeypatch, P1)
-    got = cron_space.bound_cron_space(
-        "cron_aaa111_20261019_150000", customer=_couple(), hermes_home=str(tmp_path)
-    )
-    assert got == "person:p1"
+@pytest.mark.parametrize("authored", ["person:p1", "person:p2", "shared"])
+def test_materialized_delivery_resolves_to_the_authored_space(monkeypatch, authored):
+    cust = _couple()
+    jobs = _run(_with_cron(cust, [{**CHECKIN, "space": authored}]))
+    (job,) = jobs.values()
+    _as_hermes_publishes(monkeypatch, job["deliver"])
+    resolved = space.resolve_space(config=space.parse_space_config(cust))
+    assert resolved is not None and resolved.key == authored
 
 
-def test_bound_space_none_when_job_and_delivery_disagree(tmp_path, monkeypatch):
-    _store_on_disk(
-        tmp_path, [{"id": "aaa111", "name": "op-managed:couple:couples-checkin@person:p1"}]
-    )
-    _cron_env(monkeypatch, P2)  # delivering to p2 while named for p1
-    got = cron_space.bound_cron_space(
-        "cron_aaa111_20261019_150000", customer=_couple(), hermes_home=str(tmp_path)
-    )
-    assert got is None
+def test_unbound_delivery_resolves_to_no_space(monkeypatch):
+    cust = _couple()
+    cust["people"][0]["telegram_id"] = ""
+    (job,) = _run(_with_cron(cust, [{**CHECKIN, "space": "person:p1"}])).values()
+    assert job["deliver"] == "local"
+    _as_hermes_publishes(monkeypatch, job["deliver"])
+    assert space.resolve_space(config=space.parse_space_config(cust)) is None
 
 
-def test_bound_space_none_for_a_cron_job_with_no_space(tmp_path, monkeypatch):
-    _store_on_disk(tmp_path, [{"id": "bbb222", "name": "op-managed:couple:couples-checkin"}])
-    _cron_env(monkeypatch, P1)
-    got = cron_space.bound_cron_space(
-        "cron_bbb222_20261019_150000", customer=_couple(), hermes_home=str(tmp_path)
-    )
-    assert got is None
-
-
-def test_bound_space_from_delivery_when_no_session_id(monkeypatch):
-    _cron_env(monkeypatch, GROUP)
-    assert cron_space.bound_cron_space(customer=_couple()) == "shared"
-    _cron_env(monkeypatch, P2)
-    assert cron_space.bound_cron_space(customer=_couple()) == "person:p2"
-    _cron_env(monkeypatch, "3333333333")
-    assert cron_space.bound_cron_space(customer=_couple()) is None
-
-
-def test_bound_space_none_off_cron_and_off_space_mode(monkeypatch):
-    monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
-    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", "telegram")
-    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", P1)
-    assert cron_space.bound_cron_space(customer=_couple()) is None
-    _cron_env(monkeypatch, P1)
-    assert cron_space.bound_cron_space(customer={"customer_id": "brokery"}) is None
-    assert cron_space.bound_cron_space("not-a-cron-id", customer=_couple()) == "person:p1"
+def test_attribution_keeps_the_skill_bare_for_a_spaced_name(tmp_path):
+    d = tmp_path / "profiles" / "couple" / "cron"
+    d.mkdir(parents=True)
+    jobs = [{"id": "aaa111", "name": "op-managed:couple:couples-checkin@person:p1"}]
+    (d / "jobs.json").write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    got = cron_attribution.resolve_routine("cron_aaa111_20261019_150000", hermes_home=str(tmp_path))
+    assert (got.persona, got.skill) == ("couple", "couples-checkin")
