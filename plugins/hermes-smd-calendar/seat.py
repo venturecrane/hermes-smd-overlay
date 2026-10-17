@@ -211,21 +211,32 @@ def _released_by_the_space_gate(turn: space.Space, tool_name: str, args: dict[st
     holds a crossing until the same person says "share it", so a crossing call
     that reaches this handler is one it released. A call it does NOT see as a
     crossing, while this code does, is a disagreement between the two, and the
-    answer to a disagreement is to refuse. Any part of the API missing (A's gate
-    not merged, not armed, renamed) is also a refusal."""
+    answer to a disagreement is to refuse. The gate must also have noted a
+    release for this tool, person and chat (``space_writes.take_release``), which
+    is spent here: one confirmation, one send. Any part of the API missing (A's
+    gate not merged, not armed, renamed) is also a refusal."""
     try:
         from shared import space_writes  # type: ignore[attr-defined]
     except ImportError:
         return False
     armed = getattr(space_writes, "gate_armed", None)
     crossing = getattr(space_writes, "crossing", None)
-    if not callable(armed) or not callable(crossing):
+    take_release = getattr(space_writes, "take_release", None)
+    if not callable(armed) or not callable(crossing) or not callable(take_release):
         return False
     try:
         cfg = space.space_config()
-        return (
+        if not (
             bool(armed()) and cfg is not None and crossing(tool_name, args, turn, cfg) is not None
-        )
+        ):
+            return False
+        # The gate notes a release when the person's "share it" lets THIS call
+        # through; spending it here means a crossing that reached the handler by
+        # any other road (a hook skipped, a second call in the same turn) still
+        # refuses.
+        from shared import turn_principal
+
+        return bool(take_release(tool_name, turn_principal.current()))
     except Exception:  # noqa: BLE001 - a gate that cannot answer has not released anything
         logger.warning("hermes-smd-calendar: space gate check failed; refusing", exc_info=True)
         return False

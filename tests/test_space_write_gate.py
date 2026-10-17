@@ -31,6 +31,10 @@ from tests.couples_fixtures import (
 A_SECRET = "Ana is planning a surprise trip to Lisbon"
 
 
+#: Every confirmation notice the gate sent: (chat id, text).
+POSTED: list[tuple[str, str]] = []
+
+
 @pytest.fixture
 def gate(monkeypatch, tmp_path):
     clear_turn(monkeypatch)
@@ -41,6 +45,9 @@ def gate(monkeypatch, tmp_path):
     }
     monkeypatch.setattr(record_store, "authored_policies", lambda *_, **__: policies)
     space_writes.SPACE_WRITES.clear()
+    space_writes._releases.clear()
+    POSTED.clear()
+    monkeypatch.setattr(space_writes, "post_notice", lambda chat, text: POSTED.append((chat, text)))
     plugin = load_plugin("hermes-smd-space-gate")
     yield plugin
     space_writes.SPACE_WRITES.clear()
@@ -72,8 +79,38 @@ def test_a_private_fact_into_the_shared_list_is_held_with_the_exact_payload(gate
     telegram_dm(monkeypatch, A_TG)
     args, blocked = _write(gate, A_SECRET)
     assert blocked and blocked["action"] == "block" and blocked["message"].startswith("HELD")
-    assert space_writes.exact_text(args) in blocked["message"]
     assert len(space_writes.SPACE_WRITES.pending()) == 1
+
+
+def test_the_seat_itself_posts_the_exact_stored_payload_to_the_requesting_chat(gate, monkeypatch):
+    """Code-sent, not model-relayed: the posted text is the fixed frame around
+    the stored payload, byte for byte, sent to the chat that raised it, and the
+    model is not handed the words to restate. FALSIFIER: drop the post_notice
+    call (or post anything but the stored payload)."""
+    telegram_dm(monkeypatch, A_TG)
+    _, blocked = _write(gate, A_SECRET)
+    stored = space_writes.SPACE_WRITES.pending()[0]
+    payload = space_writes.exact_text(stored.args)
+    assert POSTED == [
+        (A_TG, f"{space_writes.NOTICE_HEAD}\n\n{payload}\n\n{space_writes.NOTICE_TAIL}")
+    ]
+    body = POSTED[0][1]
+    start = len(space_writes.NOTICE_HEAD) + 2
+    assert body[start : start + len(payload)].encode() == payload.encode()
+    assert A_SECRET not in blocked["message"]
+
+
+def test_a_notice_that_cannot_be_sent_holds_nothing(gate, monkeypatch):
+    """FALSIFIER: capture before (or regardless of) the notice."""
+
+    def fail(chat, text):
+        raise RuntimeError("Bot API down")
+
+    monkeypatch.setattr(space_writes, "post_notice", fail)
+    telegram_dm(monkeypatch, A_TG)
+    _, blocked = _write(gate, A_SECRET)
+    assert blocked and "could not be shown" in blocked["message"]
+    assert not space_writes.SPACE_WRITES.pending()
 
 
 def test_b_cannot_confirm_a_held_write(gate, monkeypatch):
@@ -218,14 +255,121 @@ def _held(gate, tool: str, args: dict) -> bool:
     return bool(out) and out["message"].startswith("HELD")
 
 
-def test_calendar_invite_to_the_other_partner_is_held(gate, monkeypatch):
-    telegram_dm(monkeypatch, A_TG)
-    assert _held(
-        gate, "calendar_invite_create", {"summary": A_SECRET, "attendees": [A_EMAIL, B_EMAIL]}
+class _Event:
+    def __init__(self, space_key: str, emails: list[str]):
+        self.space = space_key
+        self._emails = emails
+
+    def attendee_emails(self) -> list[str]:
+        return list(self._emails)
+
+
+class _Store:
+    def __init__(self, events: dict):
+        self.events = events
+
+    def get(self, uid):
+        return self.events.get(uid)
+
+
+@pytest.fixture
+def calendar(monkeypatch):
+    """The stored events ``shared.calendar_reach`` reads (overlay #475)."""
+    from shared import calendar_reach
+
+    store = _Store(
+        {
+            "mine": _Event("person:p1", [A_EMAIL]),
+            "ours": _Event("shared", [A_EMAIL, B_EMAIL]),
+            "leaky": _Event("person:p1", [A_EMAIL, B_EMAIL]),
+        }
     )
+    monkeypatch.setattr(calendar_reach.calendar_store, "STORE", store)
+    return store
+
+
+def test_an_invite_naming_the_partner_by_person_id_is_held(gate, monkeypatch, calendar):
+    """``attendees`` are person ids. FALSIFIER: make _invitees_other_than
+    return an empty set."""
+    telegram_dm(monkeypatch, A_TG)
+    assert _held(gate, "calendar_invite_create", {"title": A_SECRET, "attendees": ["p1", "p2"]})
     space_writes.SPACE_WRITES.clear()
-    assert not _held(gate, "calendar_invite_create", {"summary": "dentist", "attendees": [A_EMAIL]})
-    assert _held(gate, "calendar_invite_update", {"attendees": [{"email": B_EMAIL.upper()}]})
+    assert not _held(gate, "calendar_invite_create", {"title": "dentist", "attendees": ["p1"]})
+    assert _held(gate, "calendar_invite_create", {"title": "x", "attendees": [B_EMAIL.upper()]})
+    space_writes.SPACE_WRITES.clear()
+    assert _held(gate, "calendar_invite_create", {"title": "x", "attendees": ["nobody-known"]})
+    assert gate.on_pre_tool_call(tool_name="calendar_invite_list", args={}, session_id="s") is None
+
+
+def test_a_change_to_a_stored_shared_event_is_held_even_naming_no_one(gate, monkeypatch, calendar):
+    """A change names only a uid; its reach is the stored event's attendees.
+    An unknown uid is an unreadable reach, and is held."""
+    telegram_dm(monkeypatch, A_TG)
+    for tool in ("calendar_invite_update", "calendar_invite_cancel"):
+        for uid in ("ours", "leaky"):
+            space_writes.SPACE_WRITES.clear()
+            assert _held(gate, tool, {"uid": uid, "title": A_SECRET}), (tool, uid)
+        space_writes.SPACE_WRITES.clear()
+        assert not _held(gate, tool, {"uid": "mine"}), tool
+        assert _held(gate, tool, {"uid": "unknown-uid"}), tool
+
+
+def test_a_change_is_held_when_the_event_store_cannot_be_read(gate, monkeypatch, calendar):
+    from shared import calendar_reach
+
+    def boom(uid):
+        raise calendar_reach.calendar_store.CalendarStoreError("unreadable")
+
+    monkeypatch.setattr(calendar, "get", boom)
+    telegram_dm(monkeypatch, A_TG)
+    assert _held(gate, "calendar_invite_cancel", {"uid": "mine"})
+
+
+def test_p1_invite_including_p2_is_held_then_released_only_by_p1_in_that_chat(
+    gate, monkeypatch, calendar
+):
+    """The calendar tool's own R1 check (in_tool_gate) refuses the crossing
+    unless the space gate released this very call after p1 confirmed it in p1's
+    chat. FALSIFIER: make take_release always return True, or drop
+    note_release on release."""
+    telegram_dm(monkeypatch, A_TG)
+    mine = space.Space(kind="person", person_id="p1", source=space.SOURCE_TELEGRAM_DM)
+    args = {"title": A_SECRET, "attendees": ["p1", "p2"]}
+    assert _held(gate, "calendar_invite_create", dict(args))
+    # Without a release, the handler refuses (a call that skipped the gate).
+    assert space_writes.in_tool_gate("calendar_invite_create", mine, "shared") == (
+        space_writes.IN_TOOL_REFUSAL
+    )
+    # B's yes and a group yes release nothing.
+    assert _say(gate, monkeypatch, lambda: telegram_dm(monkeypatch, B_TG), "share it", "t2") is None
+    assert (
+        _say(gate, monkeypatch, lambda: telegram_group(monkeypatch, A_TG), "share it", "t3") is None
+    )
+    assert not space_writes.SPACE_WRITES.pending()[0].approved
+    assert _say(gate, monkeypatch, lambda: telegram_dm(monkeypatch, A_TG), "share it", "t4")
+    call = {"title": "reworded", "attendees": ["p1", "p2"]}
+    assert (
+        gate.on_pre_tool_call(tool_name="calendar_invite_create", args=call, session_id="s") is None
+    )
+    assert call["title"] == A_SECRET
+    # The handler's check now passes exactly once, for p1 in p1's chat.
+    assert space_writes.in_tool_gate("calendar_invite_create", mine, "shared") is None
+    assert space_writes.in_tool_gate("calendar_invite_create", mine, "shared") == (
+        space_writes.IN_TOOL_REFUSAL
+    )
+    # A write that stays in p1's own space never needs one.
+    assert space_writes.in_tool_gate("calendar_invite_create", mine, "person:p1") is None
+
+
+def test_a_release_for_p1_does_not_pass_a_handler_running_for_p2(gate, monkeypatch):
+    from shared.turn_principal import Principal
+
+    space_writes.note_release("calendar_invite_create", Principal("telegram", A_TG, A_TG, "dm"))
+    telegram_dm(monkeypatch, B_TG)
+    theirs = space.Space(kind="person", person_id="p2", source=space.SOURCE_TELEGRAM_DM)
+    assert space_writes.in_tool_gate("calendar_invite_create", theirs, "shared") == (
+        space_writes.IN_TOOL_REFUSAL
+    )
 
 
 def test_shared_google_writes_are_held_and_reads_are_not(gate, monkeypatch):
