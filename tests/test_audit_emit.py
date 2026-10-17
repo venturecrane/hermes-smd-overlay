@@ -1162,6 +1162,51 @@ def test_on_post_tool_call_fires_both_rows_for_skill_manage_create(fake_ctx, mon
     assert "AGENT_SKILL_CREATED" in action_types
 
 
+@pytest.mark.parametrize(
+    ("result", "status", "error_type"),
+    [
+        # The trust gate refused it: the hook's own envelope says so.
+        ('{"error": "Refused: no authored ceiling"}', "blocked", "plugin_block"),
+        # The tool ran and failed.
+        ("{}", "error", "tool_error"),
+        # Only the result says so (no hook envelope).
+        ('{"success": false, "error": "skill exists"}', None, None),
+    ],
+)
+def test_a_create_that_did_not_happen_is_not_recorded_as_created(
+    fake_ctx, monkeypatch, result, status, error_type
+) -> None:
+    """A skill_manage create the trust gate BLOCKED used to land on the ledger
+    as AGENT_SKILL_CREATED (and trigger a body capture for a SKILL.md that was
+    never written). The call row still lands; the creation row does not."""
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+    monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
+    mod = load_plugin("hermes-smd-audit")
+    client = FakeD1Client()
+    mod._WRITER = mod.emit.AuditLogWriter(client)
+    mod._CUSTOMER_SLUG = "acme"
+    captured: list[str] = []
+    monkeypatch.setattr(
+        mod, "_maybe_capture_skill_body", lambda **kw: captured.append(kw["created_slug"])
+    )
+
+    mod.on_post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "create", "name": "intake-followup"},
+        result=result,
+        status=status,
+        error_type=error_type,
+        task_id="",
+        session_id="sess-1",
+        tool_call_id="trace-blocked",
+        duration_ms=3,
+    )
+    action_types = [r["action_type"] for r in client.rows()]
+    assert "TOOL_CALL_COMPLETED" in action_types
+    assert "AGENT_SKILL_CREATED" not in action_types
+    assert captured == []
+
+
 def test_on_post_tool_call_does_not_fire_agent_skill_created_for_other_tools(
     fake_ctx, monkeypatch
 ) -> None:

@@ -225,6 +225,42 @@ def test_not_a_bare_yes(text):
     assert reply_items.parse_reply_verdicts(text)["bare_yes"] is False
 
 
+@pytest.mark.parametrize(
+    ("text", "asked"),
+    [
+        ("Who is handling 3?", [3]),
+        ("Can you move 2 to Monday?", [2]),
+        ("can you reschedule 1", [1]),
+        ("what about 4", [4]),
+        ("is 2 done?", [2]),
+        ("1 and 3 are fine, but when is 2 due?", [2]),
+        ("Could you do all of them by Friday", [0]),
+    ],
+)
+def test_a_question_about_a_line_approves_nothing(text, asked):
+    v = reply_items.parse_reply_verdicts(text)
+    assert sorted(v["asked"]) == asked
+    assert _verdicts(text) == ([], [], False, False)
+    assert v["complete"] == set() and v["bare_yes"] is False
+    assert reply_items.parse_reply_items(text) == {"all": False, "numbers": []}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1 and 3 are fine", ([1, 3], [], False, False)),
+        ("approve 2", ([2], [], False, False)),
+        ("yes on 1. Thanks!", ([1], [], False, False)),
+        # A question with no line in it does not undo the answer beside it.
+        ("yes on 1, how was your weekend?", ([1], [], False, False)),
+        ("thank you, 2 is done", ([2], [], False, False)),
+    ],
+)
+def test_plain_approvals_still_approve(text, expected):
+    assert _verdicts(text) == expected
+    assert reply_items.parse_reply_verdicts(text)["asked"] == set()
+
+
 def test_the_wrapper_is_approve_or_all_minus_holds():
     assert reply_items.parse_reply_items("yes except 3") == {
         "all": True,
@@ -785,6 +821,12 @@ def test_a_failed_write_is_named_in_the_confirmation(tmp_path, rows):
         ("yes on 2, leave 2", "conflict", "both yes and leave it"),
         ("yes", "nothing_parsed", "Which ones should I go ahead with"),
         ("thanks", "nothing_parsed", "Which ones"),
+        # A question about a line is not a yes to it: approving would close or
+        # reassign a Smokeball task on a guess.
+        ("Who is handling 3?", "nothing_parsed", "a question about 3, not a yes"),
+        ("Can you move 2 to Monday?", "nothing_parsed", "a question about 2"),
+        ("1 is fine. Why is 2 on here?", "nothing_parsed", "a question about 2"),
+        ("Could you do all of them by Friday", "nothing_parsed", "a question, not a yes"),
     ],
 )
 def test_ambiguity_writes_nothing_and_asks(tmp_path, rows, text, status, phrase):

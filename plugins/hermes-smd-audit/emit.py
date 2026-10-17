@@ -1224,9 +1224,21 @@ def detect_skill_manage_creation(
     *,
     tool_name: str,
     args: dict | None,
+    result: Any = None,
+    status: Any = None,
+    error_type: Any = None,
 ) -> str | None:
     """Return the slug of the newly-created skill when ``skill_manage`` is
-    invoked with a creation action, else ``None``.
+    invoked with a creation action that did not fail, else ``None``.
+
+    A create the trust gate BLOCKED, or one the tool itself refused, created
+    nothing: recording ``AGENT_SKILL_CREATED`` for it puts a skill on the
+    ledger that never existed (and sends the body capture after a SKILL.md
+    that was never written). The call's own envelope decides, read POSITIVELY:
+    the hook's ``status`` ("error" | "blocked"), any ``error_type``, or a
+    result that ``_outcome_from_result`` does not score ``ok``. An
+    unrecognized result shape still counts as created, the same "never
+    fabricate a failure" rule the outcome column follows.
 
     The detector accepts several plausible argument shapes the Curator may
     use (``action: "create"`` with a ``slug`` or ``name`` field, plain
@@ -1245,6 +1257,12 @@ def detect_skill_manage_creation(
     # args carry a slug + a creation-shaped marker.
     candidate = args.get("slug") or args.get("name") or args.get("skill_slug")
     if not isinstance(candidate, str) or not candidate.strip():
+        return None
+    if isinstance(status, str) and status.strip().lower() in {"error", "blocked"}:
+        return None
+    if isinstance(error_type, str) and error_type.strip().lower() not in {"", "none", "null"}:
+        return None
+    if _outcome_from_result(result)[0] != "ok":
         return None
     return candidate.strip()
 

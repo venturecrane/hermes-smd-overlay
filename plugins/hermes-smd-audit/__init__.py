@@ -239,7 +239,13 @@ def on_post_tool_call(**kwargs: Any) -> None:
     # the mirror-don't-gate observation surface; the Curator's flow is not
     # intercepted.
     try:
-        created_slug = detect_skill_manage_creation(tool_name=tool_name, args=args)
+        created_slug = detect_skill_manage_creation(
+            tool_name=tool_name,
+            args=args,
+            result=kwargs.get("result"),
+            status=kwargs.get("status"),
+            error_type=kwargs.get("error_type"),
+        )
         if created_slug is not None:
             emit_agent_skill_created_event(
                 writer,

@@ -23,7 +23,13 @@ Release ordering rules:
 The pass re-resolves the authored policy every time, so authoring
 ``held_release.enabled`` (or widening a cap) takes effect without a restart —
 the same ADR 0044 read-fresh posture the send path follows. The thread starts
-unconditionally at register and no-ops while release is unauthored.
+unconditionally at register.
+
+Release OFF releases nothing, but the pass still runs its HOUSEKEEPING: rows
+past their TTL expire (audited ``REPLY_FAILED`` + paged, body nulled) and
+terminal rows past retention are purged. Before, a disabled release returned
+at once, so a row enqueued while release was on and then switched off was
+stranded forever: never expired, never reported, its body kept on the volume.
 """
 
 from __future__ import annotations
@@ -84,12 +90,10 @@ def run_sweep_once(
     Absent, a released row simply carries no authored digest -- it is never
     written empty or guessed at.
     """
-    if not policy.held_release_enabled:
-        return SweepResult()
-
     now = time.time() if now is None else now
     released = expired = skipped = failed = 0
     blocked: set[str] = set()
+    releasing = policy.held_release_enabled
 
     for row in store.iter_held():
         # Who the reply is DELIVERED to: the stored ``reply_to`` for a device
@@ -126,7 +130,8 @@ def run_sweep_once(
                 expired += 1
             continue
 
-        if recipient in blocked:
+        if not releasing or recipient in blocked:
+            # Release off: the row waits for its TTL, never for a send.
             skipped += 1
             continue
 
@@ -187,7 +192,17 @@ def run_sweep_once(
         request_index.record_reply_opening(row.message_id, row.send_text)
         released += 1
 
+    _purge(store)
     return SweepResult(released=released, expired=expired, skipped=skipped, failed=failed)
+
+
+def _purge(store: held_store_mod.HeldReplyStore) -> None:
+    """Drop terminal rows past retention. Never raises: housekeeping is not a
+    reason to stop releasing."""
+    try:
+        store.purge_terminal()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("held-reply sweeper: purge of terminal rows failed (%s)", exc)
 
 
 def _device_metadata(row: held_store_mod.HeldReply) -> dict[str, Any]:

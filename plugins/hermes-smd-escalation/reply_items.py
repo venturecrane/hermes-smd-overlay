@@ -221,6 +221,32 @@ _SIGNOFF = re.compile(
 )
 # A clause ends at punctuation, but a period inside a number ("1.5") does not.
 _CLAUSE = re.compile(r"(?:[,;!?\n]|\.(?!\d))+")
+# A clause that ASKS rather than answers: "Who is handling 3?", "Can you move 2
+# to Monday?". A number in it is the subject of a question or a request for a
+# different act, never a yes. Read as a question when the clause ends in "?",
+# opens with an interrogative, carries a verb asking for some other change, or
+# says "can/could/would/will you".
+_INTERROGATIVES = frozenset(
+    {"who", "whom", "whose", "what", "when", "where", "why", "how", "which"}
+)
+_REQUEST_VERBS = frozenset(
+    {
+        "move",
+        "reschedule",
+        "postpone",
+        "delay",
+        "push",
+        "shift",
+        "change",
+        "reassign",
+        "assign",
+        "switch",
+        "swap",
+        "extend",
+        "update",
+    }
+)
+_ASKING_AUX = frozenset({"can", "could", "would", "will"})
 _WORD = re.compile(r"[a-z']+|\d+")
 # A list's own item line, quoted or not: the digest's ("1. matter 2026-PI-101,
 # ...") and the casework list's ("1. 2026-PI-104: ...").
@@ -239,6 +265,7 @@ def _own_words(text: str) -> str:
 
 def _no_verdicts() -> dict[str, Any]:
     return {
+        "asked": set(),
         "approve": set(),
         "hold": set(),
         "all": False,
@@ -249,6 +276,48 @@ def _no_verdicts() -> dict[str, Any]:
         "all_complete": False,
         "bare_complete": False,
     }
+
+
+def _asking(clause: str, ends_in_question: bool) -> bool:
+    """Whether one clause is a question or a request for some other act."""
+    tokens = _WORD.findall(clause)
+    if not tokens:
+        return False
+    if ends_in_question or tokens[0] in _INTERROGATIVES:
+        return True
+    if any(t in _REQUEST_VERBS for t in tokens):
+        return True
+    return any(a in _ASKING_AUX and b == "you" for a, b in zip(tokens, tokens[1:], strict=False))
+
+
+def _selects_all(text: str) -> bool:
+    """Whether ``text`` says "all" as a selector, not a greeting or a closing."""
+    for match in _ALL.finditer(text):
+        before = _WORD.findall(text[: match.start()])[-1:]
+        if before and before[0] in _ALL_GREETERS | _HOLD_WORDS:
+            continue
+        return True
+    return False
+
+
+def _asked_about(words: str) -> set[int]:
+    """The numbers a reply asks ABOUT, with 0 standing in for "all of them".
+
+    Empty when no clause that names a number (or "all") is a question or a
+    request. Non-empty means the reply is not an answer the caller may act on.
+    """
+    asked: set[int] = set()
+    parts = re.split(f"({_CLAUSE.pattern})", words)
+    for index in range(0, len(parts), 2):
+        clause = parts[index]
+        separator = parts[index + 1] if index + 1 < len(parts) else ""
+        numbers = {int(m.group(1)) for m in _NUMBER.finditer(clause)}
+        selects_all = _selects_all(clause)
+        if not (numbers or selects_all):
+            continue
+        if _asking(clause, "?" in separator):
+            asked |= numbers or {0}
+    return asked
 
 
 def _future(token: str) -> bool:
@@ -288,6 +357,12 @@ def parse_reply_verdicts(text: object) -> dict[str, Any]:
     caller writes nothing and asks. ``bare_yes`` is a reply that says yes and
     names nothing, which only a one-line list can resolve.
 
+    A reply that ASKS about a number ("Who is handling 3?", "Can you move 2 to
+    Monday?") reads as nothing at all, with the asked numbers under ``asked``:
+    on the casework path an approval closes or reassigns a Smokeball task, so a
+    question about a line must never be taken as yes to it. The caller's empty
+    reading routes to the ask path, which costs one email.
+
     A line shaped like the list's own item line means the quoted list leaked
     into the text (a quote marker the provider or :mod:`shared.reply_text` did
     not recognize). Then the reader's words cannot be told from the list, and
@@ -300,6 +375,11 @@ def parse_reply_verdicts(text: object) -> dict[str, Any]:
         words = words.replace(phrase, word)
     if _DIGEST_ITEM_LINE.search(words):
         return _no_verdicts()
+    asked = _asked_about(words)
+    if asked:
+        verdicts = _no_verdicts()
+        verdicts["asked"] = asked
+        return verdicts
     approve: set[int] = set()
     hold: set[int] = set()
     complete: set[int] = set()
@@ -329,12 +409,7 @@ def parse_reply_verdicts(text: object) -> dict[str, Any]:
         uncertain |= unsure_here
         said_done = said_done or said
         clean_done = clean_done or (said and not unsure_here and not done_here) or bool(done_here)
-    select_all = False
-    for match in _ALL.finditer(words):
-        before = _WORD.findall(words[: match.start()])[-1:]
-        if before and before[0] in _ALL_GREETERS | _HOLD_WORDS:
-            continue
-        select_all = True
+    select_all = _selects_all(words)
     if saw_except and saw_yes and hold and not approve:
         # "yes except 3": yes to every line but the named exception.
         select_all = True
@@ -343,6 +418,7 @@ def parse_reply_verdicts(text: object) -> dict[str, Any]:
     # uncertain: the person said two things about it, so ask.
     complete -= uncertain
     return {
+        "asked": set(),
         "approve": approve,
         "hold": hold,
         "all": select_all,
