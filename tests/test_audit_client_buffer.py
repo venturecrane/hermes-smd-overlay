@@ -12,6 +12,7 @@ write raised and counted.
 """
 
 import json
+import math
 import os
 import socket
 import tempfile
@@ -134,8 +135,44 @@ def _params(n: int, metadata: str | None = '{"k":"v"}') -> tuple:
     return tuple(vals[c] for c in COLUMNS)
 
 
-def _gap(home: Path, **kw) -> _GapBuffer:
-    kw.setdefault("sleep", lambda s: time.sleep(0.02))
+#: Set when the current test ends. Replaced per test by the fixture below.
+_test_over = threading.Event()
+
+
+@pytest.fixture(autouse=True)
+def no_retrier_outlives_its_test(machine_home):
+    """End every retry thread a test started before that test's env is undone.
+
+    The retrier is a daemon thread that lives until its queue drains or its
+    deadline (120s) passes, and the tally it writes on giving up (and the one
+    ``AuditWriteError`` writes on an ambiguous send) goes to ``$HERMES_HOME``
+    as it is AT THAT MOMENT. A thread left running by one test therefore
+    counted its loss into whichever later test was running: the silent-broker
+    test's retrier timed out ~0.5s after that test ended and landed a second
+    count in ``test_ambiguous_send_is_counted_not_resent`` (1 expected, 2 seen)
+    whenever the suite ran slowly enough. Here the test's own clock jumps past
+    every deadline and its sleeps wake, so each retrier gives up now, into this
+    test's home, and is joined; one still alive fails the test that leaked it.
+    """
+    global _test_over
+    over = _test_over = threading.Event()
+    before = set(threading.enumerate())
+    yield
+    over.set()
+    started = [
+        t for t in threading.enumerate() if t.name == "smd-audit-gap-retry" and t not in before
+    ]
+    for t in started:
+        t.join(timeout=5)
+    assert not [t for t in started if t.is_alive()], "a gap retrier outlived its test"
+
+
+def _gap(home: Path, *, pause: float = 0.02, **kw) -> _GapBuffer:
+    """A buffer whose retry sleeps last ``pause`` seconds, cut short (and its
+    deadline reached) when the test ends."""
+    over = _test_over
+    kw.setdefault("sleep", lambda s: over.wait(pause))
+    kw.setdefault("clock", lambda: math.inf if over.is_set() else time.monotonic())
     return _GapBuffer(hermes_home=str(home), **kw)
 
 
@@ -207,6 +244,15 @@ def test_a_silent_broker_never_stalls_a_hook(machine_home, broker, as_gateway):
     assert time.monotonic() - started < 0.1
 
 
+def test_an_earlier_tests_retrier_counts_nothing_here(machine_home, broker, as_gateway):
+    """Runs right after the silent-broker test on purpose (file order). That
+    test leaves its retrier inside a 0.5s recv; unjoined, its ambiguous send is
+    tallied into THIS test's home. This is the order that flaked
+    ``test_ambiguous_send_is_counted_not_resent``; here it fails every time."""
+    time.sleep(0.8)
+    assert _tally(machine_home) == 0
+
+
 def test_not_the_gateway_still_fails_and_counts(machine_home, broker, monkeypatch):
     monkeypatch.setenv("SMD_GATEWAY_PID", str(os.getpid() + 1))
     gap = _gap(machine_home)
@@ -239,7 +285,7 @@ def test_default_client_is_unchanged_fail_closed(machine_home, broker, as_gatewa
 
 
 def test_missing_socket_file_is_also_held(machine_home, broker, as_gateway):
-    gap = _gap(machine_home, sleep=lambda s: time.sleep(10))
+    gap = _gap(machine_home, pause=10)
     c = _client(broker, gap)
     broker.stop()
     os.unlink(broker.path)
@@ -260,7 +306,7 @@ def test_socket_creation_failure_is_counted(machine_home, broker, as_gateway, mo
 
 
 def test_full_buffer_drops_the_new_row_and_counts_once(machine_home, broker, as_gateway):
-    gap = _gap(machine_home, max_rows=2, sleep=lambda s: time.sleep(10))
+    gap = _gap(machine_home, max_rows=2, pause=10)
     c = _client(broker, gap)
     broker.stop()
     for n in (1, 2, 3):
@@ -281,7 +327,7 @@ def test_gap_past_deadline_counts_what_was_held(machine_home, broker, as_gateway
 
 
 def test_exit_with_rows_pending_counts_them(machine_home, broker, as_gateway):
-    gap = _gap(machine_home, sleep=lambda s: time.sleep(10))
+    gap = _gap(machine_home, pause=10)
     c = _client(broker, gap)
     broker.stop()
     c.execute("INSERT", *_params(1))
@@ -294,7 +340,7 @@ def test_exit_with_rows_pending_counts_them(machine_home, broker, as_gateway):
 def test_rows_held_by_a_killed_gateway_are_counted_at_the_next_boot(
     machine_home, broker, as_gateway
 ):
-    gap = _gap(machine_home, sleep=lambda s: time.sleep(10))
+    gap = _gap(machine_home, pause=10)
     c = _client(broker, gap)
     broker.stop()
     c.execute("INSERT", *_params(1))
@@ -322,7 +368,7 @@ def test_ambiguous_send_is_counted_not_resent(machine_home, broker, as_gateway):
 
 
 def test_forked_child_drops_the_parents_rows_uncounted(machine_home, broker, as_gateway):
-    gap = _gap(machine_home, sleep=lambda s: time.sleep(10))
+    gap = _gap(machine_home, pause=10)
     c = _client(broker, gap)
     broker.stop()
     c.execute("INSERT", *_params(1))

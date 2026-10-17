@@ -41,6 +41,7 @@ from html.parser import HTMLParser
 from typing import Any
 
 from shared import reply_text as reply_text_mod
+from shared.same_origin_redirects import open_same_origin
 from shared.secrets import get_secret
 
 logger = logging.getLogger(__name__)
@@ -342,9 +343,11 @@ class MsGraphClient:
         self._token: str | None = None
         self._token_deadline = 0.0
         self._timeout = timeout
-        # Injectable for tests (defaults to urllib.request.urlopen). Same shape as
-        # the reply/confirm transports so the whole seam mocks identically.
-        self._open = opener or urllib.request.urlopen
+        # Injectable for tests. Same shape as urlopen (and the reply/confirm
+        # transports) so the whole seam mocks identically. The default holds
+        # every redirect to the request's own origin: urlopen would follow a 30x
+        # to any host and copy the Graph bearer onto it.
+        self._open = opener or open_same_origin
 
     # ---- url building -----------------------------------------------------
     def mail_url(self, suffix: str) -> str:

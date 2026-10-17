@@ -50,6 +50,7 @@ import urllib.request
 from typing import Any
 
 from shared import attachment_spool
+from shared.same_origin_redirects import open_same_origin
 from shared.secrets import get_secret
 from shared.send_anchor import envelope_fields
 from shared.workspace_broker import BrokerError, request
@@ -233,11 +234,22 @@ def _message_path(inbox_id: str, message_id: str, *parts: str) -> str:
     return "/" + "/".join(urllib.parse.quote(str(s), safe="") for s in segments)
 
 
+def _open_api(req: urllib.request.Request, *, timeout: float) -> Any:
+    """The authenticated API fetch: redirects held to the API's own origin.
+
+    ``urlopen`` follows a 30x to any host and copies ``Authorization`` onto the
+    new request, so a redirect off ``API_BASE`` would carry the read key to a
+    host nobody chose. Off-origin hops are refused before anything is sent."""
+    return open_same_origin(req, timeout=timeout)
+
+
 def _get(path: str, *, accept: str) -> tuple[bytes, str]:
     """One authenticated GET. Returns ``(body, content_type)``.
 
     Reads at most ``MAX_SPOOL_BYTES + 1`` bytes so an oversized attachment is
     refused by the caller without the whole thing landing in memory first.
+    A redirect is followed only within the API's origin (``_open_api``), so the
+    key never reaches another host.
     """
     req = urllib.request.Request(  # noqa: S310 - API_BASE is an https module literal; both ids are percent-encoded
         API_BASE + path,
@@ -245,8 +257,7 @@ def _get(path: str, *, accept: str) -> tuple[bytes, str]:
         headers={"Authorization": f"Bearer {_read_key()}", "Accept": accept},
     )
     try:
-        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
-        with urllib.request.urlopen(req, timeout=READ_TIMEOUT_SECONDS) as response:  # noqa: S310
+        with _open_api(req, timeout=READ_TIMEOUT_SECONDS) as response:
             body = response.read(attachment_spool.MAX_SPOOL_BYTES + 1)
             ctype = str(response.headers.get("Content-Type") or "")
     except urllib.error.HTTPError as exc:
