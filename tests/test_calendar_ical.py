@@ -225,7 +225,16 @@ def test_a_received_invitation_parses_to_plain_fields() -> None:
     assert got.attendees == ["couples-demo@agentmail.to"]
 
 
-def test_a_reply_or_publish_is_not_kept() -> None:
-    for method in ("REPLY", "PUBLISH", ""):
+def test_a_publish_or_methodless_calendar_is_not_read() -> None:
+    for method in ("PUBLISH", "COUNTER", ""):
         text = f"BEGIN:VCALENDAR\r\nMETHOD:{method}\r\nBEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
         assert ical.parse_invitation(text) == []
+
+
+def test_a_reply_carries_each_attendees_partstat() -> None:
+    text = (
+        "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:u-1\r\n"
+        'ATTENDEE;CN="Ana";PARTSTAT=declined:mailto:Ana@Example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n'
+    )
+    (got,) = ical.parse_invitation(text)
+    assert got.method == "REPLY" and got.partstats == {"ana@example.com": "DECLINED"}

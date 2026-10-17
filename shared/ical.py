@@ -43,7 +43,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 PRODID = "-//SMD Services//Hosted Agent Calendar//EN"
 METHOD_REQUEST = "REQUEST"
 METHOD_CANCEL = "CANCEL"
+METHOD_REPLY = "REPLY"
+#: What this seat SENDS.
 METHODS = (METHOD_REQUEST, METHOD_CANCEL)
+#: What it reads when received: an attendee's response too.
+RECEIVED_METHODS = (METHOD_REQUEST, METHOD_CANCEL, METHOD_REPLY)
 _FOLD_OCTETS = 75
 UTC = dt.timezone.utc
 
@@ -461,6 +465,8 @@ class Received:
     all_day: bool
     organizer: str
     attendees: list[str] = field(default_factory=list)
+    #: Each ATTENDEE's PARTSTAT, by address (what a REPLY carries).
+    partstats: dict[str, str] = field(default_factory=dict)
     description: str = ""
     location: str = ""
     rrule: str = ""
@@ -572,12 +578,15 @@ def parse_invitation(text: str) -> list[Received]:
         elif name == "ORGANIZER":
             current.organizer = _mailto(value)
         elif name == "ATTENDEE":
-            current.attendees.append(_mailto(value))
+            address = _mailto(value)
+            current.attendees.append(address)
+            if params.get("PARTSTAT"):
+                current.partstats[address] = params["PARTSTAT"].strip().upper()
         elif name == "RRULE":
             current.rrule = value.strip()
         elif name == "STATUS":
             current.status = value.strip().upper()
-    if method not in METHODS:
+    if method not in RECEIVED_METHODS:
         return []
     for event in events:
         event.method = method
@@ -587,8 +596,10 @@ def parse_invitation(text: str) -> list[Received]:
 __all__ = [
     "METHODS",
     "METHOD_CANCEL",
+    "METHOD_REPLY",
     "METHOD_REQUEST",
     "MAX_REMINDER_MINUTES",
+    "RECEIVED_METHODS",
     "Attendee",
     "Event",
     "InvitationError",

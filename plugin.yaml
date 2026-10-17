@@ -12,13 +12,16 @@ plugins:
   - plugins/hermes-smd-trust
   - plugins/hermes-smd-voice
   - plugins/hermes-smd-memory-mirror
+  # calendar registers BEFORE webhook-router: its pre_gateway_dispatch marks a
+  # calendar response consumed (shared/calendar_inbox.py) so the router, which
+  # Hermes runs on the same email regardless of the skip, leaves it alone.
+  - plugins/hermes-smd-calendar
   - plugins/hermes-smd-webhook-router
   - plugins/hermes-smd-inbound
   - plugins/hermes-smd-hook-probe
   - plugins/hermes-smd-workspace
   - plugins/hermes-smd-mail-attachments
   - plugins/hermes-smd-record-store
-  - plugins/hermes-smd-calendar
   - plugins/hermes-smd-voice-notes
   - plugins/hermes-smd-reply
   # initiation MUST register before peer-memory: both resolve the turn's
