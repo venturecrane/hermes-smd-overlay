@@ -1218,6 +1218,43 @@ def _skill_settings_block(raw: Any) -> dict[str, Any]:
 _REFUSED_CODE_EXECUTION_TOOLSETS = ("terminal", "code_execution", "delegation")
 
 
+#: The role whose persona drops every tool a private fact could leave by
+#: (ADR 0090 R2), and the toolsets it drops.
+_COUPLES_ROLE = "couples"
+_COUPLES_REFUSED_TOOLSETS = (*_REFUSED_CODE_EXECUTION_TOOLSETS, "file")
+
+
+def _space_mode(customer: dict[str, Any]) -> bool:
+    """True iff the seat authors ``people:`` (ADR 0091 space mode). Same rule as
+    ``shared.space.parse_space_config``: a present, non-null key."""
+    return customer.get("people") is not None
+
+
+def _seat_role(customer: dict[str, Any]) -> str:
+    seat = customer.get("seat")
+    role = seat.get("role") if isinstance(seat, dict) else None
+    return role.strip() if isinstance(role, str) else ""
+
+
+def _memory_block(customer: dict[str, Any]) -> dict[str, Any]:
+    """The profile's ``memory`` block: the authored mapping, verbatim.
+
+    On a space-mode seat the two native memory stores are forced OFF whatever
+    was authored (the ss-console validator requires ``false`` there; this is the
+    runtime half and does not trust that it ran). Hermes reads these flags from
+    ``config.memory`` (``hermes_cli/config_defaults.py`` memory block); with both
+    off, ``agent_init`` builds no MemoryStore and ``system_prompt._memory_parts``
+    injects no MEMORY.md / USER.md. A seat without ``people:`` is byte-identical.
+    """
+    authored = customer.get("memory") or {}
+    if not _space_mode(customer):
+        return authored
+    block = dict(authored) if isinstance(authored, dict) else {}
+    block["memory_enabled"] = False
+    block["user_profile_enabled"] = False
+    return block
+
+
 def _entitlements_block(raw: Any) -> dict[str, Any]:
     """Build the per-profile ``entitlements`` block (ADR 0056).
 
@@ -1288,7 +1325,7 @@ def _persona_config(
         "scope": customer.get("scope") or {},
         "escalation": customer.get("escalation") or {},
         "voice_library": customer.get("voice_library") or {},
-        "memory": customer.get("memory") or {},
+        "memory": _memory_block(customer),
         # No memory-provider block: Phase 1 runs on Hermes' always-on
         # flat-file core (MEMORY.md / USER.md). Honcho (inferred memory)
         # is deferred to Phase 2 — see the module docstring and ADR 0016.
@@ -1418,6 +1455,21 @@ def _persona_config(
     exposure = _entitlements_block(persona.get("entitlements"))["exposure"]
     if exposure.get("code_execution") != "autonomous":
         disabled_toolsets.extend(_REFUSED_CODE_EXECUTION_TOOLSETS)
+    # A seat several people share (ADR 0091, ss-console #3264): Hermes' native
+    # memory is one MEMORY.md/USER.md per profile, blind to who is speaking, so
+    # what one partner says in their DM would be injected into the other's turn.
+    # The flags in _memory_block stop the injection; the toolset comes off too so
+    # the model is never offered a memory tool that writes into the one file.
+    # Space-keyed memory (hermes-smd-peer-memory) replaces it.
+    if _space_mode(customer):
+        disabled_toolsets.append("memory")
+    # The couples role has no shell, no code, no subagent and no file tools
+    # (ADR 0090 R2): a private fact can then reach only the space-fenced tools,
+    # never a path, a command or a child agent that no fence sees.
+    if _seat_role(customer) == _COUPLES_ROLE:
+        for toolset in _COUPLES_REFUSED_TOOLSETS:
+            if toolset not in disabled_toolsets:
+                disabled_toolsets.append(toolset)
     # `max_turns` pins the v0.18 (v2026.7.1) per-turn tool-iteration budget of
     # 90. Hermes v0.20 raised the default to 500 (config_defaults.py:46 @
     # v2026.8.18; bridged into HERMES_MAX_ITERATIONS by gateway/run.py:1979-2022).
