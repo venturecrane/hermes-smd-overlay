@@ -471,6 +471,8 @@ class Received:
     location: str = ""
     rrule: str = ""
     status: str = ""
+    #: A REPLY's COMMENT: the note a person typed with their answer.
+    comment: str = ""
 
 
 def _unfold(text: str) -> list[str]:
@@ -584,6 +586,8 @@ def parse_invitation(text: str) -> list[Received]:
                 current.partstats[address] = params["PARTSTAT"].strip().upper()
         elif name == "RRULE":
             current.rrule = value.strip()
+        elif name == "COMMENT":
+            current.comment = unescape_text(value)
         elif name == "STATUS":
             current.status = value.strip().upper()
     if method not in RECEIVED_METHODS:

@@ -141,10 +141,15 @@ class Outcome:
 
     replies: list[str] = field(default_factory=list)
     others: list[str] = field(default_factory=list)
+    #: A person wrote a note with their answer (a REPLY's COMMENT). The answer
+    #: is still recorded, but the email reaches its turn: a note is a message.
+    noted: bool = False
 
     @property
     def response_only(self) -> bool:
-        return bool(self.replies) and not self.others
+        """True only for an email that is nothing but calendar answers: every
+        calendar part a REPLY, at least one, and no note written with any."""
+        return bool(self.replies) and not self.others and not self.noted
 
 
 def _payload(kwargs: dict[str, Any]) -> Any:
@@ -181,6 +186,7 @@ def process(payload: Any, seat: seat_mod.Seat) -> tuple[str, Outcome] | None:
         for received in ical.parse_invitation(text):
             if received.method == ical.METHOD_REPLY:
                 outcome.replies.append(record_reply(received, sender=sender, seat=seat))
+                outcome.noted = outcome.noted or bool(received.comment.strip())
             elif target is None:
                 outcome.others.append("skipped: not from one of the seat's people")
             else:
