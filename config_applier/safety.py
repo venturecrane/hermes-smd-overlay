@@ -326,6 +326,16 @@ _NEVER_LIVE_WRITABLE_PREFIXES: tuple[str, ...] = (
     # APPLIED for persona-scoped paths FIRST, and that is a live rewrite of a
     # running agent's profile — its own change, with its own blast-radius review.
     "personas.*.tone",
+    # Privacy by space (ADR 0090/0091, ss-console #3264). All three are read by
+    # translate at BOOT to decide whether native memory and the shell, code,
+    # subagent and file toolsets are on: authoring a person or the couples role
+    # live would leave a running seat with the old tool surface while the yaml
+    # claims the new posture — the `tone` failure above, with privacy at stake.
+    # `seat.role` is carved out of the live-writable `seat` prefix here; the
+    # never-list is checked first.
+    "seat.role",
+    "people",
+    "spaces",
 )
 
 
