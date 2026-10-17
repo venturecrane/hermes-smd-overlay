@@ -16,10 +16,13 @@ is confirmed on the Machine.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
+import types
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -137,46 +140,164 @@ def build_hermes_agent(*, model: str, session_id: str, max_iterations: int, sess
     )
 
 
-def hermes_segment_cost(agent: Any) -> int:
-    """Real provider-reported cost of the just-run segment, in cents, from the
-    agent's accumulated ``session_*_tokens`` (V2). Best-effort: a cost-read
-    failure must not crash the job — it returns 0 and logs, so the budget guard
-    is conservative rather than fatal.
+# Conservative per-million-token USD rates used when NEITHER Hermes nor the
+# overlay's own price table (shared/anthropic_pricing.json) can price a segment
+# (unknown model, an unrecognized return shape, or a pricing call that raised).
+# These are the HIGHEST Anthropic list rates
+# the fleet has run (Opus-class: $15 in / $75 out / $1.50 cache read / $18.75
+# cache write), so an unpriceable segment is OVER-charged to the budget guard and
+# the cost breaker rather than recorded free. Recording 0 was the defect: every
+# job segment went uncharged and the breaker never saw job spend.
+_FALLBACK_USD_PER_MTOK_INPUT = 15.0
+_FALLBACK_USD_PER_MTOK_OUTPUT = 75.0
+_FALLBACK_USD_PER_MTOK_CACHE_READ = 1.5
+_FALLBACK_USD_PER_MTOK_CACHE_WRITE = 18.75
 
-    STAGING: confirm estimate_usage_cost's exact signature against the Machine.
+
+def _fallback_segment_cents(in_tok: int, out_tok: int, cache_r: int, cache_w: int) -> int:
+    dollars = (
+        in_tok * _FALLBACK_USD_PER_MTOK_INPUT
+        + out_tok * _FALLBACK_USD_PER_MTOK_OUTPUT
+        + cache_r * _FALLBACK_USD_PER_MTOK_CACHE_READ
+        + cache_w * _FALLBACK_USD_PER_MTOK_CACHE_WRITE
+    ) / 1_000_000
+    return max(0, math.ceil(dollars * 100))
+
+
+def _overlay_table_cents(
+    model: str, in_tok: int, out_tok: int, cache_r: int, cache_w: int
+) -> int | None:
+    """Price the segment from the overlay's own Anthropic table, or None when the
+    model is not in it.
+
+    Hermes' bundled price table lags new models (the pinned v2026.9.14 does not
+    price claude-sonnet-5-5, the A&P main model since 2026-10-13), and
+    ``shared/anthropic_pricing.json`` is the table SMD keeps current for exactly
+    that reason. It carries input/output rates only, so cache buckets use
+    Anthropic's multipliers on the input rate: reads at 0.1x, writes at 2x (the
+    1-hour TTL, the dearer of the two, so the estimate errs high).
     """
     try:
-        from agent.usage_pricing import (
-            estimate_usage_cost,
-            normalize_usage,  # noqa: F401  (presence check)
-        )
+        from shared.interactive_cost_meter import _PRICING
 
-        in_tok = int(getattr(agent, "session_input_tokens", 0) or 0)
-        out_tok = int(getattr(agent, "session_output_tokens", 0) or 0)
-        cache_r = int(getattr(agent, "session_cache_read_tokens", 0) or 0)
-        cache_w = int(getattr(agent, "session_cache_write_tokens", 0) or 0)
-        model = getattr(agent, "model", "") or ""
+        rates = _PRICING.get(model or "")
+        if not rates:
+            return None
+        in_rate = float(rates["input_per_million_cents"])
+        out_rate = float(rates["output_per_million_cents"])
+    except Exception:  # noqa: BLE001 -- an unreadable table falls to the fallback
+        return None
+    cents = (
+        in_tok * in_rate + out_tok * out_rate + cache_r * in_rate * 0.1 + cache_w * in_rate * 2
+    ) / 1_000_000
+    return max(0, math.ceil(cents))
+
+
+def _cost_dollars(cost: Any) -> float | None:
+    """Dollar amount from whatever ``estimate_usage_cost`` returned, or None when
+    the shape carries no usable figure.
+
+    The pinned Hermes (v2026.9.14, agent/usage_pricing.py ``CostResult``) returns
+    a frozen dataclass whose ``amount_usd`` is a ``Decimal`` -- or ``None`` when
+    the route is unpriced (status ``"unknown"``). A dict (``{"total": ...}``) and
+    a bare number are accepted for older/other shapes. Anything else is None, and
+    the caller charges the conservative fallback instead of 0.
+    """
+    if cost is None or isinstance(cost, bool):
+        return None
+    if hasattr(cost, "amount_usd"):
+        amount = cost.amount_usd
+    elif isinstance(cost, dict):
+        amount = cost.get("amount_usd", cost.get("total"))
+    elif isinstance(cost, int | float | Decimal):
+        amount = cost
+    else:
+        return None
+    if amount is None or isinstance(amount, bool):
+        return None
+    try:
+        dollars = float(amount)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(dollars) or math.isinf(dollars) or dollars < 0:
+        return None
+    return dollars
+
+
+def hermes_segment_cost(agent: Any) -> int:
+    """Provider-priced cost of the just-run segment, in cents, from the agent's
+    accumulated ``session_*_tokens`` (V2).
+
+    Fails CLOSED: when Hermes cannot price the segment (unknown model, an
+    unrecognized return shape, or the pricing call raising) the overlay's own
+    price table is tried, then the conservative fallback rates above -- never 0, so the budget
+    guard and cost breaker still see the spend. It never raises into the job.
+    """
+    in_tok = _int_attr(agent, "session_input_tokens")
+    out_tok = _int_attr(agent, "session_output_tokens")
+    cache_r = _int_attr(agent, "session_cache_read_tokens")
+    cache_w = _int_attr(agent, "session_cache_write_tokens")
+    model = getattr(agent, "model", "") or ""
+    try:
+        from agent.usage_pricing import estimate_usage_cost
+
+        try:
+            from agent.usage_pricing import CanonicalUsage
+
+            usage: Any = CanonicalUsage(
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                cache_read_tokens=cache_r,
+                cache_write_tokens=cache_w,
+            )
+        except ImportError:
+            usage = types.SimpleNamespace(
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                cache_read_tokens=cache_r,
+                cache_write_tokens=cache_w,
+                reasoning_tokens=0,
+                request_count=1,
+                prompt_tokens=in_tok + cache_r + cache_w,
+                total_tokens=in_tok + cache_r + cache_w + out_tok,
+            )
         cost = estimate_usage_cost(
             model,
-            type(
-                "U",
-                (),
-                {
-                    "input_tokens": in_tok,
-                    "output_tokens": out_tok,
-                    "cache_read_tokens": cache_r,
-                    "cache_write_tokens": cache_w,
-                    "reasoning_tokens": 0,
-                    "prompt_tokens": in_tok,
-                    "total_tokens": in_tok + out_tok,
-                },
-            )(),
+            usage,
+            provider=getattr(agent, "provider", None) or None,
+            base_url=getattr(agent, "base_url", None) or None,
         )
-        # estimate_usage_cost returns a dollar figure or a dict; coerce to cents.
-        dollars = cost.get("total") if isinstance(cost, dict) else float(cost)
-        return max(0, round(float(dollars) * 100))
+        dollars = _cost_dollars(cost)
+        if dollars is not None:
+            return max(0, round(dollars * 100))
+        reason = f"unpriced result {cost!r}"
     except Exception as exc:  # never crash the job on a cost-read miss
-        logger.warning("hermes_segment_cost: could not read usage cost (%s); recording 0", exc)
+        reason = f"pricing raised {exc!r}"
+    table_cents = _overlay_table_cents(model, in_tok, out_tok, cache_r, cache_w)
+    if table_cents is not None:
+        logger.info(
+            "hermes_segment_cost: Hermes could not price model %r (%s); charged %d cents "
+            "from shared/anthropic_pricing.json",
+            model,
+            reason,
+            table_cents,
+        )
+        return table_cents
+    cents = _fallback_segment_cents(in_tok, out_tok, cache_r, cache_w)
+    logger.warning(
+        "hermes_segment_cost: could not price model %r (%s); charging conservative "
+        "estimate %d cents",
+        model,
+        reason,
+        cents,
+    )
+    return cents
+
+
+def _int_attr(obj: Any, name: str) -> int:
+    try:
+        return max(0, int(getattr(obj, name, 0) or 0))
+    except (TypeError, ValueError):
         return 0
 
 

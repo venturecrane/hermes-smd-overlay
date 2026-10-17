@@ -294,8 +294,12 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "mcp_agentmail_forward_message": ActionClass.EXTERNAL_SEND,
     "mcp_agentmail_create_draft": ActionClass.INTERNAL_WRITE,
     "mcp_agentmail_update_draft": ActionClass.INTERNAL_WRITE,
-    "mcp_agentmail_create_inbox": ActionClass.INTERNAL_WRITE,
-    "mcp_agentmail_update_inbox": ActionClass.INTERNAL_WRITE,
+    # Inbox provisioning / inbox settings: account config, not drafting. Both are
+    # off the menu (bootstrap/mcp_registry.py agentmail blocked_tools); COMMITMENT
+    # keeps them taint-gated if they ever come back (overlay review OS-2, the same
+    # reason create_webhook_subscription is COMMITMENT).
+    "mcp_agentmail_create_inbox": ActionClass.COMMITMENT,
+    "mcp_agentmail_update_inbox": ActionClass.COMMITMENT,
     "mcp_agentmail_update_thread": ActionClass.INTERNAL_WRITE,
     "mcp_agentmail_update_message": ActionClass.INTERNAL_WRITE,
     "mcp_agentmail_delete_draft": ActionClass.INTERNAL_WRITE,
@@ -677,7 +681,23 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     # like add_file, and identifier-scanned through its `sheets` cells.
     "mcp_smokeball_add_workbook": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_get_upload_url": ActionClass.INTERNAL_WRITE,
-    "mcp_smokeball_create_webhook_subscription": ActionClass.INTERNAL_WRITE,
+    # COMMITMENT, not INTERNAL_WRITE (overlay review OS-2, 2026-10-17). A webhook
+    # subscription is a PERSISTENT registration that makes Smokeball push firm
+    # matter events to a caller-supplied URL from then on. That is provisioning
+    # config, not the agent's own work product, and no routine needs it at
+    # runtime. As INTERNAL_WRITE it was outside the taint gate
+    # (_TAINT_GATED_CLASSES in plugins/hermes-smd-trust/enforce.py) and allowed
+    # at A&P's authored `internal_write: draft_for_review`, so an injected inbound
+    # email could have the seat register a standing feed of client data to an
+    # attacker's endpoint. It is now OFF THE MENU (bootstrap/mcp_registry.py
+    # smokeball blocked_tools); this class is the second wall if it ever comes
+    # back: taint-gated and never autonomous. Not BANNED because ss-console's
+    # boot classification probe resolves every manifest-declared tool through
+    # classify_tool(), and a banned name raises there. COORDINATED CHANGE: the
+    # connector manifest (ss-console operator/connectors/smokeball/manifest.toml)
+    # must declare create_webhook_subscription = "commitment" in the same change
+    # as the OVERLAY_REF bump, or the seat's boot probe fails on the drift.
+    "mcp_smokeball_create_webhook_subscription": ActionClass.COMMITMENT,
     "mcp_smokeball_create_event": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_update_event": ActionClass.INTERNAL_WRITE,
     "mcp_smokeball_create_event_reminder": ActionClass.INTERNAL_WRITE,

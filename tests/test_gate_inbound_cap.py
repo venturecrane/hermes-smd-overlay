@@ -149,6 +149,31 @@ def test_gate_sticky_stop_clear_core(tmp_path, monkeypatch):
     assert body["cleared"][0]["prior_level"] == "HARD_STOP"
 
 
+def test_gate_sticky_stop_clear_says_the_days_spend_is_kept(tmp_path, monkeypatch):
+    """J4 (overlay review 2026-10-17): clear() keeps cost_cents_today, so a
+    cleared cost trip re-trips on the next charge until the UTC day rolls. The
+    behaviour is deliberate and unchanged; the endpoint must SAY it."""
+    import webhook_gate as gate
+    from shared.cost_breaker import build_breaker, read_level
+
+    db = str(tmp_path / "sticky_stop.db")
+    monkeypatch.setenv("SMD_STICKY_STOP_DB_PATH", db)
+    monkeypatch.setenv("SMD_CUSTOMER_SLUG", "acme")
+
+    class _Client:
+        def execute(self, sql, *params):
+            pass
+
+    b = build_breaker(customer="acme", persona="_machine", audit_client=_Client(), path=db)
+    b.record_cost_cents(10_000)
+    status, body = gate._sticky_stop_clear({"captain_id": "captain-scott", "reason": "probe"})
+    assert status == 200 and body["level"] == "OK"
+    assert "00:00 UTC" in body["cost_note"]
+    # The note is true: one more charged cent puts the Machine back at HARD_STOP.
+    b.record_cost_cents(1)
+    assert read_level(db) == "HARD_STOP"
+
+
 # ---------------------------------------------------------------------------
 # Gate pause endpoint core (ss#2003 — the portal kill switch's Machine leg).
 # Mirror of the clear-core test above: auth glue is the handler; this
