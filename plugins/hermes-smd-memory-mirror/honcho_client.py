@@ -39,6 +39,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from shared.same_origin_redirects import open_same_origin
+
 logger = logging.getLogger(__name__)
 
 
@@ -207,7 +209,9 @@ class HonchoClient:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            # Redirects stay on the sidecar's origin: urlopen would follow a 30x
+            # to any host and copy the bearer onto it.
+            with open_same_origin(req, timeout=self._timeout) as resp:
                 raw = resp.read()
                 if not raw:
                     return {}

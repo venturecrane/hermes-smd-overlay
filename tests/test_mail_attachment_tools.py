@@ -26,6 +26,7 @@ import pytest
 from shared import agentmail_broker as broker
 from shared import attachment_spool as spool
 from shared import email_adapter, msgraph_attachments
+from shared import same_origin_redirects as same_origin
 from tests.conftest import load_plugin
 
 MESSAGE = {
@@ -53,6 +54,7 @@ PDF = b"%PDF-1.7 vendor invoice body"
 # Captured before the autouse fixture below swaps it, for the one test that
 # drives _download through the real opener.
 _REAL_OPEN_DOWNLOAD = broker._open_download
+_REAL_OPEN_API = broker._open_api
 
 SEAT_INBOX = "pilot@seat.example"
 
@@ -84,14 +86,16 @@ class _Response(io.BytesIO):
 @pytest.fixture(autouse=True)
 def _download_through_patched_urlopen(monkeypatch: pytest.MonkeyPatch) -> None:
     """The tests below script every fetch by patching ``urlopen``. The download
-    path uses its own opener (allowlisted redirects); route it through whatever
-    ``urlopen`` is at call time so one scripted fake still serves both. The
-    opener itself is pinned by the redirect tests at the end of this file."""
-    monkeypatch.setattr(
-        broker,
-        "_open_download",
-        lambda req, *, timeout: broker.urllib.request.urlopen(req, timeout=timeout),
-    )
+    path and the authenticated API path each use their own opener (allowlisted
+    and same-origin redirects); route both through whatever ``urlopen`` is at
+    call time so one scripted fake still serves all. The openers themselves are
+    pinned by the redirect tests at the end of this file."""
+    for seam in ("_open_download", "_open_api"):
+        monkeypatch.setattr(
+            broker,
+            seam,
+            lambda req, *, timeout: broker.urllib.request.urlopen(req, timeout=timeout),
+        )
 
 
 @pytest.fixture
@@ -493,6 +497,72 @@ def test_a_refused_redirect_surfaces_as_a_read_error(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(broker, "_open_download", _REAL_OPEN_DOWNLOAD)
     with pytest.raises(broker.AgentMailReadError, match="HTTP 302"):
         broker._download(DOWNLOAD_URL)
+
+
+API_URL = broker.API_BASE + "/inboxes?limit=10"
+
+
+class _AuthRecordingHTTPS(_ScriptedHTTPS):
+    """Also records the Authorization header each hop carried."""
+
+    def __init__(self, script: dict[str, Any]) -> None:
+        super().__init__(script)
+        self.auth: list[str | None] = []
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        self.auth.append(req.get_header("Authorization"))
+        return super().https_open(req)
+
+
+def _api_opener_with(script: dict[str, Any]) -> tuple[Any, _AuthRecordingHTTPS]:
+    net = _AuthRecordingHTTPS(script)
+    return urllib.request.build_opener(same_origin.SameOriginRedirects, net), net
+
+
+def _route_api_through(opener: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(same_origin, "SAME_ORIGIN_OPENER", opener)
+    monkeypatch.setattr(broker, "_open_api", _REAL_OPEN_API)
+
+
+def test_the_api_opener_holds_redirects_to_the_origin() -> None:
+    """The authenticated GET must not use bare urlopen, whose redirect handler
+    follows a 30x anywhere and copies Authorization onto the new request."""
+    handlers = same_origin.SAME_ORIGIN_OPENER.handlers
+    redirect = [h for h in handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+    assert len(redirect) == 1 and isinstance(redirect[0], same_origin.SameOriginRedirects)
+
+
+def test_an_api_redirect_off_the_api_host_never_carries_the_key(
+    seat: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opener, net = _api_opener_with({API_URL: "https://evil.example/steal"})
+    _route_api_through(opener, monkeypatch)
+    with pytest.raises(broker.AgentMailReadError, match="HTTP 302"):
+        broker._get("/inboxes?limit=10", accept="application/json")
+    assert net.hops == [API_URL]  # the other host was never asked
+    assert net.auth == ["Bearer am_read_key"]
+
+
+def test_an_api_redirect_downgrading_to_http_is_refused(
+    seat: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opener, net = _api_opener_with({API_URL: "http://api.agentmail.to/v0/inboxes"})
+    _route_api_through(opener, monkeypatch)
+    with pytest.raises(broker.AgentMailReadError):
+        broker._get("/inboxes?limit=10", accept="application/json")
+    assert net.hops == [API_URL]
+
+
+def test_an_api_redirect_within_the_api_host_still_reads(
+    seat: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    moved = broker.API_BASE + "/inboxes?limit=10&page=1"
+    opener, net = _api_opener_with({API_URL: moved, moved: b'{"inboxes": []}'})
+    _route_api_through(opener, monkeypatch)
+    body, _ = broker._get("/inboxes?limit=10", accept="application/json")
+    assert body == b'{"inboxes": []}'
+    assert net.hops == [API_URL, moved]
+    assert net.auth == ["Bearer am_read_key", "Bearer am_read_key"]
 
 
 # ---------------------------------------------------------------------------
