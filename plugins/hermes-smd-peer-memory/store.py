@@ -154,6 +154,7 @@ def active_preferences(
     peer_id: str,
     persona_slug: str | None = None,
     limit: int = 50,
+    customer_slug: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return a peer's active (non-superseded) preferences, newest first.
 
@@ -161,21 +162,25 @@ def active_preferences(
     (the safe superset when the active persona is unknown); when set it filters
     to that persona. ``rowid DESC`` breaks ties on the second-granularity
     ``recorded_at`` so ordering is stable.
+
+    ``customer_slug``, when given, scopes the read to that customer's rows.
+    The table lives in a per-seat sqlite file on the seat's own volume
+    (``shared.d1_client``), so rows of another customer should never be
+    there; the scope makes that a property of the query, not of where the
+    file happens to live. Every write already stamps it.
     """
+    clauses = ["peer_id = ?", "superseded_by IS NULL"]
+    params: list[Any] = [peer_id]
+    if customer_slug:
+        clauses.insert(0, "customer_slug = ?")
+        params.insert(0, customer_slug)
     if persona_slug:
-        return client.query(
-            f"SELECT {_SELECT_COLS} FROM peer_preferences "
-            "WHERE peer_id = ? AND persona_slug = ? AND superseded_by IS NULL "
-            "ORDER BY recorded_at DESC, rowid DESC LIMIT ?",
-            peer_id,
-            persona_slug,
-            limit,
-        )
+        clauses.append("persona_slug = ?")
+        params.append(persona_slug)
     return client.query(
-        f"SELECT {_SELECT_COLS} FROM peer_preferences "
-        "WHERE peer_id = ? AND superseded_by IS NULL "
+        f"SELECT {_SELECT_COLS} FROM peer_preferences WHERE {' AND '.join(clauses)} "
         "ORDER BY recorded_at DESC, rowid DESC LIMIT ?",
-        peer_id,
+        *params,
         limit,
     )
 
@@ -262,6 +267,7 @@ def parse_remember_args(args: Any) -> tuple[str | None, str | None]:
 def space_rows(
     client: Any,
     *,
+    customer_slug: str,
     readable: frozenset[str] | set[str],
     speaker: str | None,
     persona_slug: str | None = None,
@@ -269,23 +275,28 @@ def space_rows(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """``(memories, preferences)`` a turn may see, newest first.
 
-    Only rows whose ``space`` is in ``readable`` are read; the SQL carries the
-    set, so a row outside it never leaves the database. Memories are the space's
-    (anyone in it may see them, whichever persona kept them); preferences are
-    additionally the speaker's own and, as on any seat, the active persona's.
-    An empty ``readable`` reads nothing and does not query.
+    Only this customer's rows whose ``space`` is in ``readable`` are read; the
+    SQL carries both, so a row outside them never leaves the database. Person
+    ids are seat-local slugs (``person:p1`` on every couples seat), so the
+    customer scope is what keeps one seat's p1 from ever being another's.
+    Memories are the space's (anyone in it may see them, whichever persona kept
+    them); preferences are additionally the speaker's own and, as on any seat,
+    the active persona's. An empty ``readable`` or a missing ``customer_slug``
+    reads nothing and does not query.
     """
     keys = sorted(k for k in readable if isinstance(k, str) and k)
-    if not keys:
+    if not keys or not customer_slug:
         return [], []
     marks = ", ".join("?" for _ in keys)
     persona_clause = " AND persona_slug = ?" if persona_slug else ""
     persona_args = (persona_slug,) if persona_slug else ()
-    cols = f"{_SELECT_COLS}, space, kind"
+    cols = f"{_SELECT_COLS}, customer_slug, space, kind"
     memories = client.query(
         f"SELECT {cols} FROM peer_preferences "
-        f"WHERE kind = 'memory' AND space IN ({marks}) AND superseded_by IS NULL "
+        f"WHERE customer_slug = ? AND kind = 'memory' AND space IN ({marks}) "
+        "AND superseded_by IS NULL "
         "ORDER BY recorded_at DESC, rowid DESC LIMIT ?",
+        customer_slug,
         *keys,
         limit,
     )
@@ -293,9 +304,10 @@ def space_rows(
     if speaker:
         preferences = client.query(
             f"SELECT {cols} FROM peer_preferences "
-            f"WHERE kind = 'preference' AND peer_id = ? AND space IN ({marks}) "
-            f"AND superseded_by IS NULL{persona_clause} "
+            f"WHERE customer_slug = ? AND kind = 'preference' AND peer_id = ? "
+            f"AND space IN ({marks}) AND superseded_by IS NULL{persona_clause} "
             "ORDER BY recorded_at DESC, rowid DESC LIMIT ?",
+            customer_slug,
             speaker,
             *keys,
             *persona_args,
@@ -304,10 +316,11 @@ def space_rows(
     # Defense in depth: the SQL already filtered, and a row that somehow did not
     # match is dropped rather than shown.
     allowed = set(keys)
-    return (
-        [r for r in memories if r.get("space") in allowed],
-        [r for r in preferences if r.get("space") in allowed],
-    )
+
+    def ok(row: dict[str, Any]) -> bool:
+        return row.get("space") in allowed and row.get("customer_slug") == customer_slug
+
+    return [r for r in memories if ok(r)], [r for r in preferences if ok(r)]
 
 
 _REMEMBER_NUDGE = (

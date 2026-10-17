@@ -216,7 +216,9 @@ def on_pre_llm_call(**kwargs: Any) -> dict | None:
         if not peer_id or _D1 is None or not _CUSTOMER_SLUG:
             return None
 
-        rows = store.active_preferences(_D1, peer_id=peer_id, persona_slug=_persona_slug())
+        rows = store.active_preferences(
+            _D1, peer_id=peer_id, persona_slug=_persona_slug(), customer_slug=_CUSTOMER_SLUG
+        )
         block = store.render_preference_block(rows, peer_id=peer_id)
         return {"context": block} if block else None
     except Exception:  # noqa: BLE001 — never raise out of a hook
@@ -239,7 +241,9 @@ def _space_pre_llm_call(kwargs: dict[str, Any]) -> dict | None:
                 _sender_by_session.pop(session_id, None)
         if _D1 is None or not _CUSTOMER_SLUG:
             return None
-        block = space_memory.context_block(_D1, current, peer, _persona_slug())
+        block = space_memory.context_block(
+            _D1, current, peer, _persona_slug(), customer_slug=_CUSTOMER_SLUG
+        )
         return {"context": block} if block else None
     except Exception:  # noqa: BLE001 — never raise out of a hook
         logger.warning("hermes-smd-peer-memory: pre_llm_call failed", exc_info=True)
