@@ -425,6 +425,22 @@ _AUDIT_SELECT = (
 )
 
 
+def _honest_empty_or_raise(exc: sqlite3.OperationalError) -> None:
+    """Return only when ``exc`` means the table does not exist yet; else re-raise.
+
+    sqlite raises ``OperationalError`` for a missing table AND for a database
+    locked past the busy timeout, a disk I/O error, or a corrupt file. Only the
+    first is an honest empty page. Reading the others as one served a locked or
+    failing ledger as ``{"entries": [], "cursor": None}``: indistinguishable
+    from the end of the ledger, so a paged pull (the decommission preservation
+    pull among them) would archive a partial audit trail as complete (review
+    OSB-3, 2026-10-17). Re-raising lets the gate's handler serve its 500.
+    """
+    if "no such table" in str(exc).lower():
+        return
+    raise exc
+
+
 def _read_audit_log(db_path: str, cursor: str | None, limit: int) -> dict[str, Any]:
     """Keyset-paginate the audit_log newest-first.
 
@@ -445,9 +461,12 @@ def _read_audit_log(db_path: str, cursor: str | None, limit: int) -> dict[str, A
         else:
             sql = f"{_AUDIT_SELECT} ORDER BY id DESC LIMIT ?"
             rows = conn.execute(sql, (limit,)).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         # DB exists but has no audit_log table yet (the audit subsystem hasn't
-        # created it). Honest empty, not a 500.
+        # created it). Honest empty, not a 500. ANY OTHER operational error
+        # (locked past the busy timeout, disk I/O, corruption) propagates and
+        # the gate serves a 500: see :func:`_honest_empty_or_raise`.
+        _honest_empty_or_raise(exc)
         return {"entries": [], "cursor": None}
     finally:
         conn.close()
@@ -477,7 +496,8 @@ def _read_audit_export(db_path: str, cursor: str | None, limit: int) -> dict[str
         else:
             sql = f"SELECT {cols} FROM audit_log ORDER BY id ASC LIMIT ?"
             rows = conn.execute(sql, (limit,)).fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        _honest_empty_or_raise(exc)
         return {"entries": [], "cursor": None}
     finally:
         conn.close()
@@ -511,8 +531,10 @@ def _read_table_export(db_path: str, table: str, cursor: str | None, limit: int)
         else:
             sql = f"SELECT rowid AS _rowid, * FROM {table} ORDER BY rowid ASC LIMIT ?"  # noqa: S608 — table is allow-listed
             rows = conn.execute(sql, (limit,)).fetchall()
-    except sqlite3.OperationalError:
-        # Table not created yet (mirror never wrote) → honest empty.
+    except sqlite3.OperationalError as exc:
+        # Table not created yet (mirror never wrote) → honest empty. Anything
+        # else raises (see :func:`_honest_empty_or_raise`).
+        _honest_empty_or_raise(exc)
         return {"entries": [], "cursor": None}
     finally:
         conn.close()

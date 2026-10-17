@@ -355,6 +355,35 @@ def test_a_person_refusing_their_own_rule_is_still_a_decline():
 
 
 @pytest.mark.parametrize(
+    "own",
+    [
+        # Review OSB-1: a whole-word "no" anywhere read as a refusal, so an
+        # admin's clarifying question declined somebody else's request and
+        # emailed them that it was declined.
+        "Does this cover the no-fault matters too?",
+        "Is there no way to limit it to letters?",
+        "Thanks\n\nChrista\nNo waiver of privilege is intended by this email.",
+        "Let me check with Dan, no rush on your side.",
+    ],
+)
+def test_a_no_that_is_not_the_answer_never_declines(own):
+    message = f"{own}\n\nOn Mon, Oct 13, 2026 Operator wrote:\n> [rule {RULE}] {TEXT}\n"
+    verdict = rc.resolve(message, [_pending_row()], ADMIN, is_admin=True)
+    assert verdict.kind == rc.ASK
+    assert verdict.reason == rc.ASK_UNCLEAR_REFUSAL
+
+
+@pytest.mark.parametrize(
+    "own",
+    ["No.", "No, don't", "no", "Nope.", "No thanks", "Hi,\n\nNo, leave it as it is"],
+)
+def test_a_refusal_shaped_answer_still_declines(own):
+    message = f"{own}\n\nOn Mon, Oct 13, 2026 Operator wrote:\n> [rule {RULE}] {TEXT}\n"
+    verdict = rc.resolve(message, [_pending_row()], ADMIN, is_admin=True)
+    assert verdict.kind == rc.DECLINED
+
+
+@pytest.mark.parametrize(
     ("row", "sender", "is_admin", "expected"),
     [
         (_pending_row(), ADMIN, True, True),
@@ -1576,6 +1605,16 @@ def _ops_row(*, state="open", ask_sent=False, reason=None, instructed_by=PARALEG
         # because "looking at it" is not an answer they can act on.
         ("Looking at it, will let you know", rc.OPS_NONE, ""),
         ("No idea what this is", rc.OPS_NONE, ""),
+        # Review OSB-4: a done word that opens a clause but does not END one is
+        # not a statement that the change was made. Each of these closed the
+        # request and told the requester it was done.
+        ("Done by Friday.", rc.OPS_NONE, ""),
+        ("Set up a call with them first?", rc.OPS_NONE, ""),
+        ("Applied for access; still pending.", rc.OPS_NONE, ""),
+        ("Done?", rc.OPS_NONE, ""),
+        ("Done, pending their sign-off", rc.OPS_NONE, ""),
+        ("Installed tomorrow", rc.OPS_NONE, ""),
+        ("Done, thanks", rc.OPS_DONE, "thanks"),
         # "yes" is deliberately NOT a done token: on this channel it is as likely
         # to be agreement with the request as a statement that it was carried
         # out, and the difference is a person told a routine exists when it does

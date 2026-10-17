@@ -195,6 +195,39 @@ def test_logentry_params_redacted() -> None:
     assert out["logentry"]["params"] == ["[redacted-email]", "[redacted-matter]"]
 
 
+def test_logentry_formatted_redacted() -> None:
+    # OSB-2: the logging integration also fills ``formatted`` with the fully
+    # interpolated line (record.getMessage()); only message + params were
+    # scrubbed, so every %s-logged address reached the shared project.
+    event = {
+        "level": "error",
+        "logentry": {
+            "message": "send to %s failed",
+            "formatted": "send to ['christa@firm.com'] failed for 2026-PI-101",
+            "params": (["christa@firm.com"],),
+        },
+    }
+    out = scrub_event(event)
+    assert "christa@firm.com" not in repr(out)
+    assert "2026-PI-101" not in repr(out)
+    assert (
+        out["logentry"]["formatted"] == "send to ['[redacted-email]'] failed for [redacted-matter]"
+    )
+
+
+def test_tags_user_and_request_url_redacted() -> None:
+    event = {
+        "tags": {"to": "owner@example.com"},
+        "user": {"email": "owner@example.com"},
+        "request": {
+            "url": "https://x/hook?to=owner@example.com",
+            "query_string": "to=owner@example.com",
+        },
+    }
+    out = scrub_event(event)
+    assert "owner@example.com" not in repr(out)
+
+
 def test_scrub_value_depth_bound() -> None:
     # A pathological tree is replaced, not walked forever.
     tree: dict = {"k": "leaf"}

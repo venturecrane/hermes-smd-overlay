@@ -238,6 +238,7 @@ def refresh_profile_stamps(profiles_root: Path) -> int:
 
     block = render_pointer_block()
     changed = 0
+    failed = False
     try:
         profile_dirs = sorted(p for p in profiles_root.iterdir() if p.is_dir())
     except OSError:
@@ -255,7 +256,9 @@ def refresh_profile_stamps(profiles_root: Path) -> int:
                 # refresh beats none, and the next turn retries because the
                 # fingerprint is only recorded on a clean pass.
                 logger.debug("spec stamp: could not refresh %s", skill, exc_info=True)
-                return changed
+                failed = True
+    if failed:
+        return changed
     _LAST_STAMPED = fingerprint
     if changed:
         logger.info(

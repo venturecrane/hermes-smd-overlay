@@ -256,6 +256,36 @@ DECLINE_TOKENS: tuple[str, ...] = (
     "not applying",
 )
 
+#: A refusal is READ FROM ITS SHAPE, not found as a word (review OSB-1,
+#: 2026-10-17). A whole-word search for :data:`DECLINE_TOKENS` read "Does this
+#: cover the no-fault matters too?" and a "No waiver of privilege" signature
+#: line as refusals, which closed somebody else's request and emailed them that
+#: it was declined. So the refusal must OPEN the sender's answer line (tags and
+#: a bare greeting skipped), a "no"/"nope" must be the answer itself (followed
+#: by punctuation, the end of the line, or its own defeater), and a line that
+#: asks a question is never a refusal: it falls to ASK.
+_DECLINE_NO = re.compile(
+    r"\A(?:no|nope)\b(?!-)\s*(?:[,.;:!]|\Z|(?=(?:not|don't|dont|do not|never|leave|thanks|thank)\b))",
+)
+_DECLINE_OPENER = re.compile(
+    r"\A(?:please\s+|i\s+|we\s+)?(?:"
+    + "|".join(re.escape(t) for t in DECLINE_TOKENS if t not in ("no", "nope"))
+    + r")\b",
+)
+
+
+def _is_refusal(own: str) -> bool:
+    """Whether the sender's OWN text (fence and quote already cut) is a refusal."""
+    for raw in RULE_TAG.sub(" ", own).splitlines():
+        line = _normalize(raw)
+        if not line or _OPS_GREETING_ONLY.match(line):
+            continue
+        if "?" in line:
+            return False
+        return bool(_DECLINE_NO.match(line) or _DECLINE_OPENER.match(line))
+    return False
+
+
 #: Verdict kinds returned by :func:`resolve`.
 CONFIRMED = "confirmed"
 DECLINED = "declined"
@@ -414,13 +444,14 @@ def read_own_text(body: Any) -> Reading:
     (:func:`strip_quoted`). Both halves are load-bearing and each was, on its
     own, enough to make every reply unreadable in one direction or the other.
     """
-    text = _normalize(strip_quoted(email_body(body)))
+    own = strip_quoted(email_body(body))
+    text = _normalize(own)
     if not text:
         return Reading(affirmative=False, apply_others=False, negated=False)
     negated = any(_contains_phrase(text, token) for token in DEFEATERS)
     apply_others = any(_contains_phrase(text, token) for token in APPLY_TOKENS)
     bare = any(_contains_phrase(text, token) for token in BARE_AFFIRMATIVES)
-    declining = any(_contains_phrase(text, token) for token in DECLINE_TOKENS)
+    declining = _is_refusal(own)
     return Reading(
         affirmative=bare or apply_others,
         apply_others=apply_others,
@@ -460,13 +491,33 @@ _OPS_GREETING_ONLY = re.compile(
 #: completed act.
 _OPS_DONE_TOKENS = ("done", "set up", "applied", "installed")
 
-#: A done token at the start of a CLAUSE, not merely anywhere in the line. The
-#: clause boundary is what makes "No problem, done." read as done while leaving
-#: "the digest is not done yet" alone.
+#: A done token that IS a whole clause: it opens a clause (the boundary is what
+#: makes "No problem, done." read as done while leaving "the digest is not done
+#: yet" alone) AND it ends one, optionally after a completed-time phrase ("Set
+#: up this morning"). Opening a clause alone was not enough (review OSB-4,
+#: 2026-10-17): "Done by Friday.", "Set up a call with them first?" and
+#: "Applied for access; still pending." each closed the request and told the
+#: requester the change was made. Whatever follows the clause is a note.
 _OPS_DONE = re.compile(
-    r"(?:\A|(?<=[,;:.\-])\s*)(" + "|".join(_OPS_DONE_TOKENS) + r")\b[\s,.;:!\-]*",
+    r"(?:\A|(?<=[,;:.\-])\s*)(?P<word>" + "|".join(_OPS_DONE_TOKENS) + r")\b"
+    r"(?:\s+(?:today|yesterday|just now|now|earlier(?: today)?|last night"
+    r"|this (?:morning|afternoon|evening)))?"
+    r"(?=\s*(?:[,;:.!\-]|\Z))",
     re.IGNORECASE,
 )
+
+#: A line that asks, or says the change is still to come, is never a done, even
+#: when it opens with a done clause ("Done, pending their sign-off"). Leaving the
+#: row open costs SMD one more reply; a false done tells a person a routine
+#: exists when it does not.
+_OPS_NOT_YET = re.compile(
+    r"\?|\b(?:pending|not yet|will|going to|tomorrow|later|next (?:week|month)"
+    r"|by (?:mon|tue|wed|thu|fri|sat|sun|end|eod|next|tomorrow)[a-z]*)\b",
+    re.IGNORECASE,
+)
+
+#: Leading punctuation between a done clause and the note that follows it.
+_OPS_NOTE_LEAD = re.compile(r"\A[\s,.;:!\-]*")
 
 #: A bare "no" that IS the answer: at the start of the line and followed by
 #: punctuation or the end of it. "No, not in this package" is a refusal; "No
@@ -566,9 +617,14 @@ def read_ops_reply(message: Any) -> OpsReading:
         # refusal only with the words that make it one, and a note that dropped
         # them would quote SMD as having written "do that this month".
         return OpsReading(verdict=OPS_DECLINED, note=_ops_note(line))
+    if _OPS_NOT_YET.search(line):
+        return OpsReading(verdict=OPS_NONE)
     done = _OPS_DONE.search(line)
     if done is not None:
-        return OpsReading(verdict=OPS_DONE, note=_ops_note(line[done.end() :]))
+        # The note starts right after the done WORD, so a completed-time phrase
+        # the clause carried ("Set up this morning") is quoted, not dropped.
+        rest = line[done.end("word") :]
+        return OpsReading(verdict=OPS_DONE, note=_ops_note(_OPS_NOTE_LEAD.sub("", rest)))
     return OpsReading(verdict=OPS_NONE)
 
 

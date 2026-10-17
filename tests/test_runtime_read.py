@@ -491,3 +491,93 @@ def test_usage_export_serves_meter_rows(tmp_path):
     assert row["attributed_to"] == "greg@x.test"
     assert row["requests"] == 3
     assert row["attribution_source"] == "inbound_origin"
+
+
+# ---------------------------------------------------------------------------
+# A failed read is never an empty ledger (review OSB-3, 2026-10-17)
+# ---------------------------------------------------------------------------
+
+
+class _FailingConn:
+    """A connection whose every query raises the given operational error."""
+
+    def __init__(self, message: str) -> None:
+        self._message = message
+        self.row_factory = None
+
+    def execute(self, sql, *args):
+        if sql.startswith("PRAGMA"):
+            return None
+        raise sqlite3.OperationalError(self._message)
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("message", ["database is locked", "disk I/O error"])
+@pytest.mark.parametrize(
+    ("kind", "extra"),
+    [
+        ("audit_log", {}),
+        ("audit_export", {}),
+        ("memory_export", {"table": "persona_observations"}),
+    ],
+)
+def test_a_failed_read_raises_rather_than_reading_as_the_end(
+    tmp_path, monkeypatch, message, kind, extra
+):
+    """Every OperationalError used to become ``{"entries": [], "cursor": None}``,
+    which is exactly what the END of the ledger looks like: a locked or failing
+    read made a paged pull (the decommission preservation pull among them)
+    archive a partial trail as complete. Only "no such table" is an honest empty
+    page; anything else propagates so the gate serves its 500."""
+    db = tmp_path / "a.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(rr.sqlite3, "connect", lambda *a, **k: _FailingConn(message))
+    with pytest.raises(sqlite3.OperationalError, match=message):
+        rr.read_runtime(kind, db_path=str(db), observations_db_path=str(db), **extra)
+
+
+def test_a_locked_audit_db_is_not_an_empty_page(tmp_path, monkeypatch):
+    """The live shape, end to end: a writer holding an EXCLUSIVE lock past the
+    busy timeout (shortened here so the test does not wait five seconds)."""
+    db = tmp_path / "audit.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE audit_log (id TEXT, ts TEXT, action_type TEXT, actor TEXT)")
+    conn.execute("INSERT INTO audit_log (id) VALUES ('01A')")
+    conn.commit()
+    conn.close()
+    writer = sqlite3.connect(db, isolation_level=None)
+    writer.execute("BEGIN EXCLUSIVE")
+    real_connect = sqlite3.connect
+
+    def fast_timeout(*a, **k):
+        inner = real_connect(*a, **k)
+        inner.execute("PRAGMA busy_timeout = 50")
+        return _NoLongerBusy(inner)
+
+    monkeypatch.setattr(rr.sqlite3, "connect", fast_timeout)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            rr.read_runtime("audit_log", db_path=str(db))
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+
+class _NoLongerBusy:
+    """Wraps a real connection and drops the module's 5 s busy_timeout PRAGMA."""
+
+    def __init__(self, inner: sqlite3.Connection) -> None:
+        object.__setattr__(self, "_inner", inner)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._inner, name, value)
+
+    def execute(self, sql, *args):
+        if sql.startswith("PRAGMA busy_timeout"):
+            return None
+        return self._inner.execute(sql, *args)

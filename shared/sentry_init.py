@@ -177,25 +177,30 @@ def scrub_event(event: dict[str, Any], hint: dict[str, Any] | None = None) -> di
         if isinstance(msg, str):
             event["message"] = redact_text(msg)
 
+        # The WHOLE logentry is walked, not named keys. The logging integration
+        # fills ``message`` (the %s template), ``params`` (the interpolated
+        # values; ss-console #2150) AND ``formatted`` — ``record.getMessage()``,
+        # the fully interpolated line. Scrubbing only message + params left
+        # ``formatted`` verbatim, so every ``logger.error("... %s", addr)``
+        # shipped the address to the shared project (review OSB-2, 2026-10-17).
+        # Walking every leaf means a key the SDK adds later is covered too.
         logentry = event.get("logentry")
         if isinstance(logentry, dict):
-            if isinstance(logentry.get("message"), str):
-                logentry["message"] = redact_text(logentry["message"])
-            # The %s params carry the actual values the template interpolates —
-            # scrubbing only the template left them verbatim, and a client
-            # address in SMD-OPERATOR-10 was caught by Sentry's server-side
-            # scrubbing, not ours (ss-console #2150).
-            params = logentry.get("params")
-            if isinstance(params, (list, tuple, dict)):
-                logentry["params"] = _scrub_value(params)
+            event["logentry"] = _scrub_value(logentry)
 
         # ``set_extra`` / ``set_context`` payloads ship verbatim and were never
         # walked before (SMD-OPERATOR-10 shipped an unredacted filesystem path
-        # this way). Walk every string leaf of both sections.
-        for section in ("extra", "contexts"):
+        # this way). Walk every string leaf of both sections. ``tags`` and
+        # ``user`` are free-form scope data a call site can set; walk them too.
+        for section in ("extra", "contexts", "tags", "user"):
             sec = event.get(section)
             if isinstance(sec, dict):
                 event[section] = _scrub_value(sec)
+
+        if isinstance(req, dict):
+            for key in ("url", "query_string"):
+                if isinstance(req.get(key), (str, dict, list, tuple)):
+                    req[key] = _scrub_value(req[key])
 
         exc = event.get("exception")
         if isinstance(exc, dict):
