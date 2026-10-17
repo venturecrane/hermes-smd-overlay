@@ -317,6 +317,119 @@ def access_problem(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Space mode (ADR 0091, ss-console #3264): a seat several people share.
+#
+# On a seat that authors ``people:`` the viewer is not an inbound address but
+# the turn's SPACE (``shared.space``), and it is resolved on every turn,
+# Telegram and cron included (the address viewer above is None there, and an
+# unfenced Telegram turn would read everything). A record in a private store
+# belongs to a space: its owner field holds a person id (``p1`` or
+# ``person:p1``) or ``shared``. A turn may read a record only in a space it may
+# read, may write only into its own space or the shared one, and never moves a
+# record between spaces. An unresolved space reads, lists and writes nothing.
+# ``readers`` grants nothing here: on a shared seat a reader would be one
+# partner reading the other's private records.
+# ---------------------------------------------------------------------------
+
+
+def owner_space(text: str, policy: StorePolicy) -> str | None:
+    """The space key a record's owner field names, or ``None`` (absent, or not
+    a person id or ``shared``)."""
+    if policy.owner_field is None:
+        return None
+    from shared import space as space_mod
+
+    value = (read_frontmatter(text).get(policy.owner_field) or "").strip().lower()
+    if value == space_mod.SHARED:
+        return space_mod.SHARED
+    pid = value[len("person:") :] if value.startswith("person:") else value
+    return space_mod.person_key(pid) if pid and space_mod.PERSON_ID_RE.match(pid) else None
+
+
+def target_space(policy: StorePolicy, content: str | None) -> str | None:
+    """The space a write would put a record in: the stamped owner on a private
+    store, ``shared`` on a store with no owner field (everyone on the seat reads
+    it). ``None`` when a private record's content names no valid owner."""
+    from shared import space as space_mod
+
+    if not policy.private:
+        return space_mod.SHARED
+    return owner_space(content or "", policy)
+
+
+UNRESOLVED_SPACE = (
+    "this conversation's space could not be resolved, so no record can be shown "
+    "to be in a space you may open or change"
+)
+
+
+def space_access_problem(
+    policy: StorePolicy,
+    *,
+    action: str,
+    space: Any,
+    existing: str | None,
+    content: str | None = None,
+    writer_address: str | None = None,
+) -> str | None:
+    """Why a turn in ``space`` may not ``action`` this record, or ``None``.
+
+    ``action`` is ``list``, ``read`` or ``write``; ``space`` is a
+    ``shared.space.Space`` or ``None``. ``writer_address`` is the email of the
+    person the space belongs to (``None`` for the shared space or a cron run),
+    checked against an authored ``writers`` list.
+    """
+    from shared import space as space_mod
+
+    if space is None:
+        return UNRESOLVED_SPACE
+    if action == "list":
+        return None
+    readable = space_mod.readable_spaces(space)
+    if action == "write" and policy.writers:
+        addr = (writer_address or "").strip().lower()
+        if not addr or addr not in policy.writers:
+            return (
+                "only the people this store names as writers may change it; "
+                "anyone on the seat may read it"
+            )
+    if not policy.private:
+        return None
+    owner = owner_space(existing, policy) if existing is not None else None
+    if action == "read":
+        if existing is None:
+            return None  # the handler says "no record named ..."
+        if owner is None:
+            return (
+                f"that record names no owner ({policy.owner_field}: a person id or shared), "
+                "so it cannot be shown to be in a space you may open"
+            )
+        if owner not in readable:
+            return "that record is private to another person; only they may open it"
+        return None
+    if action != "write":
+        return f"unknown action {action!r}"
+    stamped = owner_space(content or "", policy)
+    if stamped is None:
+        mine = space.key if space.private else space_mod.SHARED
+        return (
+            f"a record you write must carry {policy.owner_field}: in its frontmatter, "
+            f"naming the space it belongs to ({mine.removeprefix('person:')} or shared)"
+        )
+    if stamped not in readable:
+        return "a record you write must belong to your own space or the shared one"
+    if existing is not None:
+        if owner is None or owner not in readable:
+            return "that record is not yours to change; keep your own as a record of your own"
+        if owner != stamped:
+            return (
+                f"that record belongs to {owner.removeprefix('person:')}; a record keeps "
+                "its space, so write a new record instead of moving this one"
+            )
+    return None
+
+
 def path_problem(path: str) -> str | None:
     """Why an authored store path is refused, or ``None`` when it is fine.
 
@@ -506,10 +619,13 @@ __all__ = [
     "authored_policies",
     "authored_stores",
     "list_records",
+    "owner_space",
     "path_problem",
     "policy_problems",
     "read_frontmatter",
     "read_record",
     "record_owner",
+    "space_access_problem",
+    "target_space",
     "write_record",
 ]
