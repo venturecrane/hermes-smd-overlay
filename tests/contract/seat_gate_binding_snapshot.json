@@ -1,7 +1,8 @@
 {
   "_comment": "Snapshot of every REAL seat's voice-gate-relevant config fields, generated from ss-console operator/customers/*/customer.yaml (underscore-prefixed template dirs excluded). Consumed by tests/test_voice_gate_binding_coverage.py to assert the ss#2086 per-class gate repoint is ADDITIVE: no (seat x class) loses its downgrade relative to the pre-repoint voice_library binding. REGENERATION IS CONSOLE-SIDE: ss-console's drift test (ss#2086 plan C3, following the validator_parity_fixtures precedent) regenerates this file when seat configs change; do not hand-edit. The generator emits it at ss-console operator/contracts/gate-coverage-snapshot.overlay.json; when ss-console's drift test fires, copy that file over this one in the same change that edits the seat configs.",
-  "generated_from": "venturecrane/ss-console@5bfdc55cce594c9fdf0622939ea4eb33b27648ac",
+  "generated_from": "venturecrane/ss-console@bb912b9317ee8878ab51e8c85a0b33ca4ec4de42",
   "excluded_template_dirs": [
+    "_couples-template",
     "_hosted-template",
     "_template"
   ],
