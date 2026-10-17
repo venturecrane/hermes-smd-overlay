@@ -73,7 +73,7 @@ import json
 import logging
 from typing import Any
 
-from shared import record_store
+from shared import record_store, space_taint
 from shared import space as space_mod
 from shared.customer_config import CustomerConfigError
 from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT
@@ -402,10 +402,13 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         if problem:
             return {"action": "block", "message": f"{tool_name} refused: {problem}"}
         return None
+    stamp = False
     try:
         if tool_name == TOOL_WRITE and _turn_is_tainted(kwargs.get("session_id")):
-            logger.info("hermes-smd-record-store: write refused (tainted turn)")
-            return {"action": "block", "message": _TAINTED_MESSAGE}
+            if not _tainted_write_allowed(args, kwargs.get("session_id")):
+                logger.info("hermes-smd-record-store: write refused (tainted turn)")
+                return {"action": "block", "message": _TAINTED_MESSAGE}
+            stamp = True
     except Exception:  # noqa: BLE001 — a hook must never raise; refusing is the safe shape
         logger.exception("hermes-smd-record-store: pre_tool_call failed; refusing write")
         return {"action": "block", "message": _TAINTED_MESSAGE}
@@ -419,7 +422,26 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     if problem:
         logger.info("hermes-smd-record-store: %s refused by the owner fence", tool_name)
         return {"action": "block", "message": f"{tool_name} refused: {problem}"}
+    if stamp and isinstance(kwargs.get("args"), dict) and isinstance(args.get("content"), str):
+        # Provenance: a record kept on a turn that read outside content says so.
+        args["content"] = space_taint.stamp_from_web(args["content"])
     return None
+
+
+def _tainted_write_allowed(args: dict[str, Any], session_id: Any) -> bool:
+    """On a shared seat, a tainted turn may still keep a record in its own
+    private space, a scheduled run in its own space, and a crossing the "share
+    it" gate released (``shared.space_taint``). Everywhere else: never."""
+    in_space_mode, _ = _space_view(session_id)
+    if not in_space_mode:
+        return False
+    store = args.get("store")
+    policy = record_store.authored_policies().get(store) if isinstance(store, str) else None
+    if policy is None:
+        return False
+    content = args.get("content") if isinstance(args.get("content"), str) else None
+    target = record_store.target_space(policy, content)
+    return space_taint.tainted_write_allowed(TOOL_WRITE, session_id, target)
 
 
 def _store_roots() -> list[str]:
