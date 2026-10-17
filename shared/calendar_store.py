@@ -237,6 +237,30 @@ class CalendarStore:
             conn.execute(_UPSERT, tuple(data[name] for name in _COLUMNS))
         return event
 
+    def set_partstat(self, uid: str, email: str, partstat: str) -> bool:
+        """Record one attendee's response (``ACCEPTED`` / ``DECLINED`` /
+        ``TENTATIVE``) on ``uid``. False when the event or the attendee is not
+        there. The SEQUENCE does not move: a response is the attendee's act, not
+        a change to the event."""
+        wanted = email.strip().lower()
+        with self._lock, self._db() as conn:
+            found = conn.execute("SELECT attendees FROM events WHERE uid = ?", (uid,)).fetchone()
+            if found is None:
+                return False
+            attendees = json.loads(found[0] or "[]")
+            hit = False
+            for attendee in attendees:
+                if str(attendee.get("email") or "").lower() == wanted:
+                    attendee["partstat"] = partstat
+                    hit = True
+            if not hit:
+                return False
+            conn.execute(
+                "UPDATE events SET attendees = ?, updated_at = ? WHERE uid = ?",
+                (json.dumps(attendees, ensure_ascii=False), time.time(), uid),
+            )
+        return True
+
     def set_delivery(self, uid: str, delivery: str) -> None:
         with self._lock, self._db() as conn:
             conn.execute("UPDATE events SET delivery = ? WHERE uid = ?", (delivery, uid))

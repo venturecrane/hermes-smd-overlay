@@ -40,7 +40,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from shared import inbound, inbound_message, msgraph_broker, read_volume, request_index
+from shared import (
+    calendar_inbox,
+    inbound,
+    inbound_message,
+    msgraph_broker,
+    read_volume,
+    request_index,
+)
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params, sender_key
@@ -589,6 +596,14 @@ def _quarantine_inbound_mcp(kwargs: dict[str, Any], payload: Any) -> None:
         )
 
 
+def _consumed_by_calendar(payload: Any) -> bool:
+    try:
+        dto = inbound_message.normalize_inbound(inbound_message.PROVIDER_AGENTMAIL, payload)
+        return dto is not None and calendar_inbox.take(dto.message_id)
+    except Exception:  # noqa: BLE001 - an unreadable payload routes as before
+        return False
+
+
 def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     """Inspect each inbound dispatch for webhook markers and rewrite if matched.
 
@@ -633,6 +648,12 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
     ``None``. Per AGENTS.md hard rule #3, the callback never raises.
     """
     payload = _webhook_payload(kwargs)
+
+    # A calendar response the calendar plugin already consumed (and told
+    # Hermes to skip): nothing to route, no origin, no request card, no row.
+    # See shared/calendar_inbox.py.
+    if _consumed_by_calendar(payload):
+        return None
 
     # Conversational MCP channel (ask_operator): "just talk" routes to NO skill,
     # so it never reaches the matched-route enqueue below. But its message is
