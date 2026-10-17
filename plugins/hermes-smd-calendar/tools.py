@@ -303,6 +303,13 @@ def list_events(args: dict[str, Any], session_id: str) -> dict[str, Any]:
             "location": e.location,
             "description": e.description,
             "invited": e.attendee_emails(),
+            # Each invitee's answer, from the REPLY their calendar sent the seat
+            # (ACCEPTED / DECLINED / TENTATIVE); "no answer yet" when none came.
+            "responses": {
+                a["email"]: a.get("partstat") or "no answer yet"
+                for a in e.attendees
+                if a.get("email")
+            },
             "status": e.status,
             "sequence": e.sequence,
             "came_from": "this seat"

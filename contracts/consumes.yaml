@@ -562,6 +562,15 @@ vars:
     requirement: optional
     consumed_by: [bootstrap-translate]
     note: skills-dir override during customer.yaml translation
+  ROLES_DIR:
+    discovery: static
+    stage: boot-helper
+    requirement: optional
+    consumed_by: [bootstrap-translate]
+    note: >-
+      role-package root override during customer.yaml translation (ss ADR 0090);
+      defaults to /app/roles, which the seat image copies from ss-console
+      operator/roles/. Read only when the seat sets seat.role.
   TELEGRAM_BOT_TOKEN:
     discovery: static
     stage: agent

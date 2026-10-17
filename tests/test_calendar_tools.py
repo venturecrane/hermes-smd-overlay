@@ -55,6 +55,16 @@ def _couples(**overrides: Any) -> dict[str, Any]:
     return doc
 
 
+@pytest.fixture(autouse=True)
+def _fresh_calendar_inbox():
+    """The consumed-email register is process-wide; no test inherits a mark."""
+    from shared import calendar_inbox
+
+    calendar_inbox._reset_for_tests()
+    yield
+    calendar_inbox._reset_for_tests()
+
+
 @pytest.fixture
 def cal(monkeypatch, tmp_path):
     """The plugin, a couples seat on disk, a fresh store, and a recording sender."""
@@ -99,7 +109,7 @@ def test_a_calendar_seat_registers_four_tools_and_two_hooks(cal) -> None:
         "calendar_invite_cancel",
         "calendar_invite_list",
     }
-    assert set(ctx.registered) == {"pre_tool_call", "pre_llm_call"}
+    assert set(ctx.registered) == {"pre_tool_call", "pre_gateway_dispatch"}
 
 
 @pytest.mark.parametrize(
@@ -446,6 +456,26 @@ def test_the_real_space_gate_holds_an_invite_to_the_partner_until_share_it(
     held = _through_the_real_gate(plugin, real_gate, name, dict(args))
     assert held and held["action"] == "block" and held["message"].startswith("HELD")
     assert sent == []
+    # Only Ana, in her own DM, releases it: Ben's "share it" in his DM, and
+    # Ana's in the group, release nothing and the call stays held.
+    for elsewhere, user in (
+        (lambda: cf.telegram_dm(monkeypatch, cf.B_TG), cf.B_TG),
+        (lambda: cf.telegram_group(monkeypatch, cf.A_TG), cf.A_TG),
+    ):
+        elsewhere()
+        assert (
+            real_gate.on_pre_llm_call(
+                session_id="s",
+                turn_id=f"x{user}",
+                user_message="share it",
+                platform="telegram",
+                sender_id=user,
+            )
+            is None
+        )
+    cf.telegram_dm(monkeypatch, cf.A_TG)
+    still = _through_the_real_gate(plugin, real_gate, name, dict(args))
+    assert still and still.get("action") == "block" and sent == []
     monkeypatch.setenv("HERMES_SESSION_ID", "s")
     released = real_gate.on_pre_llm_call(
         session_id="s",
@@ -651,7 +681,7 @@ def test_a_malformed_invitation_never_reaches_the_broker() -> None:
         trust.outbound_send._send_body({"to": ["a@b.c"], CALENDAR_ARG: {"method": "REQUEST"}})
 
 
-# -- ingest ------------------------------------------------------------------------
+# -- ingest (pre_gateway_dispatch) -------------------------------------------------
 
 
 INBOUND = (
@@ -660,42 +690,155 @@ INBOUND = (
     "ORGANIZER:mailto:{organizer}\r\nATTENDEE:mailto:couples-demo@agentmail.to\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
 )
 
+#: What Google and Apple send the organizer when an invitee answers.
+REPLY = (
+    "BEGIN:VCALENDAR\r\nPRODID:-//Google Inc//Google Calendar 70.9054//EN\r\nVERSION:2.0\r\n"
+    "METHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nSEQUENCE:0\r\nDTSTAMP:20261018T010000Z\r\n"
+    "DTSTART;TZID=America/Phoenix:20261024T183000\r\nSUMMARY:Date night\r\n"
+    "ORGANIZER:mailto:couples-demo@agentmail.to\r\n"
+    "ATTENDEE;CN=Ana;PARTSTAT={partstat}:mailto:{attendee}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+)
 
-def _mail(monkeypatch, plugin, sender: str, ics: str, session: str = "mail-1") -> None:
-    cf.email_turn(monkeypatch, session, sender)
-    from shared.inbound import SESSION_INBOUND_ORIGIN
 
-    monkeypatch.setattr(
-        SESSION_INBOUND_ORIGIN, "bound_this_turn", lambda s: SESSION_INBOUND_ORIGIN.get(s)
-    )
+def _payload(sender: str, message_id: str = "msg-in-1") -> dict[str, Any]:
+    return {
+        "event_type": "message.received",
+        "message": {
+            "from": f"Someone <{sender}>",
+            "message_id": message_id,
+            "inbox_id": "couples-demo@agentmail.to",
+            "subject": "Accepted: Date night",
+            "text": "Ana has accepted this invitation.",
+        },
+    }
+
+
+def _attach(monkeypatch, plugin, *texts: str) -> None:
     broker = plugin.ingest.agentmail_broker
-    monkeypatch.setattr(
-        broker,
-        "list_attachments",
-        lambda _m: [
-            {
-                "attachment_id": "a1",
-                "filename": "invite.ics",
-                "content_type": "text/calendar; method=REQUEST",
-            }
-        ],
-    )
-    monkeypatch.setattr(broker, "read_calendar_attachment", lambda _m, _a: ics)
+    parts = [
+        {"attachment_id": f"a{i}", "filename": "invite.ics", "content_type": "text/calendar"}
+        for i in range(len(texts))
+    ]
+    monkeypatch.setattr(broker, "list_attachments", lambda _m: parts)
+    monkeypatch.setattr(broker, "read_calendar_attachment", lambda _m, a: texts[int(a[1:])])
 
 
-def test_an_invitation_a_person_sends_is_kept_in_their_space(cal, monkeypatch) -> None:
+def _dispatch(plugin, sender: str, message_id: str = "msg-in-1") -> dict | None:
+    return plugin.on_pre_gateway_dispatch(payload=_payload(sender, message_id))
+
+
+@pytest.fixture
+def audited(cal, monkeypatch):
+    plugin, _ = cal
+    rows: list[tuple] = []
+
+    class Client:
+        def execute(self, sql, *params):
+            rows.append(params)
+
+    monkeypatch.setattr(plugin, "_AUDIT", Client())
+    return rows
+
+
+def _row_metadata(row: tuple) -> dict:
+    for value in row:
+        if isinstance(value, str) and value.startswith("{") and "calendar_reply" in value:
+            return json.loads(value)
+    raise AssertionError(f"no calendar_reply metadata in {row}")
+
+
+@pytest.mark.parametrize("partstat", ["ACCEPTED", "DECLINED", "TENTATIVE"])
+def test_a_persons_response_updates_their_status_and_wakes_no_turn(
+    cal, audited, monkeypatch, partstat
+) -> None:
     plugin, sent = cal
-    _mail(
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
+    sent.clear()
+    _attach(
+        monkeypatch, plugin, REPLY.format(uid=made["uid"], partstat=partstat, attendee=cf.A_EMAIL)
+    )
+    verdict = _dispatch(plugin, cf.A_EMAIL)
+    assert verdict == {"action": "skip", "reason": "calendar_reply"}, "no agent turn"
+    (row,) = _call(plugin, "calendar_invite_list", {})["events"]
+    assert row["responses"] == {cf.A_EMAIL: partstat, cf.B_EMAIL: "no answer yet"}
+    assert row["sequence"] == 0, "a response is not a change to the event"
+    assert sent == [], "nothing answers a calendar robot"
+    (audit,) = audited
+    assert _row_metadata(audit)["replies"] == [f"recorded:{partstat}"]
+    assert "WEBHOOK_SUPPRESSED" in audit
+
+
+def test_the_router_leaves_a_consumed_response_alone(cal, audited, monkeypatch) -> None:
+    """Hermes runs every pre_gateway_dispatch callback before reading results, so
+    the router still sees the email; it must write no origin, card or row."""
+    plugin, _ = cal
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1"]})
+    _attach(
+        monkeypatch, plugin, REPLY.format(uid=made["uid"], partstat="ACCEPTED", attendee=cf.A_EMAIL)
+    )
+    router = load_plugin("hermes-smd-webhook-router")
+    monkeypatch.setattr(
+        router.router,
+        "build_routing_table",
+        lambda _p: (_ for _ in ()).throw(AssertionError("the router routed a consumed email")),
+    )
+    assert _dispatch(plugin, cf.A_EMAIL)["action"] == "skip"
+    assert router.on_pre_gateway_dispatch(payload=_payload(cf.A_EMAIL)) is None
+    # One-shot: the same id is not swallowed twice.
+    from shared import calendar_inbox
+
+    assert calendar_inbox.take("msg-in-1") is False
+
+
+@pytest.mark.parametrize(
+    ("who", "uid", "attendee", "why"),
+    [
+        (cf.A_EMAIL, "unknown@elsewhere", cf.A_EMAIL, "not an event this seat organized"),
+        ("stranger@example.com", None, "stranger@example.com", "not from one of the seat's people"),
+        (SMD_ADDRESS, None, SMD_ADDRESS, "not from one of the seat's people"),
+        (cf.B_EMAIL, None, cf.A_EMAIL, "no response from its sender"),  # Ben answering as Ana
+        (cf.B_EMAIL, None, cf.B_EMAIL, "was not invited"),
+    ],
+)
+def test_any_other_response_is_dropped_from_the_turn_and_changes_nothing(
+    cal, audited, monkeypatch, who, uid, attendee, why
+) -> None:
+    plugin, _ = cal
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1"]})
+    _attach(
         monkeypatch,
         plugin,
-        cf.A_EMAIL,
-        INBOUND.format(method="REQUEST", seq=0, organizer=cf.A_EMAIL),
+        REPLY.format(uid=uid or made["uid"], partstat="ACCEPTED", attendee=attendee),
     )
-    note = plugin.on_pre_llm_call(session_id="mail-1")
-    assert note and "Brunch" in note["context"]
+    assert _dispatch(plugin, who) == {"action": "skip", "reason": "calendar_reply"}
+    (row,) = _call(plugin, "calendar_invite_list", {})["events"]
+    assert row["responses"] == {cf.A_EMAIL: "no answer yet"}
+    (reply,) = _row_metadata(audited[0])["replies"]
+    assert reply.startswith("dropped:") and why in reply
+
+
+def test_an_email_with_no_calendar_part_dispatches_as_before(cal, audited, monkeypatch) -> None:
+    """Falsifier for the skip: an ordinary email from a person wakes its turn."""
+    plugin, _ = cal
+    _attach(monkeypatch, plugin)
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+    assert audited == []
+
+
+def test_an_invitation_a_person_sends_is_kept_in_their_space_and_the_turn_goes_on(
+    cal, audited, monkeypatch
+) -> None:
+    plugin, sent = cal
+    _attach(monkeypatch, plugin, INBOUND.format(method="REQUEST", seq=0, organizer=cf.A_EMAIL))
+    assert _dispatch(plugin, cf.A_EMAIL) is None, (
+        "an invitation is not a response; the email is read"
+    )
     kept = calendar_store.STORE.get("g-77@google.com")
     assert kept.origin == "inbound" and kept.space == "person:p1" and kept.organizer == cf.A_EMAIL
-    assert sent == [], "keeping an invitation answers nobody"
+    assert sent == [] and audited == []
     cf.telegram_dm(monkeypatch, cf.B_TG)
     assert _call(plugin, "calendar_invite_list", {})["events"] == []
     cf.telegram_dm(monkeypatch, cf.A_TG)
@@ -707,21 +850,10 @@ def test_an_invitation_a_person_sends_is_kept_in_their_space(cal, monkeypatch) -
 
 def test_a_later_cancel_from_the_same_person_cancels_it(cal, monkeypatch) -> None:
     plugin, _ = cal
-    _mail(
-        monkeypatch,
-        plugin,
-        cf.A_EMAIL,
-        INBOUND.format(method="REQUEST", seq=0, organizer=cf.A_EMAIL),
-    )
-    plugin.on_pre_llm_call(session_id="mail-1")
-    _mail(
-        monkeypatch,
-        plugin,
-        cf.A_EMAIL,
-        INBOUND.format(method="CANCEL", seq=1, organizer=cf.A_EMAIL),
-        "mail-2",
-    )
-    plugin.on_pre_llm_call(session_id="mail-2")
+    _attach(monkeypatch, plugin, INBOUND.format(method="REQUEST", seq=0, organizer=cf.A_EMAIL))
+    _dispatch(plugin, cf.A_EMAIL)
+    _attach(monkeypatch, plugin, INBOUND.format(method="CANCEL", seq=1, organizer=cf.A_EMAIL))
+    _dispatch(plugin, cf.A_EMAIL, "msg-in-2")
     assert calendar_store.STORE.get("g-77@google.com").status == "CANCELLED"
 
 
@@ -737,8 +869,8 @@ def test_an_invitation_that_is_not_the_senders_own_is_not_kept(
     cal, monkeypatch, sender, organizer
 ) -> None:
     plugin, _ = cal
-    _mail(monkeypatch, plugin, sender, INBOUND.format(method="REQUEST", seq=0, organizer=organizer))
-    plugin.on_pre_llm_call(session_id="mail-1")
+    _attach(monkeypatch, plugin, INBOUND.format(method="REQUEST", seq=0, organizer=organizer))
+    assert _dispatch(plugin, sender) is None
     assert calendar_store.STORE.list() == []
 
 
@@ -749,17 +881,102 @@ def test_an_inbound_part_never_rewrites_an_event_this_seat_sent(cal, monkeypatch
     forged = INBOUND.format(method="CANCEL", seq=9, organizer=cf.A_EMAIL).replace(
         "g-77@google.com", made["uid"]
     )
-    _mail(monkeypatch, plugin, cf.A_EMAIL, forged)
-    plugin.on_pre_llm_call(session_id="mail-1")
+    _attach(monkeypatch, plugin, forged)
+    _dispatch(plugin, cf.A_EMAIL)
     assert calendar_store.STORE.get(made["uid"]).status == "CONFIRMED"
 
 
 def test_ingest_never_raises_out_of_the_hook(cal, monkeypatch) -> None:
     plugin, _ = cal
-    _mail(monkeypatch, plugin, cf.A_EMAIL, "x")
 
     def boom(_m):
         raise RuntimeError("vendor down")
 
     monkeypatch.setattr(plugin.ingest.agentmail_broker, "list_attachments", boom)
-    assert plugin.on_pre_llm_call(session_id="mail-1") is None
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+
+
+# -- seats without the calendar (A&P and every other seat today) -------------------
+
+
+def test_a_seat_without_the_calendar_never_reads_or_swallows_inbound_mail(
+    monkeypatch, tmp_path
+) -> None:
+    """The A&P shape: no calendar skill. register() returns before wiring any
+    hook (plugins/hermes-smd-calendar/__init__.py register), so Hermes never
+    calls the calendar's pre_gateway_dispatch, the vendor is never asked for
+    attachments, and the router's consumed-check (the only calendar code on the
+    router path) answers False for every email, so it routes as before."""
+    cf.write_seat(
+        monkeypatch,
+        tmp_path,
+        {
+            "customer_id": "firm",
+            "scope": {"inbound_allow_from": ["@firm.example"]},
+            "personas": [{"slug": "ops", "skills": [{"name": "deadline-watch", "enabled": True}]}],
+        },
+    )
+    plugin = load_plugin("hermes-smd-calendar")
+    ctx = FakePluginContext()
+    plugin.register(ctx)
+    assert ctx.registered == {} and ctx.tools == {}
+
+    def never(*_a, **_k):
+        raise AssertionError("a seat without a calendar read the mailbox")
+
+    monkeypatch.setattr(plugin.ingest.agentmail_broker, "list_attachments", never)
+    router = load_plugin("hermes-smd-webhook-router")
+    assert router._consumed_by_calendar(_payload("paralegal@firm.example")) is False
+
+
+def test_an_answer_with_a_note_is_recorded_and_still_reaches_its_turn(cal, audited, monkeypatch):
+    """Over-broad skip guard: "Accepted, but can we start at 7?" is a message."""
+    plugin, _ = cal
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1"]})
+    noted = REPLY.format(uid=made["uid"], partstat="ACCEPTED", attendee=cf.A_EMAIL).replace(
+        "END:VEVENT", "COMMENT:can we start at 7?\r\nEND:VEVENT"
+    )
+    _attach(monkeypatch, plugin, noted)
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+    (row,) = _call(plugin, "calendar_invite_list", {})["events"]
+    assert row["responses"] == {cf.A_EMAIL: "ACCEPTED"}
+    assert audited == []
+
+
+def test_a_stale_mark_never_swallows_an_email() -> None:
+    from shared import calendar_inbox
+
+    calendar_inbox.mark("m-old", now=100.0)
+    assert calendar_inbox.take("m-old", now=100.0 + calendar_inbox.TTL_SECONDS + 1) is False
+    calendar_inbox.mark("m-new", now=100.0)
+    assert calendar_inbox.take("m-new", now=101.0) is True
+    assert calendar_inbox.take("m-new", now=101.0) is False
+
+
+@pytest.mark.parametrize("payload", [None, "not json", {"message": "x"}, {"data": 7}, []])
+def test_the_routers_calendar_check_fails_open_on_any_payload(payload) -> None:
+    """Fail OPEN: a payload the check cannot read is routed exactly as before."""
+    router = load_plugin("hermes-smd-webhook-router")
+    assert router._consumed_by_calendar(payload) is False
+
+
+def test_a_broken_calendar_read_dispatches_the_email_normally(cal, monkeypatch) -> None:
+    """Fail OPEN on a calendar seat too: a parse, store or config failure is
+    never a skip; the email reaches its turn."""
+    plugin, _ = cal
+    _attach(monkeypatch, plugin, "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\n")  # truncated part
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+
+    def broken(*_a, **_k):
+        raise RuntimeError("broken")
+
+    _attach(
+        monkeypatch,
+        plugin,
+        REPLY.format(uid="u-1", partstat="ACCEPTED", attendee=cf.A_EMAIL),
+    )
+    monkeypatch.setattr(plugin.ingest.calendar_store.STORE, "get", broken)
+    assert _dispatch(plugin, cf.A_EMAIL) is None
+    monkeypatch.setattr(plugin.seat_mod, "load_seat", broken)
+    assert _dispatch(plugin, cf.A_EMAIL) is None

@@ -38,6 +38,8 @@ $HERMES_HOME/profiles/<persona-slug>/skill-bundles/<bundle-slug>.yaml   # one pe
 
 The Hermes-native multi-persona pattern is documented in ADR 0011; per-persona SOUL.md is what Hermes loads as identity at profile boot.
 
+A seat that sets `seat.role` (ss-console ADR 0090) also gets its role's persona prompt appended verbatim to every SOUL.md: `role_persona.py` reads `$ROLES_DIR/<role>/role.yaml` (default `/app/roles`, which the seat image copies from ss-console `operator/roles/`) and the `persona:` file it names. A missing, malformed or empty package fails the boot; a seat with no role never reads the dir and its SOUL.md is unchanged.
+
 The `MEMORY.md` and `USER.md` files are tombstones — each contains only a single HTML comment block. Per ADR 0016, Honcho is the memory provider for SMD AI Employee profiles, and Hermes' local-file memory sources (`MEMORY.md`, `USER.md`) must NOT be loaded because they would double-process memory and create state divergence with Honcho. The tombstones pre-empt Hermes' default-template auto-creation at profile boot.
 
 The generated `config.yaml` also carries an explicit `local_memory_files` block declaring both files disabled, so operators inspecting a profile see the intent without needing to open the tombstone files.

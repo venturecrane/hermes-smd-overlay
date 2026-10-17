@@ -34,6 +34,13 @@ On a seat that authors no ``people:`` both hooks return at once: this plugin
 cannot change any other seat's behavior. A people block that cannot be read
 counts as space mode with no space, so every candidate call is refused.
 
+TWO-PERSON APPROVAL (``joint``, ``shared.joint_acts``, ss-console #3283). A write
+of a record the couple decides together (``joint-settings.md``, or any record of
+``kind: joint-settings``) is not a "share it" write: it is held as a proposal,
+the other partner is sent the exact change in their own DM, and the seat writes
+it only when both partners have said ``agree``, each in their own DM. Either may
+``reject``; it expires in seven days.
+
 Hooks are exception-safe; a hook that cannot decide refuses.
 """
 
@@ -46,10 +53,13 @@ import time
 from collections import OrderedDict
 from typing import Any
 
+from shared import joint_acts, space_taint, space_writes, turn_principal
 from shared import space as space_mod
-from shared import space_writes, turn_principal
+from shared.inbound import SESSION_TAINT
 from shared.pending_send import _may_approve
 from shared.turn_principal import Principal
+
+from . import joint
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +138,13 @@ _CONFIRMED = (
 )
 
 
+def _tainted(session_id: str) -> bool:
+    try:
+        return SESSION_TAINT.is_tainted(session_id)
+    except Exception:  # noqa: BLE001 — unknown taint reads as tainted
+        return True
+
+
 def _current_space(session_id: str) -> tuple[bool, space_mod.Space | None]:
     try:
         cfg = space_mod.space_config()
@@ -155,6 +172,10 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         if cfg is None:
             return None
         args = kwargs.get("args")
+        if joint_acts.is_joint_write(tool_name, args):
+            # Something the couple decides together: both partners' yes, not a
+            # "share it" (shared.joint_acts).
+            return joint.hold(tool_name, args, current, cfg, turn_principal.current().user_id)
         cross = space_writes.crossing(tool_name, args, current, cfg)
         if cross is None:
             return None
@@ -174,6 +195,16 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             space_writes.note_release(tool_name, turn)
             logger.info("hermes-smd-space-gate: confirmed write released (%s)", tool_name)
             return None
+        if (
+            tool_name == space_writes.RECORD_WRITE
+            and isinstance(args, dict)
+            and isinstance(args.get("content"), str)
+            and _tainted(session_id)
+        ):
+            # A record from a turn that read outside content says so, and the
+            # person confirms the words as they will land, stamp included
+            # (shared.space_taint, ss-console #3283).
+            args["content"] = space_taint.stamp_from_web(args["content"])
         payload = space_writes.exact_text(args)
         if len(payload) > space_writes.MAX_CONFIRM_CHARS:
             return {
@@ -199,12 +230,24 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         return {"action": "block", "message": _UNRESOLVED.format(tool=tool_name)}
 
 
+def _joint_answer(message: Any, session_id: str) -> dict[str, Any] | None:
+    """A partner's agree/reject to the open joint change, in their own DM."""
+    in_space_mode, current = _current_space(session_id)
+    if not in_space_mode or current is None:
+        return None
+    cfg = space_mod.space_config()
+    return joint.answer(message, cfg, current) if cfg is not None else None
+
+
 def on_pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
     """Approve the held write this person raised in this chat. Exception-safe."""
     try:
         if str(kwargs.get("platform") or "").lower() != "telegram":
             return None
         message = kwargs.get("user_message")
+        answered = _joint_answer(message, str(kwargs.get("session_id") or ""))
+        if answered is not None:
+            return answered
         if not is_confirmation(message):
             return None
         session_id = str(kwargs.get("session_id") or "")
