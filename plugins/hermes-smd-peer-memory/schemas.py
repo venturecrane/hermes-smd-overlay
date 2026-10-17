@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS peer_preferences (
     recorded_at     TEXT NOT NULL DEFAULT (datetime('now')),
     superseded_by   TEXT,
     space           TEXT NOT NULL DEFAULT '',
-    kind            TEXT NOT NULL DEFAULT 'preference'
+    kind            TEXT NOT NULL DEFAULT 'preference',
+    from_web        INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -55,6 +56,9 @@ CREATE TABLE IF NOT EXISTS peer_preferences (
 PEER_PREFERENCES_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("space", "ALTER TABLE peer_preferences ADD COLUMN space TEXT NOT NULL DEFAULT ''"),
     ("kind", "ALTER TABLE peer_preferences ADD COLUMN kind TEXT NOT NULL DEFAULT 'preference'"),
+    # ss-console #3283: 1 when the row was kept on a turn that had read outside
+    # content (a web search); see shared.space_taint.
+    ("from_web", "ALTER TABLE peer_preferences ADD COLUMN from_web INTEGER NOT NULL DEFAULT 0"),
 )
 
 #: The values ``kind`` may hold.

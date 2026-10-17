@@ -24,6 +24,7 @@ import logging
 from typing import Any
 
 from shared import space as space_mod
+from shared import space_taint
 from shared.inbound import SESSION_TAINT
 
 from . import store
@@ -120,11 +121,24 @@ def pre_tool_block(tool_name: str, session_id: str) -> dict[str, str] | None:
             tainted = SESSION_TAINT.is_tainted(session_id)
         except Exception:  # noqa: BLE001 — an unreadable taint state refuses
             tainted = True
-        if tainted:
+        if tainted and not _tainted_remember_allowed(tool_name, session_id):
             return {"action": "block", "message": _TAINTED.format(tool=tool_name)}
     if resolve(session_id) is None:
         return {"action": "block", "message": _UNRESOLVED.format(tool=tool_name)}
     return None
+
+
+def _tainted_remember_allowed(tool_name: str, session_id: str) -> bool:
+    """A tainted turn may still ``remember`` into its OWN private space (or a
+    scheduled run into its own space), stamped as from the web
+    (``shared.space_taint``, ss-console #3283). A preference is never captured on
+    a tainted turn: it is about a person, and a page must not speak for them."""
+    if tool_name != REMEMBER_TOOL:
+        return False
+    current = resolve(session_id)
+    return current is not None and space_taint.tainted_write_allowed(
+        tool_name, session_id, current.key
+    )
 
 
 def write(
@@ -143,7 +157,8 @@ def write(
     if status in ("blocked", "error"):
         logger.info("hermes-smd-peer-memory: %s not written (call %s)", tool_name, status)
         return None
-    if session_id and SESSION_TAINT.is_tainted(session_id):
+    from_web = bool(session_id) and SESSION_TAINT.is_tainted(session_id)
+    if from_web and not _tainted_remember_allowed(tool_name, session_id):
         logger.warning("hermes-smd-peer-memory: %s refused on tainted session", tool_name)
         return None
     space = resolve(session_id)
@@ -167,6 +182,7 @@ def write(
             session_id=session_id,
             space=space.key,
             kind="memory",
+            from_web=from_web,
         )
     if not stashed_peer:
         logger.warning("hermes-smd-peer-memory: preference skipped, no speaker on this turn")

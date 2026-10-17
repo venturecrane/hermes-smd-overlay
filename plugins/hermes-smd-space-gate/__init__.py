@@ -47,7 +47,8 @@ from collections import OrderedDict
 from typing import Any
 
 from shared import space as space_mod
-from shared import space_writes, turn_principal
+from shared import space_taint, space_writes, turn_principal
+from shared.inbound import SESSION_TAINT
 from shared.pending_send import _may_approve
 from shared.turn_principal import Principal
 
@@ -128,6 +129,13 @@ _CONFIRMED = (
 )
 
 
+def _tainted(session_id: str) -> bool:
+    try:
+        return SESSION_TAINT.is_tainted(session_id)
+    except Exception:  # noqa: BLE001 — unknown taint reads as tainted
+        return True
+
+
 def _current_space(session_id: str) -> tuple[bool, space_mod.Space | None]:
     try:
         cfg = space_mod.space_config()
@@ -174,6 +182,16 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
             space_writes.note_release(tool_name, turn)
             logger.info("hermes-smd-space-gate: confirmed write released (%s)", tool_name)
             return None
+        if (
+            tool_name == space_writes.RECORD_WRITE
+            and isinstance(args, dict)
+            and isinstance(args.get("content"), str)
+            and _tainted(session_id)
+        ):
+            # A record from a turn that read outside content says so, and the
+            # person confirms the words as they will land, stamp included
+            # (shared.space_taint, ss-console #3283).
+            args["content"] = space_taint.stamp_from_web(args["content"])
         payload = space_writes.exact_text(args)
         if len(payload) > space_writes.MAX_CONFIRM_CHARS:
             return {
