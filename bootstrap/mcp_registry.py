@@ -339,7 +339,15 @@ MCP_CONNECTOR_REGISTRY: dict[str, McpConnectorSpec] = {
         # capabilities -- so naming them here filters nothing. They are
         # classified READ in shared/action_classes.py instead; see the block
         # above those entries for why that is the safe direction.
-        blocked_tools=(),
+        #
+        # create_webhook_subscription IS a declared tool, so the exclude does
+        # filter it (overlay review OS-2, 2026-10-17). It registers a standing
+        # push of firm matter events to a caller-chosen URL: provisioning config
+        # that no routine performs at runtime, and the one Smokeball write whose
+        # effect outlives the turn and leaves the firm's own record. Reachable,
+        # an injected inbound email could aim it at an outside endpoint. Off the
+        # menu here; classified COMMITMENT (taint-gated) as the second wall.
+        blocked_tools=("create_webhook_subscription",),
     ),
     # Microsoft Graph mail (mcp:msgraph-mail) — the client-custody email connector
     # (ADR 0078 / email-channel-seam D4; ss-console operator/connectors/msgraph-mail,
