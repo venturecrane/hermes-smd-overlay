@@ -1,0 +1,11 @@
+name: hermes-smd-group-audience
+version: "0.1.0"
+description: "Couples role (ADR 0091, R7): on a turn in the shared Telegram group, counts the group's members (Bot API getChatMemberCount, at most every 10 minutes, off-thread) and posts one fixed notice when anyone outside people: can read the group. Records the count it warned at so it never repeats. Seats without people: are untouched."
+author: VentureCrane
+requires_env: []
+optional_env:
+  - TELEGRAM_BOT_TOKEN
+provides_hooks:
+  - pre_llm_call
+hooks:
+  - pre_llm_call
