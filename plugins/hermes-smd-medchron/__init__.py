@@ -93,16 +93,21 @@ def _medchron_job_submit(args: dict[str, Any], session_id: str = "", **_: Any) -
         envelope["requested_by"] = origin.sender_address
         envelope["request_ref"] = origin.internet_message_id
     elif demand._turn_email_id(session_id):
-        # An email opened this turn and its verified origin did not bind, so
-        # the completion reply has no thread to go to. The job still queues (a
-        # chronology is not refused for want of a reply), but this break was
-        # silent until 2026-10-08 and must not be again.
+        # An email opened this turn and its verified origin did not bind. The
+        # model's requested_by/request_ref are NOT a substitute: they would make
+        # the completion reply go to a recipient and thread the model chose. And
+        # without them the broker refuses an unattributed package anyway. So
+        # refuse here, exactly as the demand, drafting and litigation lanes do,
+        # and say so loudly (this break was silent until 2026-10-08).
         logger.warning(
             "medchron_job_submit: this turn was opened by an email but its verified origin "
-            "did not bind or carries no internet message id (session=%r); queued without "
-            "requested_by/request_ref, so the "
-            "completion reply cannot find the requester's thread",
+            "did not bind or carries no internet message id (session=%r); refused, nothing "
+            "was queued",
             session_id,
+        )
+        return demand._refuse(
+            "the request email's sender and message id could not be verified on this turn, so "
+            "the completion reply could not find the requester's thread; nothing was queued"
         )
     selection = args.get("selection")
     if isinstance(selection, dict) and selection.get("include_file_ids"):

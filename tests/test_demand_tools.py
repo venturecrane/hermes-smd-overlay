@@ -279,3 +279,21 @@ def test_a_chronology_submit_with_no_email_keeps_the_model_values(demand, monkey
     plugin._medchron_job_submit(dict(_CHRONOLOGY))
     env = client.envelopes[0]
     assert env["requested_by"] == "attorney@firm.example" and env["request_ref"] == "the thread"
+
+
+def test_an_unbound_email_chronology_submits_nothing_and_never_the_model_values(
+    demand, monkeypatch
+) -> None:
+    """An email opened the turn but its verified origin did not bind (the router
+    never recorded it). FALSIFIER: the old code forwarded the model's
+    requested_by/request_ref to the broker here, so the completion reply bound
+    to a recipient and thread the model chose. The sibling lanes refuse."""
+    from tests.conftest import load_plugin
+
+    plugin = load_plugin("hermes-smd-medchron")
+    client = _ChronologyClient()
+    monkeypatch.setattr(plugin, "MedchronBrokerClient", lambda: client)
+    _turn(_prompt("AAMkUNBOUND="))
+    out = json.loads(plugin._medchron_job_submit(dict(_CHRONOLOGY)))
+    assert out["accepted"] is False and "nothing was queued" in out["reason"]
+    assert client.envelopes == []

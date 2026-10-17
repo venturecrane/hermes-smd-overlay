@@ -414,11 +414,12 @@ def evaluate(
 # the outbound layer is intact.
 #
 # WHO MAY MARK. Only :func:`mark_establishment_read_exempt`, called from the
-# establishment plugin AFTER the seat has classified the turn's sender as a firm
-# admin against the authored allow list. A non-admin turn is never marked, so
-# this cannot become a route around the fence for ordinary work: the mark is
-# gated on the same admin allow-list that gates the establishment tools
-# themselves.
+# establishment plugin, and only when establishment is actually underway: a
+# classified firm admin asked for it in their own words, or an establishment
+# tool cleared its admin gate. Being an admin is NOT enough (on a seat whose
+# admins are the staff doing the ordinary work, that would switch this fence
+# off for their ordinary drafting). The plugin clears the mark as soon as the
+# session's attributed sender is anyone other than that admin.
 _read_exempt_sessions: set[str] = set()
 
 

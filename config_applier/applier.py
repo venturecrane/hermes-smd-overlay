@@ -355,23 +355,29 @@ def _emit_config_write(
 # ---------------------------------------------------------------------------
 
 
-def _load_current(path: Path) -> dict[str, Any]:
-    """Best-effort parse of the on-volume config for the safety diff.
+def _load_current(path: Path) -> dict[str, Any] | None:
+    """Parse the on-volume config for the safety diff.
 
-    A missing or unparseable current file is treated as ``{}`` — the first apply
-    onto a fresh Machine has no prior config, and a corrupt current file should
-    not block replacing it with a validated good one (every path then reads as
-    changed, and the live-writability check governs whether that is allowed)."""
-    if not path.exists():
-        return {}
+    ``{}`` ONLY when the file genuinely does not exist: the first apply onto a
+    fresh Machine, the one case the safety gate treats as an initial seed.
+
+    ``None`` when the file exists but cannot be read, does not parse, or is not a
+    non-empty mapping. This used to return ``{}`` too, which made a corrupt or
+    unreadable current file look like an initial seed, and the safety gate skips
+    the live-writable / rebuild-class check for an initial seed, so a live
+    Machine could take a rebuild-class change with no re-provision. The caller
+    refuses the apply on ``None`` (fail closed)."""
     try:
+        if not path.exists():
+            return {}
         data = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError) as exc:
-        logger.warning(
-            "config_applier: current config at %s unreadable (%s); treating as empty", path, exc
-        )
-        return {}
-    return data if isinstance(data, dict) else {}
+    except (OSError, yaml.YAMLError, UnicodeDecodeError) as exc:
+        logger.warning("config_applier: current config at %s unreadable (%s)", path, exc)
+        return None
+    if not isinstance(data, dict) or not data:
+        logger.warning("config_applier: current config at %s is not a non-empty mapping", path)
+        return None
+    return data
 
 
 def _validate_and_parse(new_bytes: bytes) -> tuple[dict[str, Any] | None, ApplyResult | None]:
@@ -496,6 +502,19 @@ def apply(
     assert new_cfg is not None  # narrowed: rejected is None ⇒ cfg parsed
 
     old_cfg = _load_current(volume)
+    if old_cfg is None:
+        # The running config exists but cannot be read: the safety diff has no
+        # baseline, and treating it as an initial seed would skip the
+        # live-writable gate. Leave the volume untouched; a re-provision (which
+        # owns rebuild-class writes) is the path that replaces it.
+        return ApplyResult(
+            outcome=ApplyOutcome.REJECTED,
+            reasons=(
+                f"current config at {volume} exists but is unreadable or not a mapping; "
+                "the live-writable safety check cannot run against it, so nothing was "
+                "written (re-provision to replace it)",
+            ),
+        )
     changed = tuple(safety.changed_paths(old_cfg, new_cfg))
 
     # Step 3 — safety gate.
