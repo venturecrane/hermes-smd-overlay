@@ -83,6 +83,7 @@ from bootstrap.cron_materialize import (
     materialize_cron,
 )
 from bootstrap.mcp_registry import MCP_CONNECTOR_REGISTRY
+from bootstrap.role_persona import RolePersonaError, load_role_persona
 from bootstrap.validate import validate_customer_yaml
 from shared.cron_containment import containment_active, containment_reason, sentinel_path
 from shared.routine_change_spool import append_routine_change
@@ -1676,13 +1677,17 @@ def _send_posture_soul_section(persona: dict[str, Any]) -> str:
     )
 
 
-def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
+def _soul_body(persona: dict[str, Any], customer: dict[str, Any], role_persona: str = "") -> str:
     """Build the per-persona ``SOUL.md`` body.
 
     The shape is intentionally minimal: identity (name, title, tone)
     plus the customer context that anchors the persona. Authored voice
     samples and skill catalogs are consumed at runtime from the same
     profile directory, not embedded here.
+
+    ``role_persona`` is the seat's role persona prompt (ss ADR 0090), appended
+    verbatim; see :mod:`bootstrap.role_persona`. A seat with no role passes
+    ``""`` and its SOUL.md is byte-identical to the pre-role shape.
     """
     persona_name = persona.get("name") or persona.get("slug") or "Persona"
     title = persona.get("title") or "AI Associate"
@@ -1704,7 +1709,13 @@ def _soul_body(persona: dict[str, Any], customer: dict[str, Any]) -> str:
         f"{_relationship_soul_section(customer)}"
         f"{_digest_home_soul_section(customer)}"
         f"{_escalation_soul_section(customer)}"
+        f"{_role_persona_soul_section(role_persona)}"
     )
+
+
+def _role_persona_soul_section(role_persona: str) -> str:
+    """The role persona, verbatim, after a blank line; ``""`` for no role."""
+    return f"\n{role_persona}" if role_persona else ""
 
 
 def _digest_home_soul_section(customer: dict[str, Any]) -> str:
@@ -2122,6 +2133,7 @@ def translate_customer_yaml(
     *,
     skills_dir: str | None = None,
     cron_store_for: Callable[[str], CronStore] | None = None,
+    roles_dir: str | None = None,
 ) -> list[str]:
     """Translate ``customer.yaml`` into per-profile Hermes config.
 
@@ -2163,6 +2175,10 @@ def translate_customer_yaml(
         skills_dir: Override for the skill catalog root. Defaults to
             ``$SKILLS_DIR`` env var if set, otherwise
             ``<hermes_home>/skills``.
+        roles_dir: Override for the role-package root read when the seat
+            sets ``seat.role`` (ss ADR 0090). Defaults to ``$ROLES_DIR``,
+            otherwise ``/app/roles``. A role whose persona cannot be loaded
+            raises :class:`TranslateError` before any disk write.
 
     Returns:
         List of persona slugs whose profile directories were
@@ -2200,6 +2216,14 @@ def translate_customer_yaml(
 
     resolved_pins = _resolve_skill_pins(personas, skills_path)
 
+    # The seat's role persona (ss ADR 0090), loaded once and before any write,
+    # so a role seat whose persona is missing fails the boot instead of running
+    # without its safety rules. No seat.role -> "" and SOUL.md is unchanged.
+    try:
+        role_persona = load_role_persona(customer, roles_dir)
+    except RolePersonaError as exc:
+        raise TranslateError(str(exc)) from exc
+
     # Read the root-owned spec manifest ONCE per translate run (ss ADR 0083
     # #2084). The boot fetch (`python -m spec_applier --once`, run by the
     # entrypoint as root before the privilege drop) has already installed the
@@ -2220,7 +2244,7 @@ def translate_customer_yaml(
         soul_path = profile_dir / "SOUL.md"
 
         config_body = _persona_config(persona, customer, resolved_pins)
-        soul_body = _soul_body(persona, customer)
+        soul_body = _soul_body(persona, customer, role_persona)
 
         wrote_config = _write_if_changed(config_path, _yaml_bytes(config_body))
         wrote_soul = _write_if_changed(soul_path, soul_body.encode())
