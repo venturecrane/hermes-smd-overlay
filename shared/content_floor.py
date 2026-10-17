@@ -140,10 +140,15 @@ _CATEGORY_PATTERNS: dict[str, tuple[str, ...]] = {
 #
 # Fix: before scanning, blank out recognized disclaimer clauses, then run the
 # category patterns on the remainder. The carve-out is the OPPOSITE of weakening
-# the floor — it removes a false positive, not a real signal. It is deliberately
-# CLAUSE-LOCAL (``[^.?!\n]*?`` runs, non-greedy): a disclaimer can neutralize
-# only its own clause, so genuinely sensitive content elsewhere in the same
-# message (money, contract, scope, a real legal commitment) still trips. The
+# the floor — it removes a false positive, not a real signal. A pattern only
+# RECOGNIZES a disclaimer (negation or hedge, then the phrase, inside one clause:
+# ``[^.?!\n,;:]*?`` runs, non-greedy, stopping at commas/semicolons/colons too);
+# what gets blanked is the disclaimer PHRASE alone (``_DISCLAIMER_PHRASE_RE``).
+# Blanking the whole matched span masked every trigger between the negation
+# and the phrase: "No need to sign anything, we will wire the $40,000
+# settlement Friday, and nothing here is legal advice" read as clear, because
+# the span ran from "No" to "legal advice". Now only "legal advice" goes, and
+# "sign", "wire", "$4", "settlement" all still trip. The
 # empty/indeterminate fail-toward-draft check in ``classify`` runs on the
 # ORIGINAL text, so a disclaimer-only body does not flip to "indeterminate".
 _DISCLAIMER_PATTERNS: tuple[str, ...] = (
@@ -153,18 +158,27 @@ _DISCLAIMER_PATTERNS: tuple[str, ...] = (
     # "we cannot provide legal advice", "not intended as legal advice".
     r"\b(?:no|not|nothing|never|neither|cannot|can't|won't|will not|do not|"
     r"don't|does not|doesn't|should not|shouldn't|isn't|aren't)\b"
-    r"[^.?!\n]*?\blegal advice\b",
+    r"[^.?!\n,;:]*?\blegal advice\b",
     # hedge verbs introducing the phrase even without an explicit negation,
     # e.g. "...construed / relied upon as legal advice".
     r"\b(?:read|construed|taken|considered|interpreted|relied\s+(?:up)?on|"
-    r"treated|intended)\b[^.?!\n]*?\bas legal advice\b",
+    r"treated|intended)\b[^.?!\n,;:]*?\bas legal advice\b",
     # attorney-client relationship disclaimers ("no attorney-client
     # relationship is formed", "does not create an attorney-client privilege",
     # "we are not your attorneys").
     r"\bno attorney-client\b",
-    r"\b(?:not|does not|doesn't|do not|don't|without|no)\b[^.?!\n]*?"
+    r"\b(?:not|does not|doesn't|do not|don't|without|no)\b[^.?!\n,;:]*?"
     r"\battorney-client (?:relationship|privilege)\b",
     r"\bnot(?:\s+acting\s+as)?\s+your\s+attorneys?\b",
+)
+
+
+# The words inside a recognized disclaimer that the LEGAL patterns would match.
+# Only these are blanked; the rest of the recognized span is scanned as usual.
+_DISCLAIMER_PHRASE_RE = re.compile(
+    r"\blegal advice\b|\battorney-client(?:\s+(?:relationship|privilege))?\b|"
+    r"\byour\s+attorneys?\b",
+    re.IGNORECASE,
 )
 
 
@@ -202,16 +216,17 @@ def _disclaimer_compiled() -> tuple[re.Pattern[str], ...]:
 
 
 def _neutralize_disclaimers(text: str) -> str:
-    """Blank recognized UPL / not-legal-advice disclaimer clauses.
+    """Blank the phrase inside each recognized UPL / not-legal-advice disclaimer.
 
-    Replaces each matched disclaimer span with a single space so the category
-    scan never sees the "legal" / "attorney" inside standard boilerplate, while
-    leaving every other clause intact (the patterns are clause-local, so this
-    cannot mask an adjacent committing sentence). Pure; no I/O.
+    Within each matched disclaimer span, only the disclaimer phrase itself
+    ("legal advice", "attorney-client relationship", "your attorney") becomes
+    a space, so the category scan never sees the "legal" / "attorney" in
+    standard boilerplate while every other word in the span, and every other
+    clause, is still scanned. Pure; no I/O.
     """
     out = text
     for pat in _disclaimer_compiled():
-        out = pat.sub(" ", out)
+        out = pat.sub(lambda m: _DISCLAIMER_PHRASE_RE.sub(" ", m.group(0)), out)
     return out
 
 
