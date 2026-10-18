@@ -367,6 +367,20 @@ _RAW_TOOL_ACTION_CLASS_MAP: dict[str, ActionClass] = {
     "calendar_invite_update": ActionClass.INTERNAL_WRITE,
     "calendar_invite_cancel": ActionClass.INTERNAL_WRITE,
     "calendar_invite_list": ActionClass.READ,
+    # A couple's schedule and settings, set by conversation
+    # (plugins/hermes-smd-couples-settings, ss-console #3264). The couples persona
+    # has no cronjob tool (CODE_EXECUTION, below), so this is the ONLY way a
+    # schedule changes on such a seat, and it is narrow by construction: it
+    # writes one validated JSON document on the seat's volume, never a cron job,
+    # a path or an address (delivery is a person id or ``shared``, resolved in
+    # code). The change is INTERNAL_WRITE: a write into the seat's own state,
+    # behind the same ceiling as a record write. What it can SEND is not this
+    # call's send: a joint change's notice to the other partner goes through
+    # shared.send_dispatch on the roster lane, which the broker fences to the
+    # seat's people. The read is READ, unfenced by design
+    # (tests/test_inbound_fence_completeness.py says why).
+    "couples_settings_read": ActionClass.READ,
+    "couples_settings_change": ActionClass.INTERNAL_WRITE,
     # A rostered sender's voice memo as text (plugins/hermes-smd-voice-notes,
     # 2026-09-29, ss-console#2793). READ: it spools the seat's own mail
     # attachment to the scratch spool and runs the seat's speech-to-text on

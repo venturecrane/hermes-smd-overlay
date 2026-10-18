@@ -19,7 +19,7 @@ import logging
 import re
 from typing import Any
 
-from shared import joint_acts, space_writes
+from shared import joint_acts, joint_notice
 from shared import space as space_mod
 
 logger = logging.getLogger(__name__)
@@ -27,20 +27,16 @@ logger = logging.getLogger(__name__)
 _AGREE = frozenset({"agree", "i agree", "yes agree", "agree to the change", "agreed"})
 _REJECT = frozenset({"reject", "reject it", "reject the change", "decline", "i reject"})
 
-#: The lane a joint-change notice email rides. The broker admits the seat's
-#: people on it only when the couples-checkin skill authors
-#: ``settings.recipients: roster`` (ss-console participant fence).
-NOTICE_LANE_SKILL = "couples-checkin"
-NOTICE_SUBJECT = "A change for the two of you to decide"
+NOTICE_LANE_SKILL = joint_notice.NOTICE_LANE_SKILL
+NOTICE_SUBJECT = joint_notice.NOTICE_SUBJECT
 
-PROPOSAL_NOTICE = (
-    "{who} would like to change something you two decide together:\n\n"
-    "{payload}\n\n"
-    "Reply 'agree' to approve it or 'reject' to decline. "
-    "It applies only when you both agree, and it expires in 7 days."
-)
+PROPOSAL_NOTICE = joint_notice.PROPOSAL_NOTICE
 APPLIED_NOTICE = "You both agreed, so this change is now in place:\n\n{payload}"
 REJECTED_NOTICE = "{who} declined the change, so nothing changed:\n\n{payload}"
+FAILED_NOTICE = (
+    "You both agreed, but this change could not be applied ({why}), so nothing "
+    "changed:\n\n{payload}"
+)
 
 _HELD = (
     "HELD for both of you: {tool} changes something the two partners decide "
@@ -57,49 +53,15 @@ def _normalize(message: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _speaker(
-    cfg: space_mod.SpaceConfig, current: space_mod.Space, user_id: str, session_id: str
-) -> space_mod.Person | None:
-    """The person making the request: the DM's or the private email's person,
-    the authored person whose Telegram id spoke in the group, or the verified
-    sender of a joint email thread."""
-    if current.source in (space_mod.SOURCE_TELEGRAM_DM, space_mod.SOURCE_EMAIL):
-        return cfg.person(current.person_id or "")
-    if current.source == space_mod.SOURCE_TELEGRAM_GROUP:
-        return cfg.person_for_telegram(user_id)
-    if current.source == space_mod.SOURCE_EMAIL_JOINT:
-        from shared.inbound import SESSION_INBOUND_ORIGIN
-
-        origin = SESSION_INBOUND_ORIGIN.get(session_id)
-        return cfg.person_for_email(origin.sender_address) if origin is not None else None
-    return None
-
-
-def _reachable(person: space_mod.Person) -> bool:
-    return bool(person.telegram_id or person.email)
+# The asker and the notice are shared with the couples settings tool
+# (shared.joint_notice), so both name the asker and reach the partner alike.
+_speaker = joint_notice.speaker
+_reachable = joint_notice.reachable
 
 
 def notify(person: space_mod.Person, text: str) -> None:
-    """Tell one person, by code, on their authored channel (``people[].channel``,
-    email by default): their Telegram DM only when they prefer Telegram and are
-    bound, else their email. Raises when it could not be sent."""
-    if person.reached_by_telegram:
-        space_writes.post_notice(person.telegram_id, text)
-        return
-    if not person.email:
-        raise RuntimeError(f"{person.id} has no channel the seat can reach")
-    from shared import send_anchor, send_dispatch
-
-    result = send_dispatch.dispatch(
-        to=[person.email],
-        subject=NOTICE_SUBJECT,
-        text=text,
-        anchor=None,
-        lane=send_anchor.skill_lane(NOTICE_LANE_SKILL),
-        templated=True,
-    )
-    if not result.sent:
-        raise RuntimeError(result.reason or "the notice was not sent")
+    """Tell one person on their authored channel (``shared.joint_notice``)."""
+    joint_notice.notify(person, text)
 
 
 def hold(
@@ -216,6 +178,17 @@ def answer_person(
         return {
             "context": "This partner declined the change; nothing changed and the other "
             "partner was told."
+        }
+    if outcome == "failed":
+        why = act.history[-1] if act.history else "it no longer fits the current settings"
+        for p in cfg.people:
+            try:
+                notify(p, FAILED_NOTICE.format(why=why, payload=payload))
+            except Exception:  # noqa: BLE001
+                logger.warning("hermes-smd-space-gate: failed notice to %s not sent", p.id)
+        return {
+            "context": "Both partners agreed, but the change could not be applied: "
+            f"{why}. Nothing changed and both were told. Say so plainly."
         }
     if outcome == "already":
         return {

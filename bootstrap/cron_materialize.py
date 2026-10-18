@@ -48,7 +48,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from shared import cron_space
+from shared import couples_slots, cron_space
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,9 @@ class _DesiredJob:
     pre_run: str | None  # pre-run script basename when pre_run_decides, else None
     space: str | None = None  # authored space key on space-mode seats (ADR 0091)
     deliver: str | None = None  # Hermes deliver target; the resolver reads the run's space from it
+    # A couples slot (shared.couples_slots): its pre-run script is the
+    # conversation-settings gate, staged by ``stage_slot_gate``, not a skill script.
+    slot_gate: bool = False
 
 
 class CronStore(Protocol):
@@ -162,7 +165,16 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
         pslug = str(persona.get("slug") or persona.get("name") or "").strip()
         scheduled_skills = _scheduled_initiation_skills(persona)
         entries: list[_DesiredJob] = []
+        slots = couples_slots.slot_specs(customer, persona, space_cfg)
+        slot_skills = {skill for skill, _space in slots}
         for entry in persona.get("cron") or []:
+            if isinstance(entry, dict) and str(entry.get("skill") or "").strip() in slot_skills:
+                raise CronMaterializeError(
+                    f"persona {pslug!r} skill {entry.get('skill')!r}: on a couples seat this "
+                    "skill's schedule is set by the couple in conversation "
+                    "(shared.couples_settings), not authored in personas[].cron[]. Remove "
+                    "the cron entry."
+                )
             if not isinstance(entry, dict):
                 raise CronMaterializeError(
                     f"persona {pslug!r}: cron entry is not a mapping: {entry!r}"
@@ -232,9 +244,38 @@ def _desired_by_persona(customer: dict[str, Any]) -> dict[str, list[_DesiredJob]
                     deliver=deliver,
                 )
             )
+        entries.extend(_slot_jobs(pslug, slots, space_cfg))
         if entries:
             by_persona[pslug] = entries
     return by_persona
+
+
+def _slot_jobs(pslug: str, slots: list[tuple[str, str]], space_cfg: Any) -> list[_DesiredJob]:
+    """The couples slot jobs (``shared.couples_slots``) for one persona. Same
+    managed name and delivery as an authored routine in that space, so the
+    space resolver, attribution and email delivery read them unchanged."""
+    out: list[_DesiredJob] = []
+    for skill, raw_space in slots:
+        if not pslug:
+            raise CronMaterializeError("a couples slot has no resolvable persona slug")
+        try:
+            space, deliver = cron_space.delivery_for(raw_space, space_cfg)
+        except cron_space.CronSpaceError as exc:
+            raise CronMaterializeError(
+                f"persona {pslug!r} slot {skill}@{raw_space}: {exc}"
+            ) from exc
+        out.append(
+            _DesiredJob(
+                name=cron_space.name_with_space(managed_name(pslug, skill), space),
+                schedule=couples_slots.SLOT_SCHEDULE,
+                skill=skill,
+                pre_run=None,
+                space=space,
+                deliver=deliver,
+                slot_gate=True,
+            )
+        )
+    return out
 
 
 def materialize_cron(
@@ -244,6 +285,7 @@ def materialize_cron(
     reconcile_slugs: Iterable[str] | None = None,
     containment: bool = False,
     on_routine_change: Callable[[RoutineChange], None] | None = None,
+    stage_slot_gate: Callable[[str, str, str], str] | None = None,
 ) -> list[str]:
     """Reconcile Hermes cron jobs from customer.yaml into each persona's profile
     home, converging every reconciled persona's store to EXACTLY its authored
@@ -296,6 +338,22 @@ def materialize_cron(
     staged_refs: dict[tuple[str, str], str] = {}
     for pslug, desired in by_persona.items():
         for job in desired:
+            if job.slot_gate:
+                if stage_slot_gate is None:
+                    raise CronMaterializeError(
+                        f"persona {pslug!r} skill {job.skill!r}: a couples slot needs its "
+                        "settings gate staged, but no gate stager was provided. Aborting "
+                        "rather than waking the agent every quarter hour."
+                    )
+                try:
+                    staged_refs[(pslug, job.name)] = stage_slot_gate(
+                        pslug, job.skill, job.space or ""
+                    )
+                except Exception as exc:  # noqa: BLE001 — fail closed
+                    raise CronMaterializeError(
+                        f"persona {pslug!r} slot {job.name!r}: could not stage its gate: {exc}"
+                    ) from exc
+                continue
             if job.pre_run is None:
                 continue
             if stage_script_for is None:
