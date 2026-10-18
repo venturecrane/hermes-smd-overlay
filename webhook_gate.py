@@ -23,8 +23,10 @@ Security posture: the gate is the deterministic auth boundary. A forged POST
 (bad/missing signature) is rejected 401 before any agent work. Sender-trust
 (allowlist) + recipient-lock live downstream (the skill replies in-thread via
 ``reply_to_message``, so the reply target is structurally the original sender,
-never a body-derived address). DMARC-in-code is the documented evolution
-upgrade (AgentMail surfaces ``headers['Authentication-Results']``).
+never a body-derived address). Whether the ``From`` is the sender at all is
+decided downstream too: the router requires an aligned DMARC or DKIM pass from
+AgentMail's ``authentication_results`` before the address carries any roster or
+admin standing (``shared/sender_auth.py``).
 
 Stdlib only (http.server) — no aiohttp dependency, runs anywhere the overlay
 is installed. Launched by bootstrap.sh as a tini-supervised child.

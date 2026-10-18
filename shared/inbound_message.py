@@ -68,6 +68,12 @@ class InboundMessage:
     provider_refs: dict
     reply_text: str = field(default="", repr=False)
     auto_submitted: bool = False
+    #: AgentMail's per-message sender verdicts (``message.authentication_results``:
+    #: spf/dkim/dmarc + their domains), exactly as the payload carried them, or
+    #: ``None`` when the payload carried no such key. Read only by
+    #: ``shared.sender_auth``, which decides whether ``from_addr`` is the sender
+    #: or a claim. Not in :meth:`to_dict`: the model never reads it.
+    authentication_results: dict | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict:
         """Plain-dict projection for embedding in the dispatch directive."""
@@ -153,6 +159,20 @@ def _auto_submitted(headers: object) -> bool:
     return False
 
 
+def _authentication_results(msg: dict) -> dict | None:
+    """AgentMail's ``authentication_results`` block, or ``None`` when absent.
+
+    Absent (``None``) and present-but-empty (``{}``) are different facts and
+    both are preserved: absent means the payload did not say, so the verdicts
+    may be read back from the vendor; ``{}`` means the vendor said there is
+    nothing, which is unauthenticated. A non-dict value is treated as ``{}``
+    (said, but unusable), never as absent."""
+    if "authentication_results" not in msg:
+        return None
+    raw = msg.get("authentication_results")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def _first_present(msg: dict, *keys: str) -> str:
     """First key in ``msg`` whose value is a non-empty string, stripped; else ''."""
     for key in keys:
@@ -225,6 +245,7 @@ def _normalize_agentmail(payload: dict) -> InboundMessage | None:
         # and a quoted numbered list must never read as the reader's answer.
         reply_text=_str_or_empty(msg.get("extracted_text")),
         auto_submitted=_auto_submitted(msg.get("headers")),
+        authentication_results=_authentication_results(msg),
     )
 
 

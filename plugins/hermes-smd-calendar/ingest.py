@@ -46,7 +46,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from shared import agentmail_broker, calendar_inbox, calendar_store, ical, inbound_message, space
+from shared import (
+    agentmail_broker,
+    calendar_inbox,
+    calendar_store,
+    ical,
+    inbound_message,
+    sender_auth,
+    space,
+)
 from shared.calendar_store import StoredEvent
 
 from . import seat as seat_mod
@@ -178,6 +186,19 @@ def process(payload: Any, seat: seat_mod.Seat) -> tuple[str, Outcome] | None:
         if agentmail_broker.is_calendar_attachment(p)
     ]
     if not parts:
+        return None
+    # A calendar part is filed against the person its From names: an RSVP marks
+    # that attendee, an invitation lands in that person's space. An
+    # unauthenticated From is only a claim (shared/sender_auth.py), so it files
+    # nothing; returning None lets the email flow on to the webhook router,
+    # which delivers it as an unknown external sender. Never dropped.
+    authenticated, reason = sender_auth.sender_authenticated(dto)
+    if not authenticated:
+        logger.warning(
+            "hermes-smd-calendar: From %s is not authenticated (%s); calendar parts not filed",
+            sender,
+            reason,
+        )
         return None
     outcome = Outcome()
     target = _owner_space(seat, sender)

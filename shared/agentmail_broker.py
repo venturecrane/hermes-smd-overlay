@@ -345,6 +345,29 @@ def message_sender(message_id: str) -> str:
     return address
 
 
+def message_authentication(message_id: str) -> dict[str, Any]:
+    """The vendor's sender-authentication verdicts for one message.
+
+    Read for ONE purpose: ``shared.sender_auth`` asks whether the message's
+    ``From`` is the sender or only a claim, and reads the verdicts back here
+    when the webhook payload did not carry them. Returns the
+    ``authentication_results`` object (``{}`` when the vendor holds none, as it
+    does for mail received before 2026-09-09). Raises on any read fault, so the
+    caller treats "could not tell" as unauthenticated rather than as a pass.
+    """
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise AgentMailReadError("message_id is required")
+    body, _ = _get(_message_path(own_inbox(), message_id.strip()), accept="application/json")
+    try:
+        parsed = json.loads(body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AgentMailReadError("agentmail returned a message that is not JSON") from exc
+    if not isinstance(parsed, dict):
+        raise AgentMailReadError("agentmail returned a message that is not an object")
+    raw = parsed.get("authentication_results")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
 def list_attachments(message_id: str) -> list[dict[str, Any]]:
     """Every attachment the vendor holds for one message.
 

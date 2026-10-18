@@ -466,6 +466,8 @@ def _rostered_router(tmp_path, monkeypatch):
 
 
 def _mail(sender: str, message_id: str, **extra) -> dict:
+    from tests.test_inbound import _dmarc_pass
+
     return {
         "source": "agentmail",
         "event_type": "message.received",
@@ -473,6 +475,7 @@ def _mail(sender: str, message_id: str, **extra) -> dict:
             "inbox_id": "inbox_1",
             "message_id": message_id,
             "from": sender,
+            "authentication_results": _dmarc_pass(sender),
             "subject": "Pull the records",
             "text": "Please pull the records.",
             **extra,
