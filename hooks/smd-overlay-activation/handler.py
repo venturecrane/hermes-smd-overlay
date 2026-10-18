@@ -399,42 +399,41 @@ def _webhook_expected_tools_check() -> None:
         logger.warning("webhook expected-tools: sentinel write failed", exc_info=True)
 
 
-#: The module (``hermes_plugins.<slug>``) whose pre_gateway_dispatch callback
-#: must be live whenever a seat forwards unknown Telegram DMs (``pair``).
-_COUPLES_ONBOARDING_MODULE = "hermes_smd_couples_onboarding"
+def _unknown_dm_check() -> str:
+    """Refuse to serve a space-mode seat whose Telegram answers strangers.
 
+    A seat that authors ``people:`` (ss-console ADR 0091) must drop every DM
+    from a sender who is not an authored person, with no reply. Translate
+    authors ``telegram.unauthorized_dm_behavior: ignore`` on such a seat, which
+    is Hermes' own drop (``gateway/run_inbound.py`` ``_hm_admit_event``). Hermes'
+    Telegram DEFAULT is ``pair``, which answers a stranger with a pairing code,
+    so an absent value counts as ``pair`` here. Fail-closed: a seat that cannot
+    tell whether it is in space mode does not serve either."""
+    try:
+        from shared import space
 
-def _couples_onboarding_check(manager: Any) -> str:
-    """Refuse to serve when Telegram forwards unknown DMs but nothing drops them.
-
-    On a couples seat translate authors ``telegram.unauthorized_dm_behavior:
-    pair`` so the adapter forwards a DM from an unknown sender to the
-    ``hermes-smd-couples-onboarding`` hook, which handles a ``/start <token>``
-    and DROPS every such DM before the runner's pairing offer. Without that
-    hook in the live singleton the same config sends pairing codes to
-    strangers. The trigger is the config value, not the seat's role: whatever
-    authored ``pair``, the seat must not serve it without the drop (ss-console
-    ADR 0091 s5, fail-closed)."""
+        in_space = space.space_mode()
+    except Exception as e:  # noqa: BLE001
+        _die(f"cannot tell whether this seat authors people: ({type(e).__name__}: {e})")
+        return "unverified"
+    if not in_space:
+        return "not applicable (no people: authored)"
     try:
         config = _gateway_config()
     except Exception as e:  # noqa: BLE001
         _die(f"cannot load config for the unknown-DM check: {type(e).__name__}: {e}")
         return "unverified"
     tg = config.get("telegram") if isinstance(config, dict) else None
-    behavior = tg.get("unauthorized_dm_behavior") if isinstance(tg, dict) else None
-    if str(behavior or "").strip().lower() != "pair":
-        return "not applicable (unknown DMs are not forwarded)"
-    callbacks = (getattr(manager, "_hooks", {}) or {}).get("pre_gateway_dispatch", [])
-    if not any(
-        _COUPLES_ONBOARDING_MODULE in str(getattr(cb, "__module__", "")) for cb in callbacks
-    ):
+    if not isinstance(tg, dict):
+        return "not applicable (Telegram not configured)"
+    behavior = str(tg.get("unauthorized_dm_behavior") or "pair").strip().lower()
+    if behavior != "ignore":
         _die(
-            "telegram.unauthorized_dm_behavior is 'pair' but hermes-smd-couples-onboarding "
-            "is not registered on pre_gateway_dispatch: unknown Telegram DMs would reach "
-            "Hermes' pairing flow instead of being dropped"
+            f"telegram.unauthorized_dm_behavior is {behavior!r} on a seat that authors "
+            "people:; a DM from a non-person would be answered instead of dropped"
         )
         return "missing"
-    logger.info("unknown-DM check passed: couples-onboarding drops unknown Telegram DMs")
+    logger.info("unknown-DM check passed: Telegram drops DMs from non-people natively")
     return "enforced"
 
 
@@ -651,9 +650,9 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
     #     tiers answer different orders of harm.
     _webhook_expected_tools_check()
 
-    # 6. UNKNOWN-DM drop (ss-console ADR 0091 s5): a seat that forwards unknown
-    #    Telegram DMs (``pair``) must have the couples-onboarding drop live.
-    unknown_dm_outcome = _couples_onboarding_check(mgr)
+    # 6. UNKNOWN-DM drop (ss-console ADR 0091 s5): a seat that authors people:
+    #    must drop Telegram DMs from non-people natively (``ignore``).
+    unknown_dm_outcome = _unknown_dm_check()
 
     # This line is the surface an operator reads to learn what was PROVEN at
     # boot, so it reports each gate's actual OUTCOME rather than asserting one.

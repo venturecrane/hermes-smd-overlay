@@ -69,8 +69,9 @@ def test_space_mode_block_uses_the_pinned_hermes_keys():
         "group_allow_from": [P1, P2],
         "allowed_chats": [GROUP],
         "group_sessions_per_user": False,
-        # Unknown DMs reach the couples-onboarding hook (ss ADR 0091 s5).
-        "unauthorized_dm_behavior": "pair",
+        # A DM from anyone not on allow_from is dropped natively, no reply
+        # (ss ADR 0091 s5). Hermes' Telegram default "pair" would answer it.
+        "unauthorized_dm_behavior": "ignore",
     }
     # group_allowed_chats is a chat-scoped GRANT in the Hermes runner (every
     # member of the chat is authorized, no sender check). It must never appear.

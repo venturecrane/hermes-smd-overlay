@@ -664,47 +664,52 @@ def test_expected_tier_skipped_on_a_seat_without_the_webhook_platform(
 
 
 # ---------------------------------------------------------------------------
-# Unknown-DM drop (ss-console ADR 0091 s5). A config that forwards unknown
-# Telegram DMs ("pair") must not serve without hermes-smd-couples-onboarding's
-# pre_gateway_dispatch drop in the live singleton.
+# Unknown-DM drop (ss-console ADR 0091 s5). A seat that authors people: must
+# drop Telegram DMs from non-people natively (unauthorized_dm_behavior: ignore).
+# Hermes' Telegram default is "pair", so an absent value must refuse too.
 # ---------------------------------------------------------------------------
 
-_PAIR_CONFIG = {"telegram": {"allow_from": ["1"], "unauthorized_dm_behavior": "pair"}}
+
+@pytest.fixture
+def space_seat(monkeypatch, tmp_path):
+    from tests.couples_fixtures import write_seat
+
+    write_seat(monkeypatch, tmp_path)
 
 
-def _couples_callback():
-    def on_pre_gateway_dispatch(**kwargs):
-        return None
-
-    on_pre_gateway_dispatch.__module__ = "hermes_plugins.hermes_smd_couples_onboarding"
-    return on_pre_gateway_dispatch
-
-
-def test_FALSIFIER_pair_without_the_couples_drop_refuses_to_boot(monkeypatch, no_real_exit):
-    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_PAIR_CONFIG)
+def _boots(monkeypatch, config) -> bool:
+    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=config)
     handler = _load_handler()
-    with pytest.raises(_Exit) as ei:
+    try:
         asyncio.run(handler.handle("gateway:startup", {}))
-    assert ei.value.code == 1
+    except _Exit as ei:
+        assert ei.code == 1
+        return False
+    return True
 
 
-def test_pair_with_the_couples_drop_boots(monkeypatch, no_real_exit):
-    calls = _install_fake_plugins(
-        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_PAIR_CONFIG
-    )
-    handler = _load_handler()
-    mgr = sys.modules["hermes_cli.plugins"].get_plugin_manager()
-    mgr._hooks["pre_gateway_dispatch"].append(_couples_callback())
-    asyncio.run(handler.handle("gateway:startup", {}))
-    assert calls["force"] is True
+@pytest.mark.parametrize(
+    "telegram",
+    [
+        {"allow_from": ["1"], "unauthorized_dm_behavior": "pair"},
+        {"allow_from": ["1"]},  # absent = Hermes' Telegram default, "pair"
+    ],
+)
+def test_FALSIFIER_space_seat_that_answers_stranger_dms_refuses_to_boot(
+    monkeypatch, no_real_exit, space_seat, telegram
+):
+    assert _boots(monkeypatch, {"telegram": telegram}) is False
 
 
-def test_no_pair_needs_no_couples_drop(monkeypatch, no_real_exit):
-    _install_fake_plugins(
-        monkeypatch,
-        hooks=_ALL_HOOKS,
-        invoke_results=_BLOCK,
-        config={"telegram": {"allow_from": ["1"]}},
-    )
-    handler = _load_handler()
-    asyncio.run(handler.handle("gateway:startup", {}))
+def test_space_seat_with_the_native_drop_boots(monkeypatch, no_real_exit, space_seat):
+    config = {"telegram": {"allow_from": ["1"], "unauthorized_dm_behavior": "ignore"}}
+    assert _boots(monkeypatch, config) is True
+
+
+def test_space_seat_without_telegram_boots(monkeypatch, no_real_exit, space_seat):
+    assert _boots(monkeypatch, {"platforms": {}}) is True
+
+
+def test_seat_without_people_is_not_held_to_the_drop(monkeypatch, no_real_exit, tmp_path):
+    monkeypatch.setenv("SMD_CUSTOMER_YAML_PATH", str(tmp_path / "absent.yaml"))
+    assert _boots(monkeypatch, {"telegram": {"allow_from": ["1"]}}) is True

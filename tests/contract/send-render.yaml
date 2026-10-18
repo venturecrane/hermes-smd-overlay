@@ -283,11 +283,10 @@ skills:
       visitor record's name, property, stated intent, and contact. Authored
       compositional for the POC; a template comes with the vertical pack.
 
-  # ---- couples role (ADR 0090), armed on every seat generated from
-  # operator/customers/_couples-template (scripts/couples-seat.ts). Declared
-  # before the first seat exists: the provisioning gate
-  # (scripts/validate-customer-yaml.ts) refuses a generated couples seat
-  # without these. ----
+  # ---- couples role (ADR 0090), armed on every seat copied from
+  # operator/customers/_couples-template. Declared before the first seat
+  # exists: the provisioning gate (scripts/validate-customer-yaml.ts) refuses
+  # a couples seat without these. ----
   dates-to-remember:
     render: compositional
     note: >-
