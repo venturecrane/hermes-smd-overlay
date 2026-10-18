@@ -623,7 +623,7 @@ def _shared_reply_people(
     except Exception:  # noqa: BLE001 - an undecidable space-mode turn is held
         logger.warning("hermes-smd-reply: space unresolved for this reply", exc_info=True)
         return _SHARED_UNSUPPORTED
-    if turn is None or turn.kind != "shared" or turn.source != space.SOURCE_EMAIL:
+    if turn is None or turn.kind != "shared" or turn.source != space.SOURCE_EMAIL_JOINT:
         return ()
     people = tuple(p.email for p in spaces.people if p.email)
     sender = (origin.sender_address or "").strip().lower()

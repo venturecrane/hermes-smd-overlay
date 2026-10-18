@@ -227,6 +227,30 @@ def test_the_run_space_is_readable_from_the_job(tmp_path, sent):
     assert cron_space.routine_space_key("not-cron", hermes_home=str(tmp_path)) is None
 
 
+@pytest.mark.parametrize("authored", ["person:p1", "person:p2", "shared"])
+def test_an_email_delivered_run_resolves_to_its_space(tmp_path, sent, monkeypatch, authored):
+    """``deliver: local`` publishes no Telegram target, so the resolver reads the
+    run's space from its job (shared.space resolution step 1). Falsifier: drop the
+    session-id fallback in ``_resolve_cron`` and every case resolves None."""
+    cust = _couple()
+    entry = (
+        {**CHECKIN, "space": authored}
+        if authored != "shared"
+        else {"skill": "date-ideas", "schedule": "0 18 * * 5", "space": "shared"}
+    )
+    sessions = _materialize(tmp_path, cust, [entry])
+    (sid,) = sessions.values()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", "")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "")
+    got = space.resolve_space(sid, config=space.parse_space_config(cust))
+    assert got is not None and got.key == authored and got.source == space.SOURCE_CRON
+    # no session id, or a non-cron one: no space (fails closed)
+    assert space.resolve_space(None, config=space.parse_space_config(cust)) is None
+    assert space.resolve_space("s-other", config=space.parse_space_config(cust)) is None
+
+
 def test_the_plugin_hook_delivers_and_is_exception_safe(monkeypatch):
     plugin = load_plugin("hermes-smd-space-delivery")
     seen = []
@@ -260,6 +284,8 @@ class _FakeD1:
 def lane(monkeypatch, tmp_path):
     inbound.SESSION_INBOUND_ORIGIN._reset_for_tests()
     SESSION_TAINT._tainted.clear()
+    _THREAD["recipients"] = ("cm@agentmail.to",)
+    space._reset_cache_for_tests()
     mod = load_plugin("hermes-smd-reply")
     d1 = _FakeD1()
     agentmail: list[dict] = []
@@ -282,24 +308,26 @@ def lane(monkeypatch, tmp_path):
     SESSION_TAINT._tainted.clear()
 
 
-def _turn_space(monkeypatch, key: str | None) -> None:
-    """Stand in for workstream A's email rule (a joint thread resolves shared)."""
+#: The verified To/Cc the next inbound email carries. The REAL space resolver
+#: (shared.space, ADR 0091) reads it: another person on it makes the turn a
+#: joint thread, ``shared`` with source ``email_joint``.
+_THREAD = {"recipients": ("cm@agentmail.to",)}
 
-    def resolve(session_id=None, *, config=None):
-        if key is None:
-            return None
-        if key == "shared":
-            return space.Space(kind="shared", person_id=None, source=space.SOURCE_EMAIL)
-        return space.Space(kind="person", person_id=key.split(":", 1)[1], source=space.SOURCE_EMAIL)
 
-    monkeypatch.setattr(space, "resolve_space", resolve)
+def _turn_space(_monkeypatch, key: str | None) -> None:
+    """Shape the next inbound email so the resolver puts its turn in ``key``."""
+    joint = key == "shared"
+    _THREAD["recipients"] = ("cm@agentmail.to", P2) if joint else ("cm@agentmail.to",)
 
 
 def _inbound(sender: str = P1, message_id: str = "am-in-1", session: str = "s1") -> None:
     inbound.SESSION_INBOUND_ORIGIN.record(
         session,
         inbound.InboundOrigin(
-            sender_address=sender, message_id=message_id, inbox_id="cm@agentmail.to"
+            sender_address=sender,
+            message_id=message_id,
+            inbox_id="cm@agentmail.to",
+            recipients=tuple(_THREAD["recipients"]),
         ),
     )
     inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session, message_id)
