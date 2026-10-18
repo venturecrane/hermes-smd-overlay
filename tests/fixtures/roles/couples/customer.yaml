@@ -1,0 +1,336 @@
+schema_version: 1
+
+# COUPLES seat template customer.yaml (ADR 0090 role `couples`, ADR 0091 spaces).
+#
+# Derived from _hosted-template. The role package is operator/roles/couples/
+# (role.yaml, persona.md); this file is the seat it describes. Set up like any
+# hand-authored seat: copy this template (never another couple's seat), SMD
+# fills in the names and emails, merge through a PR, reprovision. The agent
+# then emails each partner from its own inbox; settings and schedules after
+# that are set in conversation with the agent. There is no web setup.
+#
+# Copy to operator/customers/{slug}/customer.yaml, replace every bracketed
+# value, then validate:
+#
+#   npx tsx scripts/validate-customer-yaml.ts \
+#     operator/customers/{slug}/customer.yaml
+#
+# Hard rules for this role (do not loosen per couple):
+#   - people: turns on space mode. The validator then requires spaces:, both
+#     memory switches false, no authored cron for the skills the couple
+#     schedules in conversation (rule 9), scope.inbound_allow_from
+#     exactly the people's emails, and a bound telegram_id on both telegram lists.
+#   - telegram_id stays '' until that partner gives SMD their Telegram id;
+#     SMD records it here through a PR and a reprovision. Until both are
+#     recorded, allow_from carries the SMD sentinel id so the boot guard
+#     against an empty allowlist holds. group_allow_from holds recorded
+#     partners only, never the sentinel.
+#   - external_send stays confirm. code_execution stays unauthored, which
+#     refuses it and drops terminal, code_execution and delegation (R2).
+#   - A seat cannot boot until every enabled skill below has a body under
+#     operator/skills/ (see `built:` in operator/roles/couples/role.yaml).
+
+# ---- IDENTITY ----
+customer_id: '[SLUG]'
+customer_name: '[COUPLE NAME]'
+
+# ---- SEAT DESCRIPTOR ----
+seat:
+  kind: customer
+  product: hosted-agent
+  role: couples
+
+vertical: mixed
+addons: []
+practice_areas:
+  - general
+fly_region: lax # nearest to Phoenix; Fly has no phx region; pick per couple geography
+
+# ---- RUNTIME ----
+model: claude-sonnet-4-6
+hermes_ref: '[CURRENT BLESSED FLEET PIN, e.g., v2026.5.7@<40-hex-sha>]'
+
+machine:
+  size: shared-cpu-1x
+  memory_mb: 1024
+
+# ---- PEOPLE (ADR 0091) ----
+# One entry per partner. id is a stable slug used by cron spaces and by the
+# space resolver; it never changes once the seat is live.
+people:
+  - id: p1
+    name: '[PARTNER 1 NAME]'
+    telegram_id: ''
+    email: '[PARTNER 1 EMAIL, lowercased]'
+    # How the seat reaches this partner on its own initiative (routines,
+    # two-person notices). email (the default) or telegram; telegram is used
+    # only once this partner's telegram_id is recorded.
+    channel: email
+  - id: p2
+    name: '[PARTNER 2 NAME]'
+    telegram_id: ''
+    email: '[PARTNER 2 EMAIL, lowercased]'
+    channel: email
+
+spaces:
+  # The shared Telegram group chat id (negative). '' until the group exists.
+  shared_telegram_chat: ''
+
+# ---- USERS ----
+# Required by the schema. The couples role has no web portal: the partners
+# reach the agent only through its channels.
+users:
+  - email: '[PARTNER 1 EMAIL, lowercased]'
+    role: principal
+    full_name: '[PARTNER 1 NAME]'
+
+# ---- PERSONA ----
+personas:
+  - slug: '[AGENT NAME, lowercased]'
+    status: active
+    name: '[AGENT NAME]'
+    title: Assistant
+    tone:
+      - plainspoken
+      - warm
+      - concise
+    entitlements:
+      exposure:
+        internal_write: autonomous
+        external_send: confirm
+    skills:
+      - name: calendar
+        version: pending
+        initiation:
+          manual: true
+          scheduled: false
+          webhook: false
+        enabled: true
+        # Invites go only to rostered addresses (people[].email).
+        settings:
+          recipients: roster
+      - name: workspace
+        version: pending
+        initiation:
+          manual: true
+          scheduled: false
+          webhook: false
+        enabled: true
+      - name: inbox-triage
+        version: pending
+        initiation:
+          manual: true
+          scheduled: false
+          webhook: true
+        enabled: true
+      - name: couples-checkin
+        version: pending
+        initiation:
+          manual: true
+          scheduled: true
+          webhook: false
+        enabled: true
+        # Scheduled email delivery and the seat's two-person notices ride this
+        # skill's roster lane; the roster is exactly the two partners.
+        settings:
+          recipients: roster
+      # Schedules and settings set in conversation (couples_settings_read /
+      # couples_settings_change). Manual only: it is how the couple asks.
+      - name: couples-settings
+        version: pending
+        initiation:
+          manual: true
+          scheduled: false
+          webhook: false
+        enabled: true
+      - name: gratitude-prompts
+        version: pending
+        initiation:
+          manual: true
+          scheduled: true
+          webhook: false
+        enabled: true
+        # Scheduled email delivery and the seat's two-person notices ride this
+        # skill's roster lane; the roster is exactly the two partners.
+        settings:
+          recipients: roster
+      - name: dates-to-remember
+        version: pending
+        initiation:
+          manual: true
+          scheduled: true
+          webhook: false
+        enabled: true
+        # Scheduled email delivery and the seat's two-person notices ride this
+        # skill's roster lane; the roster is exactly the two partners.
+        settings:
+          recipients: roster
+      - name: date-night-planner
+        version: pending
+        initiation:
+          manual: true
+          scheduled: false
+          webhook: false
+        enabled: true
+      - name: travel
+        version: pending
+        initiation:
+          manual: true
+          scheduled: true
+          webhook: true
+        enabled: true
+        # Scheduled email delivery and the seat's two-person notices ride this
+        # skill's roster lane; the roster is exactly the two partners.
+        settings:
+          recipients: roster
+      - name: shared-lists
+        version: pending
+        initiation:
+          manual: true
+          scheduled: false
+          webhook: false
+        enabled: true
+      - name: weekly-checkin-agenda
+        version: pending
+        initiation:
+          manual: true
+          scheduled: true
+          webhook: false
+        enabled: true
+        # Scheduled email delivery and the seat's two-person notices ride this
+        # skill's roster lane; the roster is exactly the two partners.
+        settings:
+          recipients: roster
+      - name: memory-journal
+        version: pending
+        initiation:
+          manual: true
+          scheduled: false
+          webhook: false
+        enabled: true
+    # No cron here, on purpose. The couple sets every schedule in conversation
+    # (skill couples-settings, overlay tool couples_settings_change), and the
+    # seat keeps it on its volume. At boot the overlay registers one slot job
+    # per scheduled skill and space (operator/roles/couples/role.yaml `slots`)
+    # that checks those settings every quarter hour, in the couple's own
+    # timezone. Nothing is scheduled until the couple asks for it. An authored
+    # cron entry for these skills is refused (validator rule 9).
+    cron: []
+
+# ---- CONNECTORS ----
+connectors:
+  Email:
+    adapter: agentmail
+    backend: 'mcp:agentmail'
+    enabled: true
+    webhook_url: 'https://hermes-[SLUG].fly.dev/webhooks/agentmail'
+  WebSearch:
+    adapter: brave
+    backend: 'native:brave-free'
+    enabled: true
+
+webhook_triggers:
+  - source: agentmail
+    event_type: message.received
+    skill: inbox-triage
+    persona: '[AGENT NAME, lowercased]'
+
+# ---- RECORD STORES ----
+# What the couples skills keep. Every store is private per space: a record's
+# owner field names a person id (p1, p2) or shared, and each turn lists, reads
+# and writes only records in spaces it may read (ADR 0091). No readers: on a
+# seat that authors people: the validator refuses them. A write from a private
+# chat into a shared record is held until that partner confirms it ("share
+# it", overlay hermes-smd-space-gate). On the volume, so records survive a
+# reprovision.
+record_stores:
+  - name: couples-checkin
+    path: /opt/data/couples/checkin
+    owner_field: owner
+    index: [kind, topic, date]
+  - name: gratitude
+    path: /opt/data/couples/gratitude
+    owner_field: owner
+    index: [kind, date]
+  - name: dates
+    path: /opt/data/couples/dates
+    owner_field: owner
+    index: [kind, title, date]
+  - name: date-nights
+    path: /opt/data/couples/date-nights
+    owner_field: owner
+    index: [idea, status, last_tried]
+  - name: trips
+    path: /opt/data/couples/trips
+    owner_field: owner
+    index: [kind, trip, start_date, end_date]
+  - name: lists
+    path: /opt/data/couples/lists
+    owner_field: owner
+    index: [kind, title, due]
+  - name: journal
+    path: /opt/data/couples/journal
+    owner_field: owner
+    index: [date, title]
+
+# ---- SCOPE ----
+scope:
+  email_folders_visible:
+    - Inbox
+    - Sent
+  email_folders_blind: []
+  email_keyword_blocks: []
+  domain_blocks: []
+  # EXACTLY the two partners: no SMD address, no other address, never a domain
+  # wildcard. A roster-lane send (recipients: roster) may go to any address
+  # here, so the roster must be only the couple. The validator enforces it.
+  inbound_allow_from:
+    - '[PARTNER 1 EMAIL, lowercased]'
+    - '[PARTNER 2 EMAIL, lowercased]'
+
+# ---- ESCALATION ----
+escalation:
+  red_flag_recipients:
+    - team@smd.services
+  failure_recipients:
+    - team@smd.services
+
+# ---- SAFETY ----
+safety:
+  sticky_stop:
+    cost_cap_daily_cents: 500
+    inbound_daily_cap: 100
+    web_search_daily_cap: 200
+
+# ---- TELEGRAM ----
+# OPTIONAL, later. Email is the channel at launch. `enabled: false` with only
+# the sentinel lets a seat validate and boot with Telegram fully absent; SMD
+# turns it on through a PR once the couple's bot exists.
+# One bot per couple (BotFather). Turn group privacy off with /setprivacy so the
+# bot sees the shared group. The token is a Fly secret, never here.
+telegram:
+  enabled: false
+  allow_from:
+    - '[SMD SENTINEL TELEGRAM ID until both partners are recorded]'
+  # The sender gate inside the group: recorded partners only, never the sentinel
+  # (the validator and the overlay both require every id here to be a person).
+  group_allow_from: []
+  # The chat gate (Hermes allowed_chats): only spaces.shared_telegram_chat,
+  # once the group exists. Empty until then; shared routines deliver locally.
+  group_chats: []
+  # The group is one shared conversation, not one session per sender.
+  group_sessions_per_user: false
+
+# ---- VOICE LIBRARY ----
+voice_library:
+  samples_path: 'r2://vaults/[SLUG]/voice/samples/'
+
+# ---- MEMORY ----
+# Native Hermes memory is off on a space-mode seat: it is one identity-blind
+# store per profile (ADR 0091 enforcement point 1). Space-keyed memory replaces it.
+memory:
+  d1_namespace: '[SLUG]'
+  r2_vault_path: 'vaults/[SLUG]/'
+  vectorize_index: 'hermes-[SLUG]-vault'
+  memory_enabled: false
+  user_profile_enabled: false
