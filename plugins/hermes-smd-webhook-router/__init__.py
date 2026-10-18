@@ -47,6 +47,7 @@ from shared import (
     msgraph_broker,
     read_volume,
     request_index,
+    sender_auth,
 )
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
@@ -769,6 +770,29 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
         # None) and never raises.
         dto = inbound_message.normalize_inbound(source, payload)
         origin = _origin_from_dto(dto, content=content)
+        # SENDER AUTHENTICATION (shared/sender_auth.py). The Svix signature the
+        # gate checked proves AgentMail made this delivery, not that the person
+        # in ``From`` wrote it. Every authority below — roster, admin, and,
+        # through the recorded origin, the record stores, acts, rule declines,
+        # send-as and the reply anchor — is keyed on that address, so an
+        # AgentMail inbound whose From is not backed by an aligned DMARC or DKIM
+        # pass is delivered as an unknown external sender: fenced, tainted, and
+        # with NO origin recorded, so no downstream consumer can resolve the
+        # claimed address as the person behind this turn. The mail is never
+        # dropped. Graph is tenant-authenticated and passes unchanged.
+        unauthenticated_reason: str | None = None
+        if origin is not None and dto is not None:
+            authenticated, auth_reason = sender_auth.sender_authenticated(dto)
+            if not authenticated:
+                unauthenticated_reason = auth_reason
+                logger.warning(
+                    "hermes-smd-webhook-router: inbound From %s is NOT authenticated (%s); "
+                    "delivered as an unknown external sender with no roster or admin "
+                    "standing and no recorded origin",
+                    origin.sender_address,
+                    auth_reason,
+                )
+                origin = None
         trust_class = inbound.TRUST_CLASS_UNKNOWN_EXTERNAL
         # SEPARATE FACT, SEPARATE LIST (ss#2416 iteration 5). Roster membership
         # (``scope.inbound_allow_from``) is the authorization to RESPOND to
@@ -793,7 +817,15 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
             source=source,
             surface="webhook",
             verification="verified",
-            verification_detail=(inbound.ADMIN_VERIFICATION_DETAIL if is_admin else None),
+            verification_detail=(
+                inbound.ADMIN_VERIFICATION_DETAIL
+                if is_admin
+                else (
+                    f"{inbound.SENDER_UNAUTHENTICATED_DETAIL} {unauthenticated_reason}"
+                    if unauthenticated_reason
+                    else None
+                )
+            ),
             trust_class=trust_class,
         )
         session_id = kwargs.get("session_id")
@@ -863,7 +895,7 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
                 bool(origin.inbox_id),
                 bool(origin.message_id),
             )
-        else:
+        elif unauthenticated_reason is None:
             logger.warning(
                 "hermes-smd-webhook-router: no inbound origin extracted "
                 "(payload keys=%s); demo relay has no recipient anchor to recover",

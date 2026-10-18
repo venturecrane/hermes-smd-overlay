@@ -705,6 +705,12 @@ def _payload(sender: str, message_id: str = "msg-in-1") -> dict[str, Any]:
         "event_type": "message.received",
         "message": {
             "from": f"Someone <{sender}>",
+            # Authenticated: a calendar part from an unauthenticated From files
+            # nothing (shared/sender_auth.py); that case has its own test.
+            "authentication_results": {
+                "dmarc": "pass",
+                "dmarc_domain": sender.rsplit("@", 1)[-1].lower(),
+            },
             "message_id": message_id,
             "inbox_id": "couples-demo@agentmail.to",
             "subject": "Accepted: Date night",
@@ -767,6 +773,32 @@ def test_a_persons_response_updates_their_status_and_wakes_no_turn(
     (audit,) = audited
     assert _row_metadata(audit)["replies"] == [f"recorded:{partstat}"]
     assert "WEBHOOK_SUPPRESSED" in audit
+
+
+def test_a_forged_from_files_no_response_and_the_email_goes_on(cal, audited, monkeypatch) -> None:
+    """An RSVP whose From is not authenticated is only a claim to be that
+    attendee (shared/sender_auth.py): it marks nobody, and the email is not
+    swallowed, so it reaches the router as ordinary (external) mail.
+
+    FALSIFIER: delete the sender_auth check in ingest.process and the status
+    flips to ACCEPTED and the dispatch is skipped."""
+    plugin, _ = cal
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
+    _attach(
+        monkeypatch, plugin, REPLY.format(uid=made["uid"], partstat="ACCEPTED", attendee=cf.A_EMAIL)
+    )
+
+    def unreadable(_message_id):
+        raise plugin.ingest.agentmail_broker.AgentMailReadError("no key in tests")
+
+    monkeypatch.setattr(plugin.ingest.agentmail_broker, "message_authentication", unreadable)
+    payload = _payload(cf.A_EMAIL)
+    payload["message"].pop("authentication_results")
+    assert plugin.on_pre_gateway_dispatch(payload=payload) is None
+    (row,) = _call(plugin, "calendar_invite_list", {})["events"]
+    assert row["responses"][cf.A_EMAIL] == "no answer yet"
+    assert audited == []
 
 
 def test_the_router_leaves_a_consumed_response_alone(cal, audited, monkeypatch) -> None:
