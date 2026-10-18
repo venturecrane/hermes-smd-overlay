@@ -67,7 +67,7 @@ _COPY = _REPO_ROOT / "shared" / "escalation_ledger.py"
 # skill copies; it lands with the OVERLAY_REF bump.
 # 2026-10-17b: the J-b check moved into _refuse_foreign_ack_token, identical
 # behaviour, so validate_append stays under ss-console's function-size ratchet.
-CANONICAL_SHA256 = "9f194e724ebdea79b3b1d6f7b5259a706ebbb8dfcd4a3acb923396b9247c0c1c"
+CANONICAL_SHA256 = "55e7fc98987acaf6a599f6af938fd46d481081a5640c24c54cb817e6727a2844"
 
 CANONICAL_PATH = "operator/workspace_broker/escalation_ledger.py"
 CANONICAL_REPO = "venturecrane/ss-console"
