@@ -1202,6 +1202,14 @@ def _telegram_group_keys(customer: dict[str, Any], tg: dict[str, Any]) -> dict[s
             )
             out["group_allow_from"] = []
         out["group_sessions_per_user"] = bool(tg.get("group_sessions_per_user", False))
+        # Couples onboarding (ss ADR 0091 s5): an unknown DM must reach the
+        # pre_gateway_dispatch hook for a `/start <token>` to be bound. The
+        # adapter's intake prefilter forwards an unauthorized DM only when the
+        # platform's unauthorized-DM behaviour is "pair". The
+        # hermes-smd-couples-onboarding plugin (registered on exactly these
+        # seats) drops every DM from a non-person before the runner's pairing
+        # offer, so no pairing code is ever sent and nobody is admitted.
+        out["unauthorized_dm_behavior"] = "pair"
         return out
 
     if group_chats and not group_allow:

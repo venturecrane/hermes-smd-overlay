@@ -228,7 +228,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `on_session_finalize` | no | session-end finalization |
 | `on_session_reset` | no | session reset |
 | `subagent_stop` | yes | one SUBAGENT_STOPPED audit row per delegated child (`hermes-smd-audit`, ADR 0021 Stream C) |
-| `pre_gateway_dispatch` | yes | webhook routing + inbound envelope attach (ADR 0021 Stream E / ADR 0027) |
+| `pre_gateway_dispatch` | yes | webhook routing + inbound envelope attach (ADR 0021 Stream E / ADR 0027); couples Telegram `/start <token>` binding and unknown-DM drop (`hermes-smd-couples-onboarding`, ss ADR 0091 R4) |
 | `pre_approval_request` | no | approval lifecycle observer |
 | `post_approval_response` | no | approval lifecycle observer |
 
