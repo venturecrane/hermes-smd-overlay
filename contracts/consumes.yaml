@@ -458,18 +458,6 @@ vars:
     requirement: optional
     consumed_by: [webhook-router, reply, webhook-gate]
     note: "test/dev override for the seat-local request index; defaults to /opt/data/requests.db (shared/request_index.py). The agent writes it (router at intake, reply plugin + held-reply sweeper at each send); the gate's heartbeat reads it read-only for the request cards. Holds sender/subject/reply opening, nulled after 7 days, rows deleted after 30."
-  SMD_TELEGRAM_BIND_SPOOL_PATH:
-    discovery: static
-    stage: agent
-    requirement: optional
-    consumed_by: [couples-onboarding, webhook-gate]
-    note: "test/dev override for the couples Telegram bind spool; defaults to /opt/data/telegram_binds.db (shared/telegram_bind.py). The agent appends each `/start <token>` from an unbound sender; the gate's heartbeat reads it read-only and redeems each token at ss-console. Rows pruned after 2 hours (tokens live 30 minutes)."
-  SMD_TELEGRAM_BIND_SENT_PATH:
-    discovery: static
-    stage: agent
-    requirement: optional
-    consumed_by: [webhook-gate]
-    note: "test/dev override for the gate-owned bind state; defaults to /opt/data/smd-gate/telegram_binds_sent.db (shared/telegram_bind.py). sha256 of each token plus attempt/done times; no token, no Telegram id."
   SMD_REQUEST_CARDS_DB_PATH:
     discovery: static
     stage: agent

@@ -1696,7 +1696,6 @@ class HeartbeatEmitter:
         gateway_loop_check_debounce: int = 3,
         card_post_fn=_default_post,
         request_cards_fn=None,
-        telegram_binds_fn=None,
     ) -> None:
         self._slug = slug
         self._key = key
@@ -1753,11 +1752,6 @@ class HeartbeatEmitter:
         self._card_post_fn = card_post_fn
         self._request_cards_fn = request_cards_fn or self._send_request_cards
         self._card_store = None
-        # Couples Telegram binds (shared.telegram_bind): the agent spools each
-        # `/start <token>` it sees; this leg carries them to ss-console with
-        # the beat's own credential, which the agent never holds.
-        self._telegram_binds_fn = telegram_binds_fn or self._send_telegram_binds
-        self._bind_store = None
 
     def start(self) -> bool:
         """Launch the daemon thread. Returns False (and logs) when the
@@ -1818,24 +1812,6 @@ class HeartbeatEmitter:
                 self._request_cards_fn()
             except Exception as exc:  # never let the emitter die
                 logger.warning("heartbeat: request-card leg failed: %s", exc)
-            try:
-                self._telegram_binds_fn()
-            except Exception as exc:  # never let the emitter die
-                logger.warning("heartbeat: telegram-bind leg failed: %s", exc)
-
-    def _send_telegram_binds(self) -> int:
-        """POST the spooled couples Telegram binds (shared.telegram_bind)."""
-        from shared import telegram_bind
-
-        if self._bind_store is None:
-            self._bind_store = telegram_bind.SentStore()
-        return telegram_bind.send_due_binds(
-            slug=self._slug or "",
-            key=self._key or "",
-            url=telegram_bind.bind_url(self._ingest_url),
-            post_fn=self._card_post_fn,
-            store=self._bind_store,
-        )
 
     def _send_request_cards(self) -> int:
         """POST the request cards that are due (shared.request_cards)."""

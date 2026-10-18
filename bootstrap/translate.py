@@ -1202,14 +1202,14 @@ def _telegram_group_keys(customer: dict[str, Any], tg: dict[str, Any]) -> dict[s
             )
             out["group_allow_from"] = []
         out["group_sessions_per_user"] = bool(tg.get("group_sessions_per_user", False))
-        # Couples onboarding (ss ADR 0091 s5): an unknown DM must reach the
-        # pre_gateway_dispatch hook for a `/start <token>` to be bound. The
-        # adapter's intake prefilter forwards an unauthorized DM only when the
-        # platform's unauthorized-DM behaviour is "pair". The
-        # hermes-smd-couples-onboarding plugin (registered on exactly these
-        # seats) drops every DM from a non-person before the runner's pairing
-        # offer, so no pairing code is ever sent and nobody is admitted.
-        out["unauthorized_dm_behavior"] = "pair"
+        # Space mode (ss ADR 0091 s5): a DM from anyone who is not on
+        # allow_from (the people, plus the SMD sentinel until both are
+        # recorded) is dropped by Hermes itself, with no reply. Hermes'
+        # default for Telegram is "pair", which answers a stranger's DM with a
+        # pairing code (gateway/run_inbound.py, _hm_admit_event); "ignore" is
+        # the native drop. The activation hook refuses to boot a space-mode
+        # seat whose effective behaviour is anything else.
+        out["unauthorized_dm_behavior"] = "ignore"
         return out
 
     if group_chats and not group_allow:
