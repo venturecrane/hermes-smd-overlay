@@ -518,10 +518,12 @@ class CustomerConfig:
         untrusted mail it was before.
 
         THE TAG IS THE CAPABILITY, and the spoof class is identical for every
-        entry. No seat receives an SPF or DKIM verdict on inbound mail (ADR 0085
-        §5), so a forged ``From: team@smd.services`` is exactly as available as a
-        forged ``From: scott@smd.services``; naming one rather than the other buys
-        nothing, and what bounds the exposure is the effect rather than the sender.
+        entry. A forged ``From: team@smd.services`` is exactly as available as a
+        forged ``From: scott@smd.services`` (since 2026-10-18 the AgentMail router
+        refuses an origin to any From without an aligned DMARC or DKIM pass,
+        ``shared/sender_auth.py``, which narrows but does not remove that), so
+        naming one rather than the other buys nothing, and what bounds the
+        exposure is the effect rather than the sender.
 
         TWO SHAPE RULES beyond person-form, mirroring the console validator
         (``sections-scope.ts``) rather than trusting it: every entry must sit at

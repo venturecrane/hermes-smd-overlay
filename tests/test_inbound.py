@@ -468,6 +468,16 @@ def _signed_kwargs(payload: dict, *, session_id: str = "sess", event_id: str = "
     return {"payload": payload, "raw_body": raw, "headers": headers, "session_id": session_id}
 
 
+def _dmarc_pass(from_header: str) -> dict:
+    """AgentMail ``authentication_results`` for a From whose domain passed DMARC.
+
+    Router tests that mean "this person emailed in" must say the mail was
+    authenticated: an AgentMail From with no aligned verdict is only a claim
+    and is delivered as an unknown external sender (shared/sender_auth.py)."""
+    domain = from_header.rsplit("@", 1)[-1].rstrip(">").strip().lower()
+    return {"spf": "pass", "dkim": "none", "dmarc": "pass", "dmarc_domain": domain}
+
+
 class _FakeD1Client:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
@@ -568,6 +578,7 @@ def test_inbound_row_names_the_sender_and_the_vendor_message(tmp_path, monkeypat
         "event_type": "message.received",
         "message": {
             "from": f"Paralegal <{sender}>",
+            "authentication_results": _dmarc_pass(sender),
             "message_id": "am-msg-77",
             "inbox_id": "inbox-1",
             "text": "please pull the file",
@@ -627,6 +638,7 @@ def test_router_rostered_sender_is_internal_and_not_quarantined(tmp_path, monkey
             "inbox_id": "inbox_1",
             "message_id": "msg_int",
             "from": "Colleague <colleague@firm.example>",
+            "authentication_results": _dmarc_pass("colleague@firm.example"),
             "text": "Please keep replies short.",
         },
     }
@@ -842,6 +854,7 @@ def test_router_records_inbound_origin_for_recipient_lock(tmp_path, monkeypatch)
             "inbox_id": "inbox_abc",
             "message_id": "msg_123",
             "from": "Greg Whitfield <greg@whitfield.example>",
+            "authentication_results": _dmarc_pass("greg@whitfield.example"),
             "text": "I'd like to discuss a new matter.",
         },
     }
@@ -867,6 +880,7 @@ def test_router_records_origin_from_svix_data_envelope(tmp_path, monkeypatch) ->
             "inbox_id": "inbox_abc",
             "message_id": "msg_777",
             "from": "Greg Whitfield <greg@whitfield.example>",
+            "authentication_results": _dmarc_pass("greg@whitfield.example"),
         },
     }
     mod.on_pre_gateway_dispatch(**_signed_kwargs(payload, session_id="sess-svix"))
@@ -904,6 +918,7 @@ def test_router_routes_via_event_raw_message_no_headers(tmp_path, monkeypatch) -
             "inbox_id": "inbox_abc",
             "message_id": "msg_real",
             "from": "Greg Whitfield <greg@whitfield.example>",
+            "authentication_results": _dmarc_pass("greg@whitfield.example"),
         },
     }
     event = SimpleNamespace(raw_message=payload, source=None, text="inbound")
@@ -934,6 +949,7 @@ def test_dispatch_carries_inbound_message_for_agentmail(tmp_path, monkeypatch) -
             "inbox_id": "inbox_abc",
             "message_id": "msg_123",
             "from": "Greg Whitfield <greg@whitfield.example>",
+            "authentication_results": _dmarc_pass("greg@whitfield.example"),
             "subject": "New matter",
             "text": "I'd like to discuss a new matter.",
         },
@@ -1594,6 +1610,7 @@ class TestRouterAppliesSenderStatusAtDispatch:
                 "inbox_id": "inbox_1",
                 "message_id": message_id,
                 "from": from_addr,
+                "authentication_results": _dmarc_pass(from_addr),
                 "text": "Please send the status summary for matter 2026-PI-101.",
             },
         }

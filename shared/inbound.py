@@ -249,6 +249,12 @@ _HEADER_INTERNAL_VERIFIED = (
 # row, where it is provenance a reviewer can read.
 ADMIN_VERIFICATION_DETAIL = "sender_is_admin"
 
+# The marker the router stamps, followed by a ``shared.sender_auth`` reason
+# token, when an AgentMail inbound's From failed sender authentication and the
+# sender was downgraded to unknown external. Provenance for the audit row only;
+# it grants nothing and :func:`envelope_sender_is_admin` never matches it.
+SENDER_UNAUTHENTICATED_DETAIL = "sender_unauthenticated"
+
 
 def envelope_sender_is_admin(envelope: InboundEnvelope) -> bool:
     """True iff this envelope was stamped as coming from an authored admin.
