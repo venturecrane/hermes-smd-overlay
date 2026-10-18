@@ -321,8 +321,18 @@ def _session_env(name: str) -> str:
         return ""
 
 
-def _resolve_cron(cfg: SpaceConfig) -> Space | None:
-    if _session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM").lower() != _TELEGRAM:
+def _resolve_cron(cfg: SpaceConfig, session_id: Any = None) -> Space | None:
+    platform = _session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM").lower()
+    if not platform and session_id:
+        # ``deliver: local`` publishes no target: the routine's Telegram is not
+        # bound and it is delivered by email (shared.cron_space). Its space is
+        # the one its managed job name was materialized for, read from the
+        # run's own ``cron_<job_id>_...`` session id. Never another platform's
+        # target, and never a guess: an unreadable job is no space.
+        from shared import cron_space  # local: cron_space imports this module
+
+        return cfg.space_for_key(cron_space.routine_space_key(session_id), source=SOURCE_CRON)
+    if platform != _TELEGRAM:
         return None
     chat = _session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID")
     if not chat:
@@ -393,7 +403,7 @@ def resolve_space(
     if _session_env("HERMES_CRON_SESSION") == "1":
         # A cron run is bound to its authored target and to nothing else: the
         # session vars are cleared for it, and an email origin cannot apply.
-        return _resolve_cron(cfg)
+        return _resolve_cron(cfg, session_id)
     if _session_env("HERMES_SESSION_PLATFORM").lower() == _TELEGRAM:
         return _resolve_telegram(cfg)
     sid = str(session_id or "").strip() or _session_env("HERMES_SESSION_ID")

@@ -163,6 +163,7 @@ def send_reply(
     session_id: str = "",
     matter_ref: str | None = None,
     anchor: dict[str, str] | None,
+    shared: bool = False,
 ) -> str:
     """Reply to an inbound message; return the new message id.
 
@@ -172,6 +173,10 @@ def send_reply(
     which is the point: anyone on the internet can email a seat's inbox.
     """
     body: dict[str, Any] = {"message_id": message_id}
+    if shared:
+        # ADR 0091: copy the seat's other people on this joint thread. The
+        # broker decides who from its own config and the source message.
+        body["shared"] = True
     if text:
         body["text"] = text
     if html:

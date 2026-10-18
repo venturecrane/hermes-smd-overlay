@@ -78,6 +78,7 @@ class RoutineIdentity:
     job_name: str  # the stable managed name, or the raw name for unmanaged jobs
     persona: str | None  # parsed from the managed name; None for unmanaged jobs
     skill: str | None  # the skill the job runs; None when the job names none
+    deliver: str | None = None  # the job's Hermes ``deliver`` as stored; None when absent
 
 
 # path -> (mtime_ns, {job_id: RoutineIdentity})
@@ -143,7 +144,10 @@ def _identity_from_job(job: dict[str, Any]) -> RoutineIdentity | None:
         elif isinstance(job.get("skill"), str) and job["skill"]:
             skill = job["skill"]
 
-    return RoutineIdentity(job_id=job_id, job_name=name or job_id, persona=persona, skill=skill)
+    deliver = job.get("deliver") if isinstance(job.get("deliver"), str) else None
+    return RoutineIdentity(
+        job_id=job_id, job_name=name or job_id, persona=persona, skill=skill, deliver=deliver
+    )
 
 
 def _load_store(path: Path) -> dict[str, RoutineIdentity]:

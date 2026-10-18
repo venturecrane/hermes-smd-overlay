@@ -45,8 +45,11 @@ def test_reply_cannot_name_its_recipient():
     """
     params = set(inspect.signature(agentmail_broker.send_reply).parameters)
     # ``anchor`` (participant fence) names the email the reply ANSWERS, never a
-    # recipient: the broker reads that email's sender itself.
-    assert params == {"message_id", "text", "html", "session_id", "matter_ref", "anchor"}
+    # recipient: the broker reads that email's sender itself. ``shared`` (ADR
+    # 0091) is a bare flag asking the broker to copy the seat's OTHER people on
+    # a joint thread; the broker decides who from its own config and the source
+    # message, so it names nobody either.
+    assert params == {"message_id", "text", "html", "session_id", "matter_ref", "anchor", "shared"}
     assert not params & {"to", "cc", "bcc", "recipient", "recipients", "deliver_to"}
 
 

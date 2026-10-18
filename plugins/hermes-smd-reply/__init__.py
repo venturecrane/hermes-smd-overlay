@@ -95,6 +95,7 @@ from shared import (
     report_render,
     request_index,
     send_policy,
+    space,
     spec_gate,
 )
 from shared.audit_client import audit_client_from_env
@@ -589,6 +590,54 @@ def _checklist_violations(
     return rules, output_checklist.describe(blocking)
 
 
+#: :func:`_shared_reply_people` result for a shared turn this transport cannot answer.
+_SHARED_UNSUPPORTED: tuple[str, ...] = ("<unsupported>",)
+
+
+def _shared_reply_people(
+    cfg: CustomerConfig,
+    session_id: str,
+    origin: inbound.InboundOrigin,
+    bound: Any,
+    redirected: bool,
+) -> tuple[str, ...]:
+    """The people a shared reply reaches, ``()`` for an ordinary reply, or
+    :data:`_SHARED_UNSUPPORTED`.
+
+    ``()`` on every seat without ``people:`` and on every turn the space
+    resolver does not put in ``shared`` from email (a person-space turn stays a
+    single-recipient reply). A shared turn the AgentMail inbound reply cannot
+    carry (a Graph seat, a bound reply, a device redirect, or a sender who is
+    not one of the people) is unsupported and held, never sent to one person.
+    A space that cannot be resolved at all is unsupported too: on a space-mode
+    seat an undecidable turn is held rather than answered privately."""
+    try:
+        spaces = space.space_config(cfg)
+    except Exception:  # noqa: BLE001 - unreadable people block: not space mode here
+        logger.warning("hermes-smd-reply: people block unreadable", exc_info=True)
+        return ()
+    if spaces is None:
+        return ()
+    try:
+        turn = space.resolve_space(session_id, config=spaces)
+    except Exception:  # noqa: BLE001 - an undecidable space-mode turn is held
+        logger.warning("hermes-smd-reply: space unresolved for this reply", exc_info=True)
+        return _SHARED_UNSUPPORTED
+    if turn is None or turn.kind != "shared" or turn.source != space.SOURCE_EMAIL_JOINT:
+        return ()
+    people = tuple(p.email for p in spaces.people if p.email)
+    sender = (origin.sender_address or "").strip().lower()
+    if (
+        _email_adapter(cfg) != "agentmail"
+        or bound is not None
+        or redirected
+        or sender not in people
+        or len(people) < 2
+    ):
+        return _SHARED_UNSUPPORTED
+    return people
+
+
 def _current_reply_to() -> str:
     """The redirect target resolved for this dispatch, or "" when there is none."""
     value = getattr(_CURRENT_CALL, "reply_to", "")
@@ -941,10 +990,27 @@ def _relay_draft(**kwargs: Any) -> None:
                 origin.message_id,
             )
 
+        # (b0) A SHARED reply (ADR 0091): on a space-mode seat, a turn the space
+        # resolver puts in ``shared`` from a joint email thread is answered to
+        # every authored person, not just the one who wrote last. The set is the
+        # seat's ``people[].email``, never anything the draft said, and only an
+        # AgentMail inbound reply can carry it (the broker copies the other
+        # people from the thread itself and re-checks every condition).
+        shared_people = _shared_reply_people(cfg, session_id, origin, bound, redirected)
+        if shared_people == _SHARED_UNSUPPORTED:
+            _held("shared_reply_unsupported", origin)
+            return
+
         # (b) Recipient-lock — the reply can go ONLY to the address that emailed
-        # in (or, for a device, to the person answering for it). An injected
-        # extra/substituted recipient fails the lock here.
-        if not relay.recipient_locked(args, origin.sender_address, reply_to):
+        # in (or, for a device, to the person answering for it; or, for a shared
+        # reply, to the seat's people). An injected extra/substituted recipient
+        # fails the lock here.
+        locked = (
+            relay.shared_recipients_locked(args, origin.sender_address, shared_people)
+            if shared_people
+            else relay.recipient_locked(args, origin.sender_address, reply_to)
+        )
+        if not locked:
             _held("recipient_mismatch", origin, draft_to=sorted(relay.draft_recipients(args)))
             return
         if not origin.inbox_id:
@@ -1186,6 +1252,11 @@ def _relay_draft(**kwargs: Any) -> None:
             decision = relay.RateDecision(False, "queued_behind_held")
         else:
             decision = _LIMITER.check(reply_to, internal=internal, policy=policy)
+        if not decision.allowed and shared_people:
+            # The held-reply queue releases to the source's sender alone, so a
+            # shared reply is never queued: it is held, and the agent is told.
+            _held("shared_reply_rate_limited", origin)
+            return
         if not decision.allowed:
             reason = decision.reason or "rate_limited"
             enqueued = _enqueue_hold(
@@ -1260,6 +1331,8 @@ def _relay_draft(**kwargs: Any) -> None:
                     html=wire_html,
                     session_id=session_id,
                     matter_ref=cited_matter_ref,
+                    # Only when set, so every ordinary reply makes today's call.
+                    **({"shared": True} if shared_people else {}),
                 )
         except Exception as exc:  # noqa: BLE001 - RelaySendError or a fault: either way not sent
             why = str(exc) if isinstance(exc, relay.RelaySendError) else type(exc).__name__

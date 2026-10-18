@@ -48,6 +48,9 @@ AGENTMAIL_MESSAGE = "agentmail_message"
 LANE_RULE_DISPATCH = "rule_dispatch"
 LANE_ESCALATION = "escalation"
 LANE_SKILL_PREFIX = "skill:"
+#: A space-mode seat's people, exactly (ss-console ``space_people.LANE_SPACE``):
+#: a routine's email when Telegram is unbound (``hermes-smd-space-delivery``).
+LANE_SPACE = "space"
 #: The inbox marker a verified reply binding's origin carries (reply binding.py).
 _BOUND_INBOX = "verified-binding"
 _TRUSTED_MODES = frozenset({provenance.MODE_KEYED, provenance.MODE_THREAD, provenance.MODE_PROCESS})
