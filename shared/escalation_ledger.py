@@ -698,11 +698,8 @@ def validate_append(existing_events, new_event: dict, *, send_witness) -> None:
         for prior in existing_events:
             if prior.get("event") not in RAISING_EVENTS:
                 continue
-            if token is not None and prior.get("token") == token:
-                pass
-            elif prior.get("item_key") == key:
-                pass
-            else:
+            by_token = token is not None and prior.get("token") == token
+            if not (by_token or prior.get("item_key") == key):
                 continue
             if is_pre_identity_epoch(prior):
                 # Matches, but its key came from the superseded derivation, so it
