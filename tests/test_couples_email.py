@@ -251,6 +251,38 @@ def test_an_email_delivered_run_resolves_to_its_space(tmp_path, sent, monkeypatc
     assert space.resolve_space("s-other", config=space.parse_space_config(cust)) is None
 
 
+def _cron_env(monkeypatch, tmp_path, platform: str, chat: str) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", platform)
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", chat)
+
+
+def test_a_published_target_decides_over_the_job_name(tmp_path, sent, monkeypatch):
+    """The name is read only when Hermes published NO target. A Telegram target
+    that disagrees with the name wins. Falsifier: consult the name first in
+    ``_resolve_cron`` and this resolves person:p1."""
+    cust = _couple(group=GROUP)
+    sessions = _materialize(tmp_path, cust, [{**CHECKIN, "space": "person:p1"}])
+    (sid,) = sessions.values()
+    _cron_env(monkeypatch, tmp_path, "telegram", GROUP)
+    got = space.resolve_space(sid, config=space.parse_space_config(cust))
+    assert got is not None and got.key == "shared"
+
+
+@pytest.mark.parametrize("platform, chat", [("email", P1), ("slack", "C123"), ("local", "")])
+def test_a_non_telegram_target_is_no_space_not_the_name(
+    tmp_path, sent, monkeypatch, platform, chat
+):
+    """A target on any other platform is not a space, and it never falls back to
+    the job's name. Falsifier: test ``not chat`` instead of ``not platform``."""
+    cust = _couple()
+    sessions = _materialize(tmp_path, cust, [{**CHECKIN, "space": "person:p1"}])
+    (sid,) = sessions.values()
+    _cron_env(monkeypatch, tmp_path, platform, chat)
+    assert space.resolve_space(sid, config=space.parse_space_config(cust)) is None
+
+
 def test_the_plugin_hook_delivers_and_is_exception_safe(monkeypatch):
     plugin = load_plugin("hermes-smd-space-delivery")
     seen = []
