@@ -249,6 +249,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_staff_send_as(cfg, errors)
     _validate_device_senders(cfg, errors)
     _validate_record_stores(cfg, errors)
+    _validate_people_roster(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
     _validate_email_seam(cfg, errors)
@@ -257,6 +258,66 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_custody_guard(cfg, errors)
 
     return errors
+
+
+def _validate_people_roster(cfg: dict[str, Any], errors: list[str]) -> None:
+    """On a seat several people share, the inbound roster IS the people.
+
+    ss-console validator rule 8 (#3289), mirrored here so a seat refuses to boot
+    if its roster ever drifts from the couple: on any seat that authors
+    ``people:``, ``scope.inbound_allow_from`` must equal exactly the set of the
+    people's emails. No SMD address, no other address, no ``@domain`` grant, no
+    wildcard: anyone else on the roster could write into the seat and be
+    answered, and the privacy-by-space model (ADR 0091) has no space for them.
+    Seats without ``people:`` are not checked here."""
+    people = cfg.get("people")
+    if people is None:
+        return
+    if not isinstance(people, list):
+        _err("people: must be a list", errors)
+        return
+    emails: set[str] = set()
+    for i, person in enumerate(people):
+        email = person.get("email") if isinstance(person, dict) else None
+        if not isinstance(email, str) or not email.strip():
+            _err(
+                f"people[{i}].email: required on a seat with people (the roster is the people)",
+                errors,
+            )
+            continue
+        emails.add(email.strip().lower())
+    scope = cfg.get("scope") if isinstance(cfg.get("scope"), dict) else {}
+    roster = scope.get("inbound_allow_from")
+    if not isinstance(roster, list):
+        _err(
+            "scope.inbound_allow_from: required on a seat with people, equal to the people's emails",
+            errors,
+        )
+        return
+    entries = [e.strip().lower() for e in roster if isinstance(e, str)]
+    if len(entries) != len(roster):
+        _err("scope.inbound_allow_from: every entry must be an email address", errors)
+    for entry in entries:
+        if entry.startswith("@") or "*" in entry:
+            _err(
+                f"scope.inbound_allow_from: {entry!r} is a domain or wildcard grant; a seat "
+                "with people allows exactly the people's emails",
+                errors,
+            )
+    extra = sorted(set(entries) - emails)
+    missing = sorted(emails - set(entries))
+    if extra:
+        _err(
+            "scope.inbound_allow_from: on a seat with people it must equal the people's "
+            f"emails exactly; not a person: {', '.join(extra)}",
+            errors,
+        )
+    if missing:
+        _err(
+            "scope.inbound_allow_from: on a seat with people it must equal the people's "
+            f"emails exactly; missing: {', '.join(missing)}",
+            errors,
+        )
 
 
 def _scan_parsed_secrets(cfg: dict[str, Any], errors: list[str]) -> None:

@@ -45,8 +45,20 @@ def _roles_dir(tmp_path) -> str:
     return str(roles)
 
 
+def _with_people_roster(body: str) -> str:
+    """A seat with people: must author exactly the people as its roster
+    (bootstrap.validate._validate_people_roster, ss-console rule 8)."""
+    if "\npeople:" not in body:
+        return body
+    return body.replace(
+        "scope:\n  email_folders_visible",
+        "scope:\n  inbound_allow_from: [ana@example.com, ben@example.com]\n  email_folders_visible",
+        1,
+    )
+
+
 def _config(tmp_path, body: str) -> dict:
-    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, body)
+    customer_yaml, skills_dir, hermes_home = _seed_repo(tmp_path, _with_people_roster(body))
     translate_customer_yaml(
         customer_yaml_path=str(customer_yaml),
         hermes_home=str(hermes_home),
