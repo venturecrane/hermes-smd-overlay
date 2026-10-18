@@ -250,6 +250,7 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_device_senders(cfg, errors)
     _validate_record_stores(cfg, errors)
     _validate_people_roster(cfg, errors)
+    _validate_couples_cron(cfg, errors)
     _validate_google_auth_entitlements(cfg, errors)
     _validate_connectors(cfg, errors)
     _validate_email_seam(cfg, errors)
@@ -258,6 +259,32 @@ def validate_customer_yaml(customer_yaml: Path) -> list[str]:
     _validate_custody_guard(cfg, errors)
 
     return errors
+
+
+def _validate_couples_cron(cfg: dict[str, Any], errors: list[str]) -> None:
+    """On a couples seat the couple sets the schedule in conversation.
+
+    ss-console validator rule 9 (#3264), mirrored: on a seat with
+    ``seat.role: couples`` and ``people:``, no ``personas[].cron[]`` entry may
+    name a skill the couple schedules by talking (``shared.couples_settings``
+    ``KINDS``). The seat materializes those skills' slot jobs itself; an
+    authored entry would collide with a slot's managed name and put back the
+    per-couple authoring this removes."""
+    from shared import couples_settings, couples_slots
+
+    if not couples_slots.is_couples_seat(cfg):
+        return
+    for i, persona in enumerate(cfg.get("personas") or []):
+        if not isinstance(persona, dict):
+            continue
+        for j, entry in enumerate(persona.get("cron") or []):
+            skill = entry.get("skill") if isinstance(entry, dict) else None
+            if skill in couples_settings.KINDS:
+                _err(
+                    f"personas[{i}].cron[{j}]: {skill} is scheduled by the couple in "
+                    "conversation on a couples seat; remove the cron entry",
+                    errors,
+                )
 
 
 def _validate_people_roster(cfg: dict[str, Any], errors: list[str]) -> None:
