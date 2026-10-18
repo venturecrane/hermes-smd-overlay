@@ -31,8 +31,20 @@ def _couple(**over) -> dict:
     cust = {
         "customer_id": "captain-mark",
         "people": [
-            {"id": "p1", "name": "Pat One", "telegram_id": P1, "email": "p1@example.com"},
-            {"id": "p2", "name": "Sam Two", "telegram_id": P2, "email": "p2@example.com"},
+            {
+                "id": "p1",
+                "name": "Pat One",
+                "telegram_id": P1,
+                "email": "p1@example.com",
+                "channel": "telegram",
+            },
+            {
+                "id": "p2",
+                "name": "Sam Two",
+                "telegram_id": P2,
+                "email": "p2@example.com",
+                "channel": "telegram",
+            },
         ],
         "spaces": {"shared_telegram_chat": GROUP},
         "telegram": {
@@ -239,11 +251,26 @@ def test_each_partner_gets_their_own_job_and_the_shared_one_goes_to_the_group():
 def test_unbound_person_delivers_locally_never_to_a_guessed_chat(caplog):
     cust = _couple()
     cust["people"][0]["telegram_id"] = ""
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         jobs = _run(_with_cron(cust, [{**CHECKIN, "space": "person:p1"}]))
     job = jobs["op-managed:couple:couples-checkin@person:p1"]
     assert job["deliver"] == "local"
-    assert "the person:p1 chat is not bound yet" in caplog.text
+    assert "the person:p1 routine delivers by email" in caplog.text
+
+
+def test_FALSIFIER_a_bound_person_who_prefers_email_is_not_sent_to_telegram():
+    cust = _couple()
+    cust["people"][0]["channel"] = "email"
+    jobs = _run(_with_cron(cust, [{**CHECKIN, "space": "person:p1"}]))
+    assert jobs["op-managed:couple:couples-checkin@person:p1"]["deliver"] == "local"
+
+
+def test_channel_defaults_to_email():
+    cust = _couple()
+    for p in cust["people"]:
+        p.pop("channel")
+    jobs = _run(_with_cron(cust, [{**CHECKIN, "space": "person:p1"}]))
+    assert jobs["op-managed:couple:couples-checkin@person:p1"]["deliver"] == "local"
 
 
 def test_unbound_shared_chat_delivers_locally():

@@ -36,6 +36,7 @@ HANDLER = HANDLER_PATH.read_text()
 FUNCTION_GATES = {
     "_cost_breaker_self_check": "cost breaker",
     "_webhook_read_self_check": "webhook read surface",
+    "_couples_onboarding_check": "unknown-DM drop",
 }
 
 #: Gates written INLINE in ``handle()`` rather than extracted into a function.

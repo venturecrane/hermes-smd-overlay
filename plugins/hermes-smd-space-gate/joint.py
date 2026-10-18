@@ -2,8 +2,8 @@
 
 ``hold``           a joint-record write becomes a proposal: held, the proposer's
                    yes recorded, and every other partner sent the exact change by
-                   the seat itself: in their Telegram DM when they have one bound,
-                   otherwise by email to their authored address.
+                   the seat itself, on their authored channel: their Telegram DM
+                   when they prefer Telegram and are bound, otherwise email.
 ``answer``         a partner's ``agree`` / ``reject`` in their OWN Telegram DM.
 ``answer_person``  the same answer from a verified email (``email_confirm``).
 
@@ -80,9 +80,10 @@ def _reachable(person: space_mod.Person) -> bool:
 
 
 def notify(person: space_mod.Person, text: str) -> None:
-    """Tell one person, by code: their Telegram DM when bound, else their email.
-    Raises when it could not be sent."""
-    if person.telegram_id:
+    """Tell one person, by code, on their authored channel (``people[].channel``,
+    email by default): their Telegram DM only when they prefer Telegram and are
+    bound, else their email. Raises when it could not be sent."""
+    if person.reached_by_telegram:
         space_writes.post_notice(person.telegram_id, text)
         return
     if not person.email:

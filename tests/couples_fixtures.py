@@ -42,8 +42,20 @@ def couples_yaml(**overrides: Any) -> dict[str, Any]:
         "customer_name": "Captain and Mark",
         "seat": {"kind": "internal", "product": "hosted-agent", "role": "couples"},
         "people": [
-            {"id": "p1", "name": "Ana", "telegram_id": A_TG, "email": A_EMAIL},
-            {"id": "p2", "name": "Ben", "telegram_id": B_TG, "email": B_EMAIL},
+            {
+                "id": "p1",
+                "name": "Ana",
+                "telegram_id": A_TG,
+                "email": A_EMAIL,
+                "channel": "telegram",
+            },
+            {
+                "id": "p2",
+                "name": "Ben",
+                "telegram_id": B_TG,
+                "email": B_EMAIL,
+                "channel": "telegram",
+            },
         ],
         "spaces": {"shared_telegram_chat": GROUP},
         "memory": {"memory_enabled": False, "user_profile_enabled": False},

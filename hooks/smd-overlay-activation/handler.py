@@ -399,6 +399,45 @@ def _webhook_expected_tools_check() -> None:
         logger.warning("webhook expected-tools: sentinel write failed", exc_info=True)
 
 
+#: The module (``hermes_plugins.<slug>``) whose pre_gateway_dispatch callback
+#: must be live whenever a seat forwards unknown Telegram DMs (``pair``).
+_COUPLES_ONBOARDING_MODULE = "hermes_smd_couples_onboarding"
+
+
+def _couples_onboarding_check(manager: Any) -> str:
+    """Refuse to serve when Telegram forwards unknown DMs but nothing drops them.
+
+    On a couples seat translate authors ``telegram.unauthorized_dm_behavior:
+    pair`` so the adapter forwards a DM from an unknown sender to the
+    ``hermes-smd-couples-onboarding`` hook, which handles a ``/start <token>``
+    and DROPS every such DM before the runner's pairing offer. Without that
+    hook in the live singleton the same config sends pairing codes to
+    strangers. The trigger is the config value, not the seat's role: whatever
+    authored ``pair``, the seat must not serve it without the drop (ss-console
+    ADR 0091 s5, fail-closed)."""
+    try:
+        config = _gateway_config()
+    except Exception as e:  # noqa: BLE001
+        _die(f"cannot load config for the unknown-DM check: {type(e).__name__}: {e}")
+        return "unverified"
+    tg = config.get("telegram") if isinstance(config, dict) else None
+    behavior = tg.get("unauthorized_dm_behavior") if isinstance(tg, dict) else None
+    if str(behavior or "").strip().lower() != "pair":
+        return "not applicable (unknown DMs are not forwarded)"
+    callbacks = (getattr(manager, "_hooks", {}) or {}).get("pre_gateway_dispatch", [])
+    if not any(
+        _COUPLES_ONBOARDING_MODULE in str(getattr(cb, "__module__", "")) for cb in callbacks
+    ):
+        _die(
+            "telegram.unauthorized_dm_behavior is 'pair' but hermes-smd-couples-onboarding "
+            "is not registered on pre_gateway_dispatch: unknown Telegram DMs would reach "
+            "Hermes' pairing flow instead of being dropped"
+        )
+        return "missing"
+    logger.info("unknown-DM check passed: couples-onboarding drops unknown Telegram DMs")
+    return "enforced"
+
+
 def _die(reason: str) -> None:
     """Fail closed: an operator that cannot prove it governs live turns must not
     serve. Log CRITICAL with the SPECIFIC reason (so the failure is diagnosable —
@@ -612,6 +651,10 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
     #     tiers answer different orders of harm.
     _webhook_expected_tools_check()
 
+    # 6. UNKNOWN-DM drop (ss-console ADR 0091 s5): a seat that forwards unknown
+    #    Telegram DMs (``pair``) must have the couples-onboarding drop live.
+    unknown_dm_outcome = _couples_onboarding_check(mgr)
+
     # This line is the surface an operator reads to learn what was PROVEN at
     # boot, so it reports each gate's actual OUTCOME rather than asserting one.
     #
@@ -631,6 +674,7 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
         "(before=%s after=%s)"
         " | cost breaker: %s"
         " | webhook read surface: resolved"
+        " | unknown-DM drop: %s"
         " — each gate's outcome above is what was observed on THIS boot, not a "
         "claim about what the gate would do.",
         len(present),
@@ -638,4 +682,5 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
         before,
         after,
         cost_outcome,
+        unknown_dm_outcome,
     )

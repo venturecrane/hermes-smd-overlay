@@ -113,14 +113,32 @@ class Space:
         return self.kind == "person"
 
 
+#: How a person prefers the seat to reach them (``people[].channel``). Email is
+#: the default (Captain, 2026-10-17): Telegram is optional and connected later.
+CHANNEL_EMAIL = "email"
+CHANNEL_TELEGRAM = "telegram"
+CHANNELS = frozenset({CHANNEL_EMAIL, CHANNEL_TELEGRAM})
+
+
 @dataclass(frozen=True)
 class Person:
-    """One authored person. Empty ``telegram_id`` / ``email`` mean "not bound"."""
+    """One authored person. Empty ``telegram_id`` / ``email`` mean "not bound".
+
+    ``channel`` is how the seat reaches them on its own initiative (routines,
+    two-person notices): ``telegram`` only when authored AND bound, else email.
+    It never changes where a REPLY goes: a reply answers in the chat it was
+    asked in."""
 
     id: str
     name: str
     telegram_id: str
     email: str
+    channel: str = CHANNEL_EMAIL
+
+    @property
+    def reached_by_telegram(self) -> bool:
+        """True when the seat should reach this person in their Telegram DM."""
+        return self.channel == CHANNEL_TELEGRAM and bool(self.telegram_id)
 
 
 @dataclass(frozen=True)
@@ -154,6 +172,18 @@ class SpaceConfig:
             if person is not None:
                 return Space(kind="person", person_id=person.id, source=source)
         return None
+
+    def delivery_chat_for_space(self, space: Space) -> str:
+        """The Telegram chat the seat delivers a space's ROUTINE to, honouring
+        each person's authored ``channel``: a person's DM only when they prefer
+        Telegram and are bound; the shared group only when it is bound and every
+        person prefers Telegram (otherwise each is emailed). "" means email."""
+        if space.kind == "shared":
+            if self.people and all(p.reached_by_telegram for p in self.people):
+                return self.shared_telegram_chat
+            return ""
+        person = self.person(space.person_id or "")
+        return person.telegram_id if person is not None and person.reached_by_telegram else ""
 
     def chat_for_space(self, space: Space) -> str:
         """The Telegram chat a space's messages go to ("" when not bound yet)."""
@@ -243,7 +273,18 @@ def parse_space_config(raw: dict[str, Any]) -> SpaceConfig | None:
             seen_tg.add(tg)
         if email:
             seen_email.add(email)
-        people.append(Person(id=pid, name=_str(entry.get("name")), telegram_id=tg, email=email))
+        channel = _str(entry.get("channel")).lower() or CHANNEL_EMAIL
+        if channel not in CHANNELS:
+            raise SpaceConfigError(f"people[{i}].channel must be 'email' or 'telegram'")
+        people.append(
+            Person(
+                id=pid,
+                name=_str(entry.get("name")),
+                telegram_id=tg,
+                email=email,
+                channel=channel,
+            )
+        )
     spaces = raw.get("spaces")
     if not isinstance(spaces, dict):
         raise SpaceConfigError("spaces must be a mapping when people is authored")
