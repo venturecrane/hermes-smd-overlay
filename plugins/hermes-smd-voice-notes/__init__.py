@@ -52,7 +52,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from shared import agentmail_broker, attachment_spool, email_adapter
+from shared import agentmail_broker, attachment_spool, email_adapter, sender_auth
 from shared.customer_config import CustomerConfig, CustomerConfigError
 from shared.tool_registration import register_wrapped_tool
 
@@ -166,8 +166,29 @@ def _typed_link(spooled: Path, entry: dict[str, Any]) -> Path:
 
 
 def _sender_is_rostered(message_id: str) -> str:
-    """The sender's address, only if the seat answers that address. Raises otherwise."""
+    """The sender's address, only if it is authenticated and the seat answers
+    that address. Raises otherwise.
+
+    The vendor's ``from`` is a header anyone can write, so it is checked against
+    the same message's sender-authentication verdicts first, by the rule the
+    webhook router applies before it records an origin (shared/sender_auth.py):
+    an aligned DMARC or named, aligned DKIM pass. A forged From naming a
+    rostered address gets no transcription. Read faults refuse.
+    """
     sender = agentmail_broker.message_sender(message_id)
+    try:
+        results = agentmail_broker.message_authentication(message_id)
+    except agentmail_broker.AgentMailReadError as exc:
+        raise VoiceNoteRefused(
+            f"could not read the sender verification for that message ({exc}); "
+            "refusing to read audio"
+        ) from exc
+    authenticated, reason = sender_auth.evaluate(sender, results)
+    if not authenticated:
+        raise VoiceNoteRefused(
+            f"refused: the sender of that message is not verified ({reason}), so its From "
+            "is only a claim and the recording is not this seat's to transcribe"
+        )
     try:
         cfg = CustomerConfig.from_volume()
     except CustomerConfigError as exc:

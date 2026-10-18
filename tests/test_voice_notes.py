@@ -51,6 +51,16 @@ def mail_seat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         {"customer_id": "scott", "scope": {"inbound_allow_from": [ROSTERED, "@firm.example"]}}
     )
     monkeypatch.setattr(CustomerConfig, "from_volume", classmethod(lambda cls, path=None: cfg))
+    # Authenticated by default: the vendor's verdicts pass DMARC for whatever
+    # domain the patched message_sender returns. The forged-From tests override it.
+    monkeypatch.setattr(
+        broker,
+        "message_authentication",
+        lambda mid: {
+            "dmarc": "pass",
+            "dmarc_domain": broker.message_sender(mid).rsplit("@", 1)[-1],
+        },
+    )
 
 
 def _wire_vendor(monkeypatch: pytest.MonkeyPatch, *, sender: str, spooled: list[str]) -> None:
@@ -223,6 +233,37 @@ def test_the_handler_returns_json_and_surfaces_refusals(
     monkeypatch.setattr(broker, "message_sender", lambda mid: STRANGER)
     with pytest.raises(RuntimeError, match="not on scope.inbound_allow_from"):
         plugin._handler({"message_id": MESSAGE_ID})
+
+
+@pytest.mark.parametrize(
+    "results",
+    [{}, {"dkim": "pass"}, {"dkim": "pass", "dkim_domain": "attacker.example"}, None],
+)
+def test_a_forged_rostered_from_is_refused_before_any_byte_is_read(
+    monkeypatch: pytest.MonkeyPatch, mail_seat: None, results: Any
+) -> None:
+    """A From naming a rostered address is only a claim until the vendor's
+    verdicts authenticate it (shared/sender_auth.py). ``None`` stands for a
+    verdict read that failed.
+
+    FALSIFIER: delete the sender_auth check in _sender_is_rostered and the
+    rostered address's audio is spooled and transcribed in the three verdict cases
+    (the failed read refuses on its own branch)."""
+    plugin = load_plugin("hermes-smd-voice-notes")
+    spooled: list[str] = []
+    _wire_vendor(monkeypatch, sender=ROSTERED, spooled=spooled)
+    listed: list[str] = []
+    monkeypatch.setattr(broker, "list_attachments", lambda mid: listed.append(mid) or [])
+
+    def verdicts(_mid: str) -> dict[str, Any]:
+        if results is None:
+            raise broker.AgentMailReadError("vendor down")
+        return results
+
+    monkeypatch.setattr(broker, "message_authentication", verdicts)
+    with pytest.raises(plugin.VoiceNoteRefused, match="not verified|sender verification"):
+        plugin.transcribe_message(MESSAGE_ID)
+    assert listed == [] and spooled == [], "nothing of the message is read"
 
 
 def test_the_plugin_registers_on_a_seat_with_mail_and_not_otherwise(
