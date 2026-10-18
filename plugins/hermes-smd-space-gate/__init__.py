@@ -20,9 +20,12 @@ Two hooks:
     payload, the approval is spent, a release is noted for the tool's own
     in-handler check (``space_writes.in_tool_gate``), and the call proceeds
     through every other gate. A
-    crossing from an email turn or a cron run is refused outright: there is no
-    chat in which the same person could confirm it. A candidate call on an
-    unresolved space is refused.
+    crossing from a person's EMAIL is held the same way, with the email thread
+    as the chat: the seat replies in the thread to that sender only, and only
+    that sender's own bare "share it" on that thread releases it
+    (``email_confirm``). A crossing from a cron run is refused outright: there
+    is no chat in which the same person could confirm it. A candidate call on
+    an unresolved space is refused.
 
 ``pre_llm_call``  approves the held write when the turn's whole message is a
     bare "share it" from the person who raised it, in the chat it was raised in
@@ -59,7 +62,7 @@ from shared.inbound import SESSION_TAINT
 from shared.pending_send import _may_approve
 from shared.turn_principal import Principal
 
-from . import joint
+from . import email_confirm, joint
 
 logger = logging.getLogger(__name__)
 
@@ -175,10 +178,23 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         if joint_acts.is_joint_write(tool_name, args):
             # Something the couple decides together: both partners' yes, not a
             # "share it" (shared.joint_acts).
-            return joint.hold(tool_name, args, current, cfg, turn_principal.current().user_id)
+            return joint.hold(
+                tool_name, args, current, cfg, turn_principal.current().user_id, session_id
+            )
         cross = space_writes.crossing(tool_name, args, current, cfg)
         if cross is None:
             return None
+        if current.source == space_mod.SOURCE_EMAIL:
+            # The email thread is the chat: hold, confirm by reply, release
+            # (email_confirm).
+            return email_confirm.hold_or_release(
+                tool_name,
+                args,
+                cross,
+                current,
+                session_id,
+                lambda a: _payload_for(tool_name, a, cross, session_id),
+            )
         if current.source != space_mod.SOURCE_TELEGRAM_DM:
             return {
                 "action": "block",
@@ -192,25 +208,12 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
                 args.update(copy.deepcopy(held.args))
             # A tool that checks the crossing again in its handler (the calendar
             # tools) learns from this that the person confirmed this very call.
-            space_writes.note_release(tool_name, turn)
+            space_writes.note_release(tool_name, turn, current)
             logger.info("hermes-smd-space-gate: confirmed write released (%s)", tool_name)
             return None
-        if (
-            tool_name == space_writes.RECORD_WRITE
-            and isinstance(args, dict)
-            and isinstance(args.get("content"), str)
-            and _tainted(session_id)
-        ):
-            # A record from a turn that read outside content says so, and the
-            # person confirms the words as they will land, stamp included
-            # (shared.space_taint, ss-console #3283).
-            args["content"] = space_taint.stamp_from_web(args["content"])
-        payload = space_writes.exact_text(args)
-        if len(payload) > space_writes.MAX_CONFIRM_CHARS:
-            return {
-                "action": "block",
-                "message": _TOO_LONG.format(tool=tool_name, where=cross.where),
-            }
+        payload, refusal = _payload_for(tool_name, args, cross, session_id)
+        if refusal is not None:
+            return refusal
         # The person sees the exact payload from the seat itself, never a
         # re-telling by the model. If it cannot be shown, nothing is held: a
         # confirmation of words the person never saw is not a confirmation.
@@ -230,6 +233,56 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
         return {"action": "block", "message": _UNRESOLVED.format(tool=tool_name)}
 
 
+def _payload_for(
+    tool_name: str, args: Any, cross: Any, session_id: str
+) -> tuple[str, dict[str, Any] | None]:
+    """The exact payload a person confirms, or a refusal when it is too long.
+
+    A record from a turn that read outside content says so, and the person
+    confirms the words as they will land, stamp included (shared.space_taint,
+    ss-console #3283)."""
+    if (
+        tool_name == space_writes.RECORD_WRITE
+        and isinstance(args, dict)
+        and isinstance(args.get("content"), str)
+        and _tainted(session_id)
+    ):
+        args["content"] = space_taint.stamp_from_web(args["content"])
+    payload = space_writes.exact_text(args)
+    if len(payload) > space_writes.MAX_CONFIRM_CHARS:
+        return payload, {
+            "action": "block",
+            "message": _TOO_LONG.format(tool=tool_name, where=cross.where),
+        }
+    return payload, None
+
+
+def _email_turn(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """An email turn on a shared seat: a bare "share it" for a write this sender
+    held on this thread, or an ``agree`` / ``reject`` to the open joint change.
+    Only the sender's own new words count (email_confirm.own_words)."""
+    session_id = str(kwargs.get("session_id") or "")
+    in_space_mode, _ = _current_space(session_id)
+    if not in_space_mode:
+        return None
+    cfg = space_mod.space_config()
+    if cfg is None:
+        return None
+    origin = email_confirm.this_turn_origin(session_id, kwargs.get("user_message"))
+    if origin is None:
+        return None
+    words = email_confirm.own_words(origin)
+    if not words:
+        return None
+    person = cfg.person_for_email(origin.sender_address)
+    if person is None:
+        return None
+    answered = joint.answer_person(words, cfg, person)
+    if answered is not None:
+        return answered
+    return email_confirm.confirm_from_email(origin, words)
+
+
 def _joint_answer(message: Any, session_id: str) -> dict[str, Any] | None:
     """A partner's agree/reject to the open joint change, in their own DM."""
     in_space_mode, current = _current_space(session_id)
@@ -243,7 +296,7 @@ def on_pre_llm_call(**kwargs: Any) -> dict[str, Any] | None:
     """Approve the held write this person raised in this chat. Exception-safe."""
     try:
         if str(kwargs.get("platform") or "").lower() != "telegram":
-            return None
+            return _email_turn(kwargs)
         message = kwargs.get("user_message")
         answered = _joint_answer(message, str(kwargs.get("session_id") or ""))
         if answered is not None:

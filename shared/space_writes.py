@@ -281,7 +281,7 @@ def target_space(
 # ---------------------------------------------------------------------------
 
 _RELEASE_TTL_S = 120.0
-_releases: dict[tuple[str, str, str], float] = {}
+_releases: dict[frozenset[tuple[str, str, str]], float] = {}
 
 IN_TOOL_REFUSAL = (
     "this would put something from a private conversation in front of the other "
@@ -290,30 +290,43 @@ IN_TOOL_REFUSAL = (
 )
 
 
-def note_release(tool_name: str, principal: Any) -> None:
-    """Called by the gate when it releases a confirmed call."""
-    key = (
-        tool_name,
-        str(getattr(principal, "user_id", "") or ""),
-        str(getattr(principal, "chat_id", "") or ""),
-    )
-    _releases[key] = time.monotonic() + _RELEASE_TTL_S
+def _keys(tool_name: str, who: Any) -> set[tuple[str, str, str]]:
+    """The keys a release is found by: the person's space (``person:<id>``, any
+    channel) and, for a chat principal, its user and chat."""
+    keys: set[tuple[str, str, str]] = set()
+    if isinstance(who, space_mod.Space):
+        if who.private and who.person_id:
+            keys.add((tool_name, who.key, ""))
+        return keys
+    user = str(getattr(who, "user_id", "") or "")
+    if user:
+        keys.add((tool_name, user, str(getattr(who, "chat_id", "") or "")))
+    return keys
 
 
-def take_release(tool_name: str, principal: Any) -> bool:
-    """Spend the release the gate noted for this tool, person and chat."""
+def note_release(tool_name: str, principal: Any, space: space_mod.Space | None = None) -> None:
+    """Called by the gate when it releases a confirmed call: one release, found
+    by the confirming chat principal or by the person's space."""
+    keys = _keys(tool_name, principal) | _keys(tool_name, space)
+    if keys:
+        _releases[frozenset(keys)] = time.monotonic() + _RELEASE_TTL_S
+
+
+def take_release(tool_name: str, who: Any) -> bool:
+    """Spend the release the gate noted for this tool and this person. ``who``
+    is the turn's chat principal (``shared.turn_principal``) or its Space (the
+    person, whichever channel confirmed). Single use across both keys."""
     now = time.monotonic()
     for k in [k for k, exp in _releases.items() if exp < now]:
         _releases.pop(k, None)
-    key = (
-        tool_name,
-        str(getattr(principal, "user_id", "") or ""),
-        str(getattr(principal, "chat_id", "") or ""),
-    )
-    if not key[1] or key not in _releases:
+    wanted = _keys(tool_name, who)
+    if not wanted:
         return False
-    _releases.pop(key, None)
-    return True
+    for k in list(_releases):
+        if k & wanted:
+            _releases.pop(k, None)
+            return True
+    return False
 
 
 def in_tool_gate(act: str, current: space_mod.Space | None, target_key: str) -> str | None:
@@ -324,7 +337,7 @@ def in_tool_gate(act: str, current: space_mod.Space | None, target_key: str) -> 
         return None
     from shared import turn_principal
 
-    if take_release(act, turn_principal.current()):
+    if take_release(act, current) or take_release(act, turn_principal.current()):
         return None
     return IN_TOOL_REFUSAL
 

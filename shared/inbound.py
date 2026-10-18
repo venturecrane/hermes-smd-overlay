@@ -649,6 +649,14 @@ class InboundOrigin:
     conversation_id: str = ""
     reply_text: str = field(default="", repr=False)
     auto_submitted: bool = False
+    #: The message's own To and Cc, lower-cased, from the verified payload
+    #: (the seam DTO), never from body text. On a seat several people share,
+    #: an email from one person that also went to another is a joint thread
+    #: (``shared.space``, ADR 0091). Empty when the provider did not say.
+    recipients: tuple[str, ...] = ()
+    #: The message subject from the verified payload. Read only to tell a
+    #: forward ("Fwd:") from a reply; never injected anywhere.
+    subject: str = field(default="", repr=False)
 
 
 @dataclass
@@ -872,6 +880,35 @@ class SessionInboundOrigin:
 
 # Process-wide singleton — the webhook router records, the demo relay reads.
 SESSION_INBOUND_ORIGIN = SessionInboundOrigin()
+
+
+# ``message_id: <id>`` on its own line. The inbound-email templates render it
+# as the LAST trusted field before the untrusted-body delimiter.
+_PROMPT_MESSAGE_ID_RE = re.compile(r"^message_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+
+
+def bind_origin_from_prompt(session_id: str, user_message: Any) -> bool:
+    """Bind ``session_id`` to the verified origin its turn prompt names (#195).
+
+    Shared by ``hermes-smd-inbound`` (which documents the three injection
+    layers) and any hook that needs this turn's verified sender before that
+    plugin's own ``pre_llm_call`` runs (the space gate, which registers first).
+    Idempotent: the per-turn mark records the same id, and a session's first
+    binding wins. Only the region ABOVE the untrusted-body delimiter is parsed,
+    the last match wins, and a prompt without the delimiter binds nothing.
+    Returns whether a binding was made. Raises nothing it can avoid; callers
+    still treat it as best-effort."""
+    if not session_id:
+        return False
+    if not isinstance(user_message, str):
+        SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, "")
+        return False
+    cut = user_message.find(UNTRUSTED_EMAIL_DELIMITER)
+    matches = _PROMPT_MESSAGE_ID_RE.findall(user_message[:cut]) if cut >= 0 else []
+    SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, matches[-1] if matches else "")
+    if not matches:
+        return False
+    return SESSION_INBOUND_ORIGIN.bind(session_id, matches[-1])
 
 
 __all__ = [

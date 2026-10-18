@@ -28,7 +28,9 @@ nothing a person types, moves a turn between spaces. The resolver reads only:
    authored shared group is ``shared``; any other chat is unresolved;
 3. an email turn: the Svix-verified sender the webhook router recorded for the
    session (``shared.inbound.SESSION_INBOUND_ORIGIN``), mapped to a person by
-   their authored address;
+   their authored address. When that message's own verified To/Cc also
+   includes ANOTHER person's address it is a joint thread, ``shared``
+   (source ``email_joint``); otherwise it is the sender's space;
 4. anything else: unresolved (``None``).
 
 SPACE MODE IS AUTHORED. A seat is in space mode iff its customer.yaml authors a
@@ -83,6 +85,8 @@ SOURCE_CRON = "cron"
 SOURCE_TELEGRAM_DM = "telegram_dm"
 SOURCE_TELEGRAM_GROUP = "telegram_group"
 SOURCE_EMAIL = "email"
+#: An email from one person that also went to another person: a joint thread.
+SOURCE_EMAIL_JOINT = "email_joint"
 
 
 class SpaceConfigError(ValueError):
@@ -362,6 +366,13 @@ def _resolve_email(cfg: SpaceConfig, session_id: str) -> Space | None:
     person = cfg.person_for_email(origin.sender_address)
     if person is None:
         return None
+    # A joint thread: the verified To/Cc of this very message (the webhook
+    # router copies them off the signed payload) includes another person.
+    # Never the body, never a name in the text.
+    recipients = {str(r).strip().lower() for r in getattr(origin, "recipients", ()) or ()}
+    others = {p.email for p in cfg.people if p.email and p.id != person.id}
+    if recipients & others:
+        return Space(kind="shared", person_id=None, source=SOURCE_EMAIL_JOINT)
     return Space(kind="person", person_id=person.id, source=SOURCE_EMAIL)
 
 
@@ -411,6 +422,7 @@ __all__ = [
     "SHARED",
     "SOURCE_CRON",
     "SOURCE_EMAIL",
+    "SOURCE_EMAIL_JOINT",
     "SOURCE_TELEGRAM_DM",
     "SOURCE_TELEGRAM_GROUP",
     "Person",
