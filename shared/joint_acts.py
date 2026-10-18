@@ -16,6 +16,15 @@ fence, so "changing the other partner's settings" cannot happen at all; the
 shared schedule (the routines) lives in customer.yaml and changes only through
 a reviewed PR, which the skill records as a request.
 
+A SETTINGS CHANGE is the other thing held here (ss-console #3264): a call to
+``couples_settings_change`` that does not affect its asker alone (the
+timezone, the check-in topics, any check-in routine, the other partner's
+settings or routines, a shared routine). The settings plugin proposes it with
+``tool=SETTINGS_TOOL`` and a ``summary`` rendered in code from the validated
+change; that summary is what the other partner is shown and what both agree
+to. When the last yes arrives the stored change is re-parsed and applied by
+``shared.couples_settings``; if it no longer fits it closes as ``failed``.
+
 HOW IT WORKS.
 
 1. A partner asks for the change, in their DM or in the group. The write is
@@ -67,6 +76,19 @@ STATUS_APPLIED = "applied"
 STATUS_REJECTED = "rejected"
 STATUS_EXPIRED = "expired"
 STATUS_SUPERSEDED = "superseded"
+#: Both said yes but the change no longer fits (the routine it changes was
+#: removed meanwhile, say). Closed, so it does not block the next proposal.
+STATUS_FAILED = "failed"
+
+#: The tool whose held call an act carries. A record write stores the record; a
+#: settings change (``couples_settings_change``) applies through
+#: ``shared.couples_settings``, re-validated against the settings as they are
+#: when the last yes arrives.
+RECORD_TOOL = "record_store_write"
+SETTINGS_TOOL = "couples_settings_change"
+#: Every settings proposal shares one key, so a proposer can replace their own
+#: open settings proposal with a fuller one ("and we're on Pacific time").
+SETTINGS_KEY = ("couples-settings", "settings")
 
 _PATH_ENV = "SMD_JOINT_ACTS_PATH"
 _STATE_FILE = "smd-state/joint-acts.json"
@@ -88,6 +110,10 @@ class JointAct:
     status: str = STATUS_OPEN
     decided_by: str = ""
     history: list[str] = field(default_factory=list)
+    tool: str = RECORD_TOOL
+    #: For a settings change: the exact lines the partners are shown, rendered
+    #: in code from the validated change (``shared.couples_settings_text``).
+    summary: str = ""
 
     def expired(self, now: float | None = None) -> bool:
         return ((now or time.time()) - self.created_at) > TTL_SECONDS
@@ -189,21 +215,37 @@ def open_act(now: float | None = None) -> JointAct | None:
     return next((a for a in acts if a.status == STATUS_OPEN), None)
 
 
-def propose(args: dict[str, Any], proposer: str, *, now: float | None = None) -> JointAct:
+def propose(
+    args: dict[str, Any],
+    proposer: str,
+    *,
+    now: float | None = None,
+    tool: str = RECORD_TOOL,
+    summary: str = "",
+) -> JointAct:
     """Hold a joint change. The proposer's request is their yes. Raises
     :class:`JointActError` when another act is open, or the change is not a
-    shared record (a joint record belongs to both: ``owner: shared``)."""
+    shared record (a joint record belongs to both: ``owner: shared``). A
+    settings change (``tool=SETTINGS_TOOL``) is validated by its caller, which
+    also renders ``summary``: the exact text both partners see."""
     now = time.time() if now is None else now
-    store, name = str(args.get("store")), str(args.get("name"))
-    policy = record_store.authored_policies().get(store)
-    if policy is None:
-        raise JointActError(f"no record store named {store!r} is authored on this seat")
-    content = args.get("content") if isinstance(args.get("content"), str) else ""
-    if record_store.target_space(policy, content) != space_mod.SHARED:
-        raise JointActError(
-            "a change both partners decide is kept as a shared record "
-            f"({policy.owner_field or 'owner'}: shared)"
-        )
+    if tool == SETTINGS_TOOL:
+        if not summary.strip():
+            raise JointActError("a settings change needs the exact text the partners agree to")
+        store, name = SETTINGS_KEY
+    elif tool == RECORD_TOOL:
+        store, name = str(args.get("store")), str(args.get("name"))
+        policy = record_store.authored_policies().get(store)
+        if policy is None:
+            raise JointActError(f"no record store named {store!r} is authored on this seat")
+        content = args.get("content") if isinstance(args.get("content"), str) else ""
+        if record_store.target_space(policy, content) != space_mod.SHARED:
+            raise JointActError(
+                "a change both partners decide is kept as a shared record "
+                f"({policy.owner_field or 'owner'}: shared)"
+            )
+    else:
+        raise JointActError(f"{tool} is not a change the two of you decide together")
     acts = _load()
     _expire(acts, now)
     current = next((a for a in acts if a.status == STATUS_OPEN), None)
@@ -223,6 +265,8 @@ def propose(args: dict[str, Any], proposer: str, *, now: float | None = None) ->
         proposer=proposer,
         approvals=[proposer],
         created_at=now,
+        tool=tool,
+        summary=summary,
     )
     acts.append(act)
     _save(acts)
@@ -236,7 +280,9 @@ def respond(
 
     Returns ``(act, outcome)``: ``none`` (nothing open), ``already`` (this
     person had said yes), ``waiting`` (a yes recorded, someone still to answer),
-    ``applied`` (everyone agreed; the change was written), ``rejected``."""
+    ``applied`` (everyone agreed; the change was written), ``rejected``, or
+    ``failed`` (everyone agreed but the change no longer fits; closed, nothing
+    changed, the reason last in ``act.history``)."""
     now = time.time() if now is None else now
     acts = _load()
     _expire(acts, now)
@@ -253,7 +299,13 @@ def respond(
         return act, "already"
     act.approvals.append(person)
     if set(required_people(cfg)) <= set(act.approvals):
-        _apply(act)
+        try:
+            _apply(act)
+        except JointActError as exc:
+            act.status = STATUS_FAILED
+            act.history.append(str(exc))
+            _save(acts)
+            return act, "failed"
         act.status = STATUS_APPLIED
         _save(acts)
         return act, "applied"
@@ -262,10 +314,36 @@ def respond(
 
 
 def _apply(act: JointAct) -> None:
-    """Write the stored payload, stamped with who agreed. Raises on failure (the
-    act stays open, so nothing is lost)."""
+    """Apply the stored payload, stamped with who agreed. Raises on a failure to
+    write (the act stays open, so nothing is lost); raises
+    :class:`JointActError` when a settings change no longer fits."""
+    if act.tool == SETTINGS_TOOL:
+        _apply_settings(act)
+        return
     content = _with_confirmed_by(str(act.args.get("content") or ""), act.approvals)
     record_store.write_record(act.store, act.name, content, overwrite=True)
+
+
+def _apply_settings(act: JointAct) -> None:
+    """Re-parse the held change against the people and settings as they are
+    now, and apply it. The stored change is the one both partners were shown."""
+    from shared import couples_settings as cs
+    from shared.customer_config import CustomerConfig
+
+    cfg = space_mod.space_config()
+    if cfg is None:
+        raise JointActError("this seat no longer authors its people")
+    try:
+        customer = CustomerConfig.from_volume(space_mod._config_path()).raw
+        changes = cs.parse_changes(cs.changes_from_args(act.args), cfg)
+        cs.apply_changes(
+            changes,
+            kinds=cs.available_kinds(customer),
+            agreed_by=act.approvals,
+            summary=act.summary,
+        )
+    except cs.SettingsError as exc:
+        raise JointActError(str(exc)) from exc
 
 
 def _with_confirmed_by(content: str, people: list[str]) -> str:
@@ -280,7 +358,10 @@ def _with_confirmed_by(content: str, people: list[str]) -> str:
 
 
 def payload_text(act: JointAct) -> str:
-    """The exact change the other partner is shown: the stored record text."""
+    """The exact change the other partner is shown: the stored record text, or
+    for a settings change the code-rendered lines of the setting."""
+    if act.tool == SETTINGS_TOOL:
+        return act.summary
     return str(act.args.get("content") or "")
 
 
@@ -294,8 +375,11 @@ def _reset_for_tests() -> None:
 __all__ = [
     "JOINT_KINDS",
     "JOINT_RECORD_NAMES",
+    "RECORD_TOOL",
+    "SETTINGS_TOOL",
     "STATUS_APPLIED",
     "STATUS_EXPIRED",
+    "STATUS_FAILED",
     "STATUS_OPEN",
     "STATUS_REJECTED",
     "TTL_SECONDS",

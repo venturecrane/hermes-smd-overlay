@@ -375,6 +375,10 @@ _EXPECTED_NON_SEEDING: frozenset[str] = frozenset(
         # what a person typed into an invitation. A time the Operator wrote
         # into an event and read back has not been read from any record.
         "calendar_invite_list",
+        # ss-console #3264: the couple's own schedule and settings as the seat
+        # stores them (a timezone, times, day names, topic phrases the couple
+        # chose). The seat's own state, not a record a claim is quoted from.
+        "couples_settings_read",
         "job_status",
         # ss-console #2614: broker-authored counts and states of the chronology
         # runner's jobs (documents read, pages, cents, a folder id). Not a
