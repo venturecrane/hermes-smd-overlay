@@ -197,10 +197,12 @@ def test_a_changed_target_is_held_again(gate, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_from_email_a_crossing_is_refused_not_held(gate, monkeypatch):
+def test_from_an_email_without_a_thread_a_crossing_is_refused_not_held(gate, monkeypatch):
+    """An email turn holds a crossing only when it is bound to its own verified
+    origin with a thread (tests/test_space_email.py covers the held path)."""
     email_turn(monkeypatch, "s", A_EMAIL)
     _, blocked = _write(gate, A_SECRET)
-    assert blocked and "Telegram chat" in blocked["message"]
+    assert blocked and "own thread" in blocked["message"]
     assert not space_writes.SPACE_WRITES.pending()
 
 

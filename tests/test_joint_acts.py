@@ -14,12 +14,10 @@ import pytest
 from shared import joint_acts, record_store, space, space_writes
 from tests.conftest import load_plugin
 from tests.couples_fixtures import (
-    A_EMAIL,
     A_TG,
     B_TG,
     clear_turn,
     cron_to,
-    email_turn,
     telegram_dm,
     telegram_group,
     write_seat,
@@ -159,11 +157,12 @@ def test_a_kind_joint_settings_record_by_another_name_is_gated(seat, monkeypatch
     assert _propose(seat, name="our-settings.md")["message"].startswith("HELD")
 
 
-def test_a_joint_change_needs_a_chat_to_ask_in(seat, monkeypatch):
-    for bind in (lambda: email_turn(monkeypatch, "s", A_EMAIL), lambda: cron_to(monkeypatch, A_TG)):
-        bind()
-        blocked = _propose(seat)
-        assert blocked and "refused" in blocked["message"]
+def test_a_joint_change_is_never_proposed_by_a_scheduled_run(seat, monkeypatch):
+    """A routine has no person to propose for. (By email it is proposed:
+    tests/test_space_email.py.)"""
+    cron_to(monkeypatch, A_TG)
+    blocked = _propose(seat)
+    assert blocked and "refused" in blocked["message"]
     assert joint_acts.open_act() is None
 
 

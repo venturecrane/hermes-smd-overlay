@@ -43,7 +43,6 @@ Exception-safe per AGENTS.md hard rule #3: any failure logs and returns ``None``
 """
 
 import logging
-import re
 from typing import Any
 
 from shared import inbound
@@ -60,7 +59,7 @@ logger = logging.getLogger(__name__)
 _UNTRUSTED_DELIMITER = inbound.UNTRUSTED_EMAIL_DELIMITER
 # ``message_id: <id>`` on its own line. The templates render it as the LAST
 # field before the delimiter.
-_MESSAGE_ID_RE = re.compile(r"^message_id:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+_MESSAGE_ID_RE = inbound._PROMPT_MESSAGE_ID_RE
 
 
 def _bind_origin_from_prompt(session_id: str, user_message: Any) -> None:
@@ -92,20 +91,11 @@ def _bind_origin_from_prompt(session_id: str, user_message: Any) -> None:
     Svix signature verification, and the relay's recipient-lock still requires
     the draft to name exactly that sender.
     """
-    if not session_id:
-        return
-    if not isinstance(user_message, str):
-        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, "")
-        return
     try:
-        cut = user_message.find(_UNTRUSTED_DELIMITER)
-        matches = _MESSAGE_ID_RE.findall(user_message[:cut]) if cut >= 0 else []
-        # Every turn notes what its own trusted prefix named ("" for none), so
-        # bound_this_turn() can tell the email's turn from a later wake.
-        inbound.SESSION_INBOUND_ORIGIN.note_turn_prompt(session_id, matches[-1] if matches else "")
-        if not matches:
-            return
-        if inbound.SESSION_INBOUND_ORIGIN.bind(session_id, matches[-1]):
+        # The parse lives in shared.inbound so a hook that must see the turn's
+        # verified sender before this plugin runs (the space gate) binds the
+        # same way, from the same trusted region, with the same regex.
+        if inbound.bind_origin_from_prompt(session_id, user_message):
             logger.debug(
                 "hermes-smd-inbound: bound session %r to inbound origin by message id",
                 session_id,

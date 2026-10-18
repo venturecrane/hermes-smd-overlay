@@ -296,6 +296,16 @@ def _origin_from_dto(
         # reader's own words and the RFC 3834 verdict, straight off the DTO.
         reply_text=dto.reply_text if isinstance(dto.reply_text, str) else "",
         auto_submitted=dto.auto_submitted is True,
+        # The message's own To/Cc, off the verified DTO: whom this email went
+        # to decides a joint thread on a shared seat (shared.space).
+        recipients=tuple(
+            dict.fromkeys(
+                a.strip().lower()
+                for a in [*(dto.to or []), *(dto.cc or [])]
+                if isinstance(a, str) and a.strip()
+            )
+        ),
+        subject=dto.subject if isinstance(dto.subject, str) else "",
     )
 
 

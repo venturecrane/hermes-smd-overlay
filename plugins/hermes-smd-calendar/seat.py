@@ -233,10 +233,9 @@ def _released_by_the_space_gate(turn: space.Space, tool_name: str, args: dict[st
         # The gate notes a release when the person's "share it" lets THIS call
         # through; spending it here means a crossing that reached the handler by
         # any other road (a hook skipped, a second call in the same turn) still
-        # refuses.
-        from shared import turn_principal
-
-        return bool(take_release(tool_name, turn_principal.current()))
+        # refuses. Keyed by the person's space, so a confirmation by email
+        # releases the same way one in their Telegram chat does.
+        return bool(take_release(tool_name, turn))
     except Exception:  # noqa: BLE001 - a gate that cannot answer has not released anything
         logger.warning("hermes-smd-calendar: space gate check failed; refusing", exc_info=True)
         return False

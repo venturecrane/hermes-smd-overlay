@@ -47,10 +47,10 @@ def tainted_write_allowed(tool_name: str, session_id: Any, target_key: str | Non
         return False
     if target_key == current.key and (current.private or current.source == space_mod.SOURCE_CRON):
         return True
-    if current.private and current.source == space_mod.SOURCE_TELEGRAM_DM:
-        from shared import space_writes, turn_principal
+    if current.private and current.source in (space_mod.SOURCE_TELEGRAM_DM, space_mod.SOURCE_EMAIL):
+        from shared import space_writes
 
-        return space_writes.take_release(tool_name, turn_principal.current())
+        return space_writes.take_release(tool_name, current)
     return False
 
 
