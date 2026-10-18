@@ -108,6 +108,22 @@ def recipient_locked(args: Any, recorded_sender: str, reply_to: str = "") -> boo
     return bool(named) and named <= {recorded, target}
 
 
+def shared_recipients_locked(args: Any, recorded_sender: str, people: Iterable[str]) -> bool:
+    """True iff a SHARED reply's draft names only the seat's people (ADR 0091).
+
+    The shared twin of :func:`recipient_locked`: the set is ``people`` (the
+    seat's authored ``people[].email``, passed by code), never the draft's. The
+    draft may name the sender alone or any of the people; every one of them is
+    copied anyway, because the reply answers a joint thread. A stranger, an
+    empty ``to`` or a recorded sender outside ``people`` fails the lock."""
+    allowed = {str(p).strip().lower() for p in people if str(p).strip()}
+    recorded = (recorded_sender or "").strip().lower()
+    if not recorded or recorded not in allowed:
+        return False
+    named = draft_recipients(args)
+    return bool(named) and named <= allowed
+
+
 def draft_body(args: Any) -> tuple[str, str, str]:
     """Return ``(scan_text, send_text, send_html)`` from a ``create_draft`` args.
 
@@ -507,6 +523,7 @@ def send_reply(
     sender: Callable[..., Any] | None = None,
     session_id: str = "",
     matter_ref: str | None = None,
+    shared: bool = False,
 ) -> str:
     """Ask the broker to send a threaded reply; return the new msg id.
 
@@ -534,6 +551,10 @@ def send_reply(
     that predates them raises TypeError rather than dropping them silently.
     """
     send = sender or agentmail_broker.send_reply
+    # ``shared`` (ADR 0091) asks the broker to copy the seat's other people on a
+    # joint thread; it names nobody, and it is passed only when set, so every
+    # ordinary reply calls the sender exactly as before.
+    extra: dict[str, Any] = {"shared": True} if shared else {}
     try:
         return str(
             send(
@@ -542,6 +563,7 @@ def send_reply(
                 html=html,
                 session_id=session_id,
                 matter_ref=matter_ref,
+                **extra,
                 # The participant fence: a reply's anchor is the email it
                 # answers, which every caller took from a verified origin.
                 anchor={"kind": "agentmail_message", "message_id": message_id},
@@ -619,5 +641,6 @@ __all__ = [
     "draft_recipients",
     "gate_body",
     "recipient_locked",
+    "shared_recipients_locked",
     "send_reply",
 ]

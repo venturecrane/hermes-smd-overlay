@@ -1,0 +1,9 @@
+name: hermes-smd-space-delivery
+version: "0.1.0"
+description: "Couples role (ADR 0091): a space-bound cron routine whose Telegram chat is not bound yet delivers its final response by email instead, to that person (person:<id>) or as one email to every person (shared). Recipients are derived by code from the job's managed name and people:, and the send rides the broker's space lane, which admits exactly people[].email. Seats without people: are untouched."
+author: VentureCrane
+requires_env: []
+provides_hooks:
+  - post_llm_call
+hooks:
+  - post_llm_call

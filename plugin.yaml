@@ -38,6 +38,7 @@ plugins:
   - plugins/hermes-smd-connector-health
   - plugins/hermes-smd-usage
   - plugins/hermes-smd-group-audience
+  - plugins/hermes-smd-space-delivery
   - plugins/hermes-smd-drafting
   - plugins/hermes-smd-establishment
   - plugins/hermes-smd-medchron
