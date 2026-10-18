@@ -3,8 +3,10 @@
 * ``people:`` authored: Hermes' native memory is forced off (both stores) and
   the ``memory`` toolset is disabled, because MEMORY.md is one file per profile
   that every partner's turn would read.
-* ``seat.role: couples``: terminal, code_execution, delegation and file are
-  disabled whatever the persona's exposure says.
+* ``seat.role: couples``: terminal, code_execution, delegation and the file
+  WRITE tools (``smd_couples_no_file_writes``) are disabled whatever the
+  persona's exposure says. ``file`` itself is not: that would strip read_file
+  from the email surface (shared/couples_surface.py).
 * A seat with neither renders exactly as before.
 """
 
@@ -118,8 +120,11 @@ def test_couples_role_drops_shell_code_subagent_and_file(tmp_path):
     ) + PEOPLE.replace("product: hosted-agent", "product: hosted-agent\n  role: couples")
     assert "role: couples" in body and "code_execution: autonomous" in body
     disabled = _config(tmp_path, body)["agent"]["disabled_toolsets"]
-    for ts in ("terminal", "code_execution", "delegation", "file", "memory"):
+    for ts in ("terminal", "code_execution", "delegation", "smd_couples_no_file_writes", "memory"):
         assert ts in disabled, ts
+    # FALSIFIER (captain-mark 2026-10-18): disabling `file` strips read_file from
+    # the webhook surface and the activation gate refuses to boot.
+    assert "file" not in disabled
     assert len(disabled) == len(set(disabled)), "no toolset listed twice"
 
 
@@ -128,7 +133,8 @@ def test_couples_role_with_refused_code_lists_each_toolset_once(tmp_path):
         "product: hosted-agent", "product: hosted-agent\n  role: couples"
     )
     disabled = _config(tmp_path, body)["agent"]["disabled_toolsets"]
-    assert disabled.count("terminal") == 1 and disabled.count("file") == 1
+    assert disabled.count("terminal") == 1
+    assert disabled.count("smd_couples_no_file_writes") == 1
 
 
 def test_seat_without_people_is_unchanged(tmp_path):

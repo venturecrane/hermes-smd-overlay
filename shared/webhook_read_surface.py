@@ -184,10 +184,16 @@ def resolve_webhook_tool_names(config: dict[str, Any]) -> set[str]:
     it had for months. Anyone answering "can a webhook turn call X" for an MCP
     tool must look at the MCP server config, not here.
     """
+    return resolve_platform_tool_names(config, "webhook")
+
+
+def resolve_platform_tool_names(config: dict[str, Any], platform: str) -> set[str]:
+    """The same resolution as :func:`resolve_webhook_tool_names`, for any
+    platform (``shared.couples_surface`` checks telegram too)."""
     from hermes_cli.tools_config import _get_platform_tools
     from model_tools import get_tool_definitions
 
-    enabled = sorted(_get_platform_tools(config, "webhook"))
+    enabled = sorted(_get_platform_tools(config, platform))
     disabled = (config.get("agent") or {}).get("disabled_toolsets") or None
     definitions = get_tool_definitions(
         enabled_toolsets=enabled,

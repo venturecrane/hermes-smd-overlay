@@ -343,7 +343,9 @@ def test_register_creates_the_read_only_webhook_toolset(fake_ctx, monkeypatch, w
     monkeypatch.setenv("SMD_D1_AUDIT_BINDING", "CUSTOMER_DB")
     mod = load_plugin("hermes-smd-webhook-router")
     mod.register(fake_ctx)
-    assert created == {mod.WEBHOOK_READ_TOOLSET: ["read_file"]}
+    assert created[mod.WEBHOOK_READ_TOOLSET] == ["read_file"]
+    # the couples write-tool toolset (shared.couples_surface) never carries read_file
+    assert "read_file" not in created.get("smd_couples_no_file_writes", [])
 
 
 def test_register_creates_the_toolset_even_when_env_missing(
@@ -358,7 +360,9 @@ def test_register_creates_the_toolset_even_when_env_missing(
     monkeypatch.delenv("SMD_D1_AUDIT_BINDING", raising=False)
     mod = load_plugin("hermes-smd-webhook-router")
     mod.register(fake_ctx)
-    assert created == {mod.WEBHOOK_READ_TOOLSET: ["read_file"]}
+    assert created[mod.WEBHOOK_READ_TOOLSET] == ["read_file"]
+    # the couples write-tool toolset (shared.couples_surface) never carries read_file
+    assert "read_file" not in created.get("smd_couples_no_file_writes", [])
 
 
 def test_register_survives_an_unavailable_toolsets_module(

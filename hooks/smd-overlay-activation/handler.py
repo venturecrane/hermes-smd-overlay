@@ -274,6 +274,37 @@ def _gateway_config() -> dict:
         return load_config()
 
 
+def _couples_surface_check() -> str:
+    """Refuse to serve a couples persona that would be offered a write, search
+    or code tool, or whose read_file would be unfenced (``shared.couples_surface``).
+    Returns the outcome for the completion line; ``not applicable`` elsewhere."""
+    try:
+        from shared.couples_surface import (
+            CouplesSurfaceError,
+            assert_no_forbidden_tools,
+            assert_read_fence_armed,
+            is_couples_config,
+        )
+
+        config = _gateway_config()
+    except Exception as e:  # noqa: BLE001
+        _die(f"cannot check the couples file surface: {type(e).__name__}: {e}")
+        return "failed"
+    if not is_couples_config(config):
+        return "not applicable"
+    try:
+        assert_no_forbidden_tools(config)
+        assert_read_fence_armed()
+    except CouplesSurfaceError as e:
+        _die(f"COUPLES PERSONA FILE SURFACE UNSAFE: {e}")
+        return "failed"
+    except Exception as e:  # noqa: BLE001
+        _die(f"couples file-surface check raised: {type(e).__name__}: {e}")
+        return "failed"
+    logger.info("couples file-surface check passed: read_file fenced, no write/search/code tool")
+    return "proven"
+
+
 def _webhook_read_self_check() -> None:
     """Prove ``read_file`` reaches webhook turns, or refuse to serve (#2145).
 
@@ -643,6 +674,11 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
     #    seats that actually serve the webhook platform.
     _webhook_read_self_check()
 
+    # 5a. COUPLES file surface (ss-console #3264): a couples persona keeps
+    #     read_file (fenced) but must never be offered write_file, patch,
+    #     search_files, terminal or execute_code. Fails closed.
+    couples_outcome = _couples_surface_check()
+
     # 5b. WEBHOOK EXPECTED-TOOLS check (ss-console#2222), the WARN tier of the
     #     same surface. Same resolution, opposite posture: absence logs CRITICAL
     #     and lands in a heartbeat field, and the boot CONTINUES. See the
@@ -673,6 +709,7 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
         "(before=%s after=%s)"
         " | cost breaker: %s"
         " | webhook read surface: resolved"
+        " | couples surface: %s"
         " | unknown-DM drop: %s"
         " — each gate's outcome above is what was observed on THIS boot, not a "
         "claim about what the gate would do.",
@@ -681,5 +718,6 @@ async def _handle_inner(event_type: str, context: dict | None = None) -> None:
         before,
         after,
         cost_outcome,
+        couples_outcome,
         unknown_dm_outcome,
     )
