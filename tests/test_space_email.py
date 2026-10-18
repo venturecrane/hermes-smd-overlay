@@ -355,3 +355,27 @@ def test_a_seat_without_people_ignores_email_answers(monkeypatch, tmp_path):
     gate = load_plugin("hermes-smd-space-gate")
     email(monkeypatch, "x", A_EMAIL, reply_text="share it")
     assert _turn(gate, "x") is None
+
+
+def _person(channel: str, telegram_id: str = A_TG) -> space.Person:
+    return space.Person(
+        id="p1", name="Ana", telegram_id=telegram_id, email=A_EMAIL, channel=channel
+    )
+
+
+def test_FALSIFIER_a_notice_honours_an_email_preference_over_a_bound_telegram(seat):
+    """A partner bound on Telegram who prefers email is noticed by email."""
+    seat["gate"].joint.notify(_person("email"), "a change to decide")
+    assert [k["to"] for k in MAILED] == [[A_EMAIL]]
+    assert REPLIES == []
+
+
+def test_a_notice_goes_to_telegram_when_preferred_and_bound(seat):
+    seat["gate"].joint.notify(_person("telegram"), "a change to decide")
+    assert REPLIES == [(f"tg:{A_TG}", "a change to decide")]
+    assert MAILED == []
+
+
+def test_a_telegram_preference_without_a_binding_falls_back_to_email(seat):
+    seat["gate"].joint.notify(_person("telegram", telegram_id=""), "a change to decide")
+    assert [k["to"] for k in MAILED] == [[A_EMAIL]]

@@ -30,13 +30,32 @@ P1_TG = "1111111111"
 GROUP = "-1001234567890"
 
 
-def _couple(p1_tg: str = "", group: str = "", adapter: str = "agentmail") -> dict:
+def _couple(
+    p1_tg: str = "",
+    group: str = "",
+    adapter: str = "agentmail",
+    p1_channel: str = "telegram",
+    p2_tg: str = "",
+    p2_channel: str = "telegram",
+) -> dict:
     return {
         "customer_id": "captain-mark",
         "connectors": {"Email": {"adapter": adapter, "enabled": True}},
         "people": [
-            {"id": "p1", "name": "Pat One", "telegram_id": p1_tg, "email": P1},
-            {"id": "p2", "name": "Sam Two", "telegram_id": "", "email": P2},
+            {
+                "id": "p1",
+                "name": "Pat One",
+                "telegram_id": p1_tg,
+                "email": P1,
+                "channel": p1_channel,
+            },
+            {
+                "id": "p2",
+                "name": "Sam Two",
+                "telegram_id": p2_tg,
+                "email": P2,
+                "channel": p2_channel,
+            },
         ],
         "spaces": {"shared_telegram_chat": group},
         "scope": {"inbound_allow_from": [P1, P2, "scott@smd.services"]},
@@ -161,7 +180,9 @@ def test_a_telegram_bound_routine_is_never_also_emailed(tmp_path, sent):
     assert sent == []
 
 
-def test_a_bound_group_and_an_unbound_person_split_correctly(tmp_path, sent):
+def test_a_bound_group_with_an_unbound_person_goes_by_email_to_both(tmp_path, sent):
+    # The group carries a shared routine only when EVERY person is reached on
+    # Telegram; Sam is not, so the shared routine is one email to both.
     cust = _couple(group=GROUP)
     sessions = _materialize(
         tmp_path,
@@ -173,7 +194,26 @@ def test_a_bound_group_and_an_unbound_person_split_correctly(tmp_path, sent):
     )
     _deliver(tmp_path, cust, sessions["op-managed:couple:date-ideas@shared"])
     _deliver(tmp_path, cust, sessions["op-managed:couple:couples-checkin@person:p2"])
-    assert [c["to"] for c in sent] == [[P2]]
+    assert [sorted(c["to"]) for c in sent] == [sorted([P1, P2]), [P2]]
+
+
+def test_FALSIFIER_email_preference_wins_over_a_bound_telegram(tmp_path, sent):
+    # Pat is bound on Telegram but prefers email: the routine is emailed, not
+    # sent to the DM (people[].channel decides, never the model).
+    cust = _couple(p1_tg=P1_TG, p1_channel="email")
+    sessions = _materialize(tmp_path, cust, [{**CHECKIN, "space": "person:p1"}])
+    result = _deliver(tmp_path, cust, sessions["op-managed:couple:couples-checkin@person:p1"])
+    assert result is not None and result.sent
+    assert [c["to"] for c in sent] == [[P1]]
+
+
+def test_the_group_carries_shared_routines_when_both_prefer_and_are_bound(tmp_path, sent):
+    cust = _couple(p1_tg=P1_TG, p2_tg="2222222222", group=GROUP)
+    sessions = _materialize(
+        tmp_path, cust, [{"skill": "date-ideas", "schedule": "0 18 * * 5", "space": "shared"}]
+    )
+    assert _deliver(tmp_path, cust, sessions["op-managed:couple:date-ideas@shared"]) is None
+    assert sent == []
 
 
 @pytest.mark.parametrize("text", ["[SILENT]", "SILENT", "  ", ""])

@@ -12,7 +12,12 @@ step 1). ``person:<id>`` delivers to ``telegram:<telegram_id>`` (a person's DM
 chat id is their user id); ``shared`` to ``telegram:<spaces.shared_telegram_chat>``.
 The chat comes from ``SpaceConfig.chat_for_space``, the resolver's own map.
 
-**Email, until then.** A target not bound yet delivers ``local`` in Hermes,
+**The authored channel decides first.** ``people[].channel`` (email by default)
+says how each person prefers to be reached. A person's routine goes to their DM
+only when they prefer Telegram AND are bound; a shared routine goes to the group
+only when it is bound AND every person prefers Telegram. Anything else is email.
+
+**Email, otherwise.** A target not used for Telegram delivers ``local`` in Hermes,
 never to a guessed chat, and the run's final response goes by EMAIL instead
 (``hermes-smd-space-delivery``): ``person:<id>`` to that person's
 ``people[].email``, ``shared`` as ONE email to every person. Hermes at the pinned
@@ -70,10 +75,13 @@ def delivery_for(raw_space: Any, cfg: _space.SpaceConfig) -> tuple[str, str]:
         raise CronSpaceError(
             f"cron space {raw_space!r} is not 'shared' or 'person:<id>' naming an id in people"
         )
-    chat = cfg.chat_for_space(resolved)
+    # The authored channel decides (people[].channel, email by default): a bound
+    # Telegram chat is used only when the person (or, for shared, every person)
+    # prefers Telegram. Code decides this from config; nothing the model wrote.
+    chat = cfg.delivery_chat_for_space(resolved)
     if not chat:
-        logger.warning(
-            "cron_space: the %s chat is not bound yet; its routine delivers by email until it is",
+        logger.info(
+            "cron_space: the %s routine delivers by email (preferred channel, or Telegram unbound)",
             resolved.key,
         )
         return resolved.key, LOCAL

@@ -661,3 +661,50 @@ def test_expected_tier_skipped_on_a_seat_without_the_webhook_platform(
     handler = _load_handler()
     asyncio.run(handler.handle("gateway:startup", {}))
     assert read() is None
+
+
+# ---------------------------------------------------------------------------
+# Unknown-DM drop (ss-console ADR 0091 s5). A config that forwards unknown
+# Telegram DMs ("pair") must not serve without hermes-smd-couples-onboarding's
+# pre_gateway_dispatch drop in the live singleton.
+# ---------------------------------------------------------------------------
+
+_PAIR_CONFIG = {"telegram": {"allow_from": ["1"], "unauthorized_dm_behavior": "pair"}}
+
+
+def _couples_callback():
+    def on_pre_gateway_dispatch(**kwargs):
+        return None
+
+    on_pre_gateway_dispatch.__module__ = "hermes_plugins.hermes_smd_couples_onboarding"
+    return on_pre_gateway_dispatch
+
+
+def test_FALSIFIER_pair_without_the_couples_drop_refuses_to_boot(monkeypatch, no_real_exit):
+    _install_fake_plugins(monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_PAIR_CONFIG)
+    handler = _load_handler()
+    with pytest.raises(_Exit) as ei:
+        asyncio.run(handler.handle("gateway:startup", {}))
+    assert ei.value.code == 1
+
+
+def test_pair_with_the_couples_drop_boots(monkeypatch, no_real_exit):
+    calls = _install_fake_plugins(
+        monkeypatch, hooks=_ALL_HOOKS, invoke_results=_BLOCK, config=_PAIR_CONFIG
+    )
+    handler = _load_handler()
+    mgr = sys.modules["hermes_cli.plugins"].get_plugin_manager()
+    mgr._hooks["pre_gateway_dispatch"].append(_couples_callback())
+    asyncio.run(handler.handle("gateway:startup", {}))
+    assert calls["force"] is True
+
+
+def test_no_pair_needs_no_couples_drop(monkeypatch, no_real_exit):
+    _install_fake_plugins(
+        monkeypatch,
+        hooks=_ALL_HOOKS,
+        invoke_results=_BLOCK,
+        config={"telegram": {"allow_from": ["1"]}},
+    )
+    handler = _load_handler()
+    asyncio.run(handler.handle("gateway:startup", {}))
