@@ -282,3 +282,24 @@ skills:
       the follow-up drafts that are due; each draft is composed from the
       visitor record's name, property, stated intent, and contact. Authored
       compositional for the POC; a template comes with the vertical pack.
+
+  # ---- couples role (ADR 0090), armed on every seat generated from
+  # operator/customers/_couples-template (scripts/couples-seat.ts). Declared
+  # before the first seat exists: the provisioning gate
+  # (scripts/validate-customer-yaml.ts) refuses a generated couples seat
+  # without these. ----
+  dates-to-remember:
+    render: compositional
+    note: >-
+      The daily reminder is the partner's own private message, composed in
+      their DM space; its only outbound is a calendar invite sent through the
+      calendar skill, whose recipients are locked to people[].email
+      (settings.recipients: roster). Silent on days with nothing within 21 days.
+  travel:
+    render: compositional
+    note: >-
+      The daily price-watch report to the shared group, composed from the
+      couple's own watches and cited search results; outbound is limited to
+      leg invites to the seat's people (roster-locked) and the email reply to
+      the partner who forwarded a confirmation. Silent when no watch is under
+      its target.
