@@ -215,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(min(1.0, poll_seconds - slept))
             slept += 1.0
     logger.info("establish_intake: stop requested; poll loop exiting cleanly")
-    return 0
+    # 130, not 0: the loop only ends on a signal, which means the Machine is
+    # going down; the entrypoint's respawn loop must not restart it.
+    return 130
 
 
 if __name__ == "__main__":

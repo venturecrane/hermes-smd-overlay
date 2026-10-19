@@ -328,13 +328,16 @@ def test_the_plugin_hook_delivers_and_is_exception_safe(monkeypatch):
     seen = []
     monkeypatch.setattr(space_delivery, "deliver", lambda sid, text: seen.append((sid, text)))
     plugin.on_post_llm_call(session_id="cron_x_20261020_150000", assistant_response="hi")
+    assert space_delivery.wait_idle()
     assert seen == [("cron_x_20261020_150000", "hi")]
 
     def boom(*_a, **_k):
         raise RuntimeError("x")
 
     monkeypatch.setattr(space_delivery, "deliver", boom)
+    monkeypatch.setattr(space_delivery, "_enqueue", boom)
     assert plugin.on_post_llm_call(session_id="s", assistant_response="hi") is None
+    assert plugin.on_session_end(session_id="s", completed=True) is None
 
 
 # ------------------------------------------------------------ shared reply

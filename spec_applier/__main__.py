@@ -386,7 +386,9 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _request_stop)
 
     loop.run_forever(stop=lambda: stopped["flag"])
-    return 0
+    # 130, not 0: a signalled stop means the Machine is going down, and the
+    # entrypoint's respawn loop must not restart an applier into a dying box.
+    return 130 if stopped["flag"] else 0
 
 
 if __name__ == "__main__":
