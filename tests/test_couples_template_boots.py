@@ -82,6 +82,9 @@ def _render(tmp_path: Path) -> dict:
 
 @pytest.fixture
 def hermes_model(monkeypatch):
+    # The live seat has its AgentMail route secret (a Fly secret); without it
+    # translate emits no webhook route and there is no email surface to check.
+    monkeypatch.setenv("WEBHOOK_SECRET_AGENTMAIL", "test-secret")
     monkeypatch.setattr(webhook_read_surface, "resolve_platform_tool_names", resolve)
     monkeypatch.setattr(
         webhook_read_surface, "resolve_webhook_tool_names", lambda c: resolve(c, "webhook")
