@@ -120,7 +120,16 @@ def test_couples_role_drops_shell_code_subagent_and_file(tmp_path):
     ) + PEOPLE.replace("product: hosted-agent", "product: hosted-agent\n  role: couples")
     assert "role: couples" in body and "code_execution: autonomous" in body
     disabled = _config(tmp_path, body)["agent"]["disabled_toolsets"]
-    for ts in ("terminal", "code_execution", "delegation", "smd_couples_no_file_writes", "memory"):
+    for ts in (
+        "terminal",
+        "code_execution",
+        "delegation",
+        "smd_couples_no_file_writes",
+        "memory",
+        # FALSIFIER (captain-mark 2026-10-19): with operations_request offered the
+        # model told a partner SMD sets schedules instead of setting it itself.
+        "establishment",
+    ):
         assert ts in disabled, ts
     # FALSIFIER (captain-mark 2026-10-18): disabling `file` strips read_file from
     # the webhook surface and the activation gate refuses to boot.
