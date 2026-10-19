@@ -181,12 +181,16 @@ ACCEPTED_SEND_PROVIDERS = {"agentmail", "msgraph"}
 # inbound must be a member — "a channel that cannot be fenced cannot be bound".
 EMAIL_SEAM_ADAPTERS = {"agentmail", MSGRAPH_ADAPTER}
 
+# hermes_ref is NOT required (ss seat fleet scaling): the Hermes pin lives once,
+# in ss-console operator/templates/Dockerfile (ARG HERMES_UPSTREAM_SHA), so a
+# per-seat copy could only drift. A customer.yaml that still carries it is
+# tolerated; this validator runs at boot, so requiring it would fail every seat
+# whose config has had it removed.
 REQUIRED_TOP_LEVEL_FIELDS = (
     "customer_id",
     "customer_name",
     "vertical",
     "fly_region",
-    "hermes_ref",
     "model",
 )
 
