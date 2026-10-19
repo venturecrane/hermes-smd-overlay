@@ -1283,7 +1283,15 @@ _COUPLES_ROLE = "couples"
 #: (Hermes subtracts disabled toolsets last), and the activation gate then refuses
 #: the boot. The runtime toolset disables only write_file/patch/search_files;
 #: read_file stays, fenced by the record-store path fence (shared.couples_surface).
-_COUPLES_REFUSED_TOOLSETS = (*_REFUSED_CODE_EXECUTION_TOOLSETS, "smd_couples_no_file_writes")
+#: ``establishment`` too: its ``operations_request`` tells the model routines and
+#: schedules are changes SMD makes, which is the firm-seat model. A couple sets
+#: their own schedule with couples_settings_change; offered both, the model took
+#: the SMD path and told Scott to email SMD for a gratitude prompt (2026-10-19).
+_COUPLES_REFUSED_TOOLSETS = (
+    *_REFUSED_CODE_EXECUTION_TOOLSETS,
+    "smd_couples_no_file_writes",
+    "establishment",
+)
 
 
 def _space_mode(customer: dict[str, Any]) -> bool:
