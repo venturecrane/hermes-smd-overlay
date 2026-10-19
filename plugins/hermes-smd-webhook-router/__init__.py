@@ -1035,6 +1035,20 @@ def register(ctx) -> None:
             WEBHOOK_READ_TOOLSET,
             exc_info=True,
         )
+    # The couples persona disables this toolset in place of ``file`` (write_file,
+    # patch, search_files only), so read_file stays on its email surface. Created
+    # here at load for the same memo reason; the activation gate refuses to serve
+    # a couples seat whose surface still offers any of them.
+    try:
+        from shared.couples_surface import register_couples_toolset
+
+        register_couples_toolset()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "hermes-smd-webhook-router: could not create the couples file-write toolset; "
+            "a couples seat's activation gate will refuse to serve",
+            exc_info=True,
+        )
 
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")

@@ -1279,7 +1279,11 @@ _REFUSED_CODE_EXECUTION_TOOLSETS = ("terminal", "code_execution", "delegation")
 #: The role whose persona drops every tool a private fact could leave by
 #: (ADR 0090 R2), and the toolsets it drops.
 _COUPLES_ROLE = "couples"
-_COUPLES_REFUSED_TOOLSETS = (*_REFUSED_CODE_EXECUTION_TOOLSETS, "file")
+#: Not ``file``: disabling it strips ``read_file`` from the email surface too
+#: (Hermes subtracts disabled toolsets last), and the activation gate then refuses
+#: the boot. The runtime toolset disables only write_file/patch/search_files;
+#: read_file stays, fenced by the record-store path fence (shared.couples_surface).
+_COUPLES_REFUSED_TOOLSETS = (*_REFUSED_CODE_EXECUTION_TOOLSETS, "smd_couples_no_file_writes")
 
 
 def _space_mode(customer: dict[str, Any]) -> bool:
@@ -1521,9 +1525,12 @@ def _persona_config(
     # Space-keyed memory (hermes-smd-peer-memory) replaces it.
     if _space_mode(customer):
         disabled_toolsets.append("memory")
-    # The couples role has no shell, no code, no subagent and no file tools
-    # (ADR 0090 R2): a private fact can then reach only the space-fenced tools,
-    # never a path, a command or a child agent that no fence sees.
+    # The couples role has no shell, no code, no subagent and no file-write
+    # tools (ADR 0090 R2): a private fact can then reach only the space-fenced
+    # tools, never a written path, a command or a child agent that no fence
+    # sees. read_file stays (the email surface needs it for the spec read-mark)
+    # and is fenced to skills, specs and own spillover by the record-store path
+    # fence (shared/couples_surface.py).
     if _seat_role(customer) == _COUPLES_ROLE:
         for toolset in _COUPLES_REFUSED_TOOLSETS:
             if toolset not in disabled_toolsets:
