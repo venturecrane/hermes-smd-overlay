@@ -27,7 +27,11 @@ import pytest
 from shared import answered_messages, hook_worker, tool_gate
 from shared.pending_acts import PENDING_ACTS
 from tests.test_reply import _clear_origin, _record_origin, relay_mod  # noqa: F401
-from tests.test_space_delivery_concurrency import _PinnedHermesHooks
+from tests.test_space_delivery_concurrency import (
+    SlowBroker,
+    _PinnedHermesHooks,
+    two_turns_ending_together,
+)
 
 ANA, BEN = "ana@example.com", "ben@example.com"
 TEXT = "Thanks, Friday at 7 works. I have put it on the calendar."
@@ -82,30 +86,21 @@ def _email_turn_starts(session: str, sender: str, message_id: str) -> None:
 
 def test_FALSIFIER_two_text_replies_ending_together_both_land(seat):
     mod, bus = seat["mod"], seat["bus"]
-    send_started = threading.Event()
-    turns_done = threading.Event()
     sent: list[str] = []
+    broker = SlowBroker()
 
     def slow_broker(*, message_id, text, html, **_kw):
         # The broker reply verb is a network round trip: the first reply is
         # still in flight while the second email's turn ends.
-        send_started.set()
-        turns_done.wait(5)
+        if not sent and not broker.release.is_set():
+            broker.hold()
         sent.append(message_id)
         return f"out-{message_id}"
 
     seat["mp"].setattr(mod.relay, "send_reply", slow_broker)
     _email_turn_starts("s-ana", ANA, "msg-ana")
     _email_turn_starts("s-ben", BEN, "msg-ben")
-
-    first = threading.Thread(target=bus.turn, args=("s-ana", TEXT))
-    first.start()
-    assert send_started.wait(5), "the first reply never reached the broker"
-    second = threading.Thread(target=bus.turn, args=("s-ben", TEXT))
-    second.start()
-    second.join(5)
-    turns_done.set()
-    first.join(5)
+    two_turns_ending_together(bus, ("s-ana", TEXT), ("s-ben", TEXT), broker)
     assert _drain(mod)
 
     assert bus.skipped == [], f"Hermes skipped a reply callback: {bus.skipped}"

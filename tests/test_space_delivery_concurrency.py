@@ -80,6 +80,54 @@ class _PinnedHermesHooks:
         )
 
 
+class SlowBroker:
+    """A broker call that stays in flight until both turns have ended, and
+    records which thread made it."""
+
+    def __init__(self) -> None:
+        self.in_flight = threading.Event()
+        self.release = threading.Event()
+        self.threads: list[threading.Thread] = []
+
+    def hold(self) -> None:
+        self.threads.append(threading.current_thread())
+        self.in_flight.set()
+        self.release.wait(10)
+
+
+def two_turns_ending_together(bus: _PinnedHermesHooks, first, second, broker: SlowBroker) -> None:
+    """Drive the live shape deterministically: the second turn ends while the
+    first turn's send is in flight. No sleep decides the outcome.
+
+    The first turn runs on its own thread until its send is in flight. Then:
+
+    * the send runs ON the first turn's thread (the pre-fix plugin sends from
+      inside the hook): the first turn's callback is provably still running,
+      blocked in the broker, so the second turn ends against it NOW. Pinned
+      Hermes skips it every time;
+    * the send runs on the worker (the fix): the first turn's hooks returned,
+      or will once their queue put is done; the second turn starts only after
+      the first thread has finished (``join``), so the two turns' callbacks
+      can never overlap, and the second turn ends while the send is in flight.
+
+    Either way the broker is released only after the second turn has ended."""
+    a = threading.Thread(target=bus.turn, args=first, name="turn-a")
+    a.start()
+    assert broker.in_flight.wait(10), "the first turn's send never reached the broker"
+    if broker.threads[0] is not a:
+        a.join(10)
+        assert not a.is_alive(), (
+            "the first turn's hooks did not return while its send was in flight"
+        )
+    b = threading.Thread(target=bus.turn, args=second, name="turn-b")
+    b.start()
+    b.join(10)
+    assert not b.is_alive(), "the second turn's hooks did not return"
+    broker.release.set()
+    a.join(10)
+    assert not a.is_alive()
+
+
 @pytest.fixture
 def seat(monkeypatch, tmp_path):
     monkeypatch.setattr(hook_worker, "INLINE", False)  # the real worker, as on a seat
@@ -117,27 +165,18 @@ def seat(monkeypatch, tmp_path):
 def test_FALSIFIER_two_routines_due_the_same_minute_both_deliver(seat):
     bus = seat["bus"]
     sent: list[list[str]] = []
-    send_started = threading.Event()
-    turns_done = threading.Event()
+    broker = SlowBroker()
 
     def slow_broker(**kw):
         # The broker call is slow (it was, live): the first send is still in
         # flight while the second routine's turn ends.
-        send_started.set()
-        turns_done.wait(5)
+        if not sent and not broker.release.is_set():
+            broker.hold()
         sent.append(list(kw["to"]))
         return send_dispatch.DispatchResult(sent=True, message_id="m", recipients=tuple(kw["to"]))
 
     send_dispatch.set_sender(slow_broker)
-
-    first = threading.Thread(target=bus.turn, args=(seat["p2"], SKILL_TEXT))
-    first.start()
-    assert send_started.wait(5), "the first routine never reached the broker"
-    second = threading.Thread(target=bus.turn, args=(seat["p1"], SKILL_TEXT))
-    second.start()
-    second.join(5)
-    turns_done.set()
-    first.join(5)
+    two_turns_ending_together(bus, (seat["p2"], SKILL_TEXT), (seat["p1"], SKILL_TEXT), broker)
     assert space_delivery.wait_idle()
 
     assert bus.skipped == [], f"Hermes skipped a delivery callback: {bus.skipped}"
