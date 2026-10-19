@@ -25,8 +25,12 @@ schema_version: 1
 #     recorded, allow_from carries the SMD sentinel id so the boot guard
 #     against an empty allowlist holds. group_allow_from holds recorded
 #     partners only, never the sentinel.
-#   - external_send stays confirm. code_execution stays unauthored, which
-#     refuses it and drops terminal, code_execution and delegation (R2).
+#   - external_send (anyone OFF the roster) stays confirm.
+#     external_send_internal (a rostered address, which here is exactly the
+#     two partners) is autonomous: hellos, routines and two-person notices run
+#     on scheduled turns with no channel to confirm on. code_execution stays
+#     unauthored, which refuses it and drops terminal, code_execution and
+#     delegation (R2).
 #   - A seat cannot boot until every enabled skill below has a body under
 #     operator/skills/ (see `built:` in operator/roles/couples/role.yaml).
 
@@ -98,6 +102,12 @@ personas:
       exposure:
         internal_write: autonomous
         external_send: confirm
+        # Sends to a ROSTERED address only, which on a couples seat is exactly
+        # the two partners (validator rule: roster == people). Without it the
+        # seat cannot deliver a hello, a routine, or a two-person notice by
+        # email: those run on scheduled turns with no channel to confirm on
+        # (captain-mark, 2026-10-18). Anything off the roster stays confirm.
+        external_send_internal: autonomous
     skills:
       - name: calendar
         version: pending

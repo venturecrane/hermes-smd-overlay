@@ -16,6 +16,15 @@ by vfy_01M58PRD13ZZRGJF2B06KAP67A.
 
 FALSIFIER: with ade63ad6's couples disable list (``file`` instead of
 ``smd_couples_no_file_writes``) the same template fails the read-surface check.
+
+The template must also let the seat SEND to the partners on a scheduled turn
+(captain-mark, 2026-10-18: the first scheduled email to a partner was refused
+``external_send_internal refused: no authored exposure (fail-closed)``). The
+send test resolves the persona's exposure through the real trusted-config
+reader and the real ``enforce``: a rostered send with no current-turn approval
+must be allowed, an off-roster send must stay withheld for confirm.
+FALSIFIER: strip ``external_send_internal`` from the template and the rostered
+send is refused.
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ import yaml
 
 from bootstrap import translate
 from shared import couples_surface, webhook_read_surface
+from tests.conftest import load_plugin
 from tests.test_couples_surface import resolve
 
 FIXTURE = Path(__file__).parent / "fixtures" / "roles" / "couples"
@@ -51,10 +61,15 @@ FILL = {
 ADE63AD6_COUPLES_REFUSED = ("terminal", "code_execution", "delegation", "file")
 
 
-def _render(tmp_path: Path) -> dict:
+def _filled_text() -> str:
     text = (FIXTURE / "customer.yaml").read_text()
     for placeholder, value in FILL.items():
         text = text.replace(placeholder, value)
+    return text
+
+
+def _render(tmp_path: Path) -> dict:
+    text = _filled_text()
     body = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
     assert not re.search(r"\[[A-Z][^\]]*\]", body), "an unfilled placeholder: update FILL"
     doc = yaml.safe_load(text)
@@ -106,3 +121,50 @@ def test_FALSIFIER_ade63ad6s_disable_list_is_the_live_boot_failure(
     config = _render(tmp_path)
     with pytest.raises(webhook_read_surface.WebhookReadSurfaceError, match="read_file"):
         webhook_read_surface.assert_read_file_on_webhook(config)
+
+
+def _scheduled_send(tmp_path, monkeypatch, text: str, action_name: str):
+    """Resolve the template persona's exposure via the trusted-config reader and
+    decide one send on a scheduled turn: internal trust class, no approval."""
+    enforce = load_plugin("hermes-smd-trust").enforce
+    customer_yaml = tmp_path / "trusted-customer.yaml"
+    customer_yaml.write_text(text)
+    monkeypatch.setenv("SMD_CUSTOMER_YAML_PATH", str(customer_yaml))
+    monkeypatch.setenv("SMD_EXPOSURE_OVERRIDE_DB_PATH", str(tmp_path / "no-overrides.db"))
+    doc = yaml.safe_load(text)
+    slug = doc["personas"][0]["slug"]
+    exposure = enforce._resolve_persona_exposure(slug)
+    floors = dict(enforce._VERTICAL_FLOORS.get(doc.get("vertical") or "", {}))
+    return enforce.enforce(
+        action=enforce.ActionClass(action_name),
+        exposure=exposure,
+        tool_name="agentmail_send_message",
+        persona_slug=slug,
+        current_turn_approval=False,
+        vertical_floors=floors,
+    )
+
+
+def test_the_couples_template_sends_to_a_partner_on_a_scheduled_turn(tmp_path, monkeypatch):
+    decision = _scheduled_send(tmp_path, monkeypatch, _filled_text(), "external_send_internal")
+    assert decision.allowed, decision.reason
+    assert decision.audit_action == "allow"
+
+
+def test_the_couples_template_still_confirms_an_off_roster_send(tmp_path, monkeypatch):
+    decision = _scheduled_send(tmp_path, monkeypatch, _filled_text(), "external_send")
+    assert not decision.allowed
+    assert decision.audit_action != "allow"
+
+
+def test_FALSIFIER_without_external_send_internal_the_partner_send_is_refused(
+    tmp_path, monkeypatch
+):
+    text = _filled_text()
+    line = "        external_send_internal: autonomous\n"
+    assert text.count(line) == 1, "the template no longer authors the line this test strips"
+    decision = _scheduled_send(
+        tmp_path, monkeypatch, text.replace(line, ""), "external_send_internal"
+    )
+    assert not decision.allowed
+    assert "no authored exposure" in decision.reason
