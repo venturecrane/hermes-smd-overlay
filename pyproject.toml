@@ -82,6 +82,10 @@ include = [
     # entrypoint.sh launches `python -m establish_intake` as root (gated on the
     # import succeeding, so an absent module degrades to a LOUD not-launched).
     "establish_intake*",
+    # ss seat fleet scaling — the root skills applier and the hermes-side
+    # volume sync bootstrap.sh calls (`python -m skills_applier.sync`). An
+    # absent module would leave a skills release with no way onto the seat.
+    "skills_applier*",
 ]
 
 [tool.setuptools.package-data]
