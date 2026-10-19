@@ -90,24 +90,71 @@ def _ical_event(event: StoredEvent, seat: seat_mod.Seat) -> ical.Event:
     )
 
 
-def _body(kind: str, event: StoredEvent) -> tuple[str, str]:
+#: The last line of every invitation's words. A reply reaches the seat's inbox,
+#: which is the agent, so this is a true sentence on every seat.
+CLOSING = "Reply to this email if anything needs to change."
+
+_DID = {
+    # kind -> (with the agent's name, without it)
+    "create": ("{agent} added this to {calendar}", "This was added to {calendar}"),
+    "update": ("{agent} updated this event", "This event was updated"),
+    "cancel": ("{agent} canceled this event", "This event was canceled"),
+}
+
+
+def _first_name(name: str) -> str:
+    parts = name.split()
+    return parts[0] if parts else ""
+
+
+def _context(kind: str, event: StoredEvent, seat: seat_mod.Seat, requester_id: str) -> str:
+    """The opening sentence: who made this change and, when a person of the seat
+    asked for it, who asked (ss-console#3264, Captain 2026-10-19: an invitation
+    that is only a title and a date does not say what it is).
+
+    Every word is code or authored config: the agent's name is the calendar
+    persona's ``name``, the requester's is ``people[].name`` looked up by the id
+    :func:`seat.requester` resolved. No name the model wrote can appear here.
+    """
+    calendar = "your shared calendar" if event.space == space.SHARED else "your calendar"
+    named, unnamed = _DID[kind]
+    sentence = (named if seat.agent_name else unnamed).format(
+        agent=seat.agent_name, calendar=calendar
+    )
+    who = _first_name(seat.person_names.get(requester_id, "")) if requester_id else ""
+    if who:
+        own = seat.person_emails.get(requester_id, "")
+        mine = bool(own) and event.attendee_emails() == [own]
+        sentence += " at your request" if mine else f" at {who}'s request"
+    return sentence + "."
+
+
+def _body(
+    kind: str, event: StoredEvent, seat: seat_mod.Seat, requester_id: str = ""
+) -> tuple[str, str]:
     """The subject and plain text the invitation rides in. A fixed frame around
-    the event's own fields; nothing here is said that the event does not say.
+    the event's own fields; nothing here is said that the event, the seat's
+    config, or the resolved requester does not say.
+
+    Order: who did this and for whom, the title, the event's own description,
+    when / where / how it repeats, then how to ask for a change.
 
     Words only: this text meets the seat's copy scans as prose, so no protocol
     form (an RRULE, a DTSTART stamp) is ever echoed here. The protocol rides the
     invitation part (``calendar``), which no prose scan reads."""
-    when = ical.describe_when(_when_of(event))
-    if kind == "cancel":
-        return f"Canceled: {event.title}", f"{event.title}\n{when}\n\nThis event is canceled."
-    lines = [event.title, when]
+    lines = [_context(kind, event, seat, requester_id), "", event.title]
+    if event.description and kind != "cancel":
+        lines += ["", event.description]
+    lines += ["", ical.describe_when(_when_of(event))]
     if event.location:
         lines.append(f"Where: {event.location}")
     if event.rrule:
         lines.append(f"Repeats: {ical.describe_rrule(event.rrule)}")
-    if event.description:
-        lines += ["", event.description]
-    prefix = "Updated invitation" if kind == "update" else "Invitation"
+    lines += ["", CLOSING]
+    if kind == "cancel":
+        prefix = "Canceled"
+    else:
+        prefix = "Updated invitation" if kind == "update" else "Invitation"
     return f"{prefix}: {event.title}", "\n".join(lines)
 
 
@@ -115,7 +162,7 @@ def _send(kind: str, event: StoredEvent, seat: seat_mod.Seat, session_id: str) -
     """Render and send ``event``; record and return what happened."""
     method = ical.METHOD_CANCEL if kind == "cancel" else ical.METHOD_REQUEST
     ics = ical.build_invitation(_ical_event(event, seat), method)
-    subject, text = _body(kind, event)
+    subject, text = _body(kind, event, seat, seat_mod.requester(session_id, seat))
     result = send_dispatch.dispatch(
         to=event.attendee_emails(),
         subject=subject,
