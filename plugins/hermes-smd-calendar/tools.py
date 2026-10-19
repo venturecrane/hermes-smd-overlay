@@ -155,9 +155,6 @@ def create(args: dict[str, Any], session_id: str) -> dict[str, Any]:
     turn = seat_mod.turn_space(session_id, seat)
     attendees = seat_mod.resolve_attendees(seat, args.get("attendees"))
     target = seat_mod.target_space(seat, turn, attendees)
-    refusal = seat_mod.private_to_shared_gate(turn, target, act="calendar_invite_create", args=args)
-    if refusal:
-        raise CalendarRefused(refusal)
     title = _text(args.get("title"), "title", 200)
     if not title:
         raise CalendarRefused("title is required")
@@ -189,9 +186,7 @@ def create(args: dict[str, Any], session_id: str) -> dict[str, Any]:
     return _send("create", event, seat, session_id)
 
 
-def _owned(
-    args: dict[str, Any], seat: seat_mod.Seat, turn: space.Space | None, act: str
-) -> StoredEvent:
+def _owned(args: dict[str, Any], seat: seat_mod.Seat, turn: space.Space | None) -> StoredEvent:
     """The agent-organized event ``args["uid"]`` this turn may change, or a refusal."""
     uid = args.get("uid")
     if not isinstance(uid, str) or not uid.strip():
@@ -207,13 +202,6 @@ def _owned(
         )
     if event.status == calendar_store.STATUS_CANCELLED:
         raise CalendarRefused("this event is already canceled")
-    refusal = (
-        seat_mod.private_to_shared_gate(turn, event.space, act=act, args=args)
-        if seat.space_mode
-        else None
-    )
-    if refusal:
-        raise CalendarRefused(refusal)
     return event
 
 
@@ -232,7 +220,7 @@ _UPDATABLE = (
 def update(args: dict[str, Any], session_id: str) -> dict[str, Any]:
     seat = seat_mod.load_seat()
     turn = seat_mod.turn_space(session_id, seat)
-    event = _owned(args, seat, turn, "calendar_invite_update")
+    event = _owned(args, seat, turn)
     if "attendees" in args:
         raise CalendarRefused(
             "who is invited cannot change on an existing event; cancel it and send a new invitation"
@@ -278,7 +266,7 @@ def update(args: dict[str, Any], session_id: str) -> dict[str, Any]:
 def cancel(args: dict[str, Any], session_id: str) -> dict[str, Any]:
     seat = seat_mod.load_seat()
     turn = seat_mod.turn_space(session_id, seat)
-    event = _owned(args, seat, turn, "calendar_invite_cancel")
+    event = _owned(args, seat, turn)
     event.sequence = calendar_store.STORE.next_sequence(event.uid)
     event.status = calendar_store.STATUS_CANCELLED
     event.delivery = "pending"

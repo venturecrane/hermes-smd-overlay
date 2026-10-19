@@ -47,7 +47,7 @@ as "not space mode", the same posture ``shared.record_store`` takes. A real seat
 never boots without the file.
 
 This module is the ONE resolver. The record-store fence, space memory, the
-private-to-shared write gate, cron delivery and calendar invites all import it,
+unresolved-space write refusal, cron delivery and calendar invites all import it,
 so they cannot disagree about whose turn it is.
 """
 
@@ -125,7 +125,7 @@ class Person:
     """One authored person. Empty ``telegram_id`` / ``email`` mean "not bound".
 
     ``channel`` is how the seat reaches them on its own initiative (routines,
-    two-person notices): ``telegram`` only when authored AND bound, else email.
+    hellos): ``telegram`` only when authored AND bound, else email.
     It never changes where a REPLY goes: a reply answers in the chat it was
     asked in."""
 
@@ -214,12 +214,6 @@ def readable_spaces(space: Space | None) -> frozenset[str]:
 def may_read(space: Space | None, target_key: Any) -> bool:
     """Whether a turn in ``space`` may read an item stored under ``target_key``."""
     return isinstance(target_key, str) and target_key in readable_spaces(space)
-
-
-def is_private_to_shared(space: Space | None, target_key: Any) -> bool:
-    """True when a write from ``space`` into ``target_key`` crosses from a
-    private space into the shared one (the R1 write gate's trigger)."""
-    return space is not None and space.private and target_key == SHARED
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +474,6 @@ __all__ = [
     "Space",
     "SpaceConfig",
     "SpaceConfigError",
-    "is_private_to_shared",
     "may_read",
     "parse_space_config",
     "person_for_sender",

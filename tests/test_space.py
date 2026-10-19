@@ -162,9 +162,6 @@ def test_readable_sets():
     assert not space.may_read(shared, "person:p1")
     assert not space.may_read(p1, "person:p2")
     assert not space.may_read(None, "shared")
-    assert space.is_private_to_shared(p1, "shared")
-    assert not space.is_private_to_shared(shared, "shared")
-    assert not space.is_private_to_shared(p1, "person:p1")
 
 
 # ---------------------------------------------------------------------------

@@ -1,11 +1,11 @@
 """The words a couple reads about their settings (ss-console #3264).
 
 Every sentence the seat shows a person about a setting is rendered HERE, in
-code, from validated values: the confirmation the agent restates, the proposal
-the other partner is asked to agree to, and the "what do you have set up?"
-answer. Nothing is composed by the model, so the text a partner agrees to is
-exactly the setting that will apply, and it carries none of the conversation
-that led to it (a partner's private words are never relayed; the setting is).
+code, from validated values: the confirmation the agent restates and the
+"what do you have set up?" answer. Nothing is composed by the model, so the
+text a partner reads is exactly the setting that applies, and it carries none
+of the conversation that led to it (a partner's private words are never
+relayed; the setting is).
 """
 
 from __future__ import annotations

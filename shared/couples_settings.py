@@ -8,8 +8,7 @@ it here. customer.yaml for a new couple carries only the people.
 
 WHERE IT LIVES. One JSON document on the seat's persistent volume,
 ``/opt/data/smd-state/couples-settings.json`` (``SMD_COUPLES_SETTINGS_PATH``
-overrides it), beside the two-person register (``shared.joint_acts``). The
-volume survives a reprovision by design; nothing at boot rewrites this file,
+overrides it). The volume survives a reprovision by design; nothing at boot rewrites this file,
 and the cron store holds no copy of it, so there is nothing for a boot to wipe
 or for a conversation to lose. The scheduled side reads it on every tick
 (``shared.couples_gate``).
@@ -23,15 +22,13 @@ WHAT IS IN IT.
 * ``routines``: each ``{id, kind, space, days, time, paused_until}``. ``kind``
   is the skill that runs; ``space`` is ``person:<id>`` or ``shared``, an
   authored id, never an address. Delivery follows the space, in code.
-* ``log``: a bounded record of what changed, when, and who agreed.
+* ``log``: a bounded record of what changed, when, and who asked.
 
-WHO MAY CHANGE WHAT (Captain, issue #3264; ADR 0090/0091). A change that
-affects only the person asking (their own reminder, their own quiet hours) is
-theirs alone and applies at once. Everything else needs both partners: the
-timezone, the check-in topics, ANY check-in routine, the other partner's
-settings or routines, and shared routines. :func:`needs_both` decides it from
-the validated change and the stored routines, never from the model's say-so;
-the two-person register holds it until both have said yes.
+WHO MAY CHANGE WHAT (Captain, 2026-10-19). Either partner changes any setting
+alone, and it applies at once: the timezone, the check-in topics, any routine
+they can see, either partner's quiet hours, lead days or skipped topics. What
+a partner can see is fenced by space (:func:`routine_visible`): the other
+partner's private routines are not visible from here, so they cannot be named.
 
 PARSE, NEVER CAST. :func:`parse_changes` bounds every value and rejects any
 key it does not know; :func:`simulate` runs the change against the current
@@ -68,8 +65,8 @@ KINDS: dict[str, str] = {
     "weekly-checkin-agenda": "shared",
     "travel": "shared",
 }
-#: Check-ins are decided together whoever they reach (Captain).
-ALWAYS_JOINT_KINDS = frozenset({"couples-checkin"})
+#: Check-ins are visible to both partners whoever they reach.
+VISIBLE_TO_BOTH_KINDS = frozenset({"couples-checkin"})
 
 MAX_ROUTINES = 20
 MAX_TOPICS = 8
@@ -319,36 +316,11 @@ def _space_of(routine: dict[str, Any]) -> str:
 
 
 def routine_visible(routine: dict[str, Any], space: space_mod.Space) -> bool:
-    """A partner sees shared routines, check-ins (decided together), and their
+    """A partner sees shared routines, check-ins, and their
     own. The other partner's private routines are theirs."""
-    if routine.get("kind") in ALWAYS_JOINT_KINDS or _space_of(routine) == space_mod.SHARED:
+    if routine.get("kind") in VISIBLE_TO_BOTH_KINDS or _space_of(routine) == space_mod.SHARED:
         return True
     return space.private and _space_of(routine) == space.key
-
-
-def needs_both(changes: list[Change], doc: dict[str, Any], speaker: str) -> bool:
-    """True unless every change affects the speaker alone."""
-    own = space_mod.person_key(speaker)
-    by_id = {r.get("id"): r for r in doc.get("routines") or [] if isinstance(r, dict)}
-    for change in changes:
-        f = change.fields
-        if change.op in ("set_timezone", "set_checkin_topics"):
-            return True
-        if "person" in f:
-            if f["person"] != speaker:
-                return True
-            continue
-        if change.op == "add_routine":
-            target = space_mod.SHARED if f["for"] == space_mod.SHARED else f"person:{f['for']}"
-            kind = f["kind"]
-        else:
-            routine = by_id.get(f["routine"])
-            if routine is None:
-                return True
-            target, kind = _space_of(routine), routine.get("kind")
-        if kind in ALWAYS_JOINT_KINDS or target != own:
-            return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -448,16 +420,15 @@ def apply_changes(
     changes: list[Change],
     *,
     kinds: frozenset[str],
-    agreed_by: list[str],
+    changed_by: str,
     summary: str,
     space: space_mod.Space | None = None,
 ) -> dict[str, Any]:
     """Validate against the stored document, write, and log. Returns the new document."""
     doc = simulate(changes, load(), kinds, space)
-    doc["log"] = (
-        doc["log"]
-        + [{"at": int(time.time()), "agreed_by": sorted(set(agreed_by)), "summary": summary}]
-    )[-MAX_LOG:]
+    doc["log"] = (doc["log"] + [{"at": int(time.time()), "by": changed_by, "summary": summary}])[
+        -MAX_LOG:
+    ]
     save(doc)
     return doc
 
@@ -478,25 +449,17 @@ def available_kinds(customer: dict[str, Any]) -> frozenset[str]:
     return frozenset(out)
 
 
-def changes_from_args(args: dict[str, Any]) -> list[dict[str, Any]]:
-    """The raw change list stored on a held act (re-parsed when it applies)."""
-    raw = args.get("changes")
-    return copy.deepcopy(raw) if isinstance(raw, list) else []
-
-
 __all__ = [
-    "ALWAYS_JOINT_KINDS",
     "KINDS",
     "MAX_ROUTINES",
     "SCHEMA",
     "Change",
     "SettingsError",
+    "VISIBLE_TO_BOTH_KINDS",
     "apply_changes",
     "available_kinds",
-    "changes_from_args",
     "empty",
     "load",
-    "needs_both",
     "parse_changes",
     "routine_visible",
     "save",
