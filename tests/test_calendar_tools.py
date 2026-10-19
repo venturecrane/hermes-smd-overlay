@@ -11,8 +11,8 @@ The guarantees, each with a test that fails if it regresses:
 * the recipient lock: an address that is not one of the seat's people refuses
   the whole invitation before anything is stored or sent;
 * UID stable, SEQUENCE only up, across create, update and cancel;
-* space mode: a private event stays private, a crossing to the partner is the
-  R1 hook's refusal, an unresolved conversation can do nothing;
+* space mode: a private event stays private, either partner invites both of
+  them alone, an unresolved conversation can do nothing;
 * the trust plugin carries the invitation to the broker and strips a model's
   attempt to name one;
 * an invitation a person sends the seat is kept, and a forwarded third-party
@@ -340,202 +340,65 @@ def test_a_private_event_stays_in_its_persons_space(cal, monkeypatch) -> None:
     assert _call(plugin, "calendar_invite_list", {})["events"] == []
 
 
+def _through_the_gate(plugin, tool: str, args: dict[str, Any], sid: str) -> dict | None:
+    """Run the call the way the gateway does: the space gate's pre_tool_call
+    first, then (when it does not block) the handler, on the args it left."""
+    gate = load_plugin("hermes-smd-space-gate")
+    blocked = gate.on_pre_tool_call(tool_name=tool, args=args, session_id=sid)
+    if blocked:
+        return blocked
+    return {"ran": _call(plugin, tool, args, sid)}
+
+
 @pytest.mark.parametrize("attendees", [["p2"], ["p1", "p2"]])
-def test_inviting_the_partner_from_a_private_chat_is_the_r1_hooks_refusal(
-    cal, monkeypatch, attendees
-) -> None:
+def test_inviting_the_partner_from_a_private_chat_is_sent(cal, monkeypatch, attendees) -> None:
+    """Either partner adds to the shared calendar alone (Captain decision
+    2026-10-19). FALSIFIER: refuse a private-to-shared invite in tools.create."""
     plugin, sent = cal
     cf.telegram_dm(monkeypatch, cf.A_TG)
-    with pytest.raises(RuntimeError, match="private conversation"):
-        plugin.tools.run("calendar_invite_create", {**DATE_NIGHT, "attendees": attendees}, "s1")
-    assert sent == [] and calendar_store.STORE.list() == []
-
-
-def test_changing_a_shared_event_from_a_private_chat_is_refused_too(cal, monkeypatch) -> None:
-    plugin, sent = cal
-    cf.telegram_group(monkeypatch, cf.A_TG)
-    made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
-    cf.telegram_dm(monkeypatch, cf.A_TG)
-    assert [e["uid"] for e in _call(plugin, "calendar_invite_list", {})["events"]] == [made["uid"]]
-    with pytest.raises(RuntimeError, match="private conversation"):
-        plugin.tools.run("calendar_invite_update", {"uid": made["uid"], "title": "Moved"}, "s1")
+    out = _through_the_gate(
+        plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": attendees}, "s1"
+    )
+    assert out and out["ran"]["sent"] is True
+    assert calendar_store.STORE.get(out["ran"]["uid"]).space == "shared"
     assert len(sent) == 1
 
 
-def _space_gate(monkeypatch, *, armed: bool, sees_crossing: bool) -> list[tuple]:
-    """Stand in for workstream A's ``shared.space_writes`` (overlay#476): its
-    pre_tool_call hook holds a crossing until "share it", so a crossing call that
-    reaches the handler is one it released."""
-    import sys
-    import types
-
-    seen: list[tuple] = []
-    fake = types.ModuleType("shared.space_writes")
-    fake.gate_armed = lambda: armed
-
-    def crossing(tool_name, args, current, cfg):
-        seen.append((tool_name, dict(args), current.key))
-        return object() if sees_crossing else None
-
-    fake.crossing = crossing
-    fake.take_release = lambda tool_name, principal: True
-    monkeypatch.setitem(sys.modules, "shared.space_writes", fake)
-    import shared
-
-    monkeypatch.setattr(shared, "space_writes", fake, raising=False)
-    return seen
-
-
-def test_a_crossing_released_by_the_armed_space_gate_is_sent(cal, monkeypatch) -> None:
+def test_FALSIFIER_a_private_email_invite_for_both_partners_lands(cal, monkeypatch) -> None:
+    """The 10-19 incident: Ana, by email in her own private thread, asks for an
+    event on the shared calendar. Not blocked by the space gate's pre_tool_call,
+    not refused by the calendar handler, sent to both."""
     plugin, sent = cal
-    seen = _space_gate(monkeypatch, armed=True, sees_crossing=True)
-    cf.telegram_dm(monkeypatch, cf.A_TG)
-    args = {**DATE_NIGHT, "attendees": ["p1", "p2"]}
-    out = _call(plugin, "calendar_invite_create", args)
-    assert out["sent"] and sent[0]["to"] == [cf.A_EMAIL, cf.B_EMAIL]
-    assert seen == [("calendar_invite_create", args, "person:p1")]
-    assert calendar_store.STORE.get(out["uid"]).space == "shared"
-
-
-@pytest.mark.parametrize(
-    ("armed", "sees"), [(False, True), (True, False)], ids=["not-armed", "gate-disagrees"]
-)
-def test_a_crossing_the_space_gate_did_not_hold_is_refused(cal, monkeypatch, armed, sees) -> None:
-    """Not armed, or armed but blind to this crossing: either way the gate did
-    not hold it for the person's confirmation, so tool code refuses."""
-    plugin, sent = cal
-    _space_gate(monkeypatch, armed=armed, sees_crossing=sees)
-    cf.telegram_dm(monkeypatch, cf.A_TG)
-    with pytest.raises(RuntimeError, match="private conversation"):
-        plugin.tools.run("calendar_invite_create", {**DATE_NIGHT, "attendees": ["p2"]}, "s1")
-    assert sent == []
-
-
-def _through_the_real_gate(plugin, gate, tool: str, args: dict[str, Any]) -> dict | None:
-    """Run the call the way the gateway does: the space gate's pre_tool_call
-    first, then (when it does not block) the handler, on the args it left."""
-    blocked = gate.on_pre_tool_call(tool_name=tool, args=args, session_id="s")
-    if blocked:
-        return blocked
-    return {"ran": _call(plugin, tool, args, "s")}
-
-
-@pytest.fixture
-def real_gate(monkeypatch):
-    from shared import space_writes
-
-    space_writes.SPACE_WRITES.clear()
-    space_writes._releases.clear()
-    # The gate posts the exact words through the Bot API; record instead.
-    monkeypatch.setattr(space_writes, "post_notice", lambda chat, text: None)
-    gate = load_plugin("hermes-smd-space-gate")
-    gate.register(FakePluginContext())  # arms space_writes
-    yield gate
-    space_writes.SPACE_WRITES.clear()
-    monkeypatch.setattr(space_writes, "_ARMED", False)
-
-
-@pytest.mark.parametrize("tool", ["create", "update", "cancel"])
-def test_the_real_space_gate_holds_an_invite_to_the_partner_until_share_it(
-    cal, real_gate, monkeypatch, tool
-) -> None:
-    """End to end with workstream A's gate (overlay#476): from Ana's DM, an
-    invitation that reaches Ben, including an update or cancel of a shared event
-    whose arguments name only its uid, is held; nothing is sent; Ana's "share it"
-    in her DM releases exactly that call, and only then does it send."""
-    plugin, sent = cal
-    if tool == "create":
-        args: dict[str, Any] = {**DATE_NIGHT, "attendees": ["p1", "p2"]}
-    else:
-        cf.telegram_group(monkeypatch, cf.A_TG)
-        made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
-        sent.clear()
-        args = {"uid": made["uid"], **({"title": "Moved"} if tool == "update" else {})}
-    name = f"calendar_invite_{tool}"
-    cf.telegram_dm(monkeypatch, cf.A_TG)
-    held = _through_the_real_gate(plugin, real_gate, name, dict(args))
-    assert held and held["action"] == "block" and held["message"].startswith("HELD")
-    assert sent == []
-    # Only Ana, in her own DM, releases it: Ben's "share it" in his DM, and
-    # Ana's in the group, release nothing and the call stays held.
-    for elsewhere, user in (
-        (lambda: cf.telegram_dm(monkeypatch, cf.B_TG), cf.B_TG),
-        (lambda: cf.telegram_group(monkeypatch, cf.A_TG), cf.A_TG),
-    ):
-        elsewhere()
-        assert (
-            real_gate.on_pre_llm_call(
-                session_id="s",
-                turn_id=f"x{user}",
-                user_message="share it",
-                platform="telegram",
-                sender_id=user,
-            )
-            is None
-        )
-    cf.telegram_dm(monkeypatch, cf.A_TG)
-    still = _through_the_real_gate(plugin, real_gate, name, dict(args))
-    assert still and still.get("action") == "block" and sent == []
-    monkeypatch.setenv("HERMES_SESSION_ID", "s")
-    released = real_gate.on_pre_llm_call(
-        session_id="s",
-        turn_id="t2",
-        user_message="share it",
-        platform="telegram",
-        sender_id=cf.A_TG,
+    cf.email_turn(monkeypatch, "e1", cf.A_EMAIL)
+    assert space.resolve_space("e1").key == "person:p1"
+    out = _through_the_gate(
+        plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]}, "e1"
     )
-    assert released and "confirmed" in released["context"]
-    out = _through_the_real_gate(plugin, real_gate, name, dict(args))
-    assert out and out["ran"]["sent"] is True
+    assert out and "action" not in out, out
+    assert out["ran"]["sent"] is True
     assert sent[0]["to"] == [cf.A_EMAIL, cf.B_EMAIL]
-    # One confirmation, one send: the same call again is held, and a handler
-    # reached without the gate's release refuses.
-    sent.clear()
-    again = _through_the_real_gate(plugin, real_gate, name, dict(args))
-    assert again and again["message"].startswith("HELD") and sent == []
 
 
-def test_a_crossing_that_skips_the_gate_is_refused_even_when_armed(
-    cal, real_gate, monkeypatch
-) -> None:
-    """The gate is armed and sees the crossing, but it never released this call
-    (no "share it", so no release noted): the handler's backstop refuses.
-    FALSIFIER: drop the take_release requirement in seat._released_by_the_space_gate."""
+@pytest.mark.parametrize("tool", ["update", "cancel"])
+def test_changing_a_shared_event_from_a_private_chat_is_sent(cal, monkeypatch, tool) -> None:
     plugin, sent = cal
-    cf.telegram_dm(monkeypatch, cf.A_TG)
-    with pytest.raises(RuntimeError, match="private conversation"):
-        plugin.tools.run("calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]}, "s")
-    assert sent == []
-
-
-def test_the_real_space_gate_lets_a_private_invite_through_unheld(
-    cal, real_gate, monkeypatch
-) -> None:
-    """Falsifier for the hold above: an invite only to the requester is not a crossing."""
-    plugin, sent = cal
-    cf.telegram_dm(monkeypatch, cf.A_TG)
-    out = _through_the_real_gate(
-        plugin, real_gate, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1"]}
-    )
-    assert out and out["ran"]["sent"] is True and sent[0]["to"] == [cf.A_EMAIL]
-
-
-def test_calendar_reach_answers_the_way_the_tool_resolves(cal, monkeypatch) -> None:
-    from shared import calendar_reach
-
-    plugin, _ = cal
-    reach = calendar_reach.invite_reach
-    assert reach("calendar_invite_create", {"attendees": ["p1", "P2"]}) == {cf.A_EMAIL, cf.B_EMAIL}
-    assert reach("calendar_invite_list", {}) == frozenset()
-    for bad in ({"attendees": [SMD_ADDRESS]}, {"attendees": ["p9"]}, {"attendees": "p1"}):
-        with pytest.raises(calendar_reach.ReachUnknown):
-            reach("calendar_invite_create", bad)
     cf.telegram_group(monkeypatch, cf.A_TG)
     made = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
-    for tool in ("calendar_invite_update", "calendar_invite_cancel"):
-        assert reach(tool, {"uid": made["uid"]}) == {cf.A_EMAIL, cf.B_EMAIL}
-        with pytest.raises(calendar_reach.ReachUnknown):
-            reach(tool, {"uid": "nope"})
+    cf.telegram_dm(monkeypatch, cf.B_TG)
+    args = {"uid": made["uid"], **({"title": "Moved"} if tool == "update" else {})}
+    out = _through_the_gate(plugin, f"calendar_invite_{tool}", args, "s1")
+    assert out and out["ran"]["sent"] is True
+    assert len(sent) == 2
+
+
+def test_a_private_invite_stays_private(cal, monkeypatch) -> None:
+    plugin, sent = cal
+    cf.telegram_dm(monkeypatch, cf.A_TG)
+    out = _through_the_gate(
+        plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1"]}, "s1"
+    )
+    assert out and out["ran"]["sent"] is True and sent[0]["to"] == [cf.A_EMAIL]
+    assert calendar_store.STORE.get(out["ran"]["uid"]).space == "person:p1"
 
 
 @pytest.mark.parametrize(

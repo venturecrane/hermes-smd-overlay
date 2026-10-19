@@ -430,8 +430,9 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
 
 def _tainted_write_allowed(args: dict[str, Any], session_id: Any) -> bool:
     """On a shared seat, a tainted turn may still keep a record in its own
-    private space, a scheduled run in its own space, and a crossing the "share
-    it" gate released (``shared.space_taint``). Everywhere else: never."""
+    private space or, from a person's own chat or email, in the shared one; a
+    scheduled run in its own space (``shared.space_taint``). Each is stamped
+    ``from_web``. Everywhere else: never."""
     in_space_mode, _ = _space_view(session_id)
     if not in_space_mode:
         return False

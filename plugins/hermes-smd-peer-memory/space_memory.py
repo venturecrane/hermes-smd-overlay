@@ -36,7 +36,7 @@ REMEMBER_TOOL = "remember"
 REMEMBER_DESCRIPTION = (
     "Remember something for later. It is kept in the space this conversation is "
     "in, never anywhere else: said in one person's private chat, only that person "
-    "will ever see it again; said in the shared group, both people will. Use it "
+    "will ever see it again; said where both people are, both will. Use it "
     "for facts and plans you were asked to keep (a date, a gift idea, a place they "
     "loved). You do not choose where it is kept, and you cannot use it to pass "
     "something from one person to the other."

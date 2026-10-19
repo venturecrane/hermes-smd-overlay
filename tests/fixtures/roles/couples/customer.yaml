@@ -249,9 +249,8 @@ webhook_triggers:
 # What the couples skills keep. Every store is private per space: a record's
 # owner field names a person id (p1, p2) or shared, and each turn lists, reads
 # and writes only records in spaces it may read (ADR 0091). No readers: on a
-# seat that authors people: the validator refuses them. A write from a private
-# chat into a shared record is held until that partner confirms it ("share
-# it", overlay hermes-smd-space-gate). On the volume, so records survive a
+# seat that authors people: the validator refuses them. Either partner writes
+# to a shared record alone, at once. On the volume, so records survive a
 # reprovision.
 record_stores:
   - name: couples-checkin

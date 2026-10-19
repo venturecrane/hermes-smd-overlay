@@ -29,10 +29,8 @@ seat's people through the lane ``skill:calendar``, which this code names.
 WHO MAY BE INVITED (``seat.py``). On a seat people share, person ids mapped to
 ``people[].email`` in code (never an address the model names); elsewhere the
 exact roster. One name that does not resolve refuses the whole invitation. An
-event belongs to a space; an invitation from a private conversation that
-reaches the other person is held by workstream A's space gate
-(``hermes-smd-space-gate``) until that person says "share it", and
-:func:`seat.private_to_shared_gate` refuses any crossing that gate did not hold.
+event belongs to a space; either partner may invite both of them from their own
+conversation, and the event then belongs to ``shared``.
 
 WHAT ARRIVES BY EMAIL (``ingest.py``, ``pre_gateway_dispatch``). A person's
 invitation is kept in their space; a person's Accept/Decline (METHOD:REPLY) is

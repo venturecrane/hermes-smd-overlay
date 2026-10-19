@@ -22,8 +22,8 @@ Either way the broker checks again, against its own copy of the config.
 
 WHICH SPACE (space mode, ``shared.space``). An invitation from ``person:X``
 that invites only X stays in X's space. Anything else (the partner invited, or
-both) belongs to ``shared``, and from a private space that is a private-to-
-shared write: :func:`private_to_shared_gate` decides it.
+both) belongs to ``shared``. Either partner may add to the shared calendar from
+their own conversation (Captain decision 2026-10-19).
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ def turn_space(session_id: str, seat: Seat) -> space.Space | None:
         raise CalendarRefused(f"whose conversation this is could not be read ({exc})") from exc
     if found is None:
         raise CalendarRefused(
-            "this conversation is not one of the seat's people's own chats or the shared chat, "
+            "this conversation could not be tied to one of the seat's people, "
             "so no calendar change can be made from it"
         )
     return found
@@ -195,87 +195,13 @@ def target_space(seat: Seat, turn: space.Space | None, attendees: list[str]) -> 
     return space.SHARED
 
 
-#: The refusal the R1 hook gives until workstream A's private-to-shared write
-#: gate exists (ss-console#3264, ADR 0091 R1).
-R1_PENDING_REFUSAL = (
-    "this would put something from a private conversation in front of the other "
-    "person, and that needs the person's own confirmation, which this seat cannot "
-    "ask for yet. Nothing was sent. Make this change from the shared chat instead."
-)
-
-
-def _released_by_the_space_gate(turn: space.Space, tool_name: str, args: dict[str, Any]) -> bool:
-    """True only when workstream A's R1 gate (``shared.space_writes``, the
-    ``hermes-smd-space-gate`` pre_tool_call hook) is armed on this seat AND it
-    sees this very call as a crossing. Its hook runs before every other gate and
-    holds a crossing until the same person says "share it", so a crossing call
-    that reaches this handler is one it released. A call it does NOT see as a
-    crossing, while this code does, is a disagreement between the two, and the
-    answer to a disagreement is to refuse. The gate must also have noted a
-    release for this tool, person and chat (``space_writes.take_release``), which
-    is spent here: one confirmation, one send. Any part of the API missing (A's
-    gate not merged, not armed, renamed) is also a refusal."""
-    try:
-        from shared import space_writes  # type: ignore[attr-defined]
-    except ImportError:
-        return False
-    armed = getattr(space_writes, "gate_armed", None)
-    crossing = getattr(space_writes, "crossing", None)
-    take_release = getattr(space_writes, "take_release", None)
-    if not callable(armed) or not callable(crossing) or not callable(take_release):
-        return False
-    try:
-        cfg = space.space_config()
-        if not (
-            bool(armed()) and cfg is not None and crossing(tool_name, args, turn, cfg) is not None
-        ):
-            return False
-        # The gate notes a release when the person's "share it" lets THIS call
-        # through; spending it here means a crossing that reached the handler by
-        # any other road (a hook skipped, a second call in the same turn) still
-        # refuses. Keyed by the person's space, so a confirmation by email
-        # releases the same way one in their Telegram chat does.
-        return bool(take_release(tool_name, turn))
-    except Exception:  # noqa: BLE001 - a gate that cannot answer has not released anything
-        logger.warning("hermes-smd-calendar: space gate check failed; refusing", exc_info=True)
-        return False
-
-
-def private_to_shared_gate(
-    turn: space.Space | None,
-    target_key: str,
-    *,
-    act: str,
-    args: dict[str, Any] | None = None,
-) -> str | None:
-    """THE R1 HOOK: a calendar act from a private space into ``shared``.
-
-    ADR 0091 R1: such a write is held until the same person confirms it, and that
-    gate is workstream A's (``shared.space_writes``, overlay#476). This is the
-    backstop in tool code: a crossing proceeds only when A's gate is armed and
-    released it (:func:`_released_by_the_space_gate`); otherwise it is refused.
-    So until A's gate is on the seat every crossing refuses (fail closed), and
-    after, nothing reaches the partner that A's gate did not hold. ``act`` is the
-    tool name and ``args`` the call's own arguments, as A's gate saw them.
-    Returns the refusal, or ``None``."""
-    if not space.is_private_to_shared(turn, target_key):
-        return None
-    assert turn is not None  # is_private_to_shared is False for None
-    if _released_by_the_space_gate(turn, act, dict(args or {})):
-        return None
-    logger.info("hermes-smd-calendar: %s from a private space into shared refused", act)
-    return R1_PENDING_REFUSAL
-
-
 __all__ = [
     "CALENDAR_SKILL",
     "LANE",
-    "R1_PENDING_REFUSAL",
     "CalendarRefused",
     "Seat",
     "calendar_authored",
     "load_seat",
-    "private_to_shared_gate",
     "resolve_attendees",
     "target_space",
     "turn_space",

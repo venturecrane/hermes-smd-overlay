@@ -1,9 +1,10 @@
 """A couple sets its schedule and settings by talking (ss-console #3264).
 
 The tool (``plugins/hermes-smd-couples-settings``), the document it keeps
-(``shared.couples_settings``), the two-person hold (``shared.joint_acts``) and
-the quarter-hour gate that runs the routines (``shared.couples_gate``). Each
-falsifier names the line whose removal makes the test fail.
+(``shared.couples_settings``) and the quarter-hour gate that runs the routines
+(``shared.couples_gate``). Either partner changes any setting alone, and it
+applies at once (Captain decision 2026-10-19). Each falsifier names the line
+whose removal makes the test fail.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,10 +23,8 @@ from shared import (
     couples_slots,
     cron_space,
     inbound,
-    joint_acts,
     send_dispatch,
     space,
-    space_writes,
 )
 from shared.inbound import SESSION_INBOUND_ORIGIN, SESSION_TAINT, InboundOrigin
 from shared.send_dispatch import DispatchResult
@@ -34,13 +32,11 @@ from tests.conftest import load_plugin
 from tests.couples_fixtures import (
     A_EMAIL,
     A_TG,
-    B_EMAIL,
     B_TG,
     clear_turn,
     couples_yaml,
     cron_to,
     telegram_dm,
-    telegram_group,
     write_seat,
 )
 
@@ -61,7 +57,6 @@ def seat_doc(**overrides: Any) -> dict[str, Any]:
     return doc
 
 
-NOTICES: list[tuple[str, str]] = []
 MAILED: list[dict[str, Any]] = []
 
 
@@ -70,13 +65,8 @@ def seat(monkeypatch, tmp_path):
     clear_turn(monkeypatch)
     write_seat(monkeypatch, tmp_path, seat_doc())
     SESSION_INBOUND_ORIGIN._reset_for_tests()
-    monkeypatch.setenv("SMD_JOINT_ACTS_PATH", str(tmp_path / "joint.json"))
     monkeypatch.setenv("SMD_COUPLES_SETTINGS_PATH", str(tmp_path / "state" / "settings.json"))
-    NOTICES.clear()
     MAILED.clear()
-    monkeypatch.setattr(
-        space_writes, "post_notice", lambda chat, text: NOTICES.append((chat, text))
-    )
 
     def sender(**kw: Any) -> DispatchResult:
         MAILED.append(kw)
@@ -84,8 +74,7 @@ def seat(monkeypatch, tmp_path):
 
     send_dispatch.set_sender(sender)
     plugin = load_plugin("hermes-smd-couples-settings")
-    gate = load_plugin("hermes-smd-space-gate")
-    yield {"tool": plugin, "gate": gate, "tmp": tmp_path}
+    yield {"tool": plugin, "tmp": tmp_path}
     send_dispatch.set_sender(None)
     SESSION_INBOUND_ORIGIN._reset_for_tests()
     space._reset_cache_for_tests()
@@ -99,17 +88,6 @@ def read(seat, sid: str = "s") -> dict[str, Any]:
     return json.loads(seat["tool"]._read_handler({}, session_id=sid))
 
 
-def say(seat, monkeypatch, user: str, text: str) -> dict | None:
-    telegram_dm(monkeypatch, user)
-    return seat["gate"].on_pre_llm_call(
-        session_id="s",
-        turn_id=f"t-{time.time_ns()}",
-        user_message=text,
-        platform="telegram",
-        sender_id=user,
-    )
-
-
 def stored() -> dict[str, Any]:
     return couples_settings.load()
 
@@ -117,20 +95,17 @@ def stored() -> dict[str, Any]:
 TZ = {"op": "set_timezone", "timezone": "America/Los_Angeles"}
 
 
-def agree_timezone(seat, monkeypatch) -> None:
+def set_timezone(seat, monkeypatch) -> None:
     telegram_dm(monkeypatch, A_TG)
-    assert change(seat, [TZ]).startswith("HELD")
-    out = say(seat, monkeypatch, B_TG, "agree")
-    assert out and "in place" in out["context"]
+    assert change(seat, [TZ]).startswith("DONE")
 
 
 # ---------------------------------------------------------------------------
-# 1. One person, their own change
+# 1. Either partner, alone, applied at once
 # ---------------------------------------------------------------------------
 
 
 def test_a_persons_own_quiet_hours_apply_at_once(seat, monkeypatch):
-    """FALSIFIER: make needs_both return True for a person-scoped op."""
     telegram_dm(monkeypatch, A_TG)
     out = change(
         seat, [{"op": "set_quiet_hours", "person": "p1", "start": "21:00", "end": "08:00"}]
@@ -138,12 +113,21 @@ def test_a_persons_own_quiet_hours_apply_at_once(seat, monkeypatch):
     assert out.startswith("DONE"), out
     assert "Quiet hours for Ana: no scheduled messages from 9:00 PM to 8:00 AM" in out
     assert stored()["people"]["p1"]["quiet_hours"] == {"start": "21:00", "end": "08:00"}
-    assert joint_acts.open_act() is None and not NOTICES and not MAILED
+    assert not MAILED
+
+
+def test_the_timezone_applies_at_once_and_nobody_is_asked(seat, monkeypatch):
+    """FALSIFIER: hold any change for the other partner's yes."""
+    telegram_dm(monkeypatch, A_TG)
+    out = change(seat, [TZ])
+    assert out.startswith("DONE"), out
+    assert stored()["timezone"] == "America/Los_Angeles"
+    assert stored()["log"][-1]["by"] == "p1"
+    assert not MAILED
 
 
 def test_a_persons_own_gratitude_routine_applies_at_once(seat, monkeypatch):
-    agree_timezone(seat, monkeypatch)
-    NOTICES.clear()
+    set_timezone(seat, monkeypatch)
     telegram_dm(monkeypatch, A_TG)
     add = {
         "op": "add_routine",
@@ -157,19 +141,10 @@ def test_a_persons_own_gratitude_routine_applies_at_once(seat, monkeypatch):
     assert "gratitude prompt for Ana, Sundays at 9:00 AM (America/Los_Angeles)" in out
     (routine,) = stored()["routines"]
     assert routine["space"] == "person:p1" and routine["days"] == ["sun"]
-    assert not NOTICES
 
 
-# ---------------------------------------------------------------------------
-# 2. Both partners
-# ---------------------------------------------------------------------------
-
-
-def test_a_checkin_is_held_until_the_other_partner_agrees(seat, monkeypatch):
-    """Even a check-in for the asker alone is decided together.
-    FALSIFIER: drop ALWAYS_JOINT_KINDS from needs_both."""
-    agree_timezone(seat, monkeypatch)
-    NOTICES.clear()
+def test_a_checkin_applies_at_once(seat, monkeypatch):
+    set_timezone(seat, monkeypatch)
     telegram_dm(monkeypatch, A_TG)
     add = {
         "op": "add_routine",
@@ -179,61 +154,49 @@ def test_a_checkin_is_held_until_the_other_partner_agrees(seat, monkeypatch):
         "time": "20:00",
     }
     out = change(seat, [add])
-    assert out.startswith("HELD"), out
-    assert stored()["routines"] == []
-    ((chat, text),) = NOTICES
-    assert chat == B_TG
-    assert "check-in for Ana, Tuesdays and Fridays at 8:00 PM (America/Los_Angeles)" in text
-    out = say(seat, monkeypatch, B_TG, "agree")
-    assert out and "in place" in out["context"]
+    assert out.startswith("DONE"), out
+    assert "check-in for Ana, Tuesdays and Fridays at 8:00 PM (America/Los_Angeles)" in out
     (routine,) = stored()["routines"]
     assert routine["kind"] == "couples-checkin" and routine["space"] == "person:p1"
-    assert stored()["log"][-1]["agreed_by"] == ["p1", "p2"]
 
 
-def test_the_askers_own_second_yes_and_a_group_yes_change_nothing(seat, monkeypatch):
-    """FALSIFIER: count the proposer twice, or accept a yes from the group."""
-    telegram_dm(monkeypatch, A_TG)
-    change(seat, [TZ])
-    out = say(seat, monkeypatch, A_TG, "agree")
-    assert out and "already" in out["context"]
-    telegram_group(monkeypatch, B_TG)
-    assert (
-        seat["gate"].on_pre_llm_call(
-            session_id="s", turn_id="g", user_message="agree", platform="telegram", sender_id=B_TG
-        )
-        is None
-    )
-    assert stored()["timezone"] is None
-    assert joint_acts.open_act().approvals == ["p1"]
-
-
-def test_a_reject_closes_it_and_nothing_changes(seat, monkeypatch):
-    telegram_dm(monkeypatch, A_TG)
-    change(seat, [TZ])
-    out = say(seat, monkeypatch, B_TG, "reject")
-    assert out and "declined" in out["context"]
-    assert stored()["timezone"] is None and joint_acts.open_act() is None
-
-
-def test_changing_the_other_partners_quiet_hours_needs_their_yes(seat, monkeypatch):
-    """FALSIFIER: drop the ``f["person"] != speaker`` check in needs_both."""
+def test_either_partner_changes_the_other_partners_quiet_hours(seat, monkeypatch):
     telegram_dm(monkeypatch, A_TG)
     out = change(
         seat, [{"op": "set_quiet_hours", "person": "p2", "start": "22:00", "end": "07:00"}]
     )
-    assert out.startswith("HELD")
-    assert "p2" not in stored()["people"]
+    assert out.startswith("DONE"), out
+    assert stored()["people"]["p2"]["quiet_hours"] == {"start": "22:00", "end": "07:00"}
 
 
-def test_a_mixed_bundle_is_decided_together(seat, monkeypatch):
+def test_a_partner_changes_the_others_checkin_alone(seat, monkeypatch):
+    """A check-in is visible to both, so either may change it."""
+    set_timezone(seat, monkeypatch)
+    telegram_dm(monkeypatch, B_TG)
+    add = {
+        "op": "add_routine",
+        "kind": "couples-checkin",
+        "for": "p2",
+        "days": ["mon"],
+        "time": "20:00",
+    }
+    assert change(seat, [add]).startswith("DONE")
+    rid = stored()["routines"][0]["id"]
+    telegram_dm(monkeypatch, A_TG)
+    out = change(seat, [{"op": "change_routine", "routine": rid, "time": "21:00"}])
+    assert out.startswith("DONE"), out
+    assert stored()["routines"][0]["time"] == "21:00"
+
+
+def test_a_mixed_bundle_applies_together(seat, monkeypatch):
     telegram_dm(monkeypatch, A_TG)
     mine = {"op": "set_quiet_hours", "person": "p1", "start": "21:00", "end": "08:00"}
-    assert change(seat, [mine, TZ]).startswith("HELD")
-    assert stored()["people"] == {}
+    assert change(seat, [mine, TZ]).startswith("DONE")
+    assert stored()["timezone"] == "America/Los_Angeles"
+    assert stored()["people"]["p1"]["quiet_hours"] == {"start": "21:00", "end": "08:00"}
 
 
-def _email(monkeypatch, sid: str, sender: str, reply_text: str = "") -> None:
+def _email(monkeypatch, sid: str, sender: str) -> None:
     clear_turn(monkeypatch)
     monkeypatch.setenv("HERMES_SESSION_PLATFORM", "webhook")
     origin = InboundOrigin(
@@ -241,7 +204,6 @@ def _email(monkeypatch, sid: str, sender: str, reply_text: str = "") -> None:
         message_id=f"<{sid}@mail>",
         inbox_id="couples@agentmail.to",
         conversation_id=f"thr-{sid}",
-        reply_text=reply_text,
     )
     SESSION_INBOUND_ORIGIN.record("", origin)
     inbound.bind_origin_from_prompt(
@@ -249,70 +211,18 @@ def _email(monkeypatch, sid: str, sender: str, reply_text: str = "") -> None:
     )
 
 
-def _email_turn(seat, sid: str) -> dict | None:
-    prompt = f"from: x\nmessage_id: <{sid}@mail>\n{inbound.UNTRUSTED_EMAIL_DELIMITER}\nbody"
-    return seat["gate"].on_pre_llm_call(
-        session_id=sid, turn_id=sid, user_message=prompt, platform="webhook"
-    )
-
-
-def test_over_email_the_proposal_and_the_answer_both_go_by_email(monkeypatch, tmp_path):
-    """The whole flow with no Telegram at all (email is the default channel)."""
+def test_over_email_a_change_applies_at_once(seat, monkeypatch, tmp_path):
+    """No Telegram at all (email is the default channel)."""
     clear_turn(monkeypatch)
     doc = seat_doc()
     for person in doc["people"]:
         person.update({"telegram_id": "", "channel": "email"})
     write_seat(monkeypatch, tmp_path, doc)
-    SESSION_INBOUND_ORIGIN._reset_for_tests()
-    monkeypatch.setenv("SMD_JOINT_ACTS_PATH", str(tmp_path / "joint.json"))
-    monkeypatch.setenv("SMD_COUPLES_SETTINGS_PATH", str(tmp_path / "settings.json"))
-    MAILED.clear()
-    send_dispatch.set_sender(
-        lambda **kw: (
-            MAILED.append(kw)
-            or DispatchResult(sent=True, message_id="m", recipients=tuple(kw["to"]))
-        )
-    )
-    try:
-        tool = load_plugin("hermes-smd-couples-settings")
-        gate = load_plugin("hermes-smd-space-gate")
-        _email(monkeypatch, "a", A_EMAIL)
-        assert tool._change_handler({"changes": [TZ]}, session_id="a").startswith("HELD")
-        assert [m["to"] for m in MAILED] == [[B_EMAIL]]
-        assert "Your timezone: America/Los_Angeles" in MAILED[0]["text"]
-        assert MAILED[0]["lane"] == "skill:couples-checkin"
-        # Ana's own "agree" by email is not Ben's.
-        _email(monkeypatch, "a2", A_EMAIL, reply_text="agree")
-        assert (
-            "already"
-            in gate.on_pre_llm_call(
-                session_id="a2", turn_id="a2", user_message=_prompt("a2"), platform="webhook"
-            )["context"]
-        )
-        # Someone not on the seat counts for nothing.
-        _email(monkeypatch, "x", "eve@example.com", reply_text="agree")
-        assert (
-            gate.on_pre_llm_call(
-                session_id="x", turn_id="x", user_message=_prompt("x"), platform="webhook"
-            )
-            is None
-        )
-        assert couples_settings.load()["timezone"] is None
-        _email(monkeypatch, "b", B_EMAIL, reply_text="Agree")
-        out = gate.on_pre_llm_call(
-            session_id="b", turn_id="b", user_message=_prompt("b"), platform="webhook"
-        )
-        assert out and "in place" in out["context"]
-        assert couples_settings.load()["timezone"] == "America/Los_Angeles"
-        assert {tuple(m["to"]) for m in MAILED[1:]} == {(A_EMAIL,), (B_EMAIL,)}
-    finally:
-        send_dispatch.set_sender(None)
-        SESSION_INBOUND_ORIGIN._reset_for_tests()
-        space._reset_cache_for_tests()
-
-
-def _prompt(sid: str) -> str:
-    return f"from: x\nmessage_id: <{sid}@mail>\n{inbound.UNTRUSTED_EMAIL_DELIMITER}\nbody"
+    _email(monkeypatch, "a", A_EMAIL)
+    out = seat["tool"]._change_handler({"changes": [TZ]}, session_id="a")
+    assert out.startswith("DONE"), out
+    assert couples_settings.load()["timezone"] == "America/Los_Angeles"
+    assert not MAILED
 
 
 def test_a_scheduled_run_cannot_ask_for_a_change(seat, monkeypatch):
@@ -333,29 +243,6 @@ def test_a_tainted_turn_changes_nothing(seat, monkeypatch):
         seat, [{"op": "set_quiet_hours", "person": "p1", "start": "21:00", "end": "08:00"}]
     )
     assert "refused" in out and stored()["people"] == {}
-
-
-def test_a_held_change_that_no_longer_fits_closes_as_failed(seat, monkeypatch):
-    agree_timezone(seat, monkeypatch)
-    telegram_dm(monkeypatch, A_TG)
-    add = {
-        "op": "add_routine",
-        "kind": "gratitude-prompts",
-        "for": "p1",
-        "days": ["sun"],
-        "time": "09:00",
-    }
-    change(seat, [add])
-    rid = stored()["routines"][0]["id"]
-    telegram_dm(monkeypatch, A_TG)
-    assert change(seat, [{"op": "change_routine", "routine": rid, "time": "10:00"}, TZ]).startswith(
-        "HELD"
-    )
-    telegram_dm(monkeypatch, A_TG)
-    assert change(seat, [{"op": "remove_routine", "routine": rid}]).startswith("DONE")
-    out = say(seat, monkeypatch, B_TG, "agree")
-    assert out and "could not be applied" in out["context"]
-    assert stored()["routines"] == [] and joint_acts.open_act() is None
 
 
 # ---------------------------------------------------------------------------
@@ -417,12 +304,12 @@ def test_a_held_change_that_no_longer_fits_closes_as_failed(seat, monkeypatch):
 )
 def test_invalid_input_is_refused(seat, monkeypatch, bad):
     """FALSIFIER: any one of parse_changes' checks."""
-    agree_timezone(seat, monkeypatch)
+    set_timezone(seat, monkeypatch)
     before = stored()
     telegram_dm(monkeypatch, A_TG)
     out = change(seat, [bad])
     assert "refused" in out, out
-    assert stored() == before and joint_acts.open_act() is None
+    assert stored() == before
 
 
 def test_a_routine_needs_the_timezone_first(seat, monkeypatch):
@@ -440,7 +327,7 @@ def test_a_routine_needs_the_timezone_first(seat, monkeypatch):
 
 def test_the_seat_keeps_at_most_twenty_routines(seat, monkeypatch):
     """50 asked for, 20 kept. FALSIFIER: drop the MAX_ROUTINES check."""
-    agree_timezone(seat, monkeypatch)
+    set_timezone(seat, monkeypatch)
     times = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 15, 30, 45)][:50]
     added = 0
     for i, at in enumerate(times):
@@ -469,7 +356,7 @@ def test_the_seat_keeps_at_most_twenty_routines(seat, monkeypatch):
 
 def test_a_partner_does_not_see_the_other_partners_private_routines(seat, monkeypatch):
     """FALSIFIER: drop routine_visible's filter in view()."""
-    agree_timezone(seat, monkeypatch)
+    set_timezone(seat, monkeypatch)
     telegram_dm(monkeypatch, B_TG)
     add = {
         "op": "add_routine",
@@ -653,7 +540,7 @@ def test_a_reprovision_rematerializes_the_slots_and_keeps_the_couples_routines(
     FALSIFIER: drop ``entries.extend(_slot_jobs(...))`` in cron_materialize."""
     from bootstrap.cron_materialize import materialize_cron
 
-    agree_timezone(seat, monkeypatch)
+    set_timezone(seat, monkeypatch)
     telegram_dm(monkeypatch, A_TG)
     add = {
         "op": "add_routine",

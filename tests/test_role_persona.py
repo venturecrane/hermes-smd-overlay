@@ -4,7 +4,7 @@
 (the persona file named by the package's role.yaml) into every profile's
 SOUL.md. Three properties are pinned here:
 
-* verbatim: the persona's safety rules arrive word for word. The fixture is a
+* verbatim: the persona's rules arrive word for word. The fixture is a
   copy of ss-console ``operator/roles/couples/persona.md``; the assertions read
   whatever the fixture holds, so a later edit to the copy cannot make them pass
   vacuously, and the rule-by-rule check names each rule that went missing.
@@ -90,23 +90,34 @@ def test_role_persona_is_in_soul_verbatim(tmp_path):
     assert FIXTURE_PERSONA.read_text() in soul
 
 
-def _safety_rules(text: str) -> list[str]:
-    section = text.split("## Safety rules\n", 1)[1].split("\n## ", 1)[0]
+def _always_rules(text: str) -> list[str]:
+    section = text.split("## A few rules that always hold\n", 1)[1].split("\n## ", 1)[0]
     rules = re.split(r"\n(?=\d+\. )", section.strip())
     return [r for r in rules if re.match(r"\d+\. ", r)]
 
 
-def test_every_safety_rule_is_in_soul_word_for_word(tmp_path):
+def test_every_rule_is_in_soul_word_for_word(tmp_path):
     persona = FIXTURE_PERSONA.read_text()
-    rules = _safety_rules(persona)
-    # The couples persona authors six rules (#3264 Captain decision 5); a
-    # fixture that parsed to fewer would make this test pass on nothing.
-    assert len(rules) == 6
+    rules = _always_rules(persona)
+    # The couples persona authors two rules that always hold (safety first; no
+    # tracking of the other partner); a fixture that parsed to fewer would make
+    # this test pass on nothing.
+    assert len(rules) == 2
     soul = _soul(tmp_path / "seat", _with_seat("couples"), _roles_dir(tmp_path))
     missing = [r.splitlines()[0] for r in rules if r not in soul]
     assert missing == []
+    assert "## How you work for them" in soul
     for resource in ("**988**", "**911**", "**1-800-799-7233**", "**88788**"):
         assert resource in soul
+
+
+def test_persona_carries_no_hold_or_two_person_approval():
+    """Either partner acts alone (Captain decision 2026-10-19): the persona must
+    not send a partner to confirm "share it" or to wait for an "agree"."""
+    text = FIXTURE_PERSONA.read_text().lower()
+    assert "share it" not in text
+    assert re.search(r"\bagree\b", text) is None
+    assert "shared chat" not in text and "group chat" not in text
 
 
 def test_role_persona_reaches_every_profile(tmp_path):
@@ -181,7 +192,7 @@ def test_seat_without_role_is_byte_identical(tmp_path):
     with_roles_dir = _soul(tmp_path / "b", VALID_YAML, roles)
     with_seat_block = _soul(tmp_path / "c", _with_seat(None), roles)
     assert bare == with_roles_dir == with_seat_block
-    assert "## Safety rules" not in bare
+    assert "## A few rules that always hold" not in bare
 
 
 def test_seat_without_role_never_reads_the_roles_dir(tmp_path):

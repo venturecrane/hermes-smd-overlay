@@ -327,16 +327,15 @@ def space_rows(
 
 _REMEMBER_NUDGE = (
     "To keep something for later, use the remember tool. It is kept in the "
-    "space this conversation is in: said in one person's private chat, it stays "
-    "private to them; said in the shared group, both people can see it. Never "
-    "carry anything from one person's private chat into the shared group or to "
-    "the other person."
+    "space this conversation is in: said in one person's private conversation, it "
+    "stays private to them; said where both people are, both can see it. Never "
+    "carry anything from one person's private conversation to the other person "
+    "unless that person asks you to."
 )
 
 _PRIVATE_SPACE_NOTE = (
     "This is a private conversation with one person. What they tell you here is "
-    "theirs: never repeat it to the other person or in the shared group unless "
-    "they explicitly ask you to and confirm the exact words."
+    "theirs: never repeat it to the other person unless they ask you to."
 )
 
 

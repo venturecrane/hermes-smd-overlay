@@ -1,9 +1,10 @@
 """What a tainted turn may still keep on a seat a couple shares (ss-console #3283).
 
 A web search taints the session. On a couples seat a tainted turn may still
-write into its OWN private space (stamped from_web), a scheduled run into its
-own space; anything that crosses to shared needs the "share it" gate; a seat
-without people: keeps the old rule. Each falsifier names the line whose removal
+write into its OWN private space, and a record into the shared one (each stamped
+from_web: either partner adds to the shared space alone, Captain decision
+2026-10-19); a scheduled run into its own space; a seat without people: keeps
+the old rule. Each falsifier names the line whose removal
 makes it fail.
 """
 
@@ -11,14 +12,13 @@ from __future__ import annotations
 
 import pytest
 
-from shared import record_store, space, space_taint, space_writes
+from shared import record_store, space, space_taint
 from shared.d1_client import D1Client
 from shared.inbound import SESSION_TAINT
 from tests.conftest import load_plugin
 from tests.couples_fixtures import (
     A_EMAIL,
     A_TG,
-    B_EMAIL,
     B_TG,
     GROUP,
     clear_turn,
@@ -48,9 +48,6 @@ def seat(monkeypatch, tmp_path):
     monkeypatch.setattr(record_store, "authored_stores", lambda *_, **__: roots)
     SESSION_TAINT._tainted.clear()
     SESSION_TAINT.mark("s", "unknown_external")  # a web_search on this session
-    space_writes.SPACE_WRITES.clear()
-    space_writes._releases.clear()
-    monkeypatch.setattr(space_writes, "post_notice", lambda chat, text: None)
     yield {
         "records": load_plugin("hermes-smd-record-store"),
         "gate": load_plugin("hermes-smd-space-gate"),
@@ -79,28 +76,16 @@ def test_tainted_dm_write_to_own_space_is_allowed_and_stamped(seat, monkeypatch)
     assert "from_web: true" in args["content"] and "owner: p1" in args["content"]
 
 
-def test_tainted_dm_write_to_shared_without_confirm_is_held_and_refused(seat, monkeypatch):
+def test_tainted_dm_record_write_to_shared_lands_stamped(seat, monkeypatch):
+    """Either partner adds to the shared space alone; a record from a turn that
+    read the web says so. FALSIFIER: drop the shared branch of
+    tainted_write_allowed, or the stamp in the record-store hook."""
     telegram_dm(monkeypatch, A_TG)
-    _, blocks = _write(seat, "trips", _rec("shared"))
-    messages = " ".join(b["message"] for b in blocks)
-    assert "HELD" in messages and "outside the firm" in messages
-    _, blocks = _write(seat, "lists", "milk")
-    assert any("HELD" in b["message"] for b in blocks)
-
-
-def test_tainted_shared_write_passes_only_after_share_it(seat, monkeypatch):
-    """The person confirming the exact words is the injection defense. The
-    confirmed words carry the stamp. FALSIFIER: drop the take_release branch."""
-    telegram_dm(monkeypatch, A_TG)
-    _write(seat, "trips", _rec("shared"))
-    held = space_writes.SPACE_WRITES.pending()[0]
-    assert "from_web: true" in held.args["content"]
-    seat["gate"].on_pre_llm_call(
-        session_id="s", turn_id="t2", user_message="share it", platform="telegram", sender_id=A_TG
-    )
-    args, blocks = _write(seat, "trips", _rec("shared", "reworded by the page"))
+    args, blocks = _write(seat, "trips", _rec("shared"))
     assert blocks == []
     assert PRICE in args["content"] and args["content"].count("from_web: true") == 1
+    args, blocks = _write(seat, "lists", "milk")
+    assert blocks == [] and args["content"].startswith("---\nfrom_web: true\n---")
 
 
 def test_tainted_group_write_is_refused(seat, monkeypatch):
@@ -121,19 +106,14 @@ def test_tainted_cron_writes_only_its_own_space(seat, monkeypatch):
     assert any("outside the firm" in b["message"] for b in blocks)
 
 
-def test_tainted_send_to_the_partner_is_held(seat, monkeypatch):
-    """A send never passes on taint by this narrowing: the gate holds the
-    crossing, and the trust gate still refuses a send on a tainted turn
+def test_tainted_send_is_not_narrowed(seat, monkeypatch):
+    """Only a record write is narrowed into shared; a send on a tainted turn is
+    still refused by the trust gate
     (tests/test_brief_taint_exemption.py::test_the_model_callable_send_is_still_refused_on_a_tainted_turn,
-    untouched here)."""
+    untouched here). FALSIFIER: drop the ``tool_name == RECORD_WRITE`` term."""
     telegram_dm(monkeypatch, A_TG)
-    out = seat["gate"].on_pre_tool_call(
-        tool_name="mcp_agentmail_send_message",
-        args={"to": [B_EMAIL], "text": PRICE},
-        session_id="s",
-    )
-    assert out and out["message"].startswith("HELD")
     assert not space_taint.tainted_write_allowed("mcp_agentmail_send_message", "s", "shared")
+    assert space_taint.tainted_write_allowed("record_store_write", "s", "shared")
 
 
 def test_seat_without_people_keeps_the_old_rule(monkeypatch, tmp_path):

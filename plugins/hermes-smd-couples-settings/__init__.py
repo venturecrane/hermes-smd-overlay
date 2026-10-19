@@ -18,16 +18,10 @@ job, a path, or an address: it writes one validated JSON document
 hour (``shared.couples_gate``). Where a routine is delivered is a person id or
 ``shared`` from the seat's ``people:`` block, resolved to an address in code.
 
-WHO DECIDES. A change that affects only the asker applies at once. Any other
-change (timezone, topics, any check-in, the other partner's settings or
-routines, a shared routine) is held in the two-person register
-(``shared.joint_acts``): the seat sends the other partner the exact change,
-rendered in code (``shared.couples_settings_text``), and it applies only when
-both have said ``agree`` (answers are taken by the space gate,
-``plugins/hermes-smd-space-gate``). The asker is named from verified fields
-only (``shared.joint_notice.speaker``); a scheduled run has no asker and is
-refused. A turn that read outside content is refused too, the same rule the
-record-store write follows.
+WHO DECIDES. Either partner, alone: every change applies at once (Captain,
+2026-10-19). The asker is named from verified fields only (:func:`_speaker`);
+a scheduled run has no asker and is refused. A turn that read outside content
+is refused too, the same injection defense the record-store write follows.
 
 The handlers decide everything themselves; there is no hook whose order
 matters. They raise nothing to Hermes: every refusal is a sentence for the
@@ -36,12 +30,11 @@ model, and nothing is changed by one.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 from typing import Any
 
-from shared import couples_gate, joint_acts, joint_notice
+from shared import couples_gate
 from shared import couples_settings as cs
 from shared import couples_settings_text as cst
 from shared import space as space_mod
@@ -50,7 +43,7 @@ from shared.tool_registration import register_wrapped_tool
 logger = logging.getLogger(__name__)
 
 TOOL_READ = "couples_settings_read"
-TOOL_CHANGE = joint_acts.SETTINGS_TOOL
+TOOL_CHANGE = "couples_settings_change"
 
 _CHANGE_ITEM = {
     "type": "object",
@@ -84,7 +77,7 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
     TOOL_READ: (
         "What this couple has set up: their timezone, their check-in topics, your own "
         "settings (in a private conversation), the routines you can see (each with an "
-        "id and a plain description), and any change still waiting for both partners. "
+        "id and a plain description). "
         "The people list gives each partner's id for couples_settings_change.",
         {"type": "object", "properties": {}, "additionalProperties": False},
     ),
@@ -94,11 +87,8 @@ TOOLS: dict[str, tuple[str, dict[str, Any]]] = {
         "clear_quiet_hours {person}; set_dates_lead_days {person,lead_days}; "
         "set_paused_topics {person,topics}; add_routine {kind,for,days,time}; "
         "change_routine {routine,days?,time?}; pause_routine {routine,until}; "
-        "resume_routine {routine}; remove_routine {routine}. A change that affects "
-        "only the person asking applies now; anything else (timezone, topics, any "
-        "check-in, the other partner's settings or routines, a shared routine) is sent "
-        "to the other partner and applies only when both agree. Send personal changes "
-        "separately from joint ones. Times are on the quarter hour. The result gives "
+        "resume_routine {routine}; remove_routine {routine}. Either partner may make "
+        "any change; it applies now. Times are on the quarter hour. The result gives "
         "the exact lines to restate to the person.",
         {
             "type": "object",
@@ -120,14 +110,6 @@ _REFUSED = "{tool} refused: {why}. Nothing changed."
 _DONE = (
     "DONE: this applies now. Tell the person, restating exactly these lines and "
     "adding nothing about times or days they do not say:\n{summary}{notes}"
-)
-_HELD = (
-    "HELD for both of you: this changes something the two partners decide together, "
-    "so it applies only when each agrees. The person's request counts as their yes. "
-    "The seat has sent {others} exactly these lines:\n{summary}\n"
-    'It applies when {others} replies "agree"; either can reply "reject"; it expires '
-    "in 7 days. Tell the person, restating those lines, that it is waiting on "
-    "{others}. Do not call this again for it."
 )
 
 
@@ -160,10 +142,6 @@ def _read_handler(args: dict[str, Any], **kwargs: Any) -> str:
     except cs.SettingsError as exc:
         return _REFUSED.format(tool=TOOL_READ, why=str(exc))
     out = cst.view(doc, current, cfg)
-    act = joint_acts.open_act()
-    if act is not None and act.tool == TOOL_CHANGE:
-        waiting = [p.name or p.id for p in cfg.people if p.id not in act.approvals]
-        out["waiting_for_both"] = {"change": act.summary, "waiting_on": waiting}
     return json.dumps(out, ensure_ascii=False, sort_keys=True)
 
 
@@ -190,6 +168,24 @@ def _notes(doc: dict[str, Any], cfg: space_mod.SpaceConfig, current: space_mod.S
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
+def _speaker(
+    cfg: space_mod.SpaceConfig, current: space_mod.Space, user_id: str, session_id: str
+) -> space_mod.Person | None:
+    """The person making the request: the DM's or the private email's person,
+    the authored person whose Telegram id spoke in the group, or the verified
+    sender of a joint email thread. ``None`` for a cron run or anything else."""
+    if current.source in (space_mod.SOURCE_TELEGRAM_DM, space_mod.SOURCE_EMAIL):
+        return cfg.person(current.person_id or "")
+    if current.source == space_mod.SOURCE_TELEGRAM_GROUP:
+        return cfg.person_for_telegram(user_id)
+    if current.source == space_mod.SOURCE_EMAIL_JOINT:
+        from shared.inbound import SESSION_INBOUND_ORIGIN
+
+        origin = SESSION_INBOUND_ORIGIN.get(session_id)
+        return cfg.person_for_email(origin.sender_address) if origin is not None else None
+    return None
+
+
 def _change_handler(args: dict[str, Any], **kwargs: Any) -> str:
     session_id = str(kwargs.get("session_id") or "")
     turn = _turn(session_id)
@@ -198,7 +194,7 @@ def _change_handler(args: dict[str, Any], **kwargs: Any) -> str:
     cfg, current = turn
     from shared import turn_principal
 
-    speaker = joint_notice.speaker(cfg, current, turn_principal.current().user_id, session_id)
+    speaker = _speaker(cfg, current, turn_principal.current().user_id, session_id)
     if speaker is None:
         return _REFUSED.format(
             tool=TOOL_CHANGE,
@@ -223,50 +219,17 @@ def _change_handler(args: dict[str, Any], **kwargs: Any) -> str:
     except Exception as exc:  # noqa: BLE001 — the config itself is unreadable
         logger.warning("hermes-smd-couples-settings: change could not be checked (%s)", exc)
         return _REFUSED.format(tool=TOOL_CHANGE, why="the seat's settings could not be checked")
-    if not cs.needs_both(changes, doc, speaker.id):
-        try:
-            after = cs.apply_changes(
-                changes, kinds=kinds, agreed_by=[speaker.id], summary=summary, space=current
-            )
-        except cs.SettingsError as exc:
-            return _REFUSED.format(tool=TOOL_CHANGE, why=str(exc))
-        except OSError:
-            logger.exception("hermes-smd-couples-settings: settings could not be saved")
-            return _REFUSED.format(tool=TOOL_CHANGE, why="the settings could not be saved")
-        logger.info(
-            "hermes-smd-couples-settings: %d change(s) by %s applied", len(changes), speaker.id
-        )
-        return _DONE.format(summary=summary, notes=_notes(after, cfg, current))
-    return _hold(raw, summary, speaker, cfg)
-
-
-def _hold(raw: Any, summary: str, speaker: space_mod.Person, cfg: space_mod.SpaceConfig) -> str:
-    others = [p for p in cfg.people if p.id != speaker.id]
-    if not others or not all(joint_notice.reachable(p) for p in others):
-        return _REFUSED.format(
-            tool=TOOL_CHANGE, why="the other partner has no chat or email the seat can ask in"
-        )
     try:
-        act = joint_acts.propose(
-            {"changes": copy.deepcopy(raw)}, speaker.id, tool=TOOL_CHANGE, summary=summary
+        after = cs.apply_changes(
+            changes, kinds=kinds, changed_by=speaker.id, summary=summary, space=current
         )
-    except joint_acts.JointActError as exc:
+    except cs.SettingsError as exc:
         return _REFUSED.format(tool=TOOL_CHANGE, why=str(exc))
     except OSError:
-        logger.exception("hermes-smd-couples-settings: proposal could not be saved")
-        return _REFUSED.format(tool=TOOL_CHANGE, why="the proposal could not be kept")
-    text = joint_notice.PROPOSAL_NOTICE.format(who=speaker.name or speaker.id, payload=act.summary)
-    try:
-        for other in others:
-            joint_notice.notify(other, text)
-    except Exception:  # noqa: BLE001 — not asked means not held
-        logger.warning("hermes-smd-couples-settings: proposal notice not sent; withdrawn")
-        joint_acts.respond(speaker.id, False, cfg)
-        return _REFUSED.format(
-            tool=TOOL_CHANGE, why="the other partner could not be shown the change to agree to"
-        )
-    logger.info("hermes-smd-couples-settings: joint change %s proposed by %s", act.id, speaker.id)
-    return _HELD.format(others=", ".join(p.name or p.id for p in others), summary=act.summary)
+        logger.exception("hermes-smd-couples-settings: settings could not be saved")
+        return _REFUSED.format(tool=TOOL_CHANGE, why="the settings could not be saved")
+    logger.info("hermes-smd-couples-settings: %d change(s) by %s applied", len(changes), speaker.id)
+    return _DONE.format(summary=summary, notes=_notes(after, cfg, current))
 
 
 _HANDLERS = {TOOL_READ: _read_handler, TOOL_CHANGE: _change_handler}

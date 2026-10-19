@@ -2,9 +2,7 @@
 
 A turn can answer the email that opened it by more than one path: the reply
 channel relaying the model's draft (``hermes-smd-reply``), the seat delivering
-an act line, the space gate replying in the thread to ask for a confirmation
-(``hermes-smd-space-gate.email_confirm``), a code-sent notice anchored to the
-email. Every one of them reaches the broker through
+an act line, a code-sent notice anchored to the email. Every one of them reaches the broker through
 :func:`shared.agentmail_broker._call` with the email's anchor, so the broker
 client notes the anchor here and any later question "did this turn already
 answer that email" has one place to ask.

@@ -1,6 +1,6 @@
 name: hermes-smd-couples-settings
 version: "0.1.0"
-description: "Couples role (ss-console #3264): the couple sets their schedule and settings by talking to the agent. couples_settings_read shows what this space may see; couples_settings_change validates and applies a change that affects only the asker, and holds every other change for both partners' agree (shared.joint_acts). The settings live in one JSON document on the volume, read every quarter hour by the seat's slot jobs (shared.couples_gate). Seats without people: get no tools."
+description: "Couples role (ss-console #3264): the couple sets their schedule and settings by talking to the agent. couples_settings_read shows what this space may see; couples_settings_change validates a change from either partner and applies it at once. The settings live in one JSON document on the volume, read every quarter hour by the seat's slot jobs (shared.couples_gate). Seats without people: get no tools."
 author: VentureCrane
 # Empty on purpose: the gate is register(), which asks whether the seat authors
 # people:. A failing requires_env would drop the tools silently.

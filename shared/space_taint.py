@@ -13,14 +13,14 @@ The narrowing, on a seat that authors ``people:`` only:
   space (``record_store_write``, ``remember``). What it writes is stamped
   ``from_web: true`` so a later turn knows where it came from. The person who
   asked is the only reader, and the words never leave their space.
-* Anything that crosses into ``shared`` (or leaves the seat) stays blocked,
-  unless it went through the "share it" gate (``plugins/hermes-smd-space-gate``):
-  a person confirming the exact words is the injection defense there. The gate
-  notes a release (``shared.space_writes.note_release``) and the write spends it.
-* A scheduled run has no chat to confirm in: it may write only into its own
-  bound space.
-* A tainted turn in the shared group, or on an unresolved space, writes nothing,
-  as before.
+* A tainted turn in a person's own chat or email may also write a record into
+  ``shared``: either partner adds to the shared space alone (Captain decision
+  2026-10-19). That record is stamped ``from_web: true`` too, so the other
+  partner's later turns know where it came from.
+* A scheduled run, which no person asked for in that turn, may write only into
+  its own bound space.
+* A tainted turn in a shared conversation, or on an unresolved space, writes
+  nothing, as before.
 
 Seats without ``people:`` never reach this module: the old rule (no write on a
 tainted turn) is untouched there.
@@ -35,6 +35,10 @@ from shared import space as space_mod
 #: The provenance key a record written on a tainted turn carries.
 FROM_WEB_KEY = "from_web"
 
+#: The one write a tainted private turn may also make into ``shared``: a
+#: record, which carries the stamp. A send is never narrowed here.
+RECORD_WRITE = "record_store_write"
+
 
 def tainted_write_allowed(tool_name: str, session_id: Any, target_key: str | None) -> bool:
     """Whether a tainted turn may make this write. ``target_key`` is the space the
@@ -47,11 +51,12 @@ def tainted_write_allowed(tool_name: str, session_id: Any, target_key: str | Non
         return False
     if target_key == current.key and (current.private or current.source == space_mod.SOURCE_CRON):
         return True
-    if current.private and current.source in (space_mod.SOURCE_TELEGRAM_DM, space_mod.SOURCE_EMAIL):
-        from shared import space_writes
-
-        return space_writes.take_release(tool_name, current)
-    return False
+    return (
+        tool_name == RECORD_WRITE
+        and target_key == space_mod.SHARED
+        and current.private
+        and current.source in (space_mod.SOURCE_TELEGRAM_DM, space_mod.SOURCE_EMAIL)
+    )
 
 
 def stamp_from_web(content: str) -> str:
