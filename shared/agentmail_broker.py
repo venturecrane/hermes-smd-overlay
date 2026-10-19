@@ -49,7 +49,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from shared import attachment_spool
+from shared import answered_messages, attachment_spool
 from shared.same_origin_redirects import open_same_origin
 from shared.secrets import get_secret
 from shared.send_anchor import envelope_fields
@@ -115,14 +115,21 @@ def _call(
     # people out of the inbox itself.
     envelope.update(envelope_fields(anchor, lane))
     try:
-        return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
+        response = request(envelope, timeout=SEND_TIMEOUT_SECONDS)
     except OSError as exc:
+        # The broker may have sent: an unknown outcome counts as answered, so
+        # nothing downstream sends a second answer on a maybe.
+        answered_messages.note_anchor(anchor)
         # Transport-level (OSError covers socket timeouts: TimeoutError has
         # subclassed it since 3.10). The broker may or may not have sent. Distinguished
         # from BrokerError (a decision the broker made and recorded) because
         # reporting "you may not write to this person" when the truth is "the
         # socket timed out" would be a lie in the ledger's own language.
         raise AgentMailBrokerUnavailable(f"broker unreachable: {exc}") from exc
+    # Transmitted: the email this send answers has been answered (a refusal
+    # raised BrokerError above and answered nothing).
+    answered_messages.note_anchor(anchor)
+    return response
 
 
 def send_message(

@@ -28,7 +28,7 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
-from shared import cron_space, send_anchor, send_dispatch
+from shared import cron_space, send_anchor, send_dispatch, silence
 from shared import space as _space
 
 logger = logging.getLogger(__name__)
@@ -37,28 +37,12 @@ logger = logging.getLogger(__name__)
 FALLBACK_SUBJECT = "A note from your assistant"
 _SUBJECT_MAX = 78
 
-_SILENT_TOKENS = frozenset({"[silent]", "silent", "no_reply", "no reply"})
-
 _lock = threading.Lock()
 _delivered: OrderedDict[str, None] = OrderedDict()
 _MAX_REMEMBERED = 256
 
-
-def _is_silent(text: str) -> bool:
-    """Hermes' cron silence rule (``cron/scheduler.py`` ``_is_cron_silence_response``):
-    the shared matcher when importable, else the same tokens on the whole text
-    or its first or last line."""
-    try:
-        from gateway.response_filters import (  # type: ignore[import-not-found]
-            is_autonomous_silence_response,
-        )
-
-        return bool(is_autonomous_silence_response(text))
-    except Exception:  # noqa: BLE001 - outside the gateway, the local rule
-        lines = [ln.strip().lower() for ln in text.strip().splitlines() if ln.strip()]
-        if not lines:
-            return True
-        return any(c in _SILENT_TOKENS for c in (text.strip().lower(), lines[0], lines[-1]))
+#: One silence rule for every final-response consumer (``shared.silence``).
+_is_silent = silence.is_silent
 
 
 def subject_for(text: str) -> str:

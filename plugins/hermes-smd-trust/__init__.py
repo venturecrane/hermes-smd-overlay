@@ -34,6 +34,7 @@ from shared import (
     report_render,
     send_anchor,
     spec_stamp,
+    tool_gate,
 )
 from shared.broker_audit import write_decision
 from shared.casework_acts import CASEWORK_ACTS
@@ -1709,6 +1710,10 @@ def register(ctx) -> None:
     # the gate and the transport in one file and stops anyone reimplementing
     # them against the raw broker clients, which ARE importable from shared.
     set_sender(_dispatch_internal_message)
+    # The reply channel delivers a turn's final text as the reply the model did
+    # not draft (hermes-smd-reply text_delivery). It must clear THIS gate as the
+    # draft would have, so the gate itself is published, not a copy of it.
+    tool_gate.set_gate(on_pre_tool_call)
     register_wrapped_tool(
         ctx,
         name=_SEND_TOOL_NAME,
