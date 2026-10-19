@@ -87,6 +87,7 @@ from pathlib import Path
 from typing import Any
 
 from shared import (
+    answered_messages,
     inbound,
     matter_gate,
     msgraph_broker,
@@ -95,9 +96,12 @@ from shared import (
     report_render,
     request_index,
     send_policy,
+    silence,
     space,
     spec_gate,
+    tool_gate,
 )
+from shared.action_classes import ActionClass, BannedToolError, classify_tool
 from shared.audit_client import audit_client_from_env
 from shared.audit_contract import INSERT_SQL as _INSERT_SQL
 from shared.audit_contract import agent_event_params, sender_key
@@ -114,6 +118,7 @@ from . import (
     notice,
     relay,  # noqa: F401 - surface for tests
     sweeper,
+    text_delivery,
     working_drafts,
 )
 
@@ -452,9 +457,14 @@ def _emit_reply_event(
         resolved_matter = (
             matter_ref if matter_ref is not None else matter_gate.matter_ref_for(resolved_session)
         )
+        # A reply the seat built from the turn's final text (text_delivery)
+        # says so on every row it writes, held, failed or sent.
+        seat_text = (
+            {"seat_delivered_text": True} if getattr(_CURRENT_CALL, "seat_text", False) else {}
+        )
         params = agent_event_params(
             action_type=action_type,
-            metadata={"customer": _CUSTOMER_SLUG, "reply_channel": True, **metadata},
+            metadata={"customer": _CUSTOMER_SLUG, "reply_channel": True, **metadata, **seat_text},
             session_id=resolved_session or None,
             matter_ref=resolved_matter,
         )
@@ -772,6 +782,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
     transform never fired) or when the call carries no id. See
     :class:`relay.DecidedOnce`.
     """
+    _note_turn_send(kwargs.get("tool_name"), kwargs.get("session_id"))
     if (kwargs.get("tool_name") or "") == binding.TOOL_NAME:
         _record_binding(kwargs)
         return
@@ -786,6 +797,14 @@ def on_pre_tool_call(**kwargs: Any) -> dict[str, Any] | None:
     """Block every send in a job's completion wake (binding.py). The bound reply
     is that turn's only channel (for a scheduled litigation run, a bound NEW
     message the broker addresses). Exception-safe."""
+    # Core drops session_id on this fire site (overlay #141); resolve it the
+    # way the trust gate does. post_tool_call notes it again under the real id.
+    try:
+        _note_turn_send(
+            kwargs.get("tool_name"), provenance.resolve_session(kwargs.get("session_id") or "")
+        )
+    except Exception:  # noqa: BLE001 - noting never blocks a call
+        logger.debug("hermes-smd-reply: turn-send note failed", exc_info=True)
     try:
         session_id = kwargs.get("session_id")
         message = binding.wake_send_refusal(
@@ -805,6 +824,8 @@ def on_pre_llm_call(**kwargs: Any) -> None:
     Observes; injects nothing. Exception-safe."""
     try:
         session_id = kwargs.get("session_id")
+        # A new turn: no draft or send attempted in it yet (text_delivery).
+        _TURN_SENDS.reset(session_id if isinstance(session_id, str) else "")
         binding.TURN_SOURCES.note(
             session_id if isinstance(session_id, str) else "",
             kwargs.get("sender_id"),
@@ -1685,12 +1706,177 @@ def _deliver_owed_act(session_id: str) -> str:
 
 
 def on_turn_end(**kwargs: Any) -> None:
-    """``post_llm_call`` and ``on_session_end``: deliver an owed act line."""
+    """``on_session_end`` (and the first half of ``post_llm_call``): deliver an
+    owed act line."""
     try:
         session_id = kwargs.get("session_id")
         _deliver_owed_act(session_id if isinstance(session_id, str) else "")
     except Exception as exc:  # noqa: BLE001 - never raise out of a hook
         logger.error("hermes-smd-reply: end-of-turn act delivery failed (%s)", exc)
+
+
+# Sessions whose current turn attempted a draft or a send, and the inbound
+# messages whose final text the seat already put on the relay (text_delivery).
+_TURN_SENDS = text_delivery.TurnSends()
+_TEXT_DELIVERED = text_delivery.DeliveredOnce()
+
+_SEND_CLASSES = frozenset(
+    {
+        ActionClass.EXTERNAL_SEND,
+        ActionClass.EXTERNAL_SEND_INTERNAL,
+        ActionClass.EXTERNAL_SEND_CLIENT,
+        ActionClass.EXTERNAL_SEND_VENDOR,
+        ActionClass.EXTERNAL_SEND_AS_STAFF,
+    }
+)
+
+
+def _is_send_shaped(tool_name: str) -> bool:
+    """A draft, a bound reply, or anything the registry classes as a send."""
+    if tool_name in _CREATE_DRAFT_TOOLS or tool_name == binding.TOOL_NAME:
+        return True
+    try:
+        return classify_tool(tool_name).action_class in _SEND_CLASSES
+    except BannedToolError:
+        return True  # a banned send is still an attempt to send
+    except Exception:  # noqa: BLE001 - an unclassifiable name is not a known send
+        return False
+
+
+def _note_turn_send(tool_name: Any, session_id: Any) -> None:
+    """Mark this turn as one that tried to answer by itself. Never raises."""
+    try:
+        if isinstance(tool_name, str) and isinstance(session_id, str) and session_id:
+            if _is_send_shaped(tool_name):
+                _TURN_SENDS.note(session_id)
+    except Exception:  # noqa: BLE001 - observation only
+        logger.debug("hermes-smd-reply: turn-send note failed", exc_info=True)
+
+
+def _deliver_text_reply(session_id: str, response: Any) -> str:
+    """End of turn: send the final text as the reply the model did not draft.
+
+    See ``text_delivery``. Returns the outcome word for tests and logs:
+    ``none`` (nothing owed), ``answered`` (the email was already answered or
+    the turn tried to), ``silent``, ``not_rostered``, ``adapter``, ``blocked``
+    (the trust gate refused it), ``held`` (the relay held it), or ``sent``
+    (sent, or durably queued for release). Never raises."""
+    if not _INFRA_READY or not session_id:
+        return "none"
+    # THIS turn's own email only (participant fence). A cron, a wake, a
+    # Telegram or MCP turn has none and is never answered by email from here.
+    origin = inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
+    if origin is None or not origin.message_id or not origin.sender_address:
+        return "none"
+    text = response if isinstance(response, str) else ""
+    if silence.is_silent(text):
+        return "silent"
+    message_id = origin.message_id
+    if (
+        _TURN_SENDS.attempted(session_id)
+        or _REPLIED.committed(message_id)
+        or answered_messages.answered(message_id)
+    ):
+        return "answered"
+    try:
+        cfg = CustomerConfig.from_volume(str(_YAML_PATH))
+    except (CustomerConfigError, OSError) as exc:
+        logger.warning("hermes-smd-reply: customer.yaml unreadable (%s); no text reply", exc)
+        return "none"
+    if _email_adapter(cfg) not in text_delivery.ADAPTERS:
+        return "adapter"
+    # Checked here as well as in the relay so a stranger's turn writes no trust
+    # decision and no hold row: their mail was quarantined, and its final text
+    # going nowhere is the designed behavior, not a held reply.
+    if not cfg.sender_on_roster(origin.sender_address):
+        return "not_rostered"
+    if not _TEXT_DELIVERED.claim(message_id):
+        return "answered"
+
+    call_id = f"{text_delivery.CALL_ID_PREFIX}{message_id}"
+    args = text_delivery.draft_args(origin.sender_address, text_delivery.scrub(text))
+    verdict = tool_gate.evaluate(
+        text_delivery.DRAFT_TOOL, args, session_id=session_id, tool_call_id=call_id
+    )
+    _CURRENT_CALL.seat_text = True
+    try:
+        if verdict is not None:
+            # The refusal's wording stays in the log, never the row: rows carry
+            # reason codes only.
+            _CURRENT_CALL.session_id = session_id
+            _CURRENT_CALL.tool_call_id = call_id
+            _held("trust_gate_refused", origin)
+            _HOLD_NOTICES.take(call_id)
+            _CURRENT_CALL.tool_call_id = ""
+            logger.warning(
+                "hermes-smd-reply: the turn's text reply to %s was refused by the trust gate",
+                message_id,
+            )
+            _page_text_hold("trust_gate_refused")
+            return "blocked"
+        _relay_draft(
+            tool_name=text_delivery.DRAFT_TOOL,
+            args=args,
+            session_id=session_id,
+            tool_call_id=call_id,
+        )
+    finally:
+        _CURRENT_CALL.seat_text = False
+        _CURRENT_CALL.session_id = ""
+    # No model reads this call's result, so a hold notice has nobody to reach;
+    # the REPLY_HELD row is the record.
+    notice_left = _HOLD_NOTICES.take(call_id)
+    if _REPLIED.committed(message_id):
+        logger.warning(
+            "hermes-smd-reply: the turn ended in text and drafted nothing; the seat "
+            "delivered the text as the reply to %s",
+            message_id,
+        )
+        return "sent"
+    reason = str(getattr(notice_left, "reason", "") or "held")
+    logger.warning(
+        "hermes-smd-reply: the turn's text reply to %s was not delivered (%s)",
+        message_id,
+        reason,
+    )
+    _page_text_hold(reason)
+    return "held"
+
+
+def _page_text_hold(reason: str) -> None:
+    """A rostered sender's email got no answer and no model will be told: page.
+
+    A drafted reply's hold reaches the model in its turn; this one's turn is
+    over, so the page is the only telling. Reason code only. Never raises."""
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("reason", reason)
+            scope.set_tag("customer", _CUSTOMER_SLUG or "")
+            sentry_sdk.capture_message("seat_text_reply_held", level="error")
+    except Exception as exc:  # noqa: BLE001 - monitoring must never break the hook
+        logger.debug("hermes-smd-reply: text hold page skipped (%s)", exc)
+
+
+def on_post_llm_call(**kwargs: Any) -> None:
+    """``post_llm_call``: deliver an owed act line, else the turn's text reply.
+
+    An owed act line is the turn's answer when there is one, so the text is
+    considered only when no act was owed (``text_delivery``)."""
+    session_id = kwargs.get("session_id")
+    sid = session_id if isinstance(session_id, str) else ""
+    try:
+        act = _deliver_owed_act(sid)
+    except Exception as exc:  # noqa: BLE001 - never raise out of a hook
+        logger.error("hermes-smd-reply: end-of-turn act delivery failed (%s)", exc)
+        return
+    if act != "none":
+        return
+    try:
+        _deliver_text_reply(sid, kwargs.get("assistant_response"))
+    except Exception as exc:  # noqa: BLE001 - never raise out of a hook
+        logger.error("hermes-smd-reply: end-of-turn text delivery failed (%s)", exc)
 
 
 def register(ctx) -> None:
@@ -1760,7 +1946,9 @@ def register(ctx) -> None:
     # the end of the turn (act_delivery). Both hooks: post_llm_call fires only
     # on a completed turn, on_session_end on every turn; the ledger's claim keeps
     # the line from going out twice.
-    ctx.register_hook("post_llm_call", on_turn_end)
+    # post_llm_call also carries the turn's final text: a rostered sender's
+    # email answered only in text gets that text as its reply (text_delivery).
+    ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("on_session_end", on_turn_end)
     logger.info(
         "hermes-smd-reply registered (infra_ready=True, customer=%s); "

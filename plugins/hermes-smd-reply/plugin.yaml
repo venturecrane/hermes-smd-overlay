@@ -24,7 +24,9 @@ provides_hooks:
   - transform_tool_result
   # An act line the model proposed and never sent is delivered by the seat at
   # the end of the turn (act_delivery.py): post_llm_call for a completed turn,
-  # on_session_end for any turn.
+  # on_session_end for any turn. post_llm_call also delivers a rostered sender's
+  # reply the model wrote as final text and never drafted (text_delivery.py),
+  # through the trust gate and this plugin's own relay decision.
   - post_llm_call
   - on_session_end
 hooks:
