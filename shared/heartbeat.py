@@ -1470,6 +1470,12 @@ def build_payload(
     shortfalls: int | None = None,
     shortfalls_last_ts: str | None = None,
     shortfalls_json: list[dict] | None = None,
+    image_ref: str | None = None,
+    config_digest: str | None = None,
+    skills_version: str | None = None,
+    jobs_running: int | None = None,
+    jobs_queued: int | None = None,
+    wakes_pending: int | None = None,
 ) -> dict[str, object]:
     """Assemble the heartbeat body. ``heartbeat_ts`` is the only required
     field at the receiver; optional fields are omitted when absent rather
@@ -1614,6 +1620,23 @@ def build_payload(
         payload["shortfalls_last_ts"] = shortfalls_last_ts
     if shortfalls_json is not None:
         payload["shortfalls_json"] = shortfalls_json
+    # Seat fleet scaling: what the seat runs and how busy it is
+    # (shared/fleet_facts.py). Null is unknown, 0 is none: the job counts use
+    # is-not-None so an idle seat's 0 reaches the wire (it is what lets a
+    # rollout restart the seat), and an unknown count stays absent so the
+    # receiver stores NULL and the busy gate refuses rather than assuming idle.
+    if image_ref:
+        payload["image_ref"] = image_ref
+    if config_digest:
+        payload["config_digest"] = config_digest
+    if skills_version:
+        payload["skills_version"] = skills_version
+    if jobs_running is not None:
+        payload["jobs_running"] = jobs_running
+    if jobs_queued is not None:
+        payload["jobs_queued"] = jobs_queued
+    if wakes_pending is not None:
+        payload["wakes_pending"] = wakes_pending
     return payload
 
 
@@ -2007,6 +2030,7 @@ class HeartbeatEmitter:
             token_age = token_ages() or None
         except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
             logger.debug("heartbeat: token-age read failed: %s", exc)
+        fleet = _read_fleet_facts()
         payload = build_payload(
             heartbeat_ts=_iso_utc_now(),
             last_audit_ts=ledger.last_audit_ts,
@@ -2043,6 +2067,12 @@ class HeartbeatEmitter:
             shortfalls=ledger.shortfalls,
             shortfalls_last_ts=ledger.shortfalls_last_ts,
             shortfalls_json=ledger.shortfalls_json,
+            image_ref=fleet.image_ref if fleet is not None else None,
+            config_digest=fleet.config_digest if fleet is not None else None,
+            skills_version=fleet.skills_version if fleet is not None else None,
+            jobs_running=fleet.jobs_running if fleet is not None else None,
+            jobs_queued=fleet.jobs_queued if fleet is not None else None,
+            wakes_pending=fleet.wakes_pending if fleet is not None else None,
         )
         import json
 
@@ -2063,6 +2093,18 @@ class HeartbeatEmitter:
             )
         else:
             logger.warning("heartbeat: control-plane returned %d", status)
+
+
+def _read_fleet_facts():
+    """The six fleet-table facts, or None (every field omitted) if the read
+    itself crashed. Each reader inside already maps its own failure to None."""
+    try:
+        from shared.fleet_facts import read_fleet_facts
+
+        return read_fleet_facts()
+    except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
+        logger.debug("heartbeat: fleet facts read failed: %s", exc)
+        return None
 
 
 def _read_cron_containment() -> bool | None:
