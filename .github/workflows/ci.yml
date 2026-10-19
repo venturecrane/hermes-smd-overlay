@@ -35,7 +35,8 @@ jobs:
       # The title-model falsifier (tests/test_title_generation_model.py) builds
       # the seat's title request with the REAL Hermes Anthropic adapter, so it
       # needs the fleet's pinned Hermes source. Keep this SHA equal to the
-      # hermes_ref the seats run (ss-console operator/customers/*/customer.yaml).
+      # Hermes the seats run (ss-console operator/templates/Dockerfile,
+      # ARG HERMES_UPSTREAM_SHA).
       - name: Check out pinned Hermes (read-only, outside the workspace)
         run: |
           git init -q "$RUNNER_TEMP/hermes-agent"
