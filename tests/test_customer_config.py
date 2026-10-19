@@ -205,8 +205,22 @@ def test_validate_reports_missing_top_level_fields(tmp_path):
     assert any("customer_name" in e for e in errors)
     assert any("vertical" in e for e in errors)
     assert any("fly_region" in e for e in errors)
-    assert any("hermes_ref" in e for e in errors)
     assert any("model" in e for e in errors)
+    # The Hermes pin is the Dockerfile's alone; a config without it is valid.
+    assert not any("hermes_ref" in e for e in errors)
+
+
+def test_validate_tolerates_hermes_ref_absent_or_present(tmp_path):
+    with_ref = _write(tmp_path, VALID_YAML)
+    assert "hermes_ref" in with_ref.read_text()
+    assert validate_customer_yaml(with_ref) == []
+    without = tmp_path / "without.yaml"
+    without.write_text(
+        "\n".join(line for line in VALID_YAML.splitlines() if not line.startswith("hermes_ref:"))
+        + "\n"
+    )
+    assert "hermes_ref" not in without.read_text()
+    assert validate_customer_yaml(without) == []
 
 
 def test_validate_rejects_unknown_vertical(tmp_path):
