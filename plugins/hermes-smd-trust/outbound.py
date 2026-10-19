@@ -30,7 +30,6 @@ not the row.
 
 import logging
 import os
-import re
 import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -38,6 +37,7 @@ from typing import Any
 from shared import (
     identifier_filter,
     output_checklist,
+    policy_profile,
     provenance,
     report_render,
     send_anchor,
@@ -575,10 +575,18 @@ def _emit_fabrication_audit(
 #     The SEND gate gets NO such carve: an autonomous external send composed
 #     with an empty register is exactly "cannot verify" — it blocks.
 #
+#   * Recurring dates, on a seat whose ROLE policy says so (shared/policy_profile,
+#     ``recurring_dates: verify_by_month_day``): a DATE that is this or next
+#     year's occurrence of a yearly date read from the record store this
+#     session verifies. DATE only; the floors (SSN, A-number, receipt, case
+#     number, PAIR) are not relaxable by any policy.
+#
 # Rollback lever: SMD_IDENTIFIER_GATE_MODE=report downgrades to report-only
 # (operator-only env, never client-authorable; unset or any other value =
 # block, fail-closed). The gate keeps emitting IDENTIFIER_UNVERIFIED rows in
-# either mode — telemetry continuity through an incident.
+# either mode — telemetry continuity through an incident. It is a FLEET-WIDE
+# incident rollback, not per-seat posture: per-seat posture is role policy, and
+# seat facts and the boot smoke flag any seat where the lever is set.
 # ---------------------------------------------------------------------------
 
 
@@ -635,6 +643,16 @@ def _is_ambient(hit: identifier_filter.IdentifierHit, ambient: frozenset[str]) -
         _, _, date_half = hit.canonical.rpartition("|")
         return date_half in ambient
     return False
+
+
+def _line_carries_case_number(body: str, span: tuple[int, int], known_re: Any) -> bool:
+    """True when the line holding ``span`` also carries a case or matter number."""
+    start = body.rfind("\n", 0, span[0]) + 1
+    end = body.find("\n", span[1])
+    line = body[start : end if end != -1 else len(body)]
+    if identifier_filter._CASE_RE.search(line):
+        return True
+    return bool(known_re is not None and known_re.search(line))
 
 
 def _days_from_today_bucket(canonical: str) -> str:
@@ -724,9 +742,15 @@ def _emit_identifier_audit(
     tool_call_id: str,
     vertical: str | None,
     cohort: str | None,
+    policy: policy_profile.Policy | None = None,
+    recurring_verified: int = 0,
 ) -> None:
     """Write the IDENTIFIER_UNVERIFIED row. Raises to the caller's guard — the
-    caller treats emission as best-effort and a failure NEVER rescinds a block."""
+    caller treats emission as best-effort and a failure NEVER rescinds a block.
+
+    ``policy`` puts the seat's resolved posture on the row (``policy_mode``:
+    ``block``, ``verify_recurring`` or the lever's ``report``), so a date the
+    role policy passed is distinguishable from one the lever passed."""
     client, slug = _audit_client()
     if client is None or slug is None:
         _NO_AUDIT_WARNER.warn(logger, f"IDENTIFIER_UNVERIFIED on tool={tool_name} not recorded")
@@ -758,6 +782,13 @@ def _emit_identifier_audit(
         metadata["source"] = "seat_text"
     if block_bypass:
         metadata["block_bypass"] = block_bypass
+    if policy is not None:
+        metadata["policy_mode"] = policy.identifier_mode
+        metadata["policy_source"] = policy.source
+    if recurring_verified:
+        # value-free: how many dates the role policy verified (a yearly
+        # occurrence, or an invitation's own date in the email carrying it)
+        metadata["recurring_verified"] = recurring_verified
     if date_distance:
         # value-free: distance buckets, not dates (post-flip FP triage axis)
         metadata["date_distance"] = date_distance
@@ -797,6 +828,15 @@ def _check_identifiers(
       2. decide — pure, unguarded: nothing to swallow.
       3. audit  — best-effort: an emission failure never rescinds a block.
     """
+    # The seat's role policy. Resolved outside the scan guard on purpose: a
+    # fault here must make the seat STRICTER (platform default), never fall into
+    # the scan-crash allow below.
+    try:
+        policy = policy_profile.current()
+    except Exception:  # noqa: BLE001 — current() never raises; belt and braces
+        policy = policy_profile.PLATFORM_DEFAULT
+    recurring_verified = 0
+
     # -- zone 1: scan --
     try:
         register = provenance.register_for(session_id)
@@ -807,6 +847,36 @@ def _check_identifiers(
             for h in result.unverified
             if h.kind is not identifier_filter.IdKind.NAME and not _is_ambient(h, ambient)
         ]
+        known_re = identifier_filter._known_number_re(register.matter_numbers())
+        self_dates = provenance.current_self_dates()
+        if policy.own_calendar_is_source and self_dates and unverified:
+            # An invitation's own dates, in the one email that carries it (set by
+            # the calendar plugin's code for that send only). DATE kind only, and
+            # never beside a case number, as below.
+            kept = [
+                h
+                for h in unverified
+                if h.kind not in policy_profile.RELAXABLE_KINDS
+                or h.canonical not in self_dates
+                or _line_carries_case_number(body, h.span, known_re)
+            ]
+            recurring_verified += len(unverified) - len(kept)
+            unverified = kept
+        if policy.recurring_dates == policy_profile.RECURRING_VERIFY and unverified:
+            # A yearly date's occurrence (DATE kind only; floors never reach here).
+            # Never beside a case number: a date on a matter's line is a claim
+            # about the matter, and the pair floor must not depend on whether
+            # the register happened to hold associations to judge it by.
+            month_days = provenance.recurring_for(session_id)
+            kept = [
+                h
+                for h in unverified
+                if h.kind not in policy_profile.RELAXABLE_KINDS
+                or _line_carries_case_number(body, h.span, known_re)
+                or not policy_profile.recurring_occurrence_verifies(h.canonical, month_days)
+            ]
+            recurring_verified += len(unverified) - len(kept)
+            unverified = kept
         register_was_empty = result.register_was_empty
         # ss-console#2511 — the negative register. A hit the SEAT's own text
         # supplied is a different finding from a hit nothing supplied, and
@@ -867,6 +937,8 @@ def _check_identifiers(
             tool_call_id=tool_call_id,
             vertical=vertical,
             cohort=cohort,
+            policy=policy,
+            recurring_verified=recurring_verified,
         )
     except Exception as exc:  # noqa: BLE001 — audit is best-effort vs the decision
         logger.warning(
@@ -1100,7 +1172,9 @@ _BODY_REQUIRED_SEND_TOOLS: frozenset[str] = frozenset(
 # has no business making.
 # ---------------------------------------------------------------------------
 
-_DASH_RE = re.compile(r"[ \t]*[—–][ \t]*")
+#: The one dash normalizer (``shared.report_render.normalize_dashes``), shared
+#: with the space-delivery render so the two can never disagree.
+_DASH_RE = report_render.DASH_RE
 
 #: The output class whose sends are normalized rather than refused.
 _DASH_NORMALIZED_CLASS = "staff"
@@ -1139,7 +1213,7 @@ def _normalize_staff_dashes(tool_name: str, args: dict | None, session_id: str) 
         value = args.get(key)
         if not isinstance(value, str) or not value:
             continue
-        rewritten = _DASH_RE.sub(", ", value)
+        rewritten = report_render.normalize_dashes(value)
         if rewritten != value:
             args[key] = rewritten
             changed = True
@@ -1580,6 +1654,18 @@ def _merge(
     return list(seen.values())
 
 
+def _checklist_profile() -> str:
+    """The seat role's checklist profile (shared/policy_profile); paralegal on any fault.
+
+    The withheld notice (:func:`_notice_subject`) does not use this: it is an
+    internal SMD note and stays on the paralegal standard on every seat.
+    """
+    try:
+        return policy_profile.current().checklist_profile
+    except Exception:  # noqa: BLE001 — current() never raises; strict on any fault
+        return output_checklist.PROFILE_PARALEGAL
+
+
 def _check_checklist(
     *,
     tool_name: str,
@@ -1600,7 +1686,8 @@ def _check_checklist(
     text, so an infra fault in it is not evidence about the text.
     """
     try:
-        found = _merge([output_checklist.check(text, surface) for text in texts if text])
+        profile = _checklist_profile()
+        found = _merge([output_checklist.check(text, surface, profile) for text in texts if text])
     except Exception as exc:  # noqa: BLE001 - see docstring
         logger.error("outbound gate: output checklist CRASHED (tool=%s err=%s)", tool_name, exc)
         return None
@@ -1719,7 +1806,8 @@ def send_checklist_rules(tool_name: str, args: dict | None, session_id: str) -> 
         output_checklist.STAFF_SEND if output_class == "staff" else output_checklist.EVERY_OUTPUT
     )
     try:
-        found = _merge([output_checklist.check(t, surface) for t in _send_texts(args)])
+        profile = _checklist_profile()
+        found = _merge([output_checklist.check(t, surface, profile) for t in _send_texts(args)])
     except Exception:  # noqa: BLE001 - a naming aid, never a decision
         return []
     return [v.rule for v in output_checklist.refusing(found)]

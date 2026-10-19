@@ -93,6 +93,7 @@ from shared import (
     matter_gate,
     msgraph_broker,
     output_checklist,
+    policy_profile,
     provenance,
     report_render,
     request_index,
@@ -582,7 +583,9 @@ def _checklist_violations(
     """
     surface = output_checklist.STAFF_SEND if internal else output_checklist.EXTERNAL_REPLY
     try:
-        found = output_checklist.check(text or "", surface)
+        # The seat role's profile (shared/policy_profile); paralegal by default.
+        profile = policy_profile.current().checklist_profile
+        found = output_checklist.check(text or "", surface, profile)
     except Exception:  # noqa: BLE001 - see docstring
         logger.exception("hermes-smd-reply: output checklist raised; relaying unchecked")
         return None

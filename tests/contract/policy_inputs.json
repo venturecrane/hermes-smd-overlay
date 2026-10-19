@@ -1,0 +1,43 @@
+{
+  "_comment": "Policy inputs for every live seat, generated from ss-console operator/customers/*/customer.yaml (seat.role) and operator/roles/<role>/role.yaml (the policy: block, verbatim) by tests/policy-matrix.test.ts (ADR 0093). Underscore-prefixed scaffolds and .decommissioned. tombstones are excluded. role is null when the seat selects no role; role_policy is null when the role authors no policy: block (both resolve to the platform default). Do not hand-edit: regenerate with UPDATE_POLICY_MATRIX=1, then copy this file over hermes-smd-overlay tests/contract/policy_inputs.json in the same change, where tests/test_policy_matrix.py resolves it against tests/contract/policy_matrix_expected.json.",
+  "generated_from": "venturecrane/ss-console@b23324a85bd8f94c6026480d30db764b44c240a5",
+  "seats": {
+    "ashton-price": {
+      "role": null,
+      "role_policy": null
+    },
+    "brokery": {
+      "role": null,
+      "role_policy": null
+    },
+    "captain-mark": {
+      "role": "couples",
+      "role_policy": {
+        "identifier_gate": {
+          "recurring_dates": "verify_by_month_day",
+          "provenance_sources": [
+            "calendar_invite_list",
+            "couples_settings_read"
+          ]
+        },
+        "output_checklist": {
+          "profile": "household"
+        },
+        "rationale": "A couples seat reminds the couple of their own recorded birthdays and anniversaries, whose next occurrence falls in a year nobody wrote down; a date verifies only when its month and day match a date read from the seat's own record store this session, so invented dates stay blocked. Its scheduled routines also send invites and reminders for dates the couple set through the agent itself, so reads of the seat's own invite list and settings count as a source for those dates (cron-created recurring invites were refused on captain-mark 2026-10-19). Its sends are household notes between two partners, so paralegal wording rules (exclamation marks, unknown all-caps words) do not apply.",
+        "adr": "docs/adr/0093-seat-policy-profiles.md"
+      }
+    },
+    "pilot-smokeball": {
+      "role": null,
+      "role_policy": null
+    },
+    "scott": {
+      "role": null,
+      "role_policy": null
+    },
+    "smd-staging": {
+      "role": null,
+      "role_policy": null
+    }
+  }
+}

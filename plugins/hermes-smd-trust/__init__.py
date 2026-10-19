@@ -26,6 +26,7 @@ from shared import (
     matter_binding,
     matter_gate,
     outbound_attachment,
+    policy_profile,
     pre_run_handoff,
     prerendered_dispatch,
     provenance,
@@ -596,6 +597,19 @@ def _commit_confirmed_act(tool_name: str, session_id: str, kwargs: dict[str, Any
         logger.warning("hermes-smd-trust: act commit failed", exc_info=True)
 
 
+def _role_names_as_source(tool_name: str) -> bool:
+    """True when this seat's role policy names ``tool_name`` (a seat-owned read)
+    as a provenance source. The closed list is checked first, so no other read
+    pays for the policy lookup. Any fault is False: the read stays a non-source."""
+    normalized = (tool_name or "").strip().lower()
+    if normalized not in policy_profile.SEAT_OWNED_SOURCE_TOOLS:
+        return False
+    try:
+        return normalized in policy_profile.current().provenance_sources
+    except Exception:  # noqa: BLE001 — current() never raises; strict on any fault
+        return False
+
+
 def on_post_tool_call(**kwargs: Any) -> None:
     """Populate the per-session identifier provenance register from READ-tool
     results (A1).
@@ -663,6 +677,14 @@ def on_post_tool_call(**kwargs: Any) -> None:
         # carried along by a change to the identifier register.
         text = result if isinstance(result, str) else str(result)
         if provenance.seeds_provenance(tool_name):
+            provenance.record_read(resolved, text)
+            # Month-days of yearly dates (record-store reads only). Inert unless
+            # the seat's role policy verifies recurring dates (policy_profile).
+            provenance.record_recurring_read(resolved, tool_name, text)
+        elif _role_names_as_source(tool_name):
+            # A seat-owned store this seat's ROLE names as a source (policy
+            # identifier_gate.provenance_sources, a closed code-side list).
+            # Fleet-wide it is a non-source; on that role it seeds.
             provenance.record_read(resolved, text)
         else:
             # NOT discarded. A read the seat performed on its own text is

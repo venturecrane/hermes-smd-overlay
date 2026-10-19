@@ -915,6 +915,39 @@ def test_identifier_rule_follows_the_gate_mode_it_reads(sf, tmp_path, monkeypatc
     assert _build(sf, tmp_path)["working_rules"]["identifier_gate"]["refusing"] is True
 
 
+def test_identifier_rule_reports_the_role_policy_and_the_lever(sf, tmp_path, monkeypatch):
+    """The posture comes from shared.policy_profile, so the seat tells the model
+    the truth: a role that verifies yearly dates says so, a law seat says block,
+    and the fleet lever outranks both.
+
+    FALSIFIER: read only the env var (the old code) and the verify_recurring
+    branch reports ``block`` on the couples seat.
+    """
+    roles = tmp_path / "roles" / "couples"
+    roles.mkdir(parents=True)
+    (roles / "role.yaml").write_text(
+        "role: couples\npersona: persona.md\npolicy:\n"
+        "  identifier_gate: {recurring_dates: verify_by_month_day}\n"
+        "  rationale: yearly dates are month and day\n  adr: ADR-test\n"
+    )
+    monkeypatch.setenv("ROLES_DIR", str(tmp_path / "roles"))
+    monkeypatch.delenv("SMD_IDENTIFIER_GATE_MODE", raising=False)
+
+    law = _build(sf, tmp_path)["working_rules"]["identifier_gate"]
+    assert (law["mode"], law["lever_set"], law["refusing"]) == ("block", False, True)
+
+    couples_raw = _raw_config(seat={"kind": "customer", "role": "couples"})
+    couples = _build(sf, tmp_path, raw=couples_raw)["working_rules"]["identifier_gate"]
+    assert couples["mode"] == "verify_recurring"
+    assert couples["refusing"] is True
+    assert "birthday" in couples["says"]
+    assert couples["policy_source"] == "role:couples"
+
+    monkeypatch.setenv("SMD_IDENTIFIER_GATE_MODE", "report")
+    lever = _build(sf, tmp_path, raw=couples_raw)["working_rules"]["identifier_gate"]
+    assert (lever["mode"], lever["lever_set"], lever["refusing"]) == ("report", True, False)
+
+
 def test_never_computes_rides_the_same_gate_and_says_so(sf, tmp_path):
     """reads-never-computes has no separate mechanism — it is a consequence of
     the provenance register (a computed date is in no source). The section says

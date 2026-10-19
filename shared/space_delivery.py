@@ -48,7 +48,7 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
-from shared import cron_space, hook_worker, send_anchor, send_dispatch, silence
+from shared import cron_space, hook_worker, report_render, send_anchor, send_dispatch, silence
 from shared import space as _space
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,13 @@ def deliver(
             return None
         if not _claim(sid):
             return None
+        # A routine is one-shot: refused once, the person hears nothing. The
+        # model writes markdown and dashes in a final response (2026-10-19
+        # 17:56Z, captain-mark: "line 5 carries markup '**'"), so the text is
+        # rendered to what a person reads FIRST, and the gate scans and the
+        # transport sends that same rendered text. Fabrication scans see every
+        # word: rendering removes markers, never claims.
+        text = report_render.render_message_plain(text)
         result = send_dispatch.dispatch(
             to=list(run.recipients),
             subject=subject_for(text),
