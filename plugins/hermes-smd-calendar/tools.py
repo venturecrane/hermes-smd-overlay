@@ -92,7 +92,11 @@ def _ical_event(event: StoredEvent, seat: seat_mod.Seat) -> ical.Event:
 
 def _body(kind: str, event: StoredEvent) -> tuple[str, str]:
     """The subject and plain text the invitation rides in. A fixed frame around
-    the event's own fields; nothing here is said that the event does not say."""
+    the event's own fields; nothing here is said that the event does not say.
+
+    Words only: this text meets the seat's copy scans as prose, so no protocol
+    form (an RRULE, a DTSTART stamp) is ever echoed here. The protocol rides the
+    invitation part (``calendar``), which no prose scan reads."""
     when = ical.describe_when(_when_of(event))
     if kind == "cancel":
         return f"Canceled: {event.title}", f"{event.title}\n{when}\n\nThis event is canceled."
@@ -100,7 +104,7 @@ def _body(kind: str, event: StoredEvent) -> tuple[str, str]:
     if event.location:
         lines.append(f"Where: {event.location}")
     if event.rrule:
-        lines.append(f"Repeats: {event.rrule}")
+        lines.append(f"Repeats: {ical.describe_rrule(event.rrule)}")
     if event.description:
         lines += ["", event.description]
     prefix = "Updated invitation" if kind == "update" else "Invitation"

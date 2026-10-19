@@ -447,6 +447,77 @@ def describe_when(when: When) -> str:
     return f"{start.strftime('%A, %B %-d, %Y, %-I:%M %p')} to {tail} ({label})"
 
 
+_DAY_NAMES = dict(
+    zip(
+        _WEEKDAYS,
+        ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+        strict=True,
+    )
+)
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)  # fmt: skip
+_UNIT = {"DAILY": "day", "WEEKLY": "week", "MONTHLY": "month", "YEARLY": "year"}
+_ORDINAL_WORDS = ("first", "second", "third", "fourth", "fifth")
+
+
+def _and(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _nth(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _position(n: int) -> str:
+    """1 -> "first", -1 -> "last", -2 -> "second to last", 12 -> "12th"."""
+    if n < 0:
+        return "last" if n == -1 else f"{_position(-n)} to last"
+    return _ORDINAL_WORDS[n - 1] if n <= len(_ORDINAL_WORDS) else _nth(n)
+
+
+def _byday(item: str) -> str:
+    match = _BYDAY_RE.match(item)
+    assert match is not None  # parse_rrule admitted it
+    ordinal, day = match.group(1), _DAY_NAMES[match.group(2)]
+    return f"the {_position(int(ordinal))} {day}" if ordinal else day
+
+
+def describe_rrule(rule: str) -> str:
+    """A normalized RRULE (from :func:`parse_rrule`) in words, for the message
+    body the invitation rides in; ``""`` for no rule.
+
+    The body is what a person reads and what the seat's copy scans read. The
+    rule's protocol form belongs to the invitation part alone: echoing
+    ``FREQ=WEEKLY;INTERVAL=2`` into the body refused every repeating invitation
+    on the capitals rule (ss-console#3264, 2026-10-19). Total over the closed
+    grammar, so nothing the grammar admits renders as protocol."""
+    if not rule:
+        return ""
+    parts = dict(item.split("=", 1) for item in rule.split(";"))
+    unit = _UNIT[parts["FREQ"]]
+    interval = int(parts.get("INTERVAL", "1"))
+    words = f"every {unit}" if interval == 1 else f"every {interval} {unit}s"
+    if "BYMONTH" in parts:
+        words += " in " + _and([_MONTH_NAMES[int(m) - 1] for m in parts["BYMONTH"].split(",")])
+    if "BYDAY" in parts:
+        words += " on " + _and([_byday(d) for d in parts["BYDAY"].split(",")])
+    if "BYMONTHDAY" in parts:
+        days = [int(d) for d in parts["BYMONTHDAY"].split(",")]
+        words += " on " + _and(
+            [f"the {_position(d)} day" if d < 0 else f"the {_nth(d)}" for d in days]
+        )
+    if "COUNT" in parts:
+        count = int(parts["COUNT"])
+        words += ", once" if count == 1 else f", {count} times"
+    if "UNTIL" in parts:
+        until = dt.datetime.strptime(parts["UNTIL"][:8], "%Y%m%d").date()
+        words += f" until {until.strftime('%A, %B %-d, %Y')}"
+    return words
+
+
 # ---------------------------------------------------------------------------
 # Parsing a received invitation
 # ---------------------------------------------------------------------------
