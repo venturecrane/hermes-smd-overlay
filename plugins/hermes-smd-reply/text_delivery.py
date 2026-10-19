@@ -119,6 +119,11 @@ class DeliveredOnce:
                 self._ids.popitem(last=False)
             return True
 
+    def seen(self, message_id: str) -> bool:
+        """True when ``message_id`` was claimed (no claim is made)."""
+        with self._lock:
+            return message_id in self._ids
+
     def clear(self) -> None:
         with self._lock:
             self._ids.clear()

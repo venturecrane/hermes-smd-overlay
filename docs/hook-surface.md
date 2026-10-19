@@ -224,7 +224,7 @@ For reference, the complete set of hook names Hermes accepts at the pinned ref (
 | `pre_api_request` | no | gateway-level API request (not relevant) |
 | `post_api_request` | yes | per-person token metering — `hermes-smd-usage` folds each request's `usage` into a (day, person, model) row, attributed via the session's inbound origin (ss-console #2070; kwargs verified against the pinned ref, `vfy_01KYT51JXBHNSSE99PCCXAA2M3`) |
 | `on_session_start` | no | per-turn session-start (not currently used; available if needed) |
-| `on_session_end` | yes | memory-mirror trigger; `hermes-smd-space-delivery` checks a couples routine that owed an email sent one (ERROR + page otherwise) |
+| `on_session_end` | yes | memory-mirror trigger; `hermes-smd-space-delivery` checks a couples routine that owed an email sent one, and `hermes-smd-reply` that a rostered email answered only in text got its reply (ERROR + page otherwise). Both plugins' end-of-turn hooks only submit to `shared.hook_worker`: Hermes skips a bounded callback still running for another session |
 | `on_session_finalize` | no | session-end finalization |
 | `on_session_reset` | no | session reset |
 | `subagent_stop` | yes | one SUBAGENT_STOPPED audit row per delegated child (`hermes-smd-audit`, ADR 0021 Stream C) |

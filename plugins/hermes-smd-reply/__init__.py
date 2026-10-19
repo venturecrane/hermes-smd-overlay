@@ -88,6 +88,7 @@ from typing import Any
 
 from shared import (
     answered_messages,
+    hook_worker,
     inbound,
     matter_gate,
     msgraph_broker,
@@ -1616,18 +1617,25 @@ def _start_held_release() -> None:
 _ACT_BODIES = act_delivery.TransmittedBodies()
 
 
-def _deliver_owed_act(session_id: str) -> str:
+#: "Not snapshotted by the hook; read it now" (the synchronous callers, tests).
+_UNSET: Any = object()
+
+
+def _deliver_owed_act(session_id: str, *, pending: Any = _UNSET, origin: Any = _UNSET) -> str:
     """End of turn: send an act line the model proposed and did not send.
 
-    See ``act_delivery``. Returns the outcome word for tests and logs. Never
-    raises out of a hook."""
+    See ``act_delivery``. ``pending`` / ``origin`` are the turn's state as the
+    hook snapshotted it (the worker runs later); unset, they are read now.
+    Returns the outcome word for tests and logs. Never raises out of a hook."""
     if not session_id:
         return "none"
-    pending = PENDING_ACTS.peek(session_id)
+    if pending is _UNSET:
+        pending = PENDING_ACTS.peek(session_id)
     if act_delivery.owed_line(pending) is None:
         return "none"
     # This turn's own email only (participant fence): the act line answers it.
-    origin = inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
+    if origin is _UNSET:
+        origin = inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
     try:
         adapter = _email_adapter(CustomerConfig.from_volume(str(_YAML_PATH)))
     except Exception:  # noqa: BLE001 - an unreadable config still gets the default transport
@@ -1705,14 +1713,118 @@ def _deliver_owed_act(session_id: str) -> str:
     )
 
 
+# THE END-OF-TURN HOOKS ONLY HAND OFF (hermes-captain-mark, 2026-10-19). Pinned
+# Hermes skips a bounded hook callback that is still running for ANOTHER session
+# (``hermes_cli/plugins_dispatch.py`` ``_run_hook_callback_bounded`` keys the
+# running slot on ``(hook_name, id(callback))`` for the whole process). This
+# plugin's end-of-turn work sends email (a broker round trip), so two rostered
+# emails whose turns ended together lost the second reply with one WARNING.
+# ``on_post_llm_call`` / ``on_turn_end`` now snapshot the turn's state (the
+# email that opened it, whether it tried to send, the pending act) and submit
+# the work to a ``shared.hook_worker`` worker, which runs it in the turn's own
+# context; the callbacks return in microseconds.
+_END_OF_TURN = hook_worker.HookWorker("smd-reply-end-of-turn")
+
+# Inbound message ids whose turn's final text reached the worker (post_llm_call
+# ran). A rostered email whose turn ended without one is the lost-reply shape.
+_TEXT_SEEN = text_delivery.DeliveredOnce()
+
+
+def _turn_snapshot(session_id: str) -> tuple[Any, bool, Any]:
+    """The turn-scoped state the worker needs, read now (dict lookups only):
+    the email that opened this turn, whether the turn tried to send, the
+    pending act. A later turn of the session cannot change what the worker
+    acts on."""
+    return (
+        inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id),
+        _TURN_SENDS.attempted(session_id),
+        PENDING_ACTS.peek(session_id),
+    )
+
+
+def _text_reply_lost(session_id: str, origin: Any, attempted: bool, status: dict) -> bool:
+    """At a turn's end, with no act owed: True (and logged ERROR + paged) when
+    the turn opened on a rostered sender's email that nothing answered and the
+    turn's final text never reached delivery (its ``post_llm_call`` was skipped,
+    or never fired). Never raises."""
+    try:
+        if not _INFRA_READY or origin is None:
+            return False
+        message_id = str(getattr(origin, "message_id", "") or "")
+        sender = str(getattr(origin, "sender_address", "") or "")
+        if not message_id or not sender or _TEXT_SEEN.seen(message_id):
+            return False
+        if attempted or _REPLIED.committed(message_id) or answered_messages.answered(message_id):
+            return False
+        try:
+            cfg = CustomerConfig.from_volume(str(_YAML_PATH))
+        except (CustomerConfigError, OSError):
+            return False
+        if _email_adapter(cfg) not in text_delivery.ADAPTERS or not cfg.sender_on_roster(sender):
+            return False
+        logger.error(
+            "hermes-smd-reply: the email %s from a rostered sender got NO reply: the turn's "
+            "final text never reached delivery (session=%s completed=%s failed=%s "
+            "interrupted=%s). If Hermes logged \"Hook 'post_llm_call' ... skipped\" for "
+            "this turn, the hook dispatcher dropped it.",
+            message_id,
+            session_id,
+            status.get("completed"),
+            status.get("failed"),
+            status.get("interrupted"),
+        )
+        _page_text_hold("no_response_captured")
+        return True
+    except Exception:  # noqa: BLE001 - never raises
+        logger.error("hermes-smd-reply: lost-reply check failed", exc_info=True)
+        return False
+
+
+def _end_of_turn_text(
+    session_id: str, response: Any, origin: Any, attempted: bool, pending: Any
+) -> None:
+    """Worker: ``post_llm_call``'s work: an owed act line, else the text reply."""
+    if origin is not None and getattr(origin, "message_id", ""):
+        _TEXT_SEEN.claim(origin.message_id)
+    try:
+        act = _deliver_owed_act(session_id, pending=pending, origin=origin)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("hermes-smd-reply: end-of-turn act delivery failed (%s)", exc)
+        return
+    if act != "none":
+        return
+    try:
+        _deliver_text_reply(session_id, response, origin=origin, attempted=attempted)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("hermes-smd-reply: end-of-turn text delivery failed (%s)", exc)
+
+
+def _end_of_turn_settle(
+    session_id: str, origin: Any, attempted: bool, pending: Any, status: dict
+) -> None:
+    """Worker: ``on_session_end``'s work: an owed act line; with none owed, a
+    rostered email whose text never arrived is made loud."""
+    try:
+        _deliver_owed_act(session_id, pending=pending, origin=origin)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("hermes-smd-reply: end-of-turn act delivery failed (%s)", exc)
+    if act_delivery.owed_line(pending) is None:
+        _text_reply_lost(session_id, origin, attempted, status)
+
+
 def on_turn_end(**kwargs: Any) -> None:
-    """``on_session_end`` (and the first half of ``post_llm_call``): deliver an
-    owed act line."""
+    """``on_session_end``: hand the turn's end to the worker (an owed act line;
+    a lost text reply made loud). Returns at once."""
     try:
         session_id = kwargs.get("session_id")
-        _deliver_owed_act(session_id if isinstance(session_id, str) else "")
+        sid = session_id if isinstance(session_id, str) else ""
+        if not sid:
+            return
+        origin, attempted, pending = _turn_snapshot(sid)
+        status = {k: kwargs.get(k) for k in ("completed", "failed", "interrupted")}
+        _END_OF_TURN.submit(_end_of_turn_settle, sid, origin, attempted, pending, status)
     except Exception as exc:  # noqa: BLE001 - never raise out of a hook
-        logger.error("hermes-smd-reply: end-of-turn act delivery failed (%s)", exc)
+        logger.error("hermes-smd-reply: end-of-turn hand-off failed (%s)", exc)
 
 
 # Sessions whose current turn attempted a draft or a send, and the inbound
@@ -1753,7 +1865,9 @@ def _note_turn_send(tool_name: Any, session_id: Any) -> None:
         logger.debug("hermes-smd-reply: turn-send note failed", exc_info=True)
 
 
-def _deliver_text_reply(session_id: str, response: Any) -> str:
+def _deliver_text_reply(
+    session_id: str, response: Any, *, origin: Any = _UNSET, attempted: Any = None
+) -> str:
     """End of turn: send the final text as the reply the model did not draft.
 
     See ``text_delivery``. Returns the outcome word for tests and logs:
@@ -1765,18 +1879,17 @@ def _deliver_text_reply(session_id: str, response: Any) -> str:
         return "none"
     # THIS turn's own email only (participant fence). A cron, a wake, a
     # Telegram or MCP turn has none and is never answered by email from here.
-    origin = inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
+    if origin is _UNSET:
+        origin = inbound.SESSION_INBOUND_ORIGIN.bound_this_turn(session_id)
     if origin is None or not origin.message_id or not origin.sender_address:
         return "none"
     text = response if isinstance(response, str) else ""
     if silence.is_silent(text):
         return "silent"
     message_id = origin.message_id
-    if (
-        _TURN_SENDS.attempted(session_id)
-        or _REPLIED.committed(message_id)
-        or answered_messages.answered(message_id)
-    ):
+    if attempted is None:
+        attempted = _TURN_SENDS.attempted(session_id)
+    if attempted or _REPLIED.committed(message_id) or answered_messages.answered(message_id):
         return "answered"
     try:
         cfg = CustomerConfig.from_volume(str(_YAML_PATH))
@@ -1860,23 +1973,22 @@ def _page_text_hold(reason: str) -> None:
 
 
 def on_post_llm_call(**kwargs: Any) -> None:
-    """``post_llm_call``: deliver an owed act line, else the turn's text reply.
+    """``post_llm_call``: hand the turn's end to the worker, which delivers an
+    owed act line, else the turn's text reply. Returns at once.
 
     An owed act line is the turn's answer when there is one, so the text is
     considered only when no act was owed (``text_delivery``)."""
-    session_id = kwargs.get("session_id")
-    sid = session_id if isinstance(session_id, str) else ""
     try:
-        act = _deliver_owed_act(sid)
+        session_id = kwargs.get("session_id")
+        sid = session_id if isinstance(session_id, str) else ""
+        if not sid:
+            return
+        origin, attempted, pending = _turn_snapshot(sid)
+        _END_OF_TURN.submit(
+            _end_of_turn_text, sid, kwargs.get("assistant_response"), origin, attempted, pending
+        )
     except Exception as exc:  # noqa: BLE001 - never raise out of a hook
-        logger.error("hermes-smd-reply: end-of-turn act delivery failed (%s)", exc)
-        return
-    if act != "none":
-        return
-    try:
-        _deliver_text_reply(sid, kwargs.get("assistant_response"))
-    except Exception as exc:  # noqa: BLE001 - never raise out of a hook
-        logger.error("hermes-smd-reply: end-of-turn text delivery failed (%s)", exc)
+        logger.error("hermes-smd-reply: end-of-turn hand-off failed (%s)", exc)
 
 
 def register(ctx) -> None:

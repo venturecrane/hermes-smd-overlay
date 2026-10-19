@@ -334,8 +334,8 @@ def test_the_plugin_hook_delivers_and_is_exception_safe(monkeypatch):
     def boom(*_a, **_k):
         raise RuntimeError("x")
 
-    monkeypatch.setattr(space_delivery, "deliver", boom)
-    monkeypatch.setattr(space_delivery, "_enqueue", boom)
+    monkeypatch.setattr(space_delivery, "note_response", boom)
+    monkeypatch.setattr(space_delivery, "note_turn_end", boom)
     assert plugin.on_post_llm_call(session_id="s", assistant_response="hi") is None
     assert plugin.on_session_end(session_id="s", completed=True) is None
 
