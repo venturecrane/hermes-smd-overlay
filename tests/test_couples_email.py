@@ -152,7 +152,8 @@ def test_an_unbound_person_routine_emails_that_person_and_nobody_else(tmp_path, 
     assert call["anchor"] is None
     assert call["templated"] is False
     assert call["subject"] == "Weekly check-in"
-    assert call["text"] == TEXT
+    # The title line is the subject and is not said again in the body.
+    assert call["text"] == "How did the week go for the two of you?"
     assert call["audit_extra"] == {"skill_name": "couples-checkin"}
 
 

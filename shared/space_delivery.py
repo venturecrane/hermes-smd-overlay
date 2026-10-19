@@ -53,9 +53,14 @@ from shared import space as _space
 
 logger = logging.getLogger(__name__)
 
-#: Fixed frame used only when the response has no usable first line.
+#: The subject when the response does not open with a title line.
 FALLBACK_SUBJECT = "A note from your assistant"
-_SUBJECT_MAX = 78
+#: A title line is short: a first line longer than this is a sentence, and a
+#: sentence cut off with "..." is a worse subject than the fixed one
+#: (2026-10-19 19:17Z, captain-mark: "The sample invite is in your inbox for
+#: October 30 and you can decline it wh...").
+_TITLE_MAX = 60
+_SENTENCE_END = (".", "!", "?", ",", ";", ":")
 
 _lock = threading.Lock()
 _delivered: OrderedDict[str, None] = OrderedDict()
@@ -70,13 +75,35 @@ _is_silent = silence.is_silent
 PAGE_MESSAGE = "space_routine_not_delivered"
 
 
+def split_title(text: str) -> tuple[str, str]:
+    """``(subject, body)`` for a routine's final response.
+
+    The response opens with a title when its first non-empty line is short
+    (at most 60 characters), does not end like a sentence, and is followed by a
+    blank line and more text. That line becomes the subject and leaves the body,
+    so it is not said twice. Anything else is a body with no title: the subject
+    is the fixed one and the body is the whole text, never cut."""
+    lines = text.splitlines()
+    i = next((n for n, line in enumerate(lines) if line.strip()), None)
+    if i is None:
+        return FALLBACK_SUBJECT, text
+    title = re.sub(r"^[#>*\-\s]+", "", lines[i]).replace("**", "").strip()
+    rest = lines[i + 1 :]
+    if (
+        title
+        and len(title) <= _TITLE_MAX
+        and not title.endswith(_SENTENCE_END)
+        and rest
+        and not rest[0].strip()
+        and any(line.strip() for line in rest)
+    ):
+        return title, "\n".join(rest).strip("\n")
+    return FALLBACK_SUBJECT, text
+
+
 def subject_for(text: str) -> str:
-    """The first non-empty line, stripped of markdown markers, cut to 78 chars."""
-    for line in text.splitlines():
-        cleaned = re.sub(r"^[#>*\-\s]+", "", line).replace("**", "").strip()
-        if cleaned:
-            return cleaned if len(cleaned) <= _SUBJECT_MAX else cleaned[: _SUBJECT_MAX - 3] + "..."
-    return FALLBACK_SUBJECT
+    """The subject :func:`split_title` gives ``text``."""
+    return split_title(text)[0]
 
 
 def _remember(store: OrderedDict[str, None], session_id: str) -> bool:
@@ -147,9 +174,10 @@ def deliver(
         # transport sends that same rendered text. Fabrication scans see every
         # word: rendering removes markers, never claims.
         text = report_render.render_message_plain(text)
+        subject, text = split_title(text)
         result = send_dispatch.dispatch(
             to=list(run.recipients),
-            subject=subject_for(text),
+            subject=subject,
             text=text,
             # A routine answers no email; the lane is what admits the people,
             # named here and nowhere else.
