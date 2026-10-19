@@ -33,7 +33,7 @@ import threading
 import pytest
 import yaml
 
-from shared import cron_attribution, send_dispatch, space, space_delivery
+from shared import cron_attribution, hook_worker, send_dispatch, space, space_delivery
 from tests.conftest import load_plugin
 from tests.test_couples_email import CHECKIN, P1, P2, _couple, _materialize
 
@@ -82,6 +82,7 @@ class _PinnedHermesHooks:
 
 @pytest.fixture
 def seat(monkeypatch, tmp_path):
+    monkeypatch.setattr(hook_worker, "INLINE", False)  # the real worker, as on a seat
     cust = _couple()
     sessions = _materialize(
         tmp_path,

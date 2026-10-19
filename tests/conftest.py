@@ -69,6 +69,16 @@ def _fresh_turn_provenance() -> None:
     turn_sources.TURN_SOURCES._reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _hook_workers_inline(monkeypatch) -> None:
+    """End-of-turn hook work runs on the caller's thread, so a test that drives a
+    hook can assert right after it (``shared.hook_worker.INLINE``). The
+    concurrency falsifiers turn it off to exercise the real worker."""
+    from shared import hook_worker
+
+    monkeypatch.setattr(hook_worker, "INLINE", True)
+
+
 @pytest.fixture
 def fake_ctx() -> FakePluginContext:
     """Return a fresh ``FakePluginContext`` for each test."""

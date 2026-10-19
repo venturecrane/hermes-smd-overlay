@@ -26,9 +26,9 @@ nothing else. When this module sent from inside ``post_llm_call``, two routines
 due the same minute (one per partner) raced: p2's callback was still talking to
 the broker when p1's turn ended, so p1's callback was skipped, p1's message was
 dropped, and the cron job reported success. So the hook callbacks now only
-record (``note_response`` / ``note_turn_end``: a queue put, microseconds, never
-"still running" long enough to collide), and a worker thread does the slow part
-in the turn's own context (``contextvars``), exactly as Hermes would have.
+record (``note_response`` / ``note_turn_end``: a ``shared.hook_worker`` submit,
+microseconds, never "still running" long enough to collide), and its worker
+does the slow part in the turn's own context, exactly as Hermes would have.
 
 A ROUTINE THAT OWES AN EMAIL AND SENDS NONE IS LOUD. ``on_session_end`` fires
 after ``post_llm_call`` in the same turn (``agent/turn_finalizer.py``). If a run
@@ -42,15 +42,13 @@ Never raises: the run's output is still saved locally by Hermes.
 
 from __future__ import annotations
 
-import contextvars
 import logging
-import queue
 import re
 import threading
 from collections import OrderedDict
 from typing import Any
 
-from shared import cron_space, send_anchor, send_dispatch, silence
+from shared import cron_space, hook_worker, send_anchor, send_dispatch, silence
 from shared import space as _space
 
 logger = logging.getLogger(__name__)
@@ -70,15 +68,6 @@ _is_silent = silence.is_silent
 
 #: The paging message for a routine that owed an email and sent none.
 PAGE_MESSAGE = "space_routine_not_delivered"
-
-#: Seconds the worker waits on an empty queue before it exits. A new event
-#: starts a new worker, so an idle seat holds no thread; the worker is
-#: non-daemon, so a process exiting with a delivery queued finishes it first.
-_IDLE_EXIT_SECONDS = 2.0
-
-_events: queue.Queue[tuple[str, str, Any, contextvars.Context]] = queue.Queue()
-_worker_lock = threading.Lock()
-_worker: threading.Thread | None = None
 
 
 def subject_for(text: str) -> str:
@@ -223,83 +212,32 @@ def settle(
 
 # --------------------------------------------------------------- hand-off
 
+#: The end-of-turn worker (``shared.hook_worker``): the hooks only submit.
+_WORKER = hook_worker.HookWorker("smd-space-delivery")
+
 
 def note_response(session_id: Any, response: Any) -> None:
     """``post_llm_call``: hand the turn's final response to the worker. A queue
     put; returns at once so the callback is never "still running" when the
     next routine's turn ends. Never raises."""
-    _enqueue("response", session_id, response)
+    sid = str(session_id or "")
+    if sid:
+        _WORKER.submit(deliver, sid, response)
 
 
 def note_turn_end(session_id: Any, **status: Any) -> None:
     """``on_session_end``: hand the turn's end to the worker, which checks the
     run's owed email was attempted. Never raises."""
-    _enqueue(
-        "end",
-        session_id,
-        {k: status.get(k) for k in ("completed", "failed", "interrupted")},
-    )
-
-
-def _enqueue(kind: str, session_id: Any, payload: Any) -> None:
-    global _worker
-    try:
-        sid = str(session_id or "")
-        if not sid:
-            return
-        _events.put((kind, sid, payload, contextvars.copy_context()))
-        with _worker_lock:
-            if _worker is None or not _worker.is_alive():
-                _worker = threading.Thread(
-                    target=_drain_loop, name="smd-space-delivery", daemon=False
-                )
-                _worker.start()
-    except Exception:  # noqa: BLE001 - never raises into a hook
-        logger.error(
-            "space_delivery: could not hand off %s for %s", kind, session_id, exc_info=True
+    sid = str(session_id or "")
+    if sid:
+        _WORKER.submit(
+            settle, sid, **{k: status.get(k) for k in ("completed", "failed", "interrupted")}
         )
 
 
-def _handle(kind: str, sid: str, payload: Any) -> None:
-    if kind == "response":
-        deliver(sid, payload)
-    elif kind == "end":
-        settle(sid, **(payload or {}))
-
-
-def _drain_loop() -> None:
-    global _worker
-    while True:
-        try:
-            kind, sid, payload, ctx = _events.get(timeout=_IDLE_EXIT_SECONDS)
-        except queue.Empty:
-            with _worker_lock:
-                if _events.empty():
-                    if _worker is threading.current_thread():
-                        _worker = None
-                    return
-            continue
-        try:
-            # The turn's own context: anything the send path reads from the
-            # session (gateway session vars) sees what the hook would have.
-            ctx.run(_handle, kind, sid, payload)
-        except Exception:  # noqa: BLE001 - one bad event never stops the worker
-            logger.error("space_delivery: worker failed on %s for %s", kind, sid, exc_info=True)
-        finally:
-            _events.task_done()
-
-
 def wait_idle(timeout: float = 10.0) -> bool:
-    """Block until every handed-off event is processed (tests, shutdown).
-    True when the queue drained within ``timeout``."""
-    done = threading.Event()
-
-    def _join() -> None:
-        _events.join()
-        done.set()
-
-    threading.Thread(target=_join, daemon=True).start()
-    return done.wait(timeout)
+    """Block until every handed-off event is processed (tests, shutdown)."""
+    return _WORKER.wait_idle(timeout)
 
 
 def _reset_for_tests() -> None:
