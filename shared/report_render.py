@@ -337,6 +337,38 @@ def render_plain(text: str) -> str:
     return "\n".join(out).rstrip("\n") + ("\n" if text.endswith("\n") else "")
 
 
+#: An em or en dash with its horizontal whitespace. NEWLINES ARE NOT absorbed: a
+#: line beginning with a dash is a list item, and joining two bullets changes
+#: what the message says (ss#2547; the staff-send normalizer in the trust gate).
+DASH_RE = re.compile(r"[ \t]*[—–][ \t]*")
+
+# Underscore emphasis (``__bold__``, ``_em_``), never inside a word, so a
+# snake_case name or a file name keeps its underscores.
+_RE_UNDER_BOLD = re.compile(r"(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_])")
+_RE_UNDER_EM = re.compile(r"(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?![\w_])")
+
+
+def normalize_dashes(text: str) -> str:
+    """``a — b`` becomes ``a, b``: the one dash normalizer every send path uses."""
+    return DASH_RE.sub(", ", text)
+
+
+def render_message_plain(text: str) -> str:
+    """A model's message as the plain text a person reads, before any scan.
+
+    :func:`render_plain` (headings, ``**bold**``, backtick spans), then the
+    underscore emphasis markers, then :func:`normalize_dashes`. For a send whose
+    text is a model's final response with no chance to retry (a routine's email,
+    ``shared.space_delivery``): the caller scans AND sends the result, so the
+    inspected text and the delivered text are the same bytes. Subtractive except
+    the dash, which becomes a comma.
+    """
+    out = render_plain(text)
+    out = _RE_UNDER_BOLD.sub(r"\1", out)
+    out = _RE_UNDER_EM.sub(r"\1", out)
+    return normalize_dashes(out)
+
+
 def _strip_inline(raw: str) -> str:
     """Subtract the inline markers (``**bold**`` and backtick code spans) from
     one line, leaving everything else byte-identical."""

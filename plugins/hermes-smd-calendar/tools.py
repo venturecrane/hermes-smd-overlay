@@ -18,12 +18,13 @@ sent, with the gate's or the broker's own reason.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import uuid
 from typing import Any
 
-from shared import calendar_store, ical, send_anchor, send_dispatch, space
+from shared import calendar_store, ical, provenance, send_anchor, send_dispatch, space
 from shared.calendar_store import StoredEvent
 
 from . import seat as seat_mod
@@ -158,23 +159,52 @@ def _body(
     return f"{prefix}: {event.title}", "\n".join(lines)
 
 
+def _own_dates(event: StoredEvent) -> frozenset[str]:
+    """``YYYY-MM-DD`` of every date ``_body`` writes about this event: its first
+    and last day as the body shows them (local to the event's zone) and its
+    repeat rule's last day. Never raises; an unreadable event describes nothing."""
+    try:
+        when = _when_of(event)
+        if when.all_day:
+            first, last = when.start, when.end - dt.timedelta(days=1)
+        else:
+            start = when.start.astimezone(ical.zone(when.tzid)) if when.tzid else when.start
+            end = when.end.astimezone(ical.zone(when.tzid)) if when.tzid else when.end
+            first, last = start.date(), end.date()
+        dates = {first.isoformat(), last.isoformat()}
+        until = dict(p.split("=", 1) for p in (event.rrule or "").split(";") if "=" in p).get(
+            "UNTIL"
+        )
+        if until:
+            dates.add(dt.datetime.strptime(until[:8], "%Y%m%d").date().isoformat())
+        return frozenset(dates)
+    except Exception:  # noqa: BLE001 - see docstring
+        return frozenset()
+
+
 def _send(kind: str, event: StoredEvent, seat: seat_mod.Seat, session_id: str) -> dict[str, Any]:
     """Render and send ``event``; record and return what happened."""
     method = ical.METHOD_CANCEL if kind == "cancel" else ical.METHOD_REQUEST
     ics = ical.build_invitation(_ical_event(event, seat), method)
     subject, text = _body(kind, event, seat, seat_mod.requester(session_id, seat))
-    result = send_dispatch.dispatch(
-        to=event.attendee_emails(),
-        subject=subject,
-        text=text,
-        # The request this answers, when an email opened the turn; the lane is
-        # what admits the seat's people (seat.py), named here and nowhere else.
-        anchor=send_anchor.turn_anchor(session_id),
-        lane=seat_mod.LANE,
-        session_id=session_id,
-        templated=False,
-        calendar={"method": method, "ics": ics},
-    )
+    # The body states the invitation's own dates in words (``_body``); those
+    # describe the act, not the world. The identifier gate verifies them for
+    # THIS send only, on a role that names its own calendar as a source
+    # (shared/policy_profile). A cron turn that created the event has read
+    # nothing else (captain-mark, 2026-10-19 15:34Z refusal).
+    with provenance.self_described_dates(_own_dates(event)):
+        result = send_dispatch.dispatch(
+            to=event.attendee_emails(),
+            subject=subject,
+            text=text,
+            # The request this answers, when an email opened the turn; the lane is
+            # what admits the seat's people (seat.py), named here and nowhere else.
+            anchor=send_anchor.turn_anchor(session_id),
+            lane=seat_mod.LANE,
+            session_id=session_id,
+            templated=False,
+            calendar={"method": method, "ics": ics},
+        )
     delivery = f"sent:{result.message_id}" if result.sent else f"not_sent: {result.reason}"
     calendar_store.STORE.set_delivery(event.uid, delivery)
     event.delivery = delivery

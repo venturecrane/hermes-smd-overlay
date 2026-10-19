@@ -336,12 +336,11 @@ def _connections_section(cfg: Any) -> dict[str, Any]:
     }
 
 
-#: The identifier gate's operator-only rollback lever (hermes-smd-trust
-#: outbound.py). Unset or any value other than ``report`` = blocking. Read here
-#: rather than assumed, because "I refuse identifiers I cannot verify" is FALSE
-#: on a seat running the gate in report mode, and that is exactly the kind of
-#: sentence a firm would act on.
-_IDENTIFIER_MODE_ENV = "SMD_IDENTIFIER_GATE_MODE"
+#: The identifier gate's posture is READ through ``shared.policy_profile`` (the
+#: fleet rollback lever ``SMD_IDENTIFIER_GATE_MODE=report``, then the seat role's
+#: policy) rather than assumed, because "I refuse identifiers I cannot verify" is
+#: FALSE on a seat running the gate in report mode, and that is exactly the kind
+#: of sentence a firm would act on.
 
 #: The one working rule with no readable mechanism behind it. It is authored
 #: skill policy, so it is carried under its own key and labelled as policy —
@@ -413,8 +412,31 @@ def _working_rules_section(cfg: Any) -> dict[str, Any]:
         logger.warning("operator_seat_facts: exposure unreadable for working_rules", exc_info=True)
         return _empty("working_rules")
 
-    mode = str(os.environ.get(_IDENTIFIER_MODE_ENV, "") or "").strip().lower()
-    refusing = mode != "report"
+    # The resolved posture, through the gate's own resolver (shared/policy_profile):
+    # the fleet lever outranks role policy, and a role may only verify yearly
+    # dates by month and day. Read, never assumed.
+    from shared import policy_profile
+
+    policy = policy_profile.current(cfg)
+    identifier_mode = policy.identifier_mode
+    refusing = identifier_mode != policy_profile.MODE_REPORT_LEVER
+    if identifier_mode == policy_profile.MODE_REPORT_LEVER:
+        says = (
+            "I flag an identifier I could not verify, but I do not "
+            "refuse on it — this seat's identifier gate is in report mode."
+        )
+    elif identifier_mode == policy_profile.MODE_VERIFY_RECURRING:
+        says = (
+            "I won't use a case number, date, or identifier I haven't read "
+            "from your records. A yearly date you keep with me, like a "
+            "birthday, I can write as this year's or next year's day. If I "
+            "can't verify something, I say so instead."
+        )
+    else:
+        says = (
+            "I won't use a case number, date, or identifier I haven't read "
+            "from your records. If I can't verify it, I say so instead."
+        )
     return {
         "read": True,
         "send_posture": posture,
@@ -440,13 +462,11 @@ def _working_rules_section(cfg: Any) -> dict[str, Any]:
         ),
         "identifier_gate": {
             "refusing": refusing,
-            "says": (
-                "I won't use a case number, date, or identifier I haven't read "
-                "from your records. If I can't verify it, I say so instead."
-                if refusing
-                else "I flag an identifier I could not verify, but I do not "
-                "refuse on it — this seat's identifier gate is in report mode."
-            ),
+            # block | verify_recurring | report (report = the fleet rollback lever)
+            "mode": identifier_mode,
+            "lever_set": policy.lever,
+            "policy_source": policy.source,
+            "says": says,
             "also_covers": (
                 "The same gate is the backstop for never computing a legal "
                 "deadline: a computed date is in no source, so it is not in the "

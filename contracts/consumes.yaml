@@ -316,10 +316,15 @@ vars:
     requirement: optional
     consumed_by: [trust]
     note: >-
-      operator-only rollback lever for the A1 identifier gate (ss #2171). Unset
-      = BLOCK (the enforcing state). Only the literal "report" downgrades to
-      report-only; any other value blocks (fail-closed). Never client-authorable
-      — integrity controls do not appear in customer.yaml.
+      incident-only fleet rollback for the A1 identifier gate (ss #2171); per-seat
+      posture comes from role policy (shared/policy_profile.py, ss-console ADR
+      0093 docs/adr/0093-seat-policy-profiles.md), never from this var. Unset =
+      BLOCK (the enforcing state).
+      Only the literal "report" downgrades every kind, floors included, to
+      report-only; any other value blocks (fail-closed). Seat facts report it and
+      `python3 -m shared.policy_profile` prints `lever=set` so the boot smoke
+      flags any seat where it is set. Never client-authorable — integrity
+      controls do not appear in customer.yaml.
   SMD_MATTER_GATE_MODE:
     discovery: static
     stage: agent
@@ -564,13 +569,14 @@ vars:
     note: skills-dir override during customer.yaml translation
   ROLES_DIR:
     discovery: static
-    stage: boot-helper
+    stage: agent
     requirement: optional
-    consumed_by: [bootstrap-translate]
+    consumed_by: [bootstrap-translate, trust]
     note: >-
-      role-package root override during customer.yaml translation (ss ADR 0090);
-      defaults to /app/roles, which the seat image copies from ss-console
-      operator/roles/. Read only when the seat sets seat.role.
+      role-package root override (ss ADR 0090); defaults to /app/roles, which the
+      seat image copies from ss-console operator/roles/. Read only when the seat
+      sets seat.role: at boot for the persona (translate), and per gate decision
+      by shared/policy_profile.py for the role's `policy:` block.
   TELEGRAM_BOT_TOKEN:
     discovery: static
     stage: agent

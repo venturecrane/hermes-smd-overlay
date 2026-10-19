@@ -1,0 +1,17 @@
+{
+  "_comment": "HAND-MAINTAINED. What every seat is allowed, seat x gate, as resolved by shared/policy_profile.py from tests/contract/policy_inputs.json (ss-console ADR 0093). A change to what any seat allows must change this file, so it shows up in review as a diff here. identifier_dates: block (a date must be read) | verify_recurring (a yearly date read from the record store verifies by month and day, this year or next). own_sources: seat-owned read tools the role treats as provenance sources (calendar_invite_list also verifies an invitation's own dates in the email that carries it); [] = none. checklist: paralegal | household (drops exclamation and caps_emphasis). floors: SSN, A-number, receipt number, case number and (case number, date) pair; always block, on every seat, not authorable.",
+  "platform_default": { "identifier_dates": "block", "own_sources": [], "checklist": "paralegal", "floors": "block" },
+  "seats": {
+    "ashton-price": { "identifier_dates": "block", "own_sources": [], "checklist": "paralegal", "floors": "block" },
+    "brokery": { "identifier_dates": "block", "own_sources": [], "checklist": "paralegal", "floors": "block" },
+    "captain-mark": {
+      "identifier_dates": "verify_recurring",
+      "own_sources": ["calendar_invite_list", "couples_settings_read"],
+      "checklist": "household",
+      "floors": "block"
+    },
+    "pilot-smokeball": { "identifier_dates": "block", "own_sources": [], "checklist": "paralegal", "floors": "block" },
+    "scott": { "identifier_dates": "block", "own_sources": [], "checklist": "paralegal", "floors": "block" },
+    "smd-staging": { "identifier_dates": "block", "own_sources": [], "checklist": "paralegal", "floors": "block" }
+  }
+}

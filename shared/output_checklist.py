@@ -111,6 +111,19 @@ SURFACES: frozenset[str] = frozenset(_SURFACES)
 #: false-positive rate for each has been read.
 REPORT_ONLY_RULES: frozenset[str] = frozenset({"max_lines"})
 
+#: Profiles (``shared/policy_profile.py``, a seat role's ``output_checklist.profile``).
+#: ``paralegal`` is the standard above and the default everywhere. ``household``
+#: is a couple's or a family's own messages: the rules that encode how a FIRM
+#: writes, and nothing else, are dropped. Ids, stamps, UTC times, markup and the
+#: em dash stay on every profile, because they are wrong in anyone's message.
+PROFILE_PARALEGAL = "paralegal"
+PROFILE_HOUSEHOLD = "household"
+_PROFILE_DROPS: dict[str, frozenset[str]] = {
+    PROFILE_PARALEGAL: frozenset(),
+    PROFILE_HOUSEHOLD: frozenset({"exclamation", "caps_emphasis"}),
+}
+PROFILES: frozenset[str] = frozenset(_PROFILE_DROPS)
+
 # ---------------------------------------------------------------------------
 # Patterns
 # ---------------------------------------------------------------------------
@@ -467,18 +480,22 @@ def _at(text: str, pos: int, what: str) -> str:
     return f"line {_line_of(text, pos)} carries {what}"
 
 
-def check(body: str, surface: str) -> list[Violation]:
+def check(body: str, surface: str, profile: str = PROFILE_PARALEGAL) -> list[Violation]:
     """Every checklist rule ``body`` breaks on ``surface``. Empty means it complies.
 
     Returns every violation, one per rule, each quoting the first offending
     fragment, for the reason :func:`shared.format_check.check` gives: a writer
     told about one rule at a time reads the checker as moving the goalposts.
-    An unknown surface checks nothing.
+    An unknown surface checks nothing. An unknown ``profile`` is paralegal
+    (the strict one).
     """
     spec = _SURFACES.get(surface)
     if spec is None or not isinstance(body, str) or not body.strip():
         return []
     rules, ceiling, on_wire = spec
+    dropped = _PROFILE_DROPS.get(profile, frozenset())
+    if dropped:
+        rules = tuple(rule for rule in rules if rule not in dropped)
     text = wire_text(body) if on_wire else body
     # The act/rule/ops tag is a thing a person replies to by design
     # (``shared/rule_confirm.py``); it is blanked before any rule reads the text.

@@ -41,6 +41,7 @@ exactly the defect this catches.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -318,6 +319,25 @@ _registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
 # ---------------------------------------------------------------------------
 
 _seat_registers: OrderedDict[str, ProvenanceRegister] = OrderedDict()
+
+# ---------------------------------------------------------------------------
+# The RECURRING register (seat policy profiles, shared/policy_profile.py)
+#
+# A yearly date a household keeps (a birthday stored as ``date: 06-14``) has no
+# year, so the positive register never holds this year's occurrence and the
+# reminder the seat exists to send is refused. This register holds the MONTH
+# and DAY of every recurring date read from the seat's record store this
+# session. It verifies nothing by itself: the outbound gate consults it only
+# when the seat's role policy says ``recurring_dates: verify_by_month_day``,
+# and only for DATE hits, so a floor kind can never reach it. Record-store tools
+# only, because the store is the one source whose only writer is the seat's
+# authored record flow (see TENANT_SOURCE_READ_TOOLS above).
+# ---------------------------------------------------------------------------
+
+#: Read tools whose results may seed the recurring register.
+RECURRING_SOURCE_READ_TOOLS: frozenset[str] = frozenset({"record_store_list", "record_store_read"})
+
+_recurring: OrderedDict[str, frozenset[str]] = OrderedDict()
 
 # ---------------------------------------------------------------------------
 # Session resolver (overlay #141, rescoped ss-console #2288)
@@ -701,14 +721,75 @@ def seat_sourced_for(session_id: str) -> ProvenanceRegister:
     return reg
 
 
+def record_recurring_read(session_id: str, tool_name: str, text: str) -> None:
+    """Add the recurring month-days in a record-store read result. Best-effort."""
+    if not session_id or not isinstance(text, str) or not text:
+        return
+    if (tool_name or "").strip().lower() not in RECURRING_SOURCE_READ_TOOLS:
+        return
+    try:
+        from shared.policy_profile import recurring_month_days
+
+        found = recurring_month_days(text)
+        if not found:
+            return
+        _recurring[session_id] = _recurring.get(session_id, frozenset()) | found
+        _recurring.move_to_end(session_id)
+        _evict_if_needed()
+    except Exception:  # noqa: BLE001 — recording is best-effort, never fatal
+        logger.debug(
+            "provenance: record_recurring_read failed for session %s", session_id, exc_info=True
+        )
+
+
+@contextlib.contextmanager
+def self_described_dates(dates: frozenset[str]) -> Iterator[None]:
+    """For the duration of ONE code-built send on this thread, the canonical
+    ``YYYY-MM-DD`` dates that send's message describes about itself.
+
+    The calendar plugin wraps an invitation's dispatch in this: the email's
+    "Friday, October 23, 2026" is the invitation's own start, written by code
+    from the event, not a claim about the world. The outbound gate drops DATE
+    hits in this set only when the seat's role names its own calendar as a
+    source (``policy_profile.Policy.own_calendar_is_source``). Thread-local and
+    nested-safe: a model can never set it, and it is gone when the send returns.
+    """
+    previous = getattr(_local, "self_dates", frozenset())
+    _local.self_dates = frozenset(previous | frozenset(dates))
+    try:
+        yield
+    finally:
+        _local.self_dates = previous
+
+
+def current_self_dates() -> frozenset[str]:
+    """The dates the send in progress on this thread describes about itself."""
+    return getattr(_local, "self_dates", frozenset())
+
+
+def recurring_for(session_id: str) -> frozenset[str]:
+    """``MM-DD`` of the recurring dates this session read from its record store."""
+    found = _recurring.get(session_id)
+    if found is None:
+        return frozenset()
+    _recurring.move_to_end(session_id)
+    return found
+
+
 def drop(session_id: str) -> None:
     """Forget a session's registers (e.g. at session end). Idempotent."""
     _registers.pop(session_id, None)
     _seat_registers.pop(session_id, None)
+    _recurring.pop(session_id, None)
 
 
 def _evict_if_needed() -> None:
-    for store, label in ((_registers, "read"), (_seat_registers, "seat")):
+    stores: tuple[tuple[OrderedDict, str], ...] = (
+        (_registers, "read"),
+        (_seat_registers, "seat"),
+        (_recurring, "recurring"),
+    )
+    for store, label in stores:
         while len(store) > _MAX_SESSIONS:
             evicted, _ = store.popitem(last=False)  # oldest
             logger.debug(
@@ -729,6 +810,7 @@ def _reset_for_tests() -> None:
     global _process_session, _process_owner, _process_ambiguous
     _registers.clear()
     _seat_registers.clear()
+    _recurring.clear()
     _local.session = ""
     _local.last_resolution = ("", MODE_NONE)
     with _scope_lock:
@@ -743,12 +825,17 @@ __all__ = [
     "MODE_NONE",
     "MODE_PROCESS",
     "MODE_THREAD",
+    "RECURRING_SOURCE_READ_TOOLS",
     "TENANT_SOURCE_READ_TOOLS",
     "drop",
     "last_resolution",
     "note_session",
     "record_read",
+    "record_recurring_read",
     "record_seat_text",
+    "current_self_dates",
+    "self_described_dates",
+    "recurring_for",
     "register_for",
     "resolve_session",
     "resolve_session_with_mode",
