@@ -5,5 +5,7 @@ author: VentureCrane
 requires_env: []
 provides_hooks:
   - post_llm_call
+  - on_session_end
 hooks:
   - post_llm_call
+  - on_session_end
