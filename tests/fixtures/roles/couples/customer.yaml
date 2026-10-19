@@ -27,7 +27,7 @@ schema_version: 1
 #     partners only, never the sentinel.
 #   - external_send (anyone OFF the roster) stays confirm.
 #     external_send_internal (a rostered address, which here is exactly the
-#     two partners) is autonomous: hellos, routines and two-person notices run
+#     two partners) is autonomous: hellos and routines run
 #     on scheduled turns with no channel to confirm on. code_execution stays
 #     unauthored, which refuses it and drops terminal, code_execution and
 #     delegation (R2).
@@ -66,8 +66,8 @@ people:
     name: '[PARTNER 1 NAME]'
     telegram_id: ''
     email: '[PARTNER 1 EMAIL, lowercased]'
-    # How the seat reaches this partner on its own initiative (routines,
-    # two-person notices). email (the default) or telegram; telegram is used
+    # How the seat reaches this partner on its own initiative (routines).
+    # email (the default) or telegram; telegram is used
     # only once this partner's telegram_id is recorded.
     channel: email
   - id: p2
@@ -104,7 +104,7 @@ personas:
         external_send: confirm
         # Sends to a ROSTERED address only, which on a couples seat is exactly
         # the two partners (validator rule: roster == people). Without it the
-        # seat cannot deliver a hello, a routine, or a two-person notice by
+        # seat cannot deliver a hello or a routine by
         # email: those run on scheduled turns with no channel to confirm on
         # (captain-mark, 2026-10-18). Anything off the roster stays confirm.
         external_send_internal: autonomous
@@ -140,7 +140,7 @@ personas:
           scheduled: true
           webhook: false
         enabled: true
-        # Scheduled email delivery and the seat's two-person notices ride this
+        # Scheduled email delivery rides this
         # skill's roster lane; the roster is exactly the two partners.
         settings:
           recipients: roster
@@ -160,7 +160,7 @@ personas:
           scheduled: true
           webhook: false
         enabled: true
-        # Scheduled email delivery and the seat's two-person notices ride this
+        # Scheduled email delivery rides this
         # skill's roster lane; the roster is exactly the two partners.
         settings:
           recipients: roster
@@ -171,7 +171,7 @@ personas:
           scheduled: true
           webhook: false
         enabled: true
-        # Scheduled email delivery and the seat's two-person notices ride this
+        # Scheduled email delivery rides this
         # skill's roster lane; the roster is exactly the two partners.
         settings:
           recipients: roster
@@ -189,7 +189,7 @@ personas:
           scheduled: true
           webhook: true
         enabled: true
-        # Scheduled email delivery and the seat's two-person notices ride this
+        # Scheduled email delivery rides this
         # skill's roster lane; the roster is exactly the two partners.
         settings:
           recipients: roster
@@ -207,7 +207,7 @@ personas:
           scheduled: true
           webhook: false
         enabled: true
-        # Scheduled email delivery and the seat's two-person notices ride this
+        # Scheduled email delivery rides this
         # skill's roster lane; the roster is exactly the two partners.
         settings:
           recipients: roster
