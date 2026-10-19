@@ -29,7 +29,7 @@ their own conversation (Captain decision 2026-10-19).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from shared import send_anchor, space
@@ -57,9 +57,16 @@ class Seat:
     #: ``people[].id`` -> address, on a space-mode seat; empty otherwise.
     person_emails: dict[str, str]
     space_mode: bool
+    #: The name the seat goes by: the ``name`` of the persona that authors the
+    #: calendar skill ("Captain Mark"). Empty when none is authored.
+    agent_name: str = ""
+    #: ``people[].id`` -> authored ``people[].name``, on a space-mode seat. The
+    #: ONLY source of a requester's name in an invitation's words.
+    person_names: dict[str, str] = field(default_factory=dict)
 
 
-def _skill_opted_in(personas: list[dict[str, Any]]) -> bool:
+def _calendar_persona(personas: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The first persona that authors the calendar skill on the roster lane."""
     for persona in personas:
         for entry in persona.get("skills") or [] if isinstance(persona, dict) else []:
             if not isinstance(entry, dict) or entry.get("name") != CALENDAR_SKILL:
@@ -71,8 +78,18 @@ def _skill_opted_in(personas: list[dict[str, Any]]) -> bool:
                 and settings.get(send_anchor.ROSTER_RECIPIENTS_KEY)
                 == send_anchor.ROSTER_RECIPIENTS_VALUE
             ):
-                return True
-    return False
+                return persona
+    return None
+
+
+def _skill_opted_in(personas: list[dict[str, Any]]) -> bool:
+    return _calendar_persona(personas) is not None
+
+
+def _agent_name(config: CustomerConfig) -> str:
+    persona = _calendar_persona(config.personas) or {}
+    name = persona.get("name")
+    return " ".join(name.split()) if isinstance(name, str) else ""
 
 
 def calendar_authored(config: CustomerConfig) -> bool:
@@ -109,6 +126,7 @@ def load_seat(config: CustomerConfig | None = None) -> Seat:
             raise CalendarRefused("this seat does not author a calendar")
         spaces = space.space_config(cfg)
         organizer = _organizer(cfg)
+        agent_name = _agent_name(cfg)
         roster = cfg.inbound_roster
     except (CustomerConfigError, space.SpaceConfigError) as exc:
         raise CalendarRefused(f"the seat's configuration could not be read ({exc})") from exc
@@ -118,13 +136,21 @@ def load_seat(config: CustomerConfig | None = None) -> Seat:
             audience={p.email: p.name for p in spaces.people if p.email},
             person_emails={p.id: p.email for p in spaces.people if p.email},
             space_mode=True,
+            agent_name=agent_name,
+            person_names={p.id: p.name for p in spaces.people if p.name},
         )
     audience = {
         entry: cfg.authored_person_name(entry) or ""
         for entry in roster
         if "@" in entry and not entry.startswith("@")
     }
-    return Seat(organizer=organizer, audience=audience, person_emails={}, space_mode=False)
+    return Seat(
+        organizer=organizer,
+        audience=audience,
+        person_emails={},
+        space_mode=False,
+        agent_name=agent_name,
+    )
 
 
 def resolve_attendees(seat: Seat, requested: Any) -> list[str]:
@@ -183,6 +209,46 @@ def turn_space(session_id: str, seat: Seat) -> space.Space | None:
     return found
 
 
+def _turn_sender(session_id: str) -> str:
+    """Who wrote this turn, as a channel identity: the Telegram user id on a
+    Telegram turn, the verified sender address on an email turn, ``""`` on a
+    cron run (nobody asked) or when it cannot be read."""
+    if space._session_env("HERMES_CRON_SESSION") == "1":
+        return ""
+    if space._session_env("HERMES_SESSION_PLATFORM").lower() == "telegram":
+        return space._session_env("HERMES_SESSION_USER_ID")
+    sid = str(session_id or "").strip() or space._session_env("HERMES_SESSION_ID")
+    if not sid:
+        return ""
+    try:
+        from shared.inbound import SESSION_INBOUND_ORIGIN
+    except Exception:  # noqa: BLE001 - no register, no verified sender
+        return ""
+    origin = SESSION_INBOUND_ORIGIN.get(sid)
+    return str(getattr(origin, "sender_address", "") or "") if origin is not None else ""
+
+
+def requester(session_id: str, seat: Seat) -> str:
+    """The ``people[].id`` of the person who asked for this calendar change, or
+    ``""``. Space-mode seats only: elsewhere no authored person list says who a
+    sender is. A name shown to an invitee is looked up from this id in
+    ``seat.person_names`` and nowhere else, so it can only ever be an authored
+    person's own name; an unknown sender, a cron run, or an unreadable turn
+    gives ``""`` and the invitation names nobody."""
+    if not seat.space_mode:
+        return ""
+    sender = _turn_sender(session_id)
+    if not sender:
+        return ""
+    try:
+        person = space.person_for_sender(sender)
+    except space.SpaceConfigError:
+        return ""
+    if person is None or person.id not in seat.person_names:
+        return ""
+    return person.id
+
+
 def target_space(seat: Seat, turn: space.Space | None, attendees: list[str]) -> str:
     """The space an invitation belongs to: the person's own when it invites only
     them, ``shared`` otherwise; ``""`` on a seat that is not in space mode."""
@@ -202,6 +268,7 @@ __all__ = [
     "Seat",
     "calendar_authored",
     "load_seat",
+    "requester",
     "resolve_attendees",
     "target_space",
     "turn_space",
