@@ -341,7 +341,7 @@ def test_translate_emits_delegation_block_from_escalation_model(tmp_path):
         skills_dir=str(skills_dir),
     )
     config = yaml.safe_load((hermes_home / "profiles" / "marcus" / "config.yaml").read_text())
-    assert config["model"] == "claude-sonnet-4-6"
+    assert config["model"] == {"default": "claude-sonnet-4-6", "provider": "anthropic"}
     assert config["delegation"]["model"] == "claude-opus-4-8"
     # The v0.18 fan-out cap rides alongside the escalation model (see the
     # v0.20 pin test below); the model key is the only escalation-specific one.
