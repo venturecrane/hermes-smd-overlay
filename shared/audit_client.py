@@ -82,11 +82,21 @@ class AuditWriteError(RuntimeError):
     this class for a row it goes on to persist, so a flushed row is never
     counted; a row it gives up on is tallied once, including one held when
     the gateway is killed (counted at the next boot).
+
+    ``reason`` is the loss class (``shared.audit_failure_counter.REASONS``) and
+    ``action_type`` the row's type when the raise site knows it; both are
+    recorded beside the count so a loss can be explained, never any content.
     """
 
-    def __init__(self, *args: Any) -> None:
+    def __init__(
+        self, *args: Any, reason: str | None = None, action_type: str | None = None
+    ) -> None:
         super().__init__(*args)
-        record_audit_write_failure(str(args[0]) if args else "audit write failed")
+        record_audit_write_failure(
+            str(args[0]) if args else "audit write failed",
+            reason=reason,
+            action_type=action_type,
+        )
 
 
 class _BrokerUnreachable(Exception):
@@ -102,6 +112,10 @@ class _BrokerUnreachable(Exception):
 #: connect() errors that prove the request never reached the broker: no
 #: listener on the socket (respawn gap), no socket file, a full accept backlog
 #: (EAGAIN while a starved broker comes up), or a reset during the handshake.
+#: The broker's refusal of the generic verb from any pid but the gateway's
+#: (ss-console ``workspace_broker/verbs.py`` ``_refusal``).
+_NOT_GATEWAY_REFUSAL = "did not originate from the gateway process"
+
 _UNREACHABLE_AT_CONNECT = (
     ConnectionRefusedError,
     FileNotFoundError,
@@ -152,6 +166,13 @@ def _with_buffered_at(row: dict[str, Any], at: str) -> dict[str, Any]:
     return out
 
 
+def _action_type_of(payload: dict[str, Any]) -> str | None:
+    """The row's action_type, for the loss record. Shape-checked downstream."""
+    row = payload.get("row") if isinstance(payload, dict) else None
+    value = row.get("action_type") if isinstance(row, dict) else None
+    return value if isinstance(value, str) else None
+
+
 _HELD_RELPATH = Path(".smd") / "audit_gap_held"
 
 
@@ -200,7 +221,9 @@ def count_rows_held_by_a_dead_gateway(hermes_home: str | None = None) -> int:
     except ValueError:
         held = 0
     for _ in range(held):
-        record_audit_write_failure("audit row held across a broker gap when the gateway died")
+        record_audit_write_failure(
+            "audit row held across a broker gap when the gateway died", reason="gap_dead_gateway"
+        )
     try:
         path.unlink()
     except OSError:
@@ -284,7 +307,11 @@ class _GapBuffer:
     def hold(self, payload: dict[str, Any], send: Callable[[dict[str, Any]], Any]) -> None:
         with self._lock:
             if len(self._pending) >= self._max_rows:
-                record_audit_write_failure("audit gap buffer full; row dropped")
+                record_audit_write_failure(
+                    "audit gap buffer full; row dropped",
+                    reason="gap_full",
+                    action_type=_action_type_of(payload),
+                )
                 return
             self._pending.append(
                 {**payload, "row": _with_buffered_at(payload["row"], _utc_now_iso())}
@@ -310,7 +337,9 @@ class _GapBuffer:
                 if self._gap_started is not None and (
                     self._clock() - self._gap_started >= self._deadline
                 ):
-                    self._abandon_locked(f"audit broker unreachable for over {self._deadline:.0f}s")
+                    self._abandon_locked(
+                        f"audit broker unreachable for over {self._deadline:.0f}s", "gap_deadline"
+                    )
                     self._retrier = None
                     return
                 head = self._pending[0]
@@ -323,7 +352,11 @@ class _GapBuffer:
             except AuditWriteError:
                 pass  # ambiguous or refused: tallied by the constructor, never resent
             except Exception as exc:  # noqa: BLE001 — the retry thread must not die
-                record_audit_write_failure(f"audit gap flush failed: {type(exc).__name__}")
+                record_audit_write_failure(
+                    f"audit gap flush failed: {type(exc).__name__}",
+                    reason="gap_flush_error",
+                    action_type=_action_type_of(head),
+                )
             with self._lock:
                 # Only this thread removes from the head, so it is still `head`.
                 if self._pending and self._pending[0] is head:
@@ -331,10 +364,10 @@ class _GapBuffer:
                 _record_held(len(self._pending), self._hermes_home)
             backoff = 1.0
 
-    def _abandon_locked(self, reason: str) -> None:
+    def _abandon_locked(self, context: str, reason: str) -> None:
         while self._pending:
-            self._pending.popleft()
-            record_audit_write_failure(reason)
+            row = self._pending.popleft()
+            record_audit_write_failure(context, reason=reason, action_type=_action_type_of(row))
         self._gap_started = None
         _record_held(0, self._hermes_home)
 
@@ -343,7 +376,7 @@ class _GapBuffer:
             return  # cannot happen (no I/O under the lock); the held record still counts them
         try:
             if self._pending:
-                self._abandon_locked("audit rows still buffered at interpreter exit")
+                self._abandon_locked("audit rows still buffered at interpreter exit", "gap_exit")
         finally:
             self._lock.release()
 
@@ -385,7 +418,9 @@ class BrokerAuditClient:
         self._buffer_on_unreachable = buffer_on_unreachable
         self._gap = gap_buffer if gap_buffer is not None else _GAP
         if not self._socket_path:
-            raise AuditWriteError(f"{SOCKET_ENV} is unset; cannot reach the audit broker")
+            raise AuditWriteError(
+                f"{SOCKET_ENV} is unset; cannot reach the audit broker", reason="socket_unset"
+            )
 
     def execute(self, sql: str, *params: Any) -> int:
         """Ship one audit row to the broker. Returns 1 (sent, or held).
@@ -396,7 +431,8 @@ class BrokerAuditClient:
         """
         if len(params) != len(COLUMNS):
             raise AuditWriteError(
-                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, got {len(params)}"
+                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, got {len(params)}",
+                reason="bad_row",
             )
         # COLUMNS == (id, ts, action_type, ...). Drop id/ts — the broker
         # re-derives them so the agent cannot backdate or collide.
@@ -428,7 +464,8 @@ class BrokerAuditClient:
         """
         if len(params) != len(COLUMNS):
             raise AuditWriteError(
-                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, got {len(params)}"
+                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, got {len(params)}",
+                reason="bad_row",
             )
         row = dict(zip(COLUMNS[2:], params[2:], strict=True))
         self._request({"action": "webhook_suppressed_append", "row": row})
@@ -438,15 +475,22 @@ class BrokerAuditClient:
         try:
             return self._send(payload)
         except _BrokerUnreachable as exc:
-            raise AuditWriteError(f"audit broker socket error: {exc}") from exc
+            raise AuditWriteError(
+                f"audit broker socket error: {exc}",
+                reason="broker_unreachable",
+                action_type=_action_type_of(payload),
+            ) from exc
 
     def _send(self, payload: dict[str, Any]) -> dict[str, Any]:
         """One request. :class:`_BrokerUnreachable` when nothing was delivered."""
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        action_type = _action_type_of(payload)
         try:
             client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         except OSError as exc:
-            raise AuditWriteError(f"audit broker socket error: {exc}") from exc
+            raise AuditWriteError(
+                f"audit broker socket error: {exc}", reason="broker_io", action_type=action_type
+            ) from exc
         with client:
             try:
                 client.settimeout(self._timeout)
@@ -454,7 +498,9 @@ class BrokerAuditClient:
             except _UNREACHABLE_AT_CONNECT as exc:
                 raise _BrokerUnreachable(str(exc)) from exc
             except OSError as exc:
-                raise AuditWriteError(f"audit broker socket error: {exc}") from exc
+                raise AuditWriteError(
+                    f"audit broker socket error: {exc}", reason="broker_io", action_type=action_type
+                ) from exc
             try:
                 client.sendall(encoded)
                 buf = bytearray()
@@ -464,14 +510,27 @@ class BrokerAuditClient:
                         break
                     buf.extend(chunk)
             except OSError as exc:
-                raise AuditWriteError(f"audit broker socket error: {exc}") from exc
+                raise AuditWriteError(
+                    f"audit broker socket error: {exc}", reason="broker_io", action_type=action_type
+                ) from exc
         try:
             data = json.loads(buf)
         except ValueError as exc:
-            raise AuditWriteError("audit broker returned invalid JSON") from exc
+            raise AuditWriteError(
+                "audit broker returned invalid JSON",
+                reason="broker_bad_reply",
+                action_type=action_type,
+            ) from exc
         if not isinstance(data, dict) or data.get("ok") is not True:
             message = (data.get("message") or data.get("error")) if isinstance(data, dict) else None
-            raise AuditWriteError(f"audit broker refused append: {message or 'unknown error'}")
+            text = str(message or "unknown error")
+            raise AuditWriteError(
+                f"audit broker refused append: {text}",
+                reason=(
+                    "refused_not_gateway" if _NOT_GATEWAY_REFUSAL in text else "broker_refused"
+                ),
+                action_type=action_type,
+            )
         return data
 
 

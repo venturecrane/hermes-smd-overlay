@@ -265,6 +265,36 @@ def test_writer_wraps_executor_failure_as_audit_write_error() -> None:
         writer.write(mod.schemas.AuditEvent(action_type="DRAFT_CREATED", actor="agent"))
 
 
+def test_a_broker_loss_is_counted_once_not_twice(tmp_path, monkeypatch) -> None:
+    """The broker client tallies when it raises; the writer used to wrap that in
+    a SECOND AuditWriteError, whose constructor tallied again, so every lost
+    observational row counted as two."""
+    from shared import audit_failure_counter as counter
+
+    (tmp_path / ".smd").mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    mod = load_plugin("hermes-smd-audit")
+    broker_error = mod.emit.AuditWriteError("refused", reason="refused_not_gateway")
+    assert counter.read_audit_write_failures() == 1
+    writer = mod.emit.AuditLogWriter(FakeD1Client(raise_on_execute=broker_error))
+    with pytest.raises(mod.emit.AuditWriteError):
+        writer.write(mod.schemas.AuditEvent(action_type="DRAFT_CREATED", actor="agent"))
+    assert counter.read_audit_write_failures() == 1
+    assert counter.read_audit_write_failure_reasons() == {"refused_not_gateway": 1}
+
+
+def test_a_direct_write_failure_is_counted_with_its_class(tmp_path, monkeypatch) -> None:
+    from shared import audit_failure_counter as counter
+
+    (tmp_path / ".smd").mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    mod = load_plugin("hermes-smd-audit")
+    writer = mod.emit.AuditLogWriter(FakeD1Client(raise_on_execute=RuntimeError("D1 down")))
+    with pytest.raises(mod.emit.AuditWriteError):
+        writer.write(mod.schemas.AuditEvent(action_type="DRAFT_CREATED", actor="agent"))
+    assert counter.read_audit_write_failure_reasons() == {"direct_write_failed:DRAFT_CREATED": 1}
+
+
 def test_metadata_is_deterministic_json() -> None:
     mod = load_plugin("hermes-smd-audit")
     client = FakeD1Client()
