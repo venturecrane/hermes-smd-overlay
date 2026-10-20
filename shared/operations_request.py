@@ -36,7 +36,33 @@ from typing import Any
 #: request about its own Operator somewhere else. It still has to be authored on
 #: each seat's ``scope.outbound_roster`` to be sendable at all, which is where a
 #: seat says the address is reachable; this says who it is.
-SMD_OPERATIONS_DESK = "team@smd.services"
+#:
+#: A MAILBOX, NEVER A MAILING LIST (ss-console, the [ops dbd3bf32] lapse,
+#: 2026-10-13 -> 10-20). It was ``team@smd.services``, which is a Google Group.
+#: A Group delivering mail from a sender whose domain publishes DMARC
+#: ``p=reject`` (``agentmail.to`` does) rewrites the From to the GROUP --
+#: ``From: "'Brokery Agent' via Team" <team@smd.services>`` -- and keeps the
+#: seat only in Reply-To. SMD answered within 40 seconds, through the Gmail API,
+#: which addresses a reply to the From header: the answer went to
+#: team@smd.services, whose members are SMD's mailbox and not the seat, so the
+#: seat never received it (no INBOUND_RECEIVED on the seat after the card), and
+#: the request lapsed "unanswered" a week later. Every reply path then depended
+#: on the replier honouring Reply-To, which is not a property this seat can
+#: rely on. ``scott@smd.services`` is an alias of the same mailbox and is not a
+#: Group: mail to it keeps the seat's own From, so a reply built from From,
+#: from Reply-To, or by hand all land on the seat. :data:`SMD_MAILING_LISTS`
+#: names the Groups so the choice is checked rather than remembered.
+SMD_OPERATIONS_DESK = "scott@smd.services"
+
+#: SMD addresses that are Google Groups, and so rewrite a DMARC-strict
+#: sender's From to themselves on delivery (evidence: ``List-ID:
+#: <team.smd.services>`` and ``X-Google-Group-Id`` on the 2026-10-13 card). An
+#: operations card must never be addressed to one: the answer to it would be
+#: addressed to the Group rather than to the seat.
+SMD_MAILING_LISTS: frozenset[str] = frozenset({"team@smd.services"})
+
+if SMD_OPERATIONS_DESK in SMD_MAILING_LISTS:  # pragma: no cover -- an authoring error
+    raise RuntimeError("the operations desk must be a mailbox, not a Google Group")
 
 #: The longest summary that rides in one request. A request is a sentence or
 #: two; anything longer is the person writing SMD a letter, which they can do
@@ -168,6 +194,7 @@ __all__ = [
     "FIXED_REPLY",
     "MAX_SUMMARY_CHARS",
     "REFUSED_REPLY",
+    "SMD_MAILING_LISTS",
     "SMD_OPERATIONS_DESK",
     "SUBJECT",
     "UNKNOWN_REPLY",
