@@ -23,8 +23,18 @@ from tests.test_inbound import (
     _signed_kwargs,
 )
 
-_PICTURE = {"attachment_id": "a1", "filename": "image.png", "content_type": "image/png", "size": 323300}
-_MEMO = {"attachment_id": "a2", "filename": "memo.m4a", "content_type": "audio/x-m4a", "size": 90000}
+_PICTURE = {
+    "attachment_id": "a1",
+    "filename": "image.png",
+    "content_type": "image/png",
+    "size": 323300,
+}
+_MEMO = {
+    "attachment_id": "a2",
+    "filename": "memo.m4a",
+    "content_type": "audio/x-m4a",
+    "size": 90000,
+}
 
 
 # -- the paragraph ------------------------------------------------------------
@@ -109,7 +119,9 @@ def _dispatch(tmp_path, monkeypatch, *, from_addr, parts, authenticated=True, ev
     if authenticated:
         data["authentication_results"] = _dmarc_pass(from_addr)
     payload = {"source": "agentmail", "event_type": "message.received", "data": data}
-    prompt = _rendered_email_prompt(from_addr=from_addr, message_id="msg-att-1", body="\n---\nScott")
+    prompt = _rendered_email_prompt(
+        from_addr=from_addr, message_id="msg-att-1", body="\n---\nScott"
+    )
     event = SimpleNamespace(text=prompt, raw_message=payload, source=None)
     kwargs = _signed_kwargs(payload, session_id="", event_id=event_id)
     kwargs["event"] = event
