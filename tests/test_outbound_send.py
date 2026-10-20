@@ -166,7 +166,7 @@ def test_an_unreachable_broker_is_not_reported_as_a_refusal():
     broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
 
     def _down(_body, **_kwargs):
-        raise broker.AgentMailBrokerUnavailable("socket missing")
+        raise broker.AgentMailBrokerNotReached("socket missing")
 
     with pytest.raises(mod.AgentMailSendError, match="unavailable"):
         mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=_down)

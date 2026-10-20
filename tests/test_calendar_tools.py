@@ -200,6 +200,25 @@ def test_with_no_sender_wired_nothing_is_sent_and_the_tool_says_so(cal, monkeypa
     assert calendar_store.STORE.get(out["uid"]).delivery.startswith("not_sent:")
 
 
+def test_an_unknown_outcome_is_never_reported_as_not_sent(cal, monkeypatch) -> None:
+    """The invitation may be out: "not sent" would invite a second copy."""
+    plugin, _ = cal
+    send_dispatch.set_sender(
+        lambda **k: DispatchResult(
+            sent=False,
+            reason="outcome unknown, it may have been sent: broker unreachable: timed out",
+            outcome_unknown=True,
+        )
+    )
+    cf.telegram_group(monkeypatch, cf.A_TG)
+    out = _call(plugin, "calendar_invite_create", {**DATE_NIGHT, "attendees": ["p1", "p2"]})
+    assert out["sent"] is False and out["outcome_unknown"] is True
+    assert "not_sent_because" not in out
+    assert "Do not send it again" in out["say"]
+    assert "NOT sent" not in out["say"]
+    assert calendar_store.STORE.get(out["uid"]).delivery.startswith("unknown:")
+
+
 def test_a_refused_send_is_reported_as_not_sent(cal, monkeypatch) -> None:
     plugin, _ = cal
     send_dispatch.set_sender(

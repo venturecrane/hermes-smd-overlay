@@ -32,7 +32,7 @@ import socket
 from typing import Any
 
 from shared.send_anchor import envelope_fields
-from shared.workspace_broker import BrokerError, request
+from shared.workspace_broker import BrokerError, BrokerNotReached, BrokerReplyUnreadable, request
 
 SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
 
@@ -44,6 +44,11 @@ SEND_TIMEOUT_SECONDS = 30.0
 
 class MsGraphBrokerUnavailable(RuntimeError):
     """The broker could not be reached. NOT a refusal — the outcome is unknown."""
+
+
+class MsGraphBrokerNotReached(MsGraphBrokerUnavailable):
+    """Nothing was delivered to the broker, so nothing was sent. The twin of
+    ``agentmail_broker.AgentMailBrokerNotReached``."""
 
 
 def transmit_available() -> bool:
@@ -62,7 +67,7 @@ def _call(
     lane: str | None = None,
 ) -> dict[str, Any]:
     if not transmit_available():
-        raise MsGraphBrokerUnavailable(
+        raise MsGraphBrokerNotReached(
             f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
         )
     # ss-console#2497 — see the twin note in ``agentmail_broker``. Beside the
@@ -82,9 +87,13 @@ def _call(
     envelope.update(envelope_fields(anchor, lane))
     try:
         return request(envelope, timeout=SEND_TIMEOUT_SECONDS)
-    except OSError as exc:
+    except BrokerNotReached as exc:
+        # connect() failed: nothing left this process, so nothing was sent.
+        raise MsGraphBrokerNotReached(f"broker unreachable: {exc}") from exc
+    except (OSError, BrokerReplyUnreadable) as exc:
         # Transport-level (OSError covers socket timeouts: TimeoutError has
-        # subclassed it since 3.10). The broker may or may not have sent.
+        # subclassed it since 3.10), or a reply nobody can read. The broker may
+        # or may not have sent.
         # Distinguished from BrokerError — a decision the broker made and
         # recorded — because reporting "you may not write to this person" when
         # the truth is "the socket timed out" would be a lie in the ledger's own
@@ -452,6 +461,7 @@ __all__ = [
     "ACTION_SEND_AS_MATCH_REPLY",
     "ACTION_SEND_AS_PROPOSE",
     "BrokerError",
+    "MsGraphBrokerNotReached",
     "MsGraphBrokerUnavailable",
     "SEND_AS_DECISIONS",
     "SEND_AS_STATUSES",

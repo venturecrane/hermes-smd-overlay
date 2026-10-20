@@ -376,7 +376,7 @@ def test_confirm_dispatch_msgraph_fails_closed_without_broker(monkeypatch):
     _arm_msgraph(monkeypatch, trust)
 
     def _unavailable(_payload, **_kwargs):
-        raise trust.outbound_send.msgraph_broker.MsGraphBrokerUnavailable("no socket")
+        raise trust.outbound_send.msgraph_broker.MsGraphBrokerNotReached("no socket")
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _unavailable)
     _capture_and_approve_msgraph(trust)

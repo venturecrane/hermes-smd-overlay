@@ -301,3 +301,24 @@ def test_the_gate_input_is_the_session_taint_without_the_capability():
     assert enforce._taint_gate_input(tainted, internal, False) == tainted
     assert enforce._taint_gate_input(tainted, enforce.ActionClass.EXTERNAL_SEND, True) == tainted
     assert enforce._taint_gate_input(tainted, internal, True) == enforce.TRUST_CLASS_INTERNAL
+
+
+def test_a_brief_whose_answer_was_lost_is_never_offered_a_retry(tmp_path, seat, monkeypatch):
+    """The transport lost the broker's answer, so the brief may be out. The tool
+    must not say "try again", and a second call must not send it twice. Drives
+    the real out-of-turn sender, so ``outcome_unknown`` is set where a seat
+    sets it."""
+
+    def lost(**_kw):
+        raise trust.outbound_send.AgentMailOutcomeUnknown(
+            "outcome unknown, it may have been sent: broker unreachable: timed out"
+        )
+
+    monkeypatch.setattr(trust.outbound_send, "send_message", lost)
+    out = _run_brief(tmp_path)
+    assert out["status"] == "outcome_unknown", out
+    assert "try again" not in out["note"]
+    assert "Do not send it again" in out["note"]
+    again = _run_brief(tmp_path)
+    assert again["status"] != "sent"
+    assert "already gone out" in json.dumps(again)

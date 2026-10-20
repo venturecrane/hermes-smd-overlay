@@ -475,6 +475,22 @@ def casework_brief(
             to=tuple(to), cc=tuple(cc), source=f"{state['skill']} brief envelope"
         ),
     )
+    if getattr(result, "outcome_unknown", False):
+        # The brief may be out: "try again" would be the duplicate, so this
+        # run's brief counts as spent and a second call is refused above.
+        state["sent"] = True
+        return json.dumps(
+            {
+                "status": "outcome_unknown",
+                "reason": getattr(result, "reason", ""),
+                "note": (
+                    "The brief may or may not have gone out: the connection to the mail "
+                    "service failed after it was handed over. Do not send it again; SMD "
+                    "is checking. Report that in one plain line."
+                ),
+            },
+            ensure_ascii=False,
+        )
     if not getattr(result, "sent", False):
         return json.dumps(
             {

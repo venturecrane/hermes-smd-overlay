@@ -284,6 +284,31 @@ def test_refused_full_falls_back_to_skeleton_with_no_appends(monkeypatch, tmp_pa
     assert sender.calls[1]["text"].startswith("## Deadline digest")
 
 
+def test_unknown_outcome_sends_no_skeleton_and_forbids_a_resend(monkeypatch, tmp_path):
+    """The full alert's answer was lost, so it may be out. The skeleton would be
+    a second message to the same people; nothing more goes."""
+    _routine(monkeypatch)
+    _write_envelope(tmp_path)
+    written = _appends_recorder(monkeypatch)
+    sender = _Sender(
+        [
+            DispatchResult(
+                sent=False,
+                reason="outcome unknown, it may have been sent: broker unreachable: timed out",
+                outcome_unknown=True,
+            ),
+            DispatchResult(sent=True, message_id="m2"),
+        ]
+    )
+    send_dispatch.set_sender(sender)
+    note = prerendered_dispatch.dispatch_prerendered(SESSION)
+    assert len(sender.calls) == 1  # NO skeleton attempt
+    assert written == []
+    assert "may or may not have gone out" in note
+    assert "Do not compose, resend" in note
+    assert "could not be delivered" not in note
+
+
 def test_both_refused_yields_the_failure_instruction(monkeypatch, tmp_path):
     _routine(monkeypatch)
     _write_envelope(tmp_path)

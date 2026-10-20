@@ -60,6 +60,11 @@ class DispatchResult:
     #: attachment scan, or a transport that refused the attachment). The one
     #: refusal after which the same message may go again without it.
     attachment_refused: bool = False
+    #: True when the request reached the broker, or may have, and the answer
+    #: was lost: the message may be out. ``sent`` stays False because nothing
+    #: confirmed it, but a caller must not send the same message again on this
+    #: result, and must not tell anyone it did not go. ``reason`` says so.
+    outcome_unknown: bool = False
 
 
 @dataclass(frozen=True)

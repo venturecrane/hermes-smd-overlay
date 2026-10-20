@@ -53,7 +53,13 @@ from shared import answered_messages, attachment_spool
 from shared.same_origin_redirects import open_same_origin
 from shared.secrets import get_secret
 from shared.send_anchor import envelope_fields
-from shared.workspace_broker import BrokerError, request
+from shared.workspace_broker import (
+    BrokerError,
+    BrokerNotReached,
+    BrokerReplyUnreadable,
+    request,
+    send_outcome_unknown,
+)
 
 SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
 
@@ -65,6 +71,15 @@ SEND_TIMEOUT_SECONDS = 30.0
 
 class AgentMailBrokerUnavailable(RuntimeError):
     """The broker could not be reached. NOT a refusal — the outcome is unknown."""
+
+
+class AgentMailBrokerNotReached(AgentMailBrokerUnavailable):
+    """Nothing was delivered to the broker, so nothing was sent.
+
+    The one :class:`AgentMailBrokerUnavailable` whose outcome IS known: no
+    socket path, or a ``connect()`` that failed. A subclass so a caller that
+    reads every unavailability alike is unchanged.
+    """
 
 
 def transmit_available() -> bool:
@@ -87,7 +102,7 @@ def _call(
     lane: str | None = None,
 ) -> dict[str, Any]:
     if not transmit_available():
-        raise AgentMailBrokerUnavailable(
+        raise AgentMailBrokerNotReached(
             f"{SOCKET_ENV} is unset; this seat has no broker transmit path"
         )
     # ss-console#2497. The broker writes the CONFIRM_SEND_* row and cannot know
@@ -116,7 +131,16 @@ def _call(
     envelope.update(envelope_fields(anchor, lane))
     try:
         response = request(envelope, timeout=SEND_TIMEOUT_SECONDS)
-    except OSError as exc:
+    except BrokerNotReached as exc:
+        # connect() failed: nothing left this process, so nothing was sent and
+        # the email this send answers is still unanswered.
+        raise AgentMailBrokerNotReached(f"broker unreachable: {exc}") from exc
+    except BrokerError as exc:
+        if send_outcome_unknown(exc):
+            # The vendor was called and its answer was lost: may have sent.
+            answered_messages.note_anchor(anchor)
+        raise
+    except (OSError, BrokerReplyUnreadable) as exc:
         # The broker may have sent: an unknown outcome counts as answered, so
         # nothing downstream sends a second answer on a maybe.
         answered_messages.note_anchor(anchor)
@@ -575,6 +599,7 @@ __all__ = [
     "MAX_CALENDAR_BYTES",
     "is_calendar_attachment",
     "read_calendar_attachment",
+    "AgentMailBrokerNotReached",
     "AgentMailBrokerUnavailable",
     "DOWNLOAD_HOSTS",
     "own_inbox",
