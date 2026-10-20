@@ -52,7 +52,6 @@ fly_region: lax # nearest to Phoenix; Fly has no phx region; pick per couple geo
 
 # ---- RUNTIME ----
 model: claude-sonnet-4-6
-hermes_ref: '[CURRENT BLESSED FLEET PIN, e.g., v2026.5.7@<40-hex-sha>]'
 
 machine:
   size: shared-cpu-1x
