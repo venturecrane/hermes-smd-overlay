@@ -216,11 +216,14 @@ _ACT_DECLINED_BODY = """{declined_by} declined this request, so nothing was done
 If you think it was misread, say it again.
 """
 
-#: SMD's operations desk, quoted in the lapsed notice so a person whose request
-#: nobody answered has somewhere to go that is not this seat. Mirrors
-#: ``shared.operations_request.SMD_OPERATIONS_DESK``; the two are the same desk
-#: and are written out here rather than imported so this module keeps its
-#: "templates and nothing else" shape.
+#: SMD's operations desk AS A PUBLIC CONTACT, quoted in the lapsed notice so a
+#: person whose request nobody answered has somewhere to go that is not this
+#: seat. Deliberately NOT ``shared.operations_request.SMD_OPERATIONS_DESK``
+#: since 2026-10-20: that one is where the seat addresses a card it needs an
+#: answer to, and must be a mailbox rather than a Group (a Group rewrites the
+#: seat's From and the answer never comes back). A person writing to SMD by
+#: hand needs no answer routed to a seat, so the published team address is the
+#: right one here.
 OPS_DESK = "team@smd.services"
 
 
