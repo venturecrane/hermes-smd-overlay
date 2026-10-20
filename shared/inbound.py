@@ -393,6 +393,85 @@ def sender_status_paragraph(address: str) -> str:
     return _SENDER_STATUS_TEMPLATE.format(address=safe)
 
 
+# ---------------------------------------------------------------------------
+# Attachment notice (ss#3264, captain-mark 2026-10-20)
+# ---------------------------------------------------------------------------
+#
+# AgentMail's ``message.received`` event carries no attachment list, and the
+# route template renders only ``{message.text}``. An email whose whole message
+# is a screenshot or a voice memo therefore reaches the model as an empty body
+# with a signature, and the model, reasonably, answers "your message came
+# through empty" (captain-mark, 2026-10-20, with vision_analyze and
+# voice_note_transcribe both on the surface). The router asks the vendor for
+# the attachments and says so ABOVE the delimiter, so whether to look is never
+# left to the model noticing something it cannot see.
+#
+# Kinds and MIME types only, never filenames: a filename is text the sender
+# chose, and this paragraph sits in the trusted region above the delimiter. A
+# content type is sender-declared too, so it is shown only when it matches the
+# plain ``type/subtype`` shape; anything else renders as "unknown type".
+
+ATTACHMENT_NOTICE_PREFIX = "ATTACHMENTS:"
+
+_MIME_RE = re.compile(r"^[a-z0-9][a-z0-9.+-]{0,40}/[a-z0-9][a-z0-9.+-]{0,80}$")
+#: Audio a phone or mail client may label as something else (iPhone m4a as
+#: video/mp4). Mirrors hermes-smd-voice-notes AUDIO_EXACT.
+_AUDIO_EXACT = frozenset({"video/mp4", "application/ogg", "video/webm"})
+
+
+def _attachment_kind(content_type: str) -> str:
+    if content_type.startswith("image/"):
+        return "picture"
+    if content_type.startswith("audio/") or content_type in _AUDIO_EXACT:
+        return "voice recording"
+    return "file"
+
+
+def attachment_notice(parts: Any) -> str | None:
+    """One paragraph naming what the email carries beyond its body, or None."""
+    if not isinstance(parts, list):
+        return None
+    described: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        raw = str(part.get("content_type") or "").split(";", 1)[0].strip().lower()
+        ctype = raw if _MIME_RE.match(raw) else ""
+        kind = _attachment_kind(ctype)
+        described.append(f"a {kind} ({ctype or 'unknown type'})")
+    if not described:
+        return None
+    count = len(described)
+    noun = "attachment" if count == 1 else "attachments"
+    return (
+        f"{ATTACHMENT_NOTICE_PREFIX} this email carries {count} {noun} that the "
+        f"body below does not show: {'; '.join(described)}. The message is often "
+        "in them, so open each one before you answer, and answer from what it "
+        "holds. Never say the email was empty or that you cannot open "
+        "pictures or recordings."
+    )
+
+
+def with_attachment_notice(prompt: Any, parts: Any) -> Any:
+    """``prompt`` with :func:`attachment_notice` inserted above the delimiter.
+
+    Unchanged (byte-identical) when there is nothing to say, the prompt has no
+    delimiter, or a notice is already there. Never raises.
+    """
+    try:
+        if not isinstance(prompt, str) or not prompt:
+            return prompt
+        notice = attachment_notice(parts)
+        if notice is None:
+            return prompt
+        cut = prompt.find(UNTRUSTED_EMAIL_DELIMITER)
+        if cut < 0 or ATTACHMENT_NOTICE_PREFIX in prompt[:cut]:
+            return prompt
+        return f"{prompt[:cut]}{notice}\n{prompt[cut:]}"
+    except Exception:  # noqa: BLE001 — framing must never break a dispatch
+        return prompt
+
+
 def with_sender_status(
     prompt: Any,
     *,

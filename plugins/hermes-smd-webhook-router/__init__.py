@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from shared import (
+    agentmail_broker,
     calendar_inbox,
     inbound,
     inbound_message,
@@ -387,6 +388,21 @@ def _sender_status_text(event: Any, envelope: Any, address: Any) -> str | None:
     if not isinstance(augmented, str) or augmented == text:
         return None
     return augmented
+
+
+def _attachments_for(message_id: str) -> list[dict[str, Any]]:
+    """The vendor's attachment list for one inbound message; [] when it cannot
+    be read. A failed read only means no notice: the email still dispatches,
+    exactly as it did before the notice existed, and the warning says so."""
+    try:
+        return agentmail_broker.list_attachments(message_id)
+    except Exception as exc:  # noqa: BLE001 — the notice must never break a dispatch
+        logger.warning(
+            "hermes-smd-webhook-router: could not list attachments (%s); "
+            "dispatched without an attachment notice",
+            type(exc).__name__,
+        )
+        return []
 
 
 def _apply_sender_status(event: Any, text: str) -> bool:
@@ -920,6 +936,30 @@ def on_pre_gateway_dispatch(**kwargs: Any) -> dict | None:
                     )
                 else:
                     rewrite_text = candidate
+
+        # ss#3264 — say above the delimiter that the email carries attachments,
+        # which neither the event nor the route template shows. Rostered,
+        # authenticated AgentMail senders only: they are the people the seat
+        # answers, and only their attachments the seat's tools will open.
+        if (
+            envelope is not None
+            and origin is not None
+            and trust_class == inbound.TRUST_CLASS_INTERNAL
+            and dto is not None
+            and dto.provider == inbound_message.PROVIDER_AGENTMAIL
+            and dto.message_id
+        ):
+            event = kwargs.get("event")
+            base = rewrite_text if rewrite_text is not None else getattr(event, "text", None)
+            noticed = inbound.with_attachment_notice(base, _attachments_for(dto.message_id))
+            if isinstance(noticed, str) and noticed != base:
+                if rewrite_text is None and _apply_sender_status(event, noticed):
+                    logger.info(
+                        "hermes-smd-webhook-router: dispatched prompt names the email's "
+                        "attachments (in place)"
+                    )
+                else:
+                    rewrite_text = noticed
     except Exception as exc:  # noqa: BLE001 — provenance must not break routing
         logger.warning(
             "hermes-smd-webhook-router: inbound envelope/enqueue failed (%s); "
