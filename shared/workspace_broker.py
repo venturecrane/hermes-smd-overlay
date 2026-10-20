@@ -46,26 +46,33 @@ class BrokerReplyUnreadable(ValueError):
     """
 
 
-#: connect() errors that prove the request never reached the broker. The same
-#: set ``shared.audit_client`` treats as safe to hold and resend: no listener on
-#: the socket (respawn gap), no socket file, a full accept backlog, or a reset
-#: during the handshake.
-UNREACHABLE_AT_CONNECT: tuple[type[OSError], ...] = (
-    ConnectionRefusedError,
-    FileNotFoundError,
-    BlockingIOError,
-    ConnectionResetError,
-)
+#: The code of the one :class:`BrokerError` raised here before any socket is
+#: opened: no broker path is configured, so nothing can have been sent.
+NOT_CONFIGURED = "not_configured"
 
-#: Reply ``error`` codes after which a SEND's outcome is unknown. The broker
-#: raises a transport error only once the vendor has been called (ss-console
-#: ``transmit_verbs.dispatch_transmit`` records it as ``transport_error``: the
-#: message may have gone out). ``internal_error`` is an exception the broker did
-#: not raise on purpose, which can happen after the vendor call too, and
-#: ``invalid_response`` is a reply nobody can read. Every other code is a refusal
-#: the broker made before calling the vendor, or a vendor answer that said no.
+#: Reply ``error`` codes after which a SEND's outcome is unknown, so the caller
+#: must not send it again.
+#:
+#: A transport error is raised by the broker's transmit verbs both before the
+#: vendor is called (no credential, a token that could not be minted) and after
+#: (a timeout, a 5xx, a reset), and the reply does not say which, so it counts
+#: as unknown: the cost of that is a definite failure reported as "checking",
+#: never a duplicate. ``internal_error`` is an exception the broker did not
+#: raise on purpose, which can happen after the vendor call too.
+#: ``invalid_response`` is a reply that is not an object, and ``""`` is a reply
+#: with ``ok: false`` and no code at all: neither says what happened.
+#:
+#: Every other code is a refusal the broker wrote on purpose before transmitting
+#: (``AgentMailRefused`` / ``MsGraphRefused``, ``PermissionError`` and
+#: ``ValueError`` from its gates, ``request_too_large``), or ``not_configured``.
 UNKNOWN_SEND_OUTCOME_CODES = frozenset(
-    {"AgentMailTransportError", "MsGraphTransportError", "internal_error", "invalid_response"}
+    {
+        "AgentMailTransportError",
+        "MsGraphTransportError",
+        "internal_error",
+        "invalid_response",
+        "",
+    }
 )
 
 
@@ -84,14 +91,19 @@ def request(payload: dict[str, Any], *, timeout: float = DEFAULT_TIMEOUT_SECONDS
     """
     socket_path = os.environ.get(SOCKET_ENV, "")
     if not socket_path:
-        raise BrokerError(f"{SOCKET_ENV} is unset")
+        raise BrokerError(f"{SOCKET_ENV} is unset", code=NOT_CONFIGURED)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout)
         try:
             client.connect(socket_path)
-        except UNREACHABLE_AT_CONNECT as exc:
-            raise BrokerNotReached(exc.errno, f"broker not reached: {exc}") from exc
+        except OSError as exc:
+            # EVERY connect() failure, not a chosen few: nothing is written
+            # until sendall below, so no fault here can have delivered the
+            # request (refused, no socket file, EACCES, a full backlog, a reset
+            # in the handshake). AF_UNIX has no EINPROGRESS, so a connect()
+            # does not time out halfway through a delivery either.
+            raise BrokerNotReached(exc.errno, f"broker not reached: {exc.strerror or exc}") from exc
         client.sendall(encoded)
         response = bytearray()
         while not response.endswith(b"\n"):

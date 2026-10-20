@@ -32,6 +32,7 @@ from shared import (
     msgraph_broker,
     outbound_attachment,
     send_anchor,
+    unknown_sends,
     workspace_broker,
 )
 from shared.send_dispatch import CALENDAR_ARG
@@ -85,6 +86,26 @@ class MsGraphOutcomeUnknown(MsGraphSendError, SendOutcomeUnknown):
 #: Leads with the outcome because callers quote ``str(exc)`` to people and to
 #: the model, and "not sent" would be a guess that invites the duplicate.
 OUTCOME_UNKNOWN_PREFIX = "outcome unknown, it may have been sent"
+
+
+def _unknown(
+    cls: type[SendOutcomeUnknown], body: dict[str, Any], detail: object, channel: str
+) -> SendOutcomeUnknown:
+    """Hold ``body`` (``shared.unknown_sends``), page, and return the exception."""
+    unknown_sends.hold(body)
+    unknown_sends.page(channel)
+    return cls(f"{OUTCOME_UNKNOWN_PREFIX}: {detail}")
+
+
+def _refuse_a_repeat(cls: type[SendOutcomeUnknown], body: dict[str, Any]) -> None:
+    """Raise ``cls`` when this exact body's outcome is already unknown, so a
+    resend never reaches the broker. Nothing is sent."""
+    if unknown_sends.held(body):
+        logger.error("hermes-smd-trust: refused a repeat of a send whose outcome is unknown")
+        raise cls(
+            f"{OUTCOME_UNKNOWN_PREFIX}: an identical message's outcome is already unknown "
+            "on this seat, so it was not sent again"
+        )
 
 
 class AttachmentSendError(OutboundSendError):
@@ -201,6 +222,7 @@ def send_message(
     body = _send_body(payload)
     if not body.get("to"):
         raise AgentMailSendError("refusing to send: payload has no recipient")
+    _refuse_a_repeat(AgentMailOutcomeUnknown, body)
     send = sender or agentmail_broker.send_message
     kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
     if audit_extra:
@@ -215,7 +237,7 @@ def send_message(
         message_id = send(body, **kwargs)
     except agentmail_broker.BrokerError as exc:
         if workspace_broker.send_outcome_unknown(exc):
-            raise AgentMailOutcomeUnknown(f"{OUTCOME_UNKNOWN_PREFIX}: {exc}") from exc
+            raise _unknown(AgentMailOutcomeUnknown, body, exc, "agentmail") from exc
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
         # to the operator than a generic delivery failure.
@@ -223,7 +245,7 @@ def send_message(
     except agentmail_broker.AgentMailBrokerNotReached as exc:
         raise AgentMailSendError(f"broker transmit unavailable, nothing was sent: {exc}") from exc
     except agentmail_broker.AgentMailBrokerUnavailable as exc:
-        raise AgentMailOutcomeUnknown(f"{OUTCOME_UNKNOWN_PREFIX}: {exc}") from exc
+        raise _unknown(AgentMailOutcomeUnknown, body, exc, "agentmail") from exc
     if not isinstance(message_id, str) or not message_id:
         # A 2xx with no id is still a successful send per AgentMail; surface a
         # placeholder so the caller can audit delivery without failing the turn.
@@ -310,6 +332,7 @@ def send_via_msgraph(
         raise MsGraphSendError("refusing to send: payload has no recipient")
     if attachments:
         body["attachments"] = _attachment_copies(attachments)
+    _refuse_a_repeat(MsGraphOutcomeUnknown, body)
     send = sender or msgraph_broker.send_message
     kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
     if audit_extra:
@@ -324,7 +347,7 @@ def send_via_msgraph(
         # Checked before the attachment test: a lost answer is not a refusal of
         # the attachment, and resending without it would be the duplicate.
         if workspace_broker.send_outcome_unknown(exc):
-            raise MsGraphOutcomeUnknown(f"{OUTCOME_UNKNOWN_PREFIX}: {exc}") from exc
+            raise _unknown(MsGraphOutcomeUnknown, body, exc, "msgraph") from exc
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
         # to the operator than a generic delivery failure.
@@ -334,7 +357,7 @@ def send_via_msgraph(
     except msgraph_broker.MsGraphBrokerNotReached as exc:
         raise MsGraphSendError(f"broker transmit unavailable, nothing was sent: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
-        raise MsGraphOutcomeUnknown(f"{OUTCOME_UNKNOWN_PREFIX}: {exc}") from exc
+        raise _unknown(MsGraphOutcomeUnknown, body, exc, "msgraph") from exc
     # ss-console#2499. Graph's 202 still carries no id, but the broker now stamps
     # an X-SMD-Audit-Row header on the message and looks that message up in Sent
     # Items to learn its RFC2822 id. That id is what a firm can find in its own

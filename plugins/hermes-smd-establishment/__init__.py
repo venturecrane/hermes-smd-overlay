@@ -2549,7 +2549,15 @@ def _notify_requester(
 def _dispatch_outcome_letter(
     *, kind: str, row: dict[str, Any], by: str = "", session_id: str = ""
 ) -> bool:
-    """Write and send the letter itself. The claim is the caller's business."""
+    """Write and send the letter itself. The claim is the caller's business.
+
+    True also when the send's answer was lost (``outcome_unknown``): the letter
+    may be out, so the row counts as reported and the sweeper does not send it
+    again. This module otherwise prefers a duplicate to a silence, but that
+    trade is for a letter that certainly did not go; one that may have gone is
+    a duplicate the reader cannot tell from a second decision. The broker's
+    intent row with no result is what pages SMD to settle it.
+    """
     if _is_ops_row(row):
         notification = rule_dispatch.notify_ops_outcome(
             kind=kind,
@@ -2562,7 +2570,7 @@ def _dispatch_outcome_letter(
             session_id=session_id,
             anchor=_rule_anchor(row),
         )
-        return notification.sent
+        return notification.sent or notification.outcome_unknown
     notification = rule_dispatch.notify_outcome(
         kind=kind,
         proposal_id=str(row.get("proposal_id") or ""),
@@ -2574,7 +2582,7 @@ def _dispatch_outcome_letter(
         anchor=_rule_anchor(row),
         row_kind=str(row.get("kind") or "rule"),
     )
-    return notification.sent
+    return notification.sent or notification.outcome_unknown
 
 
 def _mark_outcome_reported(proposal_id: str) -> None:
@@ -3020,6 +3028,16 @@ def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
         lane=None,
         session_id=session_id,
     )
+    if getattr(result, "outcome_unknown", False):
+        # The answer was lost, so SMD may hold this tag. The row stays open: a
+        # withdrawn row would orphan SMD's answer, and the open row is also what
+        # makes a second ask answer ``duplicate_of`` instead of emailing again.
+        logger.error(
+            "hermes-smd-establishment: operations request %s outcome unknown (%s)",
+            proposal_id,
+            result.reason,
+        )
+        return ops_request.UNKNOWN_REPLY
     if not result.sent:
         reason = result.reason or "the send was refused"
         logger.info("hermes-smd-establishment: operations request NOT passed on (%s)", reason)
@@ -4148,17 +4166,23 @@ _SEND_AS_NOTES: dict[str, str] = {
         "{reason}. Tell {sender} that plainly, and do not send the message any "
         "other way."
     ),
+    # A FAILED send can be a transport fault after Graph accepted the message,
+    # so this never says nothing went out: it says the send did not complete.
     "FAILED": (
-        "{sender} approved [draft {draft_id}], but the send failed and nothing went "
-        "out: {reason}. Tell them plainly. Do not retry it and do not send it any "
-        "other way."
+        "{sender} approved [draft {draft_id}], but the send did not complete: "
+        "{reason}. It is not confirmed whether it went out, and SMD is checking. "
+        "Tell them that plainly. Do not retry it and do not send it any other way."
     ),
 }
 
+# Any exception here, including a timeout after the reply was handed over, at
+# which point the broker may already have transmitted. So the outcome is
+# stated as unknown rather than as "nothing was sent".
 _SEND_AS_UNREACHABLE_NOTE = (
-    "This seat could not reach the broker with the reply about [draft {draft_id}], "
-    "so it was not recorded and nothing was sent by this turn. Tell {sender} "
-    "plainly, and do not send the message any other way."
+    "This seat did not get the broker's answer to the reply about [draft "
+    "{draft_id}], so it is unknown whether it was recorded or sent; SMD is "
+    "checking. Tell {sender} that plainly, do not say it was sent or that it "
+    "was not, and do not send the message any other way."
 )
 
 _SEND_AS_CHANGE_EMPTY_NOTE = (

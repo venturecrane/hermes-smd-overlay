@@ -97,6 +97,18 @@ REFUSED_REPLY = (
     "on and do not say it will happen."
 )
 
+#: What the Operator says when the request was handed over and the answer was
+#: lost: SMD may already hold it, so asking the person to resend it would be
+#: the duplicate, and saying it was not passed on would be a guess.
+UNKNOWN_REPLY = (
+    "Routines, schedules, channels, memory, autonomy and turning things on or "
+    "off are changes SMD makes rather than ones I can make myself. This seat "
+    "handed your request to SMD, but the connection failed before the answer "
+    "came back, so it is not confirmed that it arrived; SMD is checking. Say "
+    "this to the person in your own words. Do not ask them to send it again, "
+    "do not say it was passed on or that it was not, and do not say it will happen."
+)
+
 
 def summarize(value: Any) -> str:
     """The request as the Operator understood it, bounded and whitespace-folded.
@@ -158,6 +170,7 @@ __all__ = [
     "REFUSED_REPLY",
     "SMD_OPERATIONS_DESK",
     "SUBJECT",
+    "UNKNOWN_REPLY",
     "build",
     "summarize",
 ]

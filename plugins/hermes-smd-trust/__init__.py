@@ -1021,7 +1021,9 @@ def _scan_approved_send(rec: Any, payload: dict, session_id: str) -> str | None:
         told = (
             f" A short internal notice that it was withheld went to {', '.join(notice_to)}."
             if result.sent
-            else f" The internal notice that it was withheld did not go ({result.reason})."
+            else f" The internal notice that it was withheld "
+            f"{'may not have gone' if getattr(result, 'outcome_unknown', False) else 'did not go'} "
+            f"({result.reason})."
         )
     logger.info("hermes-smd-trust: approved send to %s refused by outbound scan", recipients)
     return (

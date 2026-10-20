@@ -28,7 +28,14 @@ from collections.abc import Callable, Iterator
 
 import pytest
 
-from shared import agentmail_broker, msgraph_broker, workspace_broker
+from shared import (
+    agentmail_broker,
+    msgraph_broker,
+    send_dispatch,
+    spec_gate,
+    unknown_sends,
+    workspace_broker,
+)
 from shared.inbound import SESSION_TAINT
 from shared.outbound_recipient import DRAFT_RECIPIENTS
 from shared.pending_send import PENDING_SEND
@@ -99,7 +106,10 @@ def broker(monkeypatch) -> Iterator[Callable[[Callable[[socket.socket], None]], 
         servers.append(server)
 
         def serve() -> None:
-            conn, _ = server.accept()
+            try:
+                conn, _ = server.accept()
+            except OSError:  # closed at teardown with nobody connected
+                return
             with conn:
                 buf = bytearray()
                 while not buf.endswith(b"\n"):
@@ -136,6 +146,40 @@ def test_connect_failure_is_not_reached(monkeypatch):
         workspace_broker.request({"action": "x"})
 
 
+def test_a_socket_file_with_no_listener_is_not_reached(monkeypatch):
+    """The respawn gap: the file exists and nobody is accepting."""
+    path = os.path.join(tempfile.mkdtemp(prefix="sou"), "dead.sock")
+    bound = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    bound.bind(path)  # bound, never listening: connect() is refused
+    monkeypatch.setenv(workspace_broker.SOCKET_ENV, path)
+    try:
+        with pytest.raises(workspace_broker.BrokerNotReached):
+            workspace_broker.request({"action": "x"})
+    finally:
+        bound.close()
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+def test_a_socket_the_seat_may_not_open_is_not_reached(broker):
+    """EACCES at connect(): nothing was written, so nothing can have gone."""
+    path = broker(_hang_up)
+    os.chmod(path, 0)
+    with pytest.raises(workspace_broker.BrokerNotReached):
+        workspace_broker.request({"action": "x"})
+
+
+def test_a_timeout_after_the_write_is_not_not_reached(broker):
+    """THE HEADLINE CASE: the request was written and the answer never came."""
+    stop = threading.Event()
+    broker(lambda _conn: stop.wait(5))
+    try:
+        with pytest.raises(OSError) as caught:
+            workspace_broker.request({"action": "x"}, timeout=0.3)
+        assert not isinstance(caught.value, workspace_broker.BrokerNotReached)
+    finally:
+        stop.set()
+
+
 def test_a_hang_up_after_the_write_is_unreadable_not_not_reached(broker):
     broker(_hang_up)
     with pytest.raises(workspace_broker.BrokerReplyUnreadable):
@@ -162,7 +206,10 @@ def test_the_reply_error_code_is_kept(broker):
         ("PermissionError", False),
         ("ValueError", False),
         ("request_too_large", False),
-        ("", False),
+        # An ok:false reply with no code says nothing about what happened.
+        ("", True),
+        # Raised here, before any socket was opened.
+        (workspace_broker.NOT_CONFIGURED, False),
     ],
 )
 def test_which_reply_codes_leave_a_send_unknown(code, unknown):
@@ -252,6 +299,81 @@ def test_graph_transport_error_is_unknown(broker):
     broker(GRAPH_TRANSPORT_ERROR)
     with pytest.raises(out.MsGraphOutcomeUnknown):
         out.send_via_msgraph({"to": [TO], "subject": "S", "body_text": "B"})
+
+
+def test_graph_hang_up_is_unknown(broker):
+    out = _outbound_send()
+    broker(_hang_up)
+    with pytest.raises(out.MsGraphOutcomeUnknown):
+        out.send_via_msgraph({"to": [TO], "subject": "S", "body_text": "B"})
+
+
+def test_agentmail_timeout_after_the_write_is_unknown(broker, monkeypatch):
+    out = _outbound_send()
+    monkeypatch.setattr(agentmail_broker, "SEND_TIMEOUT_SECONDS", 0.3)
+    stop = threading.Event()
+    broker(lambda _conn: stop.wait(5))
+    try:
+        with pytest.raises(out.AgentMailOutcomeUnknown):
+            out.send_message(payload={"to": [TO], "subject": "S", "text": "B"})
+    finally:
+        stop.set()
+
+
+def test_the_send_timeout_outlasts_the_brokers_worst_case():
+    """At 30s a Graph send that took 40 (send plus the Sent Items lookup) came
+    back unknown. The broker's worst case is about 105s."""
+    assert msgraph_broker.SEND_TIMEOUT_SECONDS >= 110
+    assert agentmail_broker.SEND_TIMEOUT_SECONDS >= 110
+
+
+# ---------------------------------------------------------------------------
+# The structural half: a body whose outcome is unknown is not sent again.
+# ---------------------------------------------------------------------------
+
+
+def _counting(handler: Callable[[socket.socket], None], seen: list[int]):
+    def wrapped(conn: socket.socket) -> None:
+        seen.append(1)
+        handler(conn)
+
+    return wrapped
+
+
+def test_an_identical_resend_is_refused_without_reaching_the_broker(broker, monkeypatch):
+    out = _outbound_send()
+    pages: list[str] = []
+    monkeypatch.setattr(unknown_sends, "page", pages.append)
+    seen: list[int] = []
+    broker(_counting(TRANSPORT_ERROR, seen))
+    payload = {"to": [TO], "subject": "S", "text": "B"}
+    with pytest.raises(out.SendOutcomeUnknown):
+        out.send_message(payload=dict(payload))
+    assert seen == [1] and pages == ["agentmail"]
+    # A second broker that WOULD accept: the repeat must never reach it.
+    broker(_counting(SENT_CONFIRM_ROW_SHORT, seen))
+    with pytest.raises(out.SendOutcomeUnknown) as caught:
+        out.send_message(payload=dict(payload))
+    assert seen == [1], "the repeat reached the broker"
+    assert "not sent again" in str(caught.value)
+    # A different message is not held.
+    assert out.send_message(payload={**payload, "text": "C"}) == "msg-77"
+
+
+def test_the_hold_lapses(monkeypatch):
+    body = {"to": [TO], "text": "B"}
+    unknown_sends.hold(body, now=100.0)
+    assert unknown_sends.held(body, now=100.0 + unknown_sends.HOLD_S - 1)
+    assert not unknown_sends.held(body, now=100.0 + unknown_sends.HOLD_S)
+
+
+def test_a_definite_refusal_is_not_held(broker):
+    out = _outbound_send()
+    broker(REFUSED)
+    payload = {"to": [TO], "subject": "S", "text": "B"}
+    with pytest.raises(out.AgentMailSendError):
+        out.send_message(payload=dict(payload))
+    assert not unknown_sends.held(payload)
 
 
 def test_the_broker_clients_keep_their_old_unavailable_type():
@@ -364,6 +486,64 @@ def test_send_tool_connect_failure_still_says_not_sent(monkeypatch, tmp_path):
     _no_broker(monkeypatch)
     result = trust._smd_send_message({"to": [TO], "subject": "S", "text": "B"})
     assert result.startswith("Not sent:")
+
+
+STAFF = "attorney@firm.example"
+
+
+@pytest.fixture
+def internal_seat(monkeypatch):
+    """The real out-of-turn sender over the real transports: only the gate's
+    inputs and the content scans are stubbed, so ``outcome_unknown`` is set
+    where a seat sets it."""
+    trust = load_plugin("hermes-smd-trust")
+    enforce = trust.enforce
+    SESSION_TAINT._tainted.clear()
+    monkeypatch.setattr(
+        enforce,
+        "_resolve_persona_exposure",
+        lambda slug="": {
+            enforce.ActionClass.EXTERNAL_SEND_INTERNAL: enforce.Ceiling.AUTONOMOUS,
+            enforce.ActionClass.EXTERNAL_SEND: enforce.Ceiling.AUTONOMOUS,
+        },
+    )
+    monkeypatch.setattr(enforce, "_resolve_roster", lambda: [STAFF])
+    monkeypatch.setattr(enforce, "_resolve_typed_roster", lambda: [])
+    monkeypatch.setattr(enforce, "_resolve_vertical_floors", lambda: {})
+    monkeypatch.setattr(enforce, "_resolve_active_persona", lambda: "agent-case")
+    monkeypatch.setattr(spec_gate, "check_structure_floor", lambda **_k: None)
+    monkeypatch.setattr(spec_gate, "check_spec_gate", lambda **_k: None)
+    monkeypatch.setattr(trust.outbound, "check_outbound_draft", lambda **_k: None)
+    monkeypatch.setattr(trust.outbound, "check_outbound_send", lambda **_k: None)
+    monkeypatch.setattr(trust, "get_secret", lambda _k: "seat")
+    monkeypatch.setattr(trust, "_seat_email_adapter", lambda: "agentmail")
+    send_dispatch.set_sender(trust._dispatch_internal_message)
+    yield trust
+    send_dispatch.set_sender(None)
+
+
+def _internal_send() -> DispatchResult:
+    return send_dispatch.dispatch(
+        to=[STAFF],
+        subject="s",
+        text="Needs you:\n1. A question?",
+        anchor=None,
+        lane="escalation",
+        session_id="s-internal",
+    )
+
+
+def test_the_out_of_turn_sender_reports_an_unknown_outcome(internal_seat, broker):
+    broker(TRANSPORT_ERROR)
+    result = _internal_send()
+    assert result.sent is False and result.outcome_unknown is True
+    assert result.reason.startswith("outcome unknown")
+
+
+def test_the_out_of_turn_sender_reports_a_refusal_as_not_sent(internal_seat, broker):
+    broker(REFUSED)
+    result = _internal_send()
+    assert result.sent is False and result.outcome_unknown is False
 
 
 def test_dispatch_result_carries_outcome_unknown():

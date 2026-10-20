@@ -63,10 +63,13 @@ from shared.workspace_broker import (
 
 SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
 
-#: Longer than the broker's own 15s vendor timeout so a slow AgentMail response
-#: surfaces as the broker's typed error (which carries a reason and an audit row)
-#: rather than as a socket timeout here (which carries neither).
-SEND_TIMEOUT_SECONDS = 30.0
+#: Longer than the broker's whole send so a slow AgentMail response surfaces as
+#: the broker's typed error (which carries a reason and an audit row) rather
+#: than as a socket timeout here (which carries neither, and leaves the outcome
+#: unknown). Matched to ``msgraph_broker.SEND_TIMEOUT_SECONDS``: the broker's
+#: 15s vendor call plus the intent and confirm row writes (each up to a 5s
+#: sqlite busy timeout) fits with a wide margin.
+SEND_TIMEOUT_SECONDS = 120.0
 
 
 class AgentMailBrokerUnavailable(RuntimeError):

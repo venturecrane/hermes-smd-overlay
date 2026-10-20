@@ -321,4 +321,6 @@ def test_a_brief_whose_answer_was_lost_is_never_offered_a_retry(tmp_path, seat, 
     assert "Do not send it again" in out["note"]
     again = _run_brief(tmp_path)
     assert again["status"] != "sent"
-    assert "already gone out" in json.dumps(again)
+    # Refused, without claiming it went: the first send's outcome is unknown.
+    assert "may already have gone out" in json.dumps(again)
+    assert "has already gone out" not in json.dumps(again)

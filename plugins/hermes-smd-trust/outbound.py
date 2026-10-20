@@ -1736,7 +1736,9 @@ def _check_checklist(
                 " A short internal notice that a message was withheld went to "
                 f"{', '.join(result.recipients or notice['to'])}."
                 if result.sent
-                else f" The internal notice that it was withheld did not go ({result.reason})."
+                else f" The internal notice that it was withheld "
+                f"{'may not have gone' if getattr(result, 'outcome_unknown', False) else 'did not go'} "
+                f"({result.reason})."
             )
         return {
             "action": "block",

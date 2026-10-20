@@ -36,10 +36,15 @@ from shared.workspace_broker import BrokerError, BrokerNotReached, BrokerReplyUn
 
 SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
 
-#: Longer than the broker's own 15s Graph timeout so a slow Graph response
-#: surfaces as the broker's typed error (which carries a reason and an audit row)
-#: rather than as a socket timeout here (which carries neither).
-SEND_TIMEOUT_SECONDS = 30.0
+#: Longer than the broker's WHOLE send, not one Graph call, so a slow Graph
+#: response surfaces as the broker's typed error (which carries a reason and an
+#: audit row) rather than as a socket timeout here (which carries neither, and
+#: leaves the outcome unknown). The broker's worst case is about 105s: two token
+#: mints and the sendMail POST at 15s each (ss-console ``msgraph_ops.TIMEOUT_S``),
+#: then the Sent Items lookup's three 15s reads after 5s of pauses
+#: (``_SENT_LOOKUP_BACKOFF_S``), plus the intent and confirm row writes. At 30s a
+#: send that succeeded in 40 was reported to the agent as unknown.
+SEND_TIMEOUT_SECONDS = 120.0
 
 
 class MsGraphBrokerUnavailable(RuntimeError):

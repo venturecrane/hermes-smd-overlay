@@ -403,6 +403,8 @@ def list_events(args: dict[str, Any], session_id: str) -> dict[str, Any]:
             "invitation_delivered": e.delivery.startswith("sent:")
             if e.origin == calendar_store.ORIGIN_AGENT
             else None,
+            # False above is not "not sent" for these: the answer was lost.
+            **({"invitation_outcome_unknown": True} if e.delivery.startswith("unknown:") else {}),
             **({"space": e.space} if seat.space_mode else {}),
         }
         for e in visible
