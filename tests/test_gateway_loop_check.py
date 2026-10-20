@@ -221,3 +221,21 @@ def test_ledger_counts_only_the_last_hour_and_ignores_garbage(world):
         )
     )
     assert world.checker().check(uptime_seconds=10_000).restarts_last_hour == 2
+
+
+def test_the_default_ledger_lives_under_roots_own_directory():
+    """2026-10-20: /opt/data/gateway-liveness sat directly under the agent-owned
+    /opt/data, so the agent could rename it aside and plant its own."""
+    from shared import gateway_loop_check as glc
+
+    assert glc._DEFAULT_LEDGER_DIR == "/opt/data/.smd-root/gateway-liveness"
+
+
+def test_a_planted_link_fifo_or_device_is_blindness_not_a_count_or_a_hang(world):
+    world.beat(age=5)
+    kills = world.ledger / "kills"
+    kills.symlink_to("/dev/zero")
+    assert world.checker().check(uptime_seconds=10_000).restarts_last_hour is None
+    kills.unlink()
+    os.mkfifo(kills)
+    assert world.checker().check(uptime_seconds=10_000).restarts_last_hour is None

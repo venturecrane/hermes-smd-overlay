@@ -15,7 +15,8 @@ so the file's mtime goes stale the instant the loop freezes. ss-console#2488
 part 1 added a root-side supervisor in the Machine entrypoint that watches that
 mtime and restarts the seat, and publishes its own state to
 ``/run/smd-gateway-liveness/state`` (one word) plus a kill ledger at
-``/opt/data/gateway-liveness/kills`` (one line per restart). Both root-written,
+``/opt/data/.smd-root/gateway-liveness/kills`` (one line per restart; moved
+out of the agent-renamable ``/opt/data/gateway-liveness`` 2026-10-20). Both root-written,
 world-readable, so this gate-uid process can read them.
 
 What this module ships, four fields, all tri-state by construction:
@@ -62,6 +63,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,7 +72,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_HOME = "/opt/data"
 _DEFAULT_RUN_DIR = "/run/smd-gateway-liveness"
-_DEFAULT_LEDGER_DIR = "/opt/data/gateway-liveness"
+#: Under root's own ``.smd-root`` since 2026-10-20: a root directory directly
+#: under the agent-owned /opt/data could be renamed aside and replaced.
+_DEFAULT_LEDGER_DIR = "/opt/data/.smd-root/gateway-liveness"
+#: The ledger is read at most this far from its end.
+_LEDGER_READ_CAP_BYTES = 1024 * 1024
 LEDGER_WINDOW_SECONDS = 3600
 # Mirrors scheduler_check.BOOT_SUPPRESS_SECONDS; imported lazily below so a
 # refactor there cannot break this module's import.
@@ -256,7 +262,7 @@ class GatewayLoopChecker:
 
     def _count_restarts(self, now_s: float) -> int | None:
         try:
-            text = (self._ledger_dir / "kills").read_text(encoding="utf-8", errors="replace")
+            text = _read_regular_tail(self._ledger_dir / "kills", _LEDGER_READ_CAP_BYTES)
         except FileNotFoundError:
             # No ledger means no supervisor on this pin, OR a supervisor that
             # has never had to kill. The former must hold, and the two cannot be
@@ -279,6 +285,21 @@ class GatewayLoopChecker:
             if int(head) >= cutoff:
                 count += 1
         return count
+
+
+def _read_regular_tail(path: Path, cap: int) -> str:
+    """At most ``cap`` bytes from the end of a REGULAR file, never through a
+    link: a FIFO planted at the path would block the heartbeat and a device
+    would read forever. Raises FileNotFoundError like ``read_text``."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{path} is not a regular file")
+        if st.st_size > cap:
+            fh.seek(st.st_size - cap)
+            fh.readline()
+        return fh.read(cap).decode("utf-8", errors="replace")
 
 
 __all__ = [
