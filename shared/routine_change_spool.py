@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,10 @@ def append_routine_change(
             "skill": skill,
             "enabled": bool(enabled),
             "schedule": schedule,
+            # When bootstrap saw the change. The broker stamps ``ts`` when the
+            # row ARRIVES, which can be boots later (2026-10-20: the gateway
+            # never drained this spool, so the first drain is a backlog).
+            "spooled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
         sort_keys=True,
         separators=(",", ":"),

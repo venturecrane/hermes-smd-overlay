@@ -476,6 +476,29 @@ def on_post_llm_call(**kwargs: Any) -> None:
 _ROUTINE_ACTOR = "customer.yaml"
 
 
+def _routine_change_metadata(change: dict) -> dict:
+    """Row metadata for one spooled routine change.
+
+    The row's ``ts`` is when the gateway drained it, not when the routine
+    changed, so the row says so. ``spooled_at`` is bootstrap's own stamp; a
+    line without one was spooled before 2026-10-20, when no gateway ever
+    drained the spool, so it is marked ``backlog`` with no date: when that
+    change happened is not known, and inventing one would be worse than
+    saying so.
+    """
+    spooled_at = change.get("spooled_at")
+    meta = {
+        "persona": str(change.get("persona_slug") or ""),
+        "schedule": change.get("schedule"),
+        "source": "customer.yaml cron reconcile at boot",
+    }
+    if isinstance(spooled_at, str) and spooled_at:
+        meta["spooled_at"] = spooled_at
+    else:
+        meta["backlog"] = "spooled before 2026-10-20; changed at an unknown earlier boot"
+    return meta
+
+
 def _drain_routine_changes_to_ledger(writer) -> None:
     """Write one row per routine that crossed the scheduled line at this boot.
 
@@ -515,11 +538,7 @@ def _drain_routine_changes_to_ledger(writer) -> None:
                     actor=_ROUTINE_ACTOR,
                     actor_role=schemas.ActorRole.OPERATOR,
                     skill_name=str(change.get("skill") or "") or None,
-                    metadata={
-                        "persona": str(change.get("persona_slug") or ""),
-                        "schedule": change.get("schedule"),
-                        "source": "customer.yaml cron reconcile at boot",
-                    },
+                    metadata=_routine_change_metadata(change),
                 )
             )
         except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
