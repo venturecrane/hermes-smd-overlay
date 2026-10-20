@@ -514,3 +514,19 @@ def test_emit_skills_write_uses_accepted_action_type():
     assert rows[0][2] == "CONFIG_WRITE"
     meta = json.loads(rows[0][-1])
     assert meta["skills_apply"] is True and meta["version"] == "v2" and meta["refused"] == ["alpha"]
+
+
+def test_emit_skills_write_prefers_the_root_verb():
+    """A root poller's generic append is refused by the broker (gateway only)."""
+    rows = []
+
+    class BrokerAudit:
+        def execute(self, sql, *params):
+            raise AssertionError("refused for a root poller")
+
+        def execute_config_write(self, sql, *params):
+            rows.append(params)
+
+    result = ap.SkillsApplyResult(ap.Outcome.APPLIED, version="v2", previous="v1")
+    assert ap.emit_skills_write(audit_client=BrokerAudit(), slug=SLUG, result=result)
+    assert rows[0][2] == "CONFIG_WRITE"

@@ -24,15 +24,18 @@ actor, and skill_name are logged on failure.
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from shared.audit_client import (
+    SOCKET_ENV,
     BrokerAuditClient,
     audit_client_from_env,
     count_rows_held_by_a_dead_gateway,
 )
 from shared.audit_status import NoAuditWarner, write_audit_status
 from shared.d1_client import D1Client
+from shared.gateway_identity import _env_says_gateway
 from shared.secrets import require
 
 from . import (  # noqa: F401 — surface for tests
@@ -484,10 +487,22 @@ def _drain_routine_changes_to_ledger(writer) -> None:
     """
     if writer is None:
         return
+    # Only the gateway drains on a broker seat: any other process that loads
+    # this plugin (a one-shot over ssh) would consume the spool and have every
+    # row refused. And drain the SEAT home: bootstrap spools under
+    # --hermes-home=/opt/data, while `hermes -p <profile>` points this
+    # process's HERMES_HOME at profiles/<profile>, so reading our own home
+    # found nothing and every routine change since #2498 went unrecorded and
+    # uncounted (found 2026-10-20).
+    if os.environ.get(SOCKET_ENV) and not _env_says_gateway():
+        return
+    home = os.environ.get("HERMES_HOME") or "/opt/data"
+    if Path(home).parent.name == "profiles":
+        home = str(Path(home).parent.parent)
     try:
         from shared.routine_change_spool import drain_routine_changes
 
-        changes = drain_routine_changes()
+        changes = drain_routine_changes(hermes_home=home)
     except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
         logger.warning("hermes-smd-audit: routine-change spool unreadable: %s", exc)
         return
