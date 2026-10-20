@@ -1,36 +1,56 @@
-"""The one outbound attachment a seat may send, and the text the gate reads in it.
+"""The outbound attachments a seat may send, and the text the gate reads in them.
 
-WHY THIS EXISTS. A routine's pre_run can now hand its out-of-turn send a
-workbook (statute-watch's monthly list, ss-console). Until this module no hop
-carried an outbound attachment at all, and every hop that now does must answer
-the same two questions the same way: is this a well-formed attachment the seat
-is allowed to send, and what does a reader SEE in it. Both answers live here so
-the prerendered dispatcher, the trust plugin's sender and the transport cannot
-disagree about either.
+WHY THIS EXISTS. A routine's pre_run can hand its out-of-turn send a workbook
+(statute-watch's monthly list, ss-console), and SMD can stage one send carrying
+PDFs it authored (:mod:`shared.staged_send`). Every hop that carries an outbound
+attachment must answer the same two questions the same way: is this a
+well-formed attachment the seat is allowed to send, and what does a reader SEE
+in it. Both answers live here so the prerendered dispatcher, the trust plugin's
+sender and the transport cannot disagree about either.
 
-WHAT IS ALLOWED. Exactly one ``.xlsx`` per message, at most 512 KiB decoded,
-named plainly, whose sha256 matches the bytes. The descriptor shape is pinned
-across repos (ss-console's skill writes it, its broker maps it to a Graph
-``fileAttachment``)::
+WHAT IS ALLOWED. At most :data:`MAX_ATTACHMENTS` per message and
+:data:`MAX_TOTAL_ATTACHMENT_BYTES` decoded between them, each named plainly and
+carrying a sha256 that matches its bytes, of two kinds:
 
-    {"name": str, "content_type": XLSX_CONTENT_TYPE,
+* ``.xlsx``: at most one per message, at most 512 KiB decoded (the original
+  workbook rule, unchanged);
+* ``.pdf``: at most :data:`MAX_PDF_BYTES` decoded each.
+
+Which transport carries which is the transport's decision, not this module's:
+the Graph verb still carries exactly one workbook (``outbound_send``), the
+AgentMail verb carries the full set. The descriptor shape is pinned across
+repos (ss-console's broker re-validates it and maps it to the vendor's)::
+
+    {"name": str, "content_type": XLSX_CONTENT_TYPE | PDF_CONTENT_TYPE,
      "content_b64": <standard base64>, "sha256": <hex sha256 of the bytes>}
 
 An attachment is NEVER a payload field and never a tool argument. It travels as
 a separate keyword from code the model cannot reach (the prerendered envelope
 under the ``.smd`` fence), the same shape as ``CodeFixedRecipients``.
 
-WHAT THE GATE READS. :func:`extract_xlsx_text` renders the workbook as the
-lines a reader sees: one line per row, cells joined ``" | "`` so a (file
-number, date) pair stays on one line for the identifier gate's PAIR check. A
-date-formatted numeric cell is a serial number on disk (``46460``) and a date
-on screen, so it is rendered as the ISO date it displays; without that the
-identifier gate would read a number where the reader reads a deadline.
+WHAT THE GATE READS. :func:`extract_text` dispatches on the content type.
+:func:`extract_xlsx_text` renders the workbook as the lines a reader sees: one
+line per row, cells joined ``" | "`` so a (file number, date) pair stays on one
+line for the identifier gate's PAIR check. A date-formatted numeric cell is a
+serial number on disk (``46460``) and a date on screen, so it is rendered as the
+ISO date it displays; without that the identifier gate would read a number where
+the reader reads a deadline. :func:`extract_pdf_text` renders a PDF as its
+document properties, each page's text, and the text of its links, annotations,
+outline and form fields.
 
-FAIL CLOSED. Anything this module cannot account for refuses: a part outside
-the closed list a plain data workbook needs (macros, embedded objects, external
-links, drawings, hyperlink relationships), a formula (its displayed value is
-not on disk to scan), a DOCTYPE, an oversized or over-populated archive.
+FAIL CLOSED. Anything this module cannot account for refuses. A workbook: a part
+outside the closed list a plain data workbook needs (macros, embedded objects,
+external links, drawings, hyperlink relationships), a formula (its displayed
+value is not on disk to scan), a DOCTYPE, an oversized or over-populated
+archive. A PDF: one that does not parse, is encrypted, carries JavaScript, an
+additional-action trigger, any action other than an in-document jump or a web
+link, an embedded or referenced file, rich media, an XFA form, more pages or
+objects than a document needs, or no readable page text at all (an image-only
+PDF cannot be read by the gate, so it does not go). A runtime with no PDF reader
+refuses every PDF.
+
+THE RESIDUAL, stated rather than hidden: text drawn INSIDE an image on a page
+that also has real text is not read. The gate reads what a text layer says.
 """
 
 from __future__ import annotations
@@ -46,10 +66,27 @@ from typing import Any
 from xml.etree import ElementTree
 
 XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-MAX_ATTACHMENTS = 1
+PDF_CONTENT_TYPE = "application/pdf"
+#: Attachments one message may carry, every kind together.
+MAX_ATTACHMENTS = 3
+#: Workbooks one message may carry (the original rule).
+MAX_XLSX_ATTACHMENTS = 1
+#: The decoded bound on a workbook. The name predates PDFs and keeps its meaning.
 MAX_ATTACHMENT_BYTES = 512 * 1024
+#: The decoded bound on one PDF.
+MAX_PDF_BYTES = 2 * 1024 * 1024
+#: The decoded bound on every attachment of one message together. Base64 adds a
+#: third on the wire, and AgentMail bounds a whole send request at 6 MB.
+MAX_TOTAL_ATTACHMENT_BYTES = 3 * 1024 * 1024
 NAME_RE = re.compile(r"^[\w .()-]{1,120}\.xlsx$")
+PDF_NAME_RE = re.compile(r"^[\w .()-]{1,120}\.pdf$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+#: Per content type: (name pattern, decoded bound, what the name must be).
+_KINDS: dict[str, tuple[re.Pattern[str], int, str]] = {
+    XLSX_CONTENT_TYPE: (NAME_RE, MAX_ATTACHMENT_BYTES, ".xlsx"),
+    PDF_CONTENT_TYPE: (PDF_NAME_RE, MAX_PDF_BYTES, ".pdf"),
+}
 
 #: Archive bounds: a 512 KiB zip can still inflate enormously.
 _MAX_MEMBERS = 64
@@ -90,7 +127,8 @@ def validate(obj: Any) -> tuple[dict[str, str], bytes]:
     """The canonical descriptor and its decoded bytes, or :class:`AttachmentError`.
 
     The returned descriptor is a fresh dict of exactly the four pinned keys, so
-    nothing else a caller put on the object travels further.
+    nothing else a caller put on the object travels further. This checks ONE
+    attachment; the per-message limits are :func:`validate_all`'s.
     """
     if not isinstance(obj, dict):
         raise AttachmentError("attachment is not an object")
@@ -98,16 +136,18 @@ def validate(obj: Any) -> tuple[dict[str, str], bytes]:
     content_type = obj.get("content_type")
     content_b64 = obj.get("content_b64")
     sha256 = obj.get("sha256")
-    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-        raise AttachmentError("attachment name is not a plain .xlsx file name")
-    if content_type != XLSX_CONTENT_TYPE:
-        raise AttachmentError("attachment content type is not a workbook")
+    kind = _KINDS.get(content_type) if isinstance(content_type, str) else None
+    if kind is None:
+        raise AttachmentError("attachment content type is not a workbook or a PDF")
+    name_re, bound, suffix = kind
+    if not isinstance(name, str) or not name_re.fullmatch(name):
+        raise AttachmentError(f"attachment name is not a plain {suffix} file name")
     if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
         raise AttachmentError("attachment sha256 is not a hex digest")
     if not isinstance(content_b64, str) or not content_b64:
         raise AttachmentError("attachment has no content")
     # Cheap length bound before decoding: base64 is 4 chars per 3 bytes.
-    if len(content_b64) > (MAX_ATTACHMENT_BYTES + 2) // 3 * 4 + 4:
+    if len(content_b64) > (bound + 2) // 3 * 4 + 4:
         raise AttachmentError("attachment is larger than the allowed size")
     try:
         data = base64.b64decode(content_b64, validate=True)
@@ -115,10 +155,12 @@ def validate(obj: Any) -> tuple[dict[str, str], bytes]:
         raise AttachmentError("attachment content is not valid base64") from exc
     if not data:
         raise AttachmentError("attachment has no content")
-    if len(data) > MAX_ATTACHMENT_BYTES:
+    if len(data) > bound:
         raise AttachmentError("attachment is larger than the allowed size")
     if hashlib.sha256(data).hexdigest() != sha256:
         raise AttachmentError("attachment sha256 does not match its content")
+    if content_type == PDF_CONTENT_TYPE and not data.startswith(b"%PDF-"):
+        raise AttachmentError("attachment is not a PDF file")
     descriptor = {
         "name": name,
         "content_type": content_type,
@@ -128,12 +170,44 @@ def validate(obj: Any) -> tuple[dict[str, str], bytes]:
     return descriptor, data
 
 
+def _check_set(validated: list[tuple[dict[str, str], bytes]]) -> None:
+    """The per-message limits over already-validated attachments."""
+    if len(validated) > MAX_ATTACHMENTS:
+        raise AttachmentError(f"{len(validated)} attachments (at most {MAX_ATTACHMENTS})")
+    workbooks = sum(1 for d, _ in validated if d["content_type"] == XLSX_CONTENT_TYPE)
+    if workbooks > MAX_XLSX_ATTACHMENTS:
+        raise AttachmentError(f"{workbooks} workbooks (at most {MAX_XLSX_ATTACHMENTS})")
+    if sum(len(data) for _, data in validated) > MAX_TOTAL_ATTACHMENT_BYTES:
+        raise AttachmentError("the attachments together are larger than the allowed size")
+    names = [d["name"].lower() for d, _ in validated]
+    if len(set(names)) != len(names):
+        raise AttachmentError("two attachments share a name")
+
+
+def validate_all(value: Any) -> list[tuple[dict[str, str], bytes]]:
+    """Every attachment of one message, validated, or :class:`AttachmentError`.
+
+    A non-empty list of at most :data:`MAX_ATTACHMENTS`, each passing
+    :func:`validate`, at most one workbook, distinct names, and at most
+    :data:`MAX_TOTAL_ATTACHMENT_BYTES` between them. All or nothing: a message
+    never goes with some of the files its author attached.
+    """
+    if not isinstance(value, list) or not value:
+        raise AttachmentError("attachments is not a non-empty list")
+    if len(value) > MAX_ATTACHMENTS:
+        raise AttachmentError(f"{len(value)} attachments (at most {MAX_ATTACHMENTS})")
+    validated = [validate(item) for item in value]
+    _check_set(validated)
+    return validated
+
+
 def sanitize(value: Any) -> tuple[list[dict[str, str]], list[str]]:
     """Split an envelope's ``attachments`` value into (valid, reasons-stripped).
 
     Never raises. ``None``/absent is no attachments and nothing stripped. More
-    than :data:`MAX_ATTACHMENTS` keeps none: picking one of several would be a
-    guess about which the author meant.
+    than :data:`MAX_ATTACHMENTS`, or a set that breaks a per-message limit,
+    keeps none: picking some of several would be a guess about which the author
+    meant.
     """
     if value is None:
         return [], []
@@ -141,16 +215,28 @@ def sanitize(value: Any) -> tuple[list[dict[str, str]], list[str]]:
         return [], ["attachments is not a list"]
     if len(value) > MAX_ATTACHMENTS:
         return [], [f"{len(value)} attachments (at most {MAX_ATTACHMENTS})"] * len(value)
-    kept: list[dict[str, str]] = []
+    kept: list[tuple[dict[str, str], bytes]] = []
     stripped: list[str] = []
     for item in value:
         try:
-            descriptor, _ = validate(item)
+            kept.append(validate(item))
         except AttachmentError as exc:
             stripped.append(str(exc))
-            continue
-        kept.append(descriptor)
-    return kept, stripped
+    try:
+        _check_set(kept)
+    except AttachmentError as exc:
+        return [], stripped + [str(exc)] * len(kept)
+    return [d for d, _ in kept], stripped
+
+
+def extract_text(descriptor: dict[str, str], data: bytes) -> str:
+    """The text a reader sees in a validated attachment, by its content type."""
+    content_type = descriptor.get("content_type")
+    if content_type == XLSX_CONTENT_TYPE:
+        return extract_xlsx_text(data)
+    if content_type == PDF_CONTENT_TYPE:
+        return extract_pdf_text(data)
+    raise AttachmentError("attachment content type is not a workbook or a PDF")
 
 
 # ---------------------------------------------------------------------------
@@ -388,13 +474,229 @@ def extract_xlsx_text(data: bytes) -> str:
         return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# What a reader sees in a PDF
+# ---------------------------------------------------------------------------
+
+#: A flyer, a letter, a form: anything SMD stages fits well inside these.
+_MAX_PDF_PAGES = 50
+_MAX_PDF_OBJECTS = 50_000
+
+#: Dictionary keys whose presence means the document can act, not just be read.
+_FORBIDDEN_PDF_KEYS = frozenset(
+    {
+        "/JS",
+        "/JavaScript",
+        "/AA",  # additional actions: triggers on open, close, focus, page view
+        "/EmbeddedFile",
+        "/EmbeddedFiles",
+        "/RichMedia",
+        "/RichMediaContent",
+        "/XFA",
+    }
+)
+#: The only action types a sent PDF may carry: a jump inside itself and a link.
+_ALLOWED_PDF_ACTIONS = frozenset({"/GoTo", "/URI"})
+#: ``/Type`` and ``/Subtype`` values that are files, media or scripts.
+_FORBIDDEN_PDF_TYPES = frozenset(
+    {
+        "/Filespec",
+        "/EmbeddedFile",
+        "/FileAttachment",
+        "/Sound",
+        "/Movie",
+        "/Screen",
+        "/RichMedia",
+        "/3D",
+    }
+)
+_DOCINFO_KEYS = ("/Title", "/Subject", "/Author", "/Keywords")
+
+
+def _pdf_reader(data: bytes) -> Any:
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:  # a runtime without the reader sends no PDF
+        raise AttachmentError("this seat cannot read a PDF") from exc
+    if not data.startswith(b"%PDF-"):
+        raise AttachmentError("attachment is not a PDF file")
+    try:
+        reader = PdfReader(io.BytesIO(data), strict=False)
+        encrypted = reader.is_encrypted
+    except Exception as exc:  # noqa: BLE001 - any parse failure is a refusal
+        raise AttachmentError("the PDF could not be read") from exc
+    if encrypted:
+        raise AttachmentError("the PDF is encrypted")
+    return reader
+
+
+#: Where an action lives: an annotation's or outline item's ``/A``, the
+#: catalog's ``/OpenAction``, an action's chained ``/Next``. A ``/S`` anywhere
+#: else (a border style, a transparency group) is not an action.
+_ACTION_KEYS = ("/A", "/OpenAction", "/Next")
+
+
+def _check_action(value: Any) -> None:
+    """Refuse an action that is neither a jump inside the document nor a link.
+
+    An ``/OpenAction`` may be a bare destination array, which only opens the
+    document at a page. A chain (``/Next``) may be one action or an array."""
+    from pypdf.generic import ArrayObject, DictionaryObject
+
+    value = value.get_object() if hasattr(value, "get_object") else value
+    if isinstance(value, ArrayObject):
+        for item in value:
+            item = item.get_object() if hasattr(item, "get_object") else item
+            if isinstance(item, DictionaryObject):
+                _check_action(item)
+        return
+    if not isinstance(value, DictionaryObject):
+        return
+    # A destination array names a page dictionary, which is not an action.
+    if "/S" not in value and value.get("/Type") != "/Action":
+        return
+    if value.get("/S") not in _ALLOWED_PDF_ACTIONS:
+        raise AttachmentError("the PDF carries an action other than a jump or a link")
+
+
+def _pdf_refuse_active_content(reader: Any) -> None:
+    """Walk every object reachable from the trailer; refuse anything active.
+
+    Reachable is the right set: an object nothing references is never rendered
+    or run. Object streams are read through pypdf, so a dictionary compressed
+    into one is checked like any other.
+    """
+    from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NameObject
+
+    trailer = reader.trailer
+    if "/Encrypt" in trailer:
+        raise AttachmentError("the PDF is encrypted")
+    stack: list[Any] = [trailer]
+    seen: set[tuple[int, int]] = set()
+    visited = 0
+    while stack:
+        node = stack.pop()
+        if isinstance(node, IndirectObject):
+            ref = (node.idnum, node.generation)
+            if ref in seen:
+                continue
+            seen.add(ref)
+            node = node.get_object()
+        visited += 1
+        if visited > _MAX_PDF_OBJECTS:
+            raise AttachmentError("the PDF has more objects than a document needs")
+        if isinstance(node, DictionaryObject):
+            keys = set(node.keys())
+            if keys & _FORBIDDEN_PDF_KEYS:
+                raise AttachmentError("the PDF carries scripts, triggers or embedded files")
+            for key in ("/Type", "/Subtype"):
+                value = node.get(key)
+                if isinstance(value, NameObject) and value in _FORBIDDEN_PDF_TYPES:
+                    raise AttachmentError("the PDF carries a file, media or 3D content")
+            if node.get("/Type") == "/Action":
+                _check_action(node)
+            for key in _ACTION_KEYS:
+                if key in node:
+                    _check_action(node[key])
+            # /Parent points back up the page tree; following it only revisits.
+            stack.extend(v for k, v in node.items() if k != "/Parent")
+        elif isinstance(node, ArrayObject):
+            stack.extend(node)
+
+
+def _pdf_string(value: Any) -> str:
+    try:
+        text = value.get_object() if hasattr(value, "get_object") else value
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(text).strip() if isinstance(text, str) else ""
+
+
+def _outline_titles(outline: Any) -> list[str]:
+    titles: list[str] = []
+    for item in outline or []:
+        if isinstance(item, list):
+            titles.extend(_outline_titles(item))
+        else:
+            title = getattr(item, "title", None)
+            if isinstance(title, str) and title.strip():
+                titles.append(title.strip())
+    return titles
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """The text a reader sees in PDF ``data``.
+
+    Raises :class:`AttachmentError` on anything it cannot account for (see the
+    module docstring). Lines, in order: the document properties a viewer shows,
+    the outline, then per page its text, its annotations' text and its links.
+    Form field values close the list.
+    """
+    reader = _pdf_reader(data)
+    try:
+        pages = list(reader.pages)
+    except Exception as exc:  # noqa: BLE001
+        raise AttachmentError("the PDF's pages could not be read") from exc
+    if not pages:
+        raise AttachmentError("the PDF has no pages")
+    if len(pages) > _MAX_PDF_PAGES:
+        raise AttachmentError("the PDF has more pages than the allowed number")
+    try:
+        _pdf_refuse_active_content(reader)
+        lines: list[str] = []
+        info = reader.trailer.get("/Info")
+        info = info.get_object() if info is not None else None
+        if info is not None and hasattr(info, "get"):
+            for key in _DOCINFO_KEYS:
+                value = _pdf_string(info.get(key))
+                if value:
+                    lines.append(value)
+        lines.extend(_outline_titles(reader.outline))
+        page_text = 0
+        for page in pages:
+            text = page.extract_text() or ""
+            page_text += len(text.strip())
+            lines.extend(line.strip() for line in text.splitlines() if line.strip())
+            for annot in page.get("/Annots") or []:
+                annot = annot.get_object()
+                for key in ("/Contents", "/T", "/TU"):
+                    value = _pdf_string(annot.get(key))
+                    if value:
+                        lines.append(value)
+                action = annot.get("/A")
+                action = action.get_object() if action is not None else None
+                if action is not None and hasattr(action, "get"):
+                    uri = _pdf_string(action.get("/URI"))
+                    if uri:
+                        lines.append(uri)
+        for field in (reader.get_fields() or {}).values():
+            value = _pdf_string(field.get("/V")) if hasattr(field, "get") else ""
+            if value:
+                lines.append(value)
+    except AttachmentError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - "could not look" must not send
+        raise AttachmentError("the PDF's text could not be read") from exc
+    if not page_text:
+        raise AttachmentError("the PDF has no readable text, so it cannot be checked")
+    return "\n".join(lines)
+
+
 __all__ = [
     "MAX_ATTACHMENTS",
     "MAX_ATTACHMENT_BYTES",
+    "MAX_PDF_BYTES",
+    "MAX_TOTAL_ATTACHMENT_BYTES",
+    "MAX_XLSX_ATTACHMENTS",
     "NAME_RE",
+    "PDF_CONTENT_TYPE",
+    "PDF_NAME_RE",
     "XLSX_CONTENT_TYPE",
     "AttachmentError",
+    "extract_pdf_text",
+    "extract_text",
     "extract_xlsx_text",
     "sanitize",
     "validate",
+    "validate_all",
 ]
