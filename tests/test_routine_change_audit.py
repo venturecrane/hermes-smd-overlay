@@ -314,11 +314,10 @@ def test_a_process_that_is_not_the_gateway_leaves_the_spool_alone(home, monkeypa
     assert [e.skill_name for e in writer.events] == ["a"]
 
 
-def test_a_row_says_when_bootstrap_saw_the_change_and_a_backlog_row_says_it_cannot(
-    home,
-) -> None:
-    """The broker stamps ts at arrival. The first drain after 2026-10-20 flushes
-    lines spooled before spooled_at existed; they must not read as new changes."""
+def test_undated_backlog_is_kept_off_the_ledger_and_on_the_volume(home) -> None:
+    """The broker stamps ts at arrival, and ROUTINE_* rows reach the client's
+    activity feed. Lines spooled before spooled_at existed would show months of
+    old changes as happening today, so they are set aside, not written."""
     plugin = _audit_plugin()
     append_routine_change(persona_slug="crane", skill="new", enabled=True, schedule="@daily")
     with open(spool_path(), "a", encoding="utf-8") as fh:
@@ -328,8 +327,7 @@ def test_a_row_says_when_bootstrap_saw_the_change_and_a_backlog_row_says_it_cann
         )
     writer = _RecordingWriter()
     plugin._drain_routine_changes_to_ledger(writer)
-    by_skill = {e.skill_name: e.metadata for e in writer.events}
-    assert by_skill["new"]["spooled_at"].endswith("Z")
-    assert "backlog" not in by_skill["new"]
-    assert "spooled_at" not in by_skill["old"]
-    assert "unknown" in by_skill["old"]["backlog"]
+    assert [e.skill_name for e in writer.events] == ["new"]
+    assert writer.events[0].metadata["spooled_at"].endswith("Z")
+    backlog = (home / ".smd" / "routine_changes.backlog.jsonl").read_text()
+    assert '"skill":"old"' in backlog

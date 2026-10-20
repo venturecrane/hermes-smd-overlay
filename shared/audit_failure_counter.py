@@ -98,8 +98,11 @@ REASONS = frozenset(
 _UNCLASSIFIED = "unclassified"
 _ACTION_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 _KEY_RE = re.compile(r"([a-z][a-z_]{0,39})(?::([A-Z][A-Z0-9_]{0,63}))?")
-#: A reasons file is read whole on every beat; past this it is read from the end.
-_REASONS_READ_CAP_BYTES = 256 * 1024
+#: A reasons file is read whole on every beat; past this it is read from the end
+#: (about 130,000 losses at ~30 bytes a line). The console keeps a per-key
+#: high-water mark, so a key whose count falls out of the window is never
+#: re-reported as new.
+_REASONS_READ_CAP_BYTES = 4 * 1024 * 1024
 #: Distinct keys reported per beat. More than this is not a pattern to read.
 _MAX_REASON_KEYS = 32
 
@@ -147,7 +150,7 @@ def record_audit_write_failure(
         logger.debug("audit_failure_counter: no tally dir at %s; not counted", path.parent)
         return False
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = _open_append(path)
     except OSError as exc:
         logger.warning("audit_failure_counter: cannot open tally (%s): %s", path, exc)
         return False
@@ -166,10 +169,29 @@ def record_audit_write_failure(
     return True
 
 
+def _open_append(path: Path) -> int:
+    """O_APPEND fd on ``path``, owned like its directory when root writes it.
+
+    Root pollers (the config and skills appliers) share ``/opt/data/.smd`` with
+    the agent-uid gateway and gate. A 0600 file root created first would lock
+    them out of appending and the heartbeat out of reading the reasons, until
+    the next boot's chown (review 2026-10-20). Best-effort: a failed chown
+    leaves the file as it was, never costs the count.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    if os.geteuid() == 0:
+        try:
+            st = os.stat(path.parent)
+            os.fchown(fd, st.st_uid, st.st_gid)
+        except OSError as exc:
+            logger.debug("audit_failure_counter: could not hand %s to its dir owner: %s", path, exc)
+    return fd
+
+
 def _append_reason(path: Path, key: str) -> None:
     """One line, one O_APPEND write: atomic across writers like the tally byte."""
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = _open_append(path)
     except OSError as exc:
         logger.warning("audit_failure_counter: cannot open reasons (%s): %s", path, exc)
         return
@@ -181,7 +203,7 @@ def _append_reason(path: Path, key: str) -> None:
         os.close(fd)
 
 
-def _seat_home(hermes_home: str | None) -> Path:
+def seat_home(hermes_home: str | None = None) -> Path:
     home = Path(hermes_home or os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
     # A caller running inside a profile home still answers for the whole seat.
     if home.parent.name == "profiles":
@@ -214,7 +236,7 @@ def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
     history without moving a byte, and a writer in any profile is counted the
     moment it writes.
     """
-    home = _seat_home(hermes_home)
+    home = seat_home(hermes_home)
     root = tally_path(str(home))
     if not root.parent.is_dir():
         return None
@@ -261,7 +283,7 @@ def read_audit_write_failure_reasons(hermes_home: str | None = None) -> dict[str
     by a write the tally itself dropped. Lines that do not have the key shape
     are skipped, so a damaged file reports less, never something invented.
     """
-    home = _seat_home(hermes_home)
+    home = seat_home(hermes_home)
     if not (home / ".smd").is_dir():
         return None
     counts: Counter[str] = Counter()
@@ -299,4 +321,5 @@ __all__ = [
     "record_audit_write_failure",
     "read_audit_write_failures",
     "read_audit_write_failure_reasons",
+    "seat_home",
 ]

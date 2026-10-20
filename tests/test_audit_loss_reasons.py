@@ -164,3 +164,24 @@ def test_the_heartbeat_carries_the_histogram_and_an_empty_one():
     assert empty["audit_write_failure_reasons"] == {}
     some = hb.build_payload(**base, audit_write_failure_reasons={"gap_exit": 2})
     assert some["audit_write_failure_reasons"] == {"gap_exit": 2}
+
+
+def test_a_root_writer_hands_both_files_to_the_directory_owner(machine_home, monkeypatch):
+    """A root applier's loss must not leave 0600 root files the agent-uid
+    gateway cannot append to and the heartbeat cannot read (review 2026-10-20)."""
+    chowned: list[tuple[int, int]] = []
+    monkeypatch.setattr(counter.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(counter.os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
+    counter.record_audit_write_failure(
+        "x", reason="refused_not_gateway", action_type="CONFIG_WRITE"
+    )
+    st = (machine_home / ".smd").stat()
+    assert chowned == [(st.st_uid, st.st_gid)] * 2
+
+
+def test_a_non_root_writer_never_chowns(machine_home, monkeypatch):
+    monkeypatch.setattr(counter.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        counter.os, "fchown", lambda *a: (_ for _ in ()).throw(AssertionError("chowned"))
+    )
+    assert counter.record_audit_write_failure("x", reason="gap_exit") is True

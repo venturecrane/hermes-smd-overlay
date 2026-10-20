@@ -22,6 +22,7 @@ contract). Secret values never appear in log output; only the action_type,
 actor, and skill_name are logged on failure.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ from shared.audit_client import (
     audit_client_from_env,
     count_rows_held_by_a_dead_gateway,
 )
+from shared.audit_failure_counter import seat_home
 from shared.audit_status import NoAuditWarner, write_audit_status
 from shared.d1_client import D1Client
 from shared.gateway_identity import _env_says_gateway
@@ -477,26 +479,48 @@ _ROUTINE_ACTOR = "customer.yaml"
 
 
 def _routine_change_metadata(change: dict) -> dict:
-    """Row metadata for one spooled routine change.
-
-    The row's ``ts`` is when the gateway drained it, not when the routine
-    changed, so the row says so. ``spooled_at`` is bootstrap's own stamp; a
-    line without one was spooled before 2026-10-20, when no gateway ever
-    drained the spool, so it is marked ``backlog`` with no date: when that
-    change happened is not known, and inventing one would be worse than
-    saying so.
-    """
-    spooled_at = change.get("spooled_at")
+    """Row metadata for one spooled routine change, with bootstrap's own stamp."""
     meta = {
         "persona": str(change.get("persona_slug") or ""),
         "schedule": change.get("schedule"),
         "source": "customer.yaml cron reconcile at boot",
     }
+    spooled_at = change.get("spooled_at")
     if isinstance(spooled_at, str) and spooled_at:
         meta["spooled_at"] = spooled_at
-    else:
-        meta["backlog"] = "spooled before 2026-10-20; changed at an unknown earlier boot"
     return meta
+
+
+def _set_aside_undated(changes: list[dict], home: str) -> list[dict]:
+    """Keep undated changes OUT of the ledger, and on the volume.
+
+    Lines with no ``spooled_at`` were spooled before 2026-10-20, while no
+    gateway ever drained the spool, at boots nobody can now date. As rows they
+    would reach the client's activity feed (ROUTINE_* is client-visible) stamped
+    with THIS boot's time: months of old changes shown as happening today, and
+    reversed pairs as same-second flips. A fabricated date is worse than a gap,
+    so they are appended to ``.smd/routine_changes.backlog.jsonl`` instead,
+    where the evidence survives, and counted in the log. Returns the dated
+    changes, which become rows.
+    """
+    dated = [c for c in changes if isinstance(c.get("spooled_at"), str) and c["spooled_at"]]
+    undated = [c for c in changes if c not in dated]
+    if not undated:
+        return dated
+    path = Path(home) / ".smd" / "routine_changes.backlog.jsonl"
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            for change in undated:
+                fh.write(json.dumps(change, sort_keys=True, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        logger.warning("hermes-smd-audit: routine backlog not kept (%s): %s", path, exc)
+    logger.warning(
+        "hermes-smd-audit: %d undated routine change(s) from before 2026-10-20 set aside "
+        "in %s, not written to the ledger (their dates are unknown)",
+        len(undated),
+        path,
+    )
+    return dated
 
 
 def _drain_routine_changes_to_ledger(writer) -> None:
@@ -519,13 +543,11 @@ def _drain_routine_changes_to_ledger(writer) -> None:
     # uncounted (found 2026-10-20).
     if os.environ.get(SOCKET_ENV) and not _env_says_gateway():
         return
-    home = os.environ.get("HERMES_HOME") or "/opt/data"
-    if Path(home).parent.name == "profiles":
-        home = str(Path(home).parent.parent)
+    home = str(seat_home())
     try:
         from shared.routine_change_spool import drain_routine_changes
 
-        changes = drain_routine_changes(hermes_home=home)
+        changes = _set_aside_undated(drain_routine_changes(hermes_home=home), home)
     except Exception as exc:  # noqa: BLE001 — never crash Hermes plugin load
         logger.warning("hermes-smd-audit: routine-change spool unreadable: %s", exc)
         return

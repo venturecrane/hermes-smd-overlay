@@ -338,6 +338,10 @@ def _emit_config_write(
     # metadata). input_digest[7] = old config, output_digest[8] = new config.
     params[7] = old_digest
     params[8] = new_digest
+    # The root applier wrote this, applying authored config: not the agent
+    # (agent_event_params' default), which a compliance export would misread.
+    params[3] = "config-applier"
+    params[4] = "operator"
     try:
         # The broker client's root verb (this process is a root poller, never
         # the gateway, so the generic append is refused); the direct D1 client

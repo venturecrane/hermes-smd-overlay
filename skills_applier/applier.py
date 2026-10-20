@@ -594,6 +594,9 @@ def emit_skills_write(*, audit_client: Any, slug: str, result: SkillsApplyResult
         "retired": list(result.retired[:64]),
     }
     params = agent_event_params(action_type="CONFIG_WRITE", metadata=metadata)
+    # The root skills applier, not the agent (agent_event_params' default).
+    params[3] = "skills-applier"
+    params[4] = "operator"
     try:
         # Root poller: the generic append admits only the gateway (see
         # config_applier/applier.py _emit_config_write).
