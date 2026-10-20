@@ -544,6 +544,19 @@ def dispatch_prerendered(session_id: str) -> str | None:
                     note += f"; {written} of {attempted} item record(s) written"
                 lines.append(note + ". Do not send this alert and do not record these items again.")
                 continue
+            if getattr(result, "outcome_unknown", False):
+                # The request reached the broker and the answer was lost: the
+                # alert may be out. The skeleton below would be a second message
+                # to the same people, so nothing more goes. No appends either:
+                # the items re-fire next run if it never arrived, and the
+                # broker's intent row is what SMD's reconciler settles it from.
+                lines.append(
+                    f"Your {routine.skill} alert to {who} may or may not have gone out: "
+                    "the connection to the mail service failed after it was handed over. "
+                    "Do not compose, resend, or record anything for it; SMD is checking. "
+                    "Report that in one plain line and send nothing else."
+                )
+                continue
             if _looks_confirm_withheld(result.reason):
                 # Held for the owner's approval — a legitimate authored
                 # posture. No skeleton, no appends; the approval round-trip

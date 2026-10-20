@@ -80,6 +80,11 @@ from .casework_steps import (
 
 logger = logging.getLogger(__name__)
 
+#: ``state["sent"]`` for a brief whose send's answer was lost. Truthy, so every
+#: check that a brief went refuses a second one, and distinct, so the refusal
+#: does not claim it went.
+_OUTCOME_UNKNOWN = "outcome_unknown"
+
 
 EMPTY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -296,8 +301,11 @@ def _send_reviews(
             )
         else:
             report["reason"] = getattr(result, "reason", "")
+            if getattr(result, "outcome_unknown", False):
+                report["outcome_unknown"] = True
         sent.append(report)
     delivered = sum(1 for r in sent if r["sent"])
+    unknown = sum(1 for r in sent if r.get("outcome_unknown"))
     if not sent:
         note = "Nothing needed a person this run, so no review was sent. Send nothing else."
     elif delivered == len(sent):
@@ -306,10 +314,16 @@ def _send_reviews(
             "anything else for it."
         )
     else:
-        note = (
-            f"{len(sent) - delivered} of {len(sent)} review message(s) could not be sent. "
-            "Report that in one plain line and send nothing else."
-        )
+        failed = len(sent) - delivered - unknown
+        parts = []
+        if failed:
+            parts.append(f"{failed} of {len(sent)} review message(s) could not be sent")
+        if unknown:
+            parts.append(
+                f"{unknown} of {len(sent)} may or may not have gone out (the connection "
+                "failed before the answer came back; SMD is checking)"
+            )
+        note = "; ".join(parts) + ". Report that in one plain line and send nothing else."
     memos = list(state["envelope"].get("memos") or [])
     if memos:
         note += " Then file each memo in memos with create_memo, verbatim, on its matter."
@@ -434,6 +448,11 @@ def casework_brief(
     state = brief_state(session_id, routine=routine, hermes_home=hermes_home, now=now)
     if state is None:
         return _brief_refusal("There is no date-prep brief to send in this run.")
+    if state.get("sent") == _OUTCOME_UNKNOWN:
+        return _brief_refusal(
+            "This run's brief may already have gone out (its send's answer was lost); "
+            "SMD is checking. Send nothing else."
+        )
     if state.get("sent"):
         return _brief_refusal("This run's brief has already gone out. Send nothing else.")
     envelope = state["envelope"]
@@ -475,6 +494,22 @@ def casework_brief(
             to=tuple(to), cc=tuple(cc), source=f"{state['skill']} brief envelope"
         ),
     )
+    if getattr(result, "outcome_unknown", False):
+        # The brief may be out: "try again" would be the duplicate, so this
+        # run's brief counts as spent and a second call is refused above.
+        state["sent"] = _OUTCOME_UNKNOWN
+        return json.dumps(
+            {
+                "status": "outcome_unknown",
+                "reason": getattr(result, "reason", ""),
+                "note": (
+                    "The brief may or may not have gone out: the connection to the mail "
+                    "service failed after it was handed over. Do not send it again; SMD "
+                    "is checking. Report that in one plain line."
+                ),
+            },
+            ensure_ascii=False,
+        )
     if not getattr(result, "sent", False):
         return json.dumps(
             {

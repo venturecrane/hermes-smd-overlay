@@ -357,7 +357,9 @@ def test_confirm_dispatch_msgraph_never_falls_back_to_agentmail(monkeypatch):
     agentmail_calls: list[dict] = []
 
     def _refuse(_payload, **_kwargs):
-        raise trust.outbound_send.msgraph_broker.BrokerError("recipient not authored")
+        raise trust.outbound_send.msgraph_broker.BrokerError(
+            "recipient not authored", code="MsGraphRefused"
+        )
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)
     monkeypatch.setattr(
@@ -376,7 +378,7 @@ def test_confirm_dispatch_msgraph_fails_closed_without_broker(monkeypatch):
     _arm_msgraph(monkeypatch, trust)
 
     def _unavailable(_payload, **_kwargs):
-        raise trust.outbound_send.msgraph_broker.MsGraphBrokerUnavailable("no socket")
+        raise trust.outbound_send.msgraph_broker.MsGraphBrokerNotReached("no socket")
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _unavailable)
     _capture_and_approve_msgraph(trust)
@@ -575,7 +577,9 @@ def test_send_via_msgraph_surfaces_a_broker_refusal(monkeypatch):
     trust = load_plugin("hermes-smd-trust")
 
     def _refuse(_payload, **_kwargs):
-        raise trust.outbound_send.msgraph_broker.BrokerError("not on the authored surface")
+        raise trust.outbound_send.msgraph_broker.BrokerError(
+            "not on the authored surface", code="MsGraphRefused"
+        )
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)
     with pytest.raises(trust.outbound_send.MsGraphSendError) as excinfo:
@@ -724,7 +728,9 @@ def test_a_broker_refusal_naming_the_attachment_is_an_attachment_error(monkeypat
     trust = load_plugin("hermes-smd-trust")
 
     def _refuse(_payload, **_kwargs):
-        raise trust.outbound_send.msgraph_broker.BrokerError("attachment refused: too large")
+        raise trust.outbound_send.msgraph_broker.BrokerError(
+            "attachment refused: too large", code="MsGraphRefused"
+        )
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)
     with pytest.raises(trust.outbound_send.AttachmentSendError):
@@ -738,7 +744,9 @@ def test_other_broker_refusals_with_an_attachment_stay_plain_send_errors(monkeyp
     trust = load_plugin("hermes-smd-trust")
 
     def _refuse(_payload, **_kwargs):
-        raise trust.outbound_send.msgraph_broker.BrokerError("not on the authored surface")
+        raise trust.outbound_send.msgraph_broker.BrokerError(
+            "not on the authored surface", code="MsGraphRefused"
+        )
 
     monkeypatch.setattr(trust.outbound_send.msgraph_broker, "send_message", _refuse)
     with pytest.raises(trust.outbound_send.MsGraphSendError) as excinfo:

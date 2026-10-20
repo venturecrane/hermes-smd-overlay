@@ -952,6 +952,9 @@ def _smd_send_message(args: dict[str, Any], **kwargs: Any) -> str:
                 matter_ref=send_matter_ref,
                 **send_anchor.envelope_fields(fence_anchor, fence_lane),
             )
+    except outbound_send.SendOutcomeUnknown as exc:
+        logger.error("hermes-smd-trust: send tool outcome unknown (%s)", exc)
+        return _unknown_outcome_note("This message")
     except outbound_send.OutboundSendError as exc:
         # Returned, not raised: a refused send is information the agent should
         # act on (pick a different recipient, ask the owner), not a tool crash.
@@ -1018,12 +1021,33 @@ def _scan_approved_send(rec: Any, payload: dict, session_id: str) -> str | None:
         told = (
             f" A short internal notice that it was withheld went to {', '.join(notice_to)}."
             if result.sent
-            else f" The internal notice that it was withheld did not go ({result.reason})."
+            else f" The internal notice that it was withheld "
+            f"{'may not have gone' if getattr(result, 'outcome_unknown', False) else 'did not go'} "
+            f"({result.reason})."
         )
     logger.info("hermes-smd-trust: approved send to %s refused by outbound scan", recipients)
     return (
         f"[Your approved send to {recipients} was not dispatched: {reason}{told} "
         "Nothing was sent; a corrected send needs a fresh approval.]"
+    )
+
+
+def _unknown_outcome_note(subject: str) -> str:
+    """What the agent is told about a send whose outcome is unknown.
+
+    ``subject`` names the send ("Your approved send to ..."). The connection to
+    the mail service failed after the request was made, so the message may
+    already be out: resending is how a client gets it twice, and "not sent" or
+    "sent" would both be guesses. The broker recorded its intent before calling
+    the vendor, and the console's send reconciler flags an intent with no
+    result, so SMD finds out which it was without the agent's help.
+    """
+    return (
+        f"{subject} may or may not have gone out: the connection to the mail "
+        "service failed after the request was made, so the outcome is unknown. "
+        "Do NOT send it again, by this or any other tool. SMD is checking whether "
+        "it arrived. Tell the person you are checking, and do not say it was sent "
+        "or that it was not."
     )
 
 
@@ -1158,6 +1182,15 @@ def _dispatch_approved_send(
                 matter_ref=send_matter_ref,
                 **send_anchor.envelope_fields(fence_anchor, fence_lane),
             )
+    except outbound_send.SendOutcomeUnknown as exc:
+        # The request reached the broker, or may have, and the answer was lost.
+        # The broker recorded its intent before calling the vendor, so SMD's
+        # send reconciler will find this one either way. A retry here is the
+        # duplicate, so the agent is told not to and not to guess.
+        logger.error(
+            "hermes-smd-trust: approved send to %s has an unknown outcome (%s)", recipients, exc
+        )
+        return f"[{_unknown_outcome_note(f'Your approved send to {recipients}')}]"
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: approved send to %s failed (%s)", recipients, exc)
         note = send_anchor.refusal_note(str(exc))
@@ -1488,6 +1521,11 @@ def _dispatch_internal_message(
         logger.error("hermes-smd-trust: out-of-turn send refused its attachment (%s)", exc)
         return DispatchResult(
             sent=False, reason=str(exc), recipients=recipients, attachment_refused=True
+        )
+    except outbound_send.SendOutcomeUnknown as exc:
+        logger.error("hermes-smd-trust: out-of-turn send outcome unknown (%s)", exc)
+        return DispatchResult(
+            sent=False, reason=str(exc), recipients=recipients, outcome_unknown=True
         )
     except outbound_send.OutboundSendError as exc:
         logger.error("hermes-smd-trust: out-of-turn send failed (%s)", exc)

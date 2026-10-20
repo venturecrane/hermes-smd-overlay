@@ -335,10 +335,8 @@ def _send_msgraph_reply(
             # which every caller took from a verified origin (never a guess).
             anchor={"kind": "graph_message", "graph_message_id": graph_message_id},
         )
-    except msgraph_broker.BrokerError as exc:
-        raise relay.RelaySendError(f"broker refused the msgraph reply: {exc}") from exc
-    except msgraph_broker.MsGraphBrokerUnavailable as exc:
-        raise relay.RelaySendError(f"msgraph reply unavailable: {exc}") from exc
+    except (msgraph_broker.BrokerError, msgraph_broker.MsGraphBrokerUnavailable) as exc:
+        raise relay.reply_failure(exc, "msgraph reply") from exc
     # ss-console#2499. Every REPLY_SENT row on the live A&P ledger read
     # "(sent via msgraph, id unavailable)" — 8 of 8 — because Graph's 202 carries
     # no id. The broker now stamps an audit header on the reply and resolves the
@@ -375,10 +373,8 @@ def _send_bound_reply(
             session_id=session_id,
             matter_ref=matter_ref,
         )
-    except msgraph_broker.BrokerError as exc:
-        raise relay.RelaySendError(f"broker refused the bound reply: {exc}") from exc
-    except msgraph_broker.MsGraphBrokerUnavailable as exc:
-        raise relay.RelaySendError(f"bound reply unavailable: {exc}") from exc
+    except (msgraph_broker.BrokerError, msgraph_broker.MsGraphBrokerUnavailable) as exc:
+        raise relay.reply_failure(exc, "bound reply") from exc
     return sent_id or "(sent via msgraph, id unavailable)"
 
 
@@ -1359,8 +1355,16 @@ def _relay_draft(**kwargs: Any) -> None:
                     # Only when set, so every ordinary reply makes today's call.
                     **({"shared": True} if shared_people else {}),
                 )
-        except Exception as exc:  # noqa: BLE001 - RelaySendError or a fault: either way not sent
+        except Exception as exc:  # noqa: BLE001 - RelaySendError or a fault: not confirmed
             why = str(exc) if isinstance(exc, relay.RelaySendError) else type(exc).__name__
+            if isinstance(exc, relay.RelayOutcomeUnknown):
+                # It may be in their inbox. Treat it as carried for everything
+                # that could send it again: the inbound counts as answered, so a
+                # redraft relays nothing, and an act line it carried is not owed
+                # again at end of turn. The failure is still told and paged
+                # below, because delivery is not confirmed.
+                _commit_reply(reply_key, origin)
+                _ACT_BODIES.note(session_id, wire_text, wire_html)
             _send_failed(
                 why,
                 origin,

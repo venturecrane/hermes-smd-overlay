@@ -27,7 +27,14 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from shared import agentmail_broker, msgraph_broker, outbound_attachment, send_anchor
+from shared import (
+    agentmail_broker,
+    msgraph_broker,
+    outbound_attachment,
+    send_anchor,
+    unknown_sends,
+    workspace_broker,
+)
 from shared.send_dispatch import CALENDAR_ARG
 
 logger = logging.getLogger(__name__)
@@ -51,6 +58,56 @@ class AgentMailSendError(OutboundSendError):
 
 class MsGraphSendError(OutboundSendError):
     """A Microsoft Graph confirm-dispatch send failed (bad creds or a Graph 4xx/5xx)."""
+
+
+class SendOutcomeUnknown(OutboundSendError):
+    """The request reached the broker, or may have, and no answer says whether
+    the message went out: a socket timeout or reset after the request was
+    written, an unreadable reply, or the broker reporting that the VENDOR call
+    itself failed in transit.
+
+    Every other :class:`OutboundSendError` is a definite "not sent" (a broker
+    refusal made before the vendor was called, a vendor that said no, or a
+    broker that was never reached). This one is not, and the caller must not
+    send the same message again: the broker wrote its intent row before calling
+    the vendor, so the console's send reconciler settles whether it went.
+    """
+
+
+class AgentMailOutcomeUnknown(AgentMailSendError, SendOutcomeUnknown):
+    """An AgentMail send whose outcome is unknown. Must not be resent."""
+
+
+class MsGraphOutcomeUnknown(MsGraphSendError, SendOutcomeUnknown):
+    """A Graph send whose outcome is unknown. Must not be resent."""
+
+
+#: The reason text an unknown outcome carries, ahead of the transport detail.
+#: Leads with the outcome because callers quote ``str(exc)`` to people and to
+#: the model, and "not sent" would be a guess that invites the duplicate.
+OUTCOME_UNKNOWN_PREFIX = "outcome unknown, it may have been sent"
+
+
+def _unknown(
+    cls: type[SendOutcomeUnknown], body: dict[str, Any], detail: object, channel: str
+) -> SendOutcomeUnknown:
+    """Hold ``body`` (``shared.unknown_sends``), page, and return the exception."""
+    unknown_sends.hold(body)
+    unknown_sends.page(channel)
+    return cls(f"{OUTCOME_UNKNOWN_PREFIX}: {detail}")
+
+
+def _claim_or_refuse(cls: type[SendOutcomeUnknown], body: dict[str, Any]) -> None:
+    """Hold ``body`` for the send about to start, or raise ``cls`` when an
+    identical message is already in flight or has an unknown outcome, so a
+    resend never reaches the broker. The caller releases the hold on a known
+    outcome (``unknown_sends.release``); :func:`_unknown` keeps it."""
+    if not unknown_sends.claim(body):
+        logger.error("hermes-smd-trust: refused a repeat of a send whose outcome is unknown")
+        raise cls(
+            f"{OUTCOME_UNKNOWN_PREFIX}: an identical message is already in flight or has "
+            "an unknown outcome on this seat, so it was not sent again"
+        )
 
 
 class AttachmentSendError(OutboundSendError):
@@ -143,7 +200,8 @@ def send_message(
     allowlist on top, so nothing extra rides the wire either.
 
     ``sender`` is injectable for tests. Raises :class:`AgentMailSendError` on
-    refusal or transport failure alike — the caller's contract is unchanged.
+    refusal or transport failure alike; a failure whose outcome is unknown is
+    the :class:`SendOutcomeUnknown` subclass, which must not be resent.
 
     ``session_id`` / ``matter_ref`` are ss-console#2497: the broker writes the
     CONFIRM_SEND_* row and has no way to learn either, so the only place they can
@@ -166,6 +224,8 @@ def send_message(
     body = _send_body(payload)
     if not body.get("to"):
         raise AgentMailSendError("refusing to send: payload has no recipient")
+    _claim_or_refuse(AgentMailOutcomeUnknown, body)
+    keep_hold = False
     send = sender or agentmail_broker.send_message
     kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
     if audit_extra:
@@ -179,12 +239,22 @@ def send_message(
     try:
         message_id = send(body, **kwargs)
     except agentmail_broker.BrokerError as exc:
+        if workspace_broker.send_outcome_unknown(exc):
+            keep_hold = True
+            raise _unknown(AgentMailOutcomeUnknown, body, exc, "agentmail") from exc
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
         # to the operator than a generic delivery failure.
         raise AgentMailSendError(f"broker refused the send: {exc}") from exc
+    except agentmail_broker.AgentMailBrokerNotReached as exc:
+        raise AgentMailSendError(f"broker transmit unavailable, nothing was sent: {exc}") from exc
     except agentmail_broker.AgentMailBrokerUnavailable as exc:
-        raise AgentMailSendError(f"broker transmit unavailable: {exc}") from exc
+        keep_hold = True
+        raise _unknown(AgentMailOutcomeUnknown, body, exc, "agentmail") from exc
+    finally:
+        if not keep_hold:
+            # A known outcome, sent or refused: the in-flight hold is over.
+            unknown_sends.release(body)
     if not isinstance(message_id, str) or not message_id:
         # A 2xx with no id is still a successful send per AgentMail; surface a
         # placeholder so the caller can audit delivery without failing the turn.
@@ -244,7 +314,8 @@ def send_via_msgraph(
     ``shared/msgraph_broker`` for what closes the rest.
 
     ``sender`` is injectable for tests. Raises :class:`MsGraphSendError` on
-    refusal or transport failure alike — the caller's contract is unchanged.
+    refusal or transport failure alike; a failure whose outcome is unknown is
+    the :class:`SendOutcomeUnknown` subclass, which must not be resent.
 
     ``session_id`` / ``matter_ref`` are ss-console#2497, forwarded to the broker
     for the CONFIRM_SEND_* row it writes. See the twin note on ``send_message``.
@@ -270,6 +341,8 @@ def send_via_msgraph(
         raise MsGraphSendError("refusing to send: payload has no recipient")
     if attachments:
         body["attachments"] = _attachment_copies(attachments)
+    _claim_or_refuse(MsGraphOutcomeUnknown, body)
+    keep_hold = False
     send = sender or msgraph_broker.send_message
     kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
     if audit_extra:
@@ -281,14 +354,26 @@ def send_via_msgraph(
     try:
         message_id = send(body, **kwargs)
     except msgraph_broker.BrokerError as exc:
+        # Checked before the attachment test: a lost answer is not a refusal of
+        # the attachment, and resending without it would be the duplicate.
+        if workspace_broker.send_outcome_unknown(exc):
+            keep_hold = True
+            raise _unknown(MsGraphOutcomeUnknown, body, exc, "msgraph") from exc
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
         # to the operator than a generic delivery failure.
         if attachments and "attachment" in str(exc).lower():
             raise MsGraphAttachmentError(f"broker refused the send: {exc}") from exc
         raise MsGraphSendError(f"broker refused the send: {exc}") from exc
+    except msgraph_broker.MsGraphBrokerNotReached as exc:
+        raise MsGraphSendError(f"broker transmit unavailable, nothing was sent: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
-        raise MsGraphSendError(f"broker transmit unavailable: {exc}") from exc
+        keep_hold = True
+        raise _unknown(MsGraphOutcomeUnknown, body, exc, "msgraph") from exc
+    finally:
+        if not keep_hold:
+            # A known outcome, sent or refused: the in-flight hold is over.
+            unknown_sends.release(body)
     # ss-console#2499. Graph's 202 still carries no id, but the broker now stamps
     # an X-SMD-Audit-Row header on the message and looks that message up in Sent
     # Items to learn its RFC2822 id. That id is what a firm can find in its own

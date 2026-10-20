@@ -846,7 +846,7 @@ def test_send_reply_distinguishes_an_unreachable_broker_from_a_refusal() -> None
     mod = load_plugin("hermes-smd-reply")
 
     def _down(**_kw):
-        raise mod.relay.agentmail_broker.AgentMailBrokerUnavailable("socket missing")
+        raise mod.relay.agentmail_broker.AgentMailBrokerNotReached("socket missing")
 
     with pytest.raises(mod.relay.RelaySendError, match="unavailable"):
         mod.relay.send_reply(message_id="m", text="t", html="", sender=_down)

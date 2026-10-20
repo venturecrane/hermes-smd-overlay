@@ -24,8 +24,9 @@ from dataclasses import dataclass, field
 from email.utils import parseaddr
 from typing import Any
 
-from shared import agentmail_broker, content_floor, inbound, outbound_gate
+from shared import agentmail_broker, content_floor, inbound, msgraph_broker, outbound_gate
 from shared import send_policy as send_policy_mod
+from shared.workspace_broker import BrokerError, send_outcome_unknown
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +516,37 @@ class RelaySendError(RuntimeError):
     """The AgentMail reply POST failed (HTTP error, unreachable, or timeout)."""
 
 
+class RelayOutcomeUnknown(RelaySendError):
+    """The reply reached the broker, or may have, and its answer was lost, so it
+    may already be in the person's inbox. A caller must treat it as carried for
+    every purpose that could send it again (the act line, the reply register),
+    while still reporting that delivery is not confirmed.
+
+    ``outcome_unknown`` is the duck-typed mark ``act_delivery`` reads, so that
+    module does not import this one."""
+
+    outcome_unknown = True
+
+
+def reply_failure(exc: Exception, what: str) -> RelaySendError:
+    """The typed error for a broker reply that raised ``exc``.
+
+    Shared by the AgentMail relay and the plugin's two Graph reply paths so all
+    three classify a lost answer the same way: a refusal the broker wrote on
+    purpose, or a broker that was never reached, is a :class:`RelaySendError`;
+    anything that may have gone out is a :class:`RelayOutcomeUnknown`.
+    """
+    if isinstance(exc, BrokerError):
+        if send_outcome_unknown(exc):
+            return RelayOutcomeUnknown(f"{what}: outcome unknown, it may have been sent: {exc}")
+        return RelaySendError(f"broker refused the {what}: {exc}")
+    if isinstance(
+        exc, (agentmail_broker.AgentMailBrokerNotReached, msgraph_broker.MsGraphBrokerNotReached)
+    ):
+        return RelaySendError(f"{what} unavailable, nothing was sent: {exc}")
+    return RelayOutcomeUnknown(f"{what}: outcome unknown, it may have been sent: {exc}")
+
+
 def send_reply(
     *,
     message_id: str,
@@ -570,13 +602,11 @@ def send_reply(
             )
             or ""
         )
-    except agentmail_broker.BrokerError as exc:
-        # The broker refused and has already recorded why. Surfacing its reason
-        # keeps the operator-visible message specific ("that sender is not on
-        # inbound_allow_from") rather than a generic delivery failure.
-        raise RelaySendError(f"broker refused the reply: {exc}") from exc
-    except agentmail_broker.AgentMailBrokerUnavailable as exc:
-        raise RelaySendError(f"broker transmit unavailable: {exc}") from exc
+    except (agentmail_broker.BrokerError, agentmail_broker.AgentMailBrokerUnavailable) as exc:
+        # A refusal keeps the broker's reason, which is specific ("that sender
+        # is not on inbound_allow_from") rather than a generic delivery failure;
+        # a lost answer is typed as unknown (``reply_failure``).
+        raise reply_failure(exc, "reply") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +664,9 @@ __all__ = [
     "DecidedOnce",
     "GateResult",
     "RateLimiter",
+    "RelayOutcomeUnknown",
     "RelaySendError",
+    "reply_failure",
     "authored_digest",
     "authored_digests",
     "draft_body",

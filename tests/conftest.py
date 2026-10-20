@@ -70,6 +70,15 @@ def _fresh_turn_provenance() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_held_unknown_sends() -> None:
+    """A send a previous test left with an unknown outcome is not this test's:
+    ``shared.unknown_sends`` would refuse the same body here."""
+    from shared import unknown_sends
+
+    unknown_sends._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _hook_workers_inline(monkeypatch) -> None:
     """End-of-turn hook work runs on the caller's thread, so a test that drives a
     hook can assert right after it (``shared.hook_worker.INLINE``). The

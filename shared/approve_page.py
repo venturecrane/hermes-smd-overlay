@@ -89,7 +89,15 @@ def apply_click(token: str, decide: Any) -> tuple[int, str]:
         "CANCELLED": ("Cancelled", "Nothing was sent, and the draft is closed."),
         "EXPIRED": ("Too late", "That draft expired, so nothing was sent."),
         "SUPERSEDED": ("Replaced", "A newer draft replaced this one. Answer that one instead."),
-        "FAILED": ("Not sent", reason or "The send failed and nothing went out."),
+        # A FAILED send can be a transport fault after Graph accepted it, so the
+        # page never says nothing went out: pressing again could send it twice.
+        "FAILED": (
+            "Not confirmed",
+            (f"{reason.rstrip('.')}. " if reason else "")
+            + "The send did not complete, and it is not confirmed whether the email "
+            "went out. SMD has been told and will check. Look in your Sent folder "
+            "before pressing again or replying to the approval email.",
+        ),
     }.get(status)
     if said is None:
         return 400, _page("Nothing was done", reason or "That link is not valid for this draft.")

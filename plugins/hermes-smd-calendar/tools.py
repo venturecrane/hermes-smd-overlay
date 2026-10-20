@@ -9,8 +9,9 @@ Every change follows one order, so a failure at any step leaves an honest state:
    out-of-turn sender (``shared.send_dispatch``): the trust plugin's gate, its
    scans, then the broker, which fences the recipients, validates the
    invitation, builds the part and writes the CONFIRM_SEND row;
-4. record what the send did (``sent:<message id>`` or ``not_sent: <reason>``)
-   and say exactly that to the model.
+4. record what the send did (``sent:<message id>``, ``not_sent: <reason>``, or
+   ``unknown: <reason>`` when the answer was lost) and say exactly that to the
+   model.
 
 No step sends mail any other way. A send that did not go is reported as not
 sent, with the gate's or the broker's own reason.
@@ -205,7 +206,12 @@ def _send(kind: str, event: StoredEvent, seat: seat_mod.Seat, session_id: str) -
             templated=False,
             calendar={"method": method, "ics": ics},
         )
-    delivery = f"sent:{result.message_id}" if result.sent else f"not_sent: {result.reason}"
+    if result.sent:
+        delivery = f"sent:{result.message_id}"
+    elif getattr(result, "outcome_unknown", False):
+        delivery = f"unknown: {result.reason}"
+    else:
+        delivery = f"not_sent: {result.reason}"
     calendar_store.STORE.set_delivery(event.uid, delivery)
     event.delivery = delivery
     outcome: dict[str, Any] = {
@@ -217,6 +223,16 @@ def _send(kind: str, event: StoredEvent, seat: seat_mod.Seat, session_id: str) -
     }
     if result.sent:
         outcome["message_id"] = result.message_id
+    elif getattr(result, "outcome_unknown", False):
+        # The invitation may be out. Sending it again would put a second copy
+        # on people's calendars, and "not sent" would be a guess.
+        outcome["outcome_unknown"] = True
+        outcome["say"] = (
+            "The calendar change is recorded on this seat, but whether the invitation "
+            "went out is unknown: the connection to the mail service failed after it was "
+            "handed over. Do not send it again; SMD is checking. Say so plainly, and do "
+            "not say it was sent or that it was not."
+        )
     else:
         note = send_anchor.refusal_note(result.reason)
         outcome["not_sent_because"] = note or result.reason
@@ -387,6 +403,8 @@ def list_events(args: dict[str, Any], session_id: str) -> dict[str, Any]:
             "invitation_delivered": e.delivery.startswith("sent:")
             if e.origin == calendar_store.ORIGIN_AGENT
             else None,
+            # False above is not "not sent" for these: the answer was lost.
+            **({"invitation_outcome_unknown": True} if e.delivery.startswith("unknown:") else {}),
             **({"space": e.space} if seat.space_mode else {}),
         }
         for e in visible

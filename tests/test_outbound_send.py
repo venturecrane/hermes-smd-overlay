@@ -154,7 +154,9 @@ def test_a_broker_refusal_maps_to_send_error_and_keeps_its_reason():
     broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
 
     def _refuse(_body, **_kwargs):
-        raise broker.BrokerError("recipient is not on this seat's authored surface")
+        raise broker.BrokerError(
+            "recipient is not on this seat's authored surface", code="AgentMailRefused"
+        )
 
     with pytest.raises(mod.AgentMailSendError, match="authored surface"):
         mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=_refuse)
@@ -166,7 +168,7 @@ def test_an_unreachable_broker_is_not_reported_as_a_refusal():
     broker = load_plugin("hermes-smd-trust").outbound_send.agentmail_broker
 
     def _down(_body, **_kwargs):
-        raise broker.AgentMailBrokerUnavailable("socket missing")
+        raise broker.AgentMailBrokerNotReached("socket missing")
 
     with pytest.raises(mod.AgentMailSendError, match="unavailable"):
         mod.send_message(payload={"to": "a@b.com", "text": "hi"}, sender=_down)

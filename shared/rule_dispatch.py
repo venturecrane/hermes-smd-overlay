@@ -92,6 +92,10 @@ class Notification:
     note: str
     recipients: tuple[str, ...] = field(default_factory=tuple)
     reason: str = ""
+    #: The send's answer was lost, so the message may be out
+    #: (``DispatchResult.outcome_unknown``). Not sent as far as anyone can
+    #: prove, and never to be sent again on that basis.
+    outcome_unknown: bool = False
 
 
 #: ``(to, subject, text, session_id, cc) -> object with .sent/.reason``
@@ -287,6 +291,15 @@ _NOT_NOTIFIED_NOTE = (
     "an administrator themselves. Do not say an administrator was asked."
 )
 
+_UNKNOWN_NOTIFIED_NOTE = (
+    "The rule was recorded, and this seat handed it to {names} by email, but the "
+    "connection failed before the answer came back, so it is unknown whether "
+    "they received it. SMD is checking. Tell the person that their rule is "
+    "written down and that you are checking whether the administrator was told. "
+    "Do not say an administrator was asked or that nobody was, do not ask them "
+    "to forward it, and do not call a send tool."
+)
+
 _NO_ROUTING_NOTE = (
     "The rule was recorded, but this engagement names nobody to receive rule "
     "requests, so no administrator has been told. Say that plainly: the rule is "
@@ -339,6 +352,18 @@ def notify_admins(
         anchor=anchor,
         lane=LANE_RULE_DISPATCH,
     )
+    if getattr(result, "outcome_unknown", False):
+        reason = _clean(getattr(result, "reason", ""))
+        logger.error(
+            "rule_dispatch: rule %s notification outcome unknown (%s)", proposal_id, reason
+        )
+        return Notification(
+            sent=False,
+            note=_UNKNOWN_NOTIFIED_NOTE.format(names=", ".join(recipients)),
+            recipients=tuple(recipients),
+            reason=reason,
+            outcome_unknown=True,
+        )
     if not getattr(result, "sent", False):
         reason = _clean(getattr(result, "reason", "")) or "the send was refused"
         logger.info("rule_dispatch: rule %s NOT notified (%s)", proposal_id, reason)
@@ -478,6 +503,7 @@ def notify_outcome(
         note="",
         recipients=(requester,),
         reason=reason,
+        outcome_unknown=bool(getattr(result, "outcome_unknown", False)),
     )
 
 
@@ -570,6 +596,7 @@ def notify_ops_outcome(
         note="",
         recipients=(requester,),
         reason=send_reason,
+        outcome_unknown=bool(getattr(result, "outcome_unknown", False)),
     )
 
 

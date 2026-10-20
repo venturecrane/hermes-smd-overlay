@@ -788,7 +788,7 @@ def test_cancel_is_carried_and_acknowledged(establishment):
         ("EXPIRED", "had expired"),
         ("SUPERSEDED", "replaced by a newer draft (9abc0123)"),
         ("REFUSED", "only the named approver may send"),
-        ("FAILED", "the send failed and nothing went out"),
+        ("FAILED", "the send did not complete"),
         ("SOMETHING_NEW", "was refused and nothing was sent"),
     ],
 )
@@ -813,7 +813,8 @@ def test_an_unreachable_broker_is_reported_never_claimed_as_sent(establishment, 
     monkeypatch.setattr(msgraph_broker, "send_as_decide", boom)
     _email_turn()
     context = _turn(mod, STAFF, f"{TAG} send")
-    assert "could not reach the broker" in context
+    assert "did not get the broker's answer" in context
+    assert "nothing was sent" not in context.lower()
     assert "has been sent" not in context
 
 

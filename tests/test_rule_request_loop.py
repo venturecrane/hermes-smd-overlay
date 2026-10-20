@@ -60,11 +60,12 @@ TEXT = "In client letters, no pleasantries; keep that."
 class _Result:
     """A send outcome, shaped like ``shared.send_dispatch.DispatchResult``."""
 
-    def __init__(self, sent=True, reason="", message_id="msg-1"):
+    def __init__(self, sent=True, reason="", message_id="msg-1", outcome_unknown=False):
         self.sent = sent
         self.reason = reason
         self.message_id = message_id
         self.recipients = ()
+        self.outcome_unknown = outcome_unknown
 
 
 class _Recorder:
@@ -253,6 +254,24 @@ def test_an_outcome_goes_to_the_person_who_asked_and_to_nobody_else():
     )
     assert send.recipients == [PARALEGAL]
     assert send.copied == []
+
+
+def test_a_rule_request_whose_answer_was_lost_never_asks_the_person_to_forward_it():
+    """The administrators may already have it: "forward it yourself" is the
+    duplicate, and "nobody has been asked" is a guess."""
+    send = _Recorder(_Result(sent=False, reason="outcome unknown: timed out", outcome_unknown=True))
+    result = rule_dispatch.notify_admins(
+        proposal_id=RULE,
+        text=TEXT,
+        requester=PARALEGAL,
+        rule_requests_to=[ADMIN],
+        send=send,
+        emit=lambda **kw: None,
+    )
+    assert result.sent is False and result.outcome_unknown is True
+    assert "forward it" in result.note and "do not ask them to forward it" in result.note
+    assert "nobody has been asked yet" not in result.note
+    assert "SMD is checking" in result.note
 
 
 def test_a_refused_outcome_send_reports_not_sent_so_the_row_stays_unmarked():
@@ -672,7 +691,11 @@ def plugin(monkeypatch, tmp_path):
 
     def fake_send(**kwargs):
         state["sends"].append(kwargs)
-        return _Result(sent=state.get("send_ok", True), reason=state.get("send_reason", ""))
+        return _Result(
+            sent=state.get("send_ok", True),
+            reason=state.get("send_reason", ""),
+            outcome_unknown=state.get("send_unknown", False),
+        )
 
     monkeypatch.setattr(mod, "_broker_request", fake_broker_request)
     monkeypatch.setattr(mod.send_dispatch, "dispatch", fake_send)
@@ -813,6 +836,37 @@ def test_an_operations_request_that_could_not_go_says_it_did_not(plugin):
     assert "COULD NOT pass the request on" in reply
     assert "tainted" in reply
     assert "send it to SMD themselves" in reply
+
+
+def test_an_operations_request_whose_answer_was_lost_is_neither_withdrawn_nor_resent(plugin):
+    """SMD may already hold the [ops] email: withdrawing the row would orphan its
+    answer, and asking the person to send it themselves is the duplicate."""
+    mod, state = plugin
+    state["send_ok"] = False
+    state["send_unknown"] = True
+    state["send_reason"] = "outcome unknown, it may have been sent: timed out"
+    mod._ADMIN_STASH["sess-1"] = {"sender": PARALEGAL, "is_admin": False}
+    reply = mod._operations_request({"summary": "a digest"}, session_id="sess-1")
+    assert reply == ops_request.UNKNOWN_REPLY
+    assert "send it to SMD themselves" not in reply
+    assert not any("withdraw" in str(r.get("action")) for r in state["requests"])
+    # Asked again: the open row answers duplicate_of, and the reply still must
+    # not claim the request was passed on.
+    state["ops_duplicate_of"] = OPS
+    again = mod._operations_request({"summary": "a digest"}, session_id="sess-1")
+    assert again == ops_request.UNKNOWN_REPLY
+
+
+def test_an_outcome_letter_whose_answer_was_lost_counts_as_reported(plugin):
+    """The sweeper marks a row after this says True. A letter that may be out
+    is not sent again."""
+    mod, state = plugin
+    state["send_ok"] = False
+    state["send_unknown"] = True
+    row = {"proposal_id": RULE, "instructed_by": PARALEGAL, "text": TEXT, "kind": "rule"}
+    assert mod._dispatch_outcome_letter(kind="lapsed", row=row) is True
+    state["send_unknown"] = False
+    assert mod._dispatch_outcome_letter(kind="lapsed", row=row) is False
 
 
 def test_an_unattributed_turn_cannot_pass_a_request_on(plugin):

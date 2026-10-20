@@ -360,7 +360,7 @@ def test_a_broker_refusal_answers_nothing(monkeypatch):
     from shared import agentmail_broker
 
     def _refuse(*_a, **_k):
-        raise agentmail_broker.BrokerError("refused")
+        raise agentmail_broker.BrokerError("refused", code="AgentMailRefused")
 
     monkeypatch.setenv(agentmail_broker.SOCKET_ENV, "/tmp/none.sock")
     monkeypatch.setattr(agentmail_broker, "request", _refuse)
