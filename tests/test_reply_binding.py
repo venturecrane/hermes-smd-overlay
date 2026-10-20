@@ -278,6 +278,28 @@ def test_a_draft_to_anyone_else_is_held(lane) -> None:
     assert any(m["reason"] == "recipient_mismatch" for m in _held(d1))
 
 
+def test_a_hold_in_a_jobs_wake_names_the_job(lane) -> None:
+    """The daemon's reply watch pages on this row instead of twenty minutes
+    later (A&P 201167, 2026-10-20). FALSIFIER: drop the wake_job stamp in _held."""
+    mod, d1, _broker, _ = lane
+    _wake(mod)
+    _bind(mod, {"job_id": JOB})
+    _draft(mod, [OTHER])
+    rows = _held(d1)
+    assert rows
+    assert [(m.get("wake_kind"), m.get("wake_job_id")) for m in rows] == [
+        ("demand_job", JOB)
+    ] * len(rows)
+
+
+def test_a_hold_outside_a_jobs_wake_names_no_job(lane) -> None:
+    mod, d1, _broker, _ = lane
+    _bind(mod, {"graph_message_id": GRAPH_ID}, session=CRON)
+    _draft(mod, [OTHER], session=CRON)
+    rows = _held(d1)
+    assert rows and not any("wake_job_id" in m for m in rows)
+
+
 def test_the_fabrication_floor_still_holds_a_bound_reply(lane) -> None:
     mod, d1, broker, _ = lane
     _wake(mod)

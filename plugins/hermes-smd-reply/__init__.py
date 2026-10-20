@@ -483,6 +483,12 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
     # reads and NEVER into the row, which records rule names only.
     detail = extra.pop("_detail", "")
     recipient, device = _reply_recipient(origin)
+    # ss-console 2026-10-20 (A&P 201167): a job's wake turn whose reply is held
+    # names the job, so the daemon's reply watch can page on the hold itself
+    # instead of twenty minutes later on the absence of a send. The session id
+    # alone is hermes' own and cannot be traced back to the wake.
+    wake = binding.TURN_SOURCES.wake_job(_current_session_id())
+    job = {"wake_kind": wake[0], "wake_job_id": wake[1]} if wake else {}
     _emit_reply_event(
         action_type="REPLY_HELD",
         metadata={
@@ -490,6 +496,7 @@ def _held(reason: str, origin: inbound.InboundOrigin, **extra: Any) -> None:
             "recipient": recipient,
             "message_id": origin.message_id,
             **device,
+            **job,
             **extra,
         },
         matter_ref=matter_ref,
