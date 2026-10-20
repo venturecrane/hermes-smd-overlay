@@ -36,6 +36,10 @@ dependencies = [
     # (shared/sentry_init.py). Errors-only, PII-scrubbed at SDK init; the
     # gate + gateway processes both init from this dependency.
     "sentry-sdk>=2.0,<3",
+    # The outbound PDF reader (shared/outbound_attachment.py): the send gate
+    # reads what a PDF attachment says, and refuses one it cannot read. Pure
+    # Python, no dependencies; Hermes' own lock carries no PDF parser.
+    "pypdf>=6.1,<7",
 ]
 
 [project.optional-dependencies]

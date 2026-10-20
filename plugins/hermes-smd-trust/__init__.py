@@ -1286,16 +1286,18 @@ def _dispatch_internal_message(
     extra. A capability that does not match is refused outright rather than
     ignored, because a mismatch means a caller is not the code path it claims.
 
-    ``attachments`` (statute-watch v2) are pinned-shape workbook descriptors
-    (:mod:`shared.outbound_attachment`) from a pre_run envelope, never from a
-    payload. Each is re-validated, its text extracted, and that text scanned by
+    ``attachments`` (statute-watch v2; PDFs since the SMD-staged send) are
+    pinned-shape descriptors (:mod:`shared.outbound_attachment`) from a pre_run
+    or SMD-staged envelope, never from a payload. The set is re-validated
+    (``validate_all``), each one's text extracted, and that text scanned by
     ``outbound.check_outbound_attachment`` AFTER the body has passed every gate,
     on the same session register. Any invalid descriptor, extraction failure,
     scan refusal or scan raise refuses the whole send with
     ``attachment_refused=True``, and so does a transport that refuses the
     attachment; the caller may then send the message again without it. The
-    send's row carries ``attachment_sha256``, stamped here from the validated
-    bytes (a caller cannot pre-stamp it).
+    send's row carries ``attachment_sha256`` (comma-joined, in order, when
+    there are several), stamped here from the validated bytes (a caller cannot
+    pre-stamp it).
 
     ``calendar`` (ss-console#3264) is one invitation, ``{"method", "ics"}``,
     from ``hermes-smd-calendar``. It rides the payload as ``CALENDAR_ARG``
@@ -1311,11 +1313,7 @@ def _dispatch_internal_message(
     validated_attachments: list[tuple[dict[str, str], bytes]] = []
     if attachments:
         try:
-            if not isinstance(attachments, list) or len(attachments) > (
-                outbound_attachment.MAX_ATTACHMENTS
-            ):
-                raise outbound_attachment.AttachmentError("too many attachments")
-            validated_attachments = [outbound_attachment.validate(a) for a in attachments]
+            validated_attachments = outbound_attachment.validate_all(attachments)
         except outbound_attachment.AttachmentError as exc:
             logger.warning(
                 "hermes-smd-trust: out-of-turn attachment invalid (%s); NOT dispatching", exc
@@ -1421,9 +1419,9 @@ def _dispatch_internal_message(
             return DispatchResult(sent=False, reason=str(reason), recipients=recipients)
     # The attachment scan, AFTER the body has passed: a refusal here is about
     # the attachment alone, which is what lets the caller resend without it.
-    for _descriptor, data in validated_attachments:
+    for descriptor, data in validated_attachments:
         try:
-            attachment_text = outbound_attachment.extract_xlsx_text(data)
+            attachment_text = outbound_attachment.extract_text(descriptor, data)
             attachment_block = outbound.check_outbound_attachment(
                 attachment_text, session_id=gate_session
             )

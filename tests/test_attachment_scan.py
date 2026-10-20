@@ -195,13 +195,13 @@ def test_the_512_kib_bound_is_exact():
         outbound_attachment.validate(descriptor(at_bound + b"\0"))
 
 
-def test_sanitize_strips_bad_entries_and_refuses_more_than_one():
+def test_sanitize_strips_bad_entries_and_refuses_more_than_one_workbook():
     good = descriptor()
     kept, stripped = outbound_attachment.sanitize([good])
     assert kept == [outbound_attachment.validate(good)[0]] and stripped == []
     kept, stripped = outbound_attachment.sanitize([{**good, "sha256": "0" * 64}])
     assert kept == [] and len(stripped) == 1
-    kept, stripped = outbound_attachment.sanitize([good, good])
+    kept, stripped = outbound_attachment.sanitize([good, descriptor(name="Other.xlsx")])
     assert kept == [] and len(stripped) == 2
     assert outbound_attachment.sanitize(None) == ([], [])
     assert outbound_attachment.sanitize("x")[0] == []
@@ -414,7 +414,8 @@ def test_an_invalid_attachment_handed_to_the_sender_refuses(monkeypatch):
     assert not result.sent and result.attachment_refused and captured == []
 
 
-def test_agentmail_seat_refuses_an_attachment_as_an_attachment_refusal(monkeypatch):
+def test_agentmail_seat_carries_the_attachment(monkeypatch):
+    """Was refused on AgentMail (the verb carried none); now carried, stamped."""
     trust = load_plugin("hermes-smd-trust")
     captured: list[dict] = []
     _arm_sender(monkeypatch, trust, captured, adapter="agentmail")
@@ -423,7 +424,7 @@ def test_agentmail_seat_refuses_an_attachment_as_an_attachment_refusal(monkeypat
     monkeypatch.setattr(
         trust.outbound_send.agentmail_broker,
         "send_message",
-        lambda body, **k: am_calls.append(body) or "am-1",
+        lambda body, **k: am_calls.append({"body": body, **k}) or "am-1",
     )
     result = trust._dispatch_internal_message(
         to=["staff@firm.example"],
@@ -432,8 +433,35 @@ def test_agentmail_seat_refuses_an_attachment_as_an_attachment_refusal(monkeypat
         session_id="s1",
         attachments=[descriptor()],
     )
+    assert result.sent and not result.attachment_refused
+    [call] = am_calls
+    assert call["body"]["attachments"] == [outbound_attachment.validate(descriptor())[0]]
+    assert call["audit_extra"]["attachment_sha256"] == descriptor()["sha256"]
+    assert captured == []
+
+
+def test_agentmail_seat_broker_refusal_of_the_attachment_is_an_attachment_refusal(monkeypatch):
+    from shared import agentmail_broker
+
+    trust = load_plugin("hermes-smd-trust")
+    captured: list[dict] = []
+    _arm_sender(monkeypatch, trust, captured, adapter="agentmail")
+    monkeypatch.setattr(trust.outbound, "check_outbound_attachment", lambda text, **k: None)
+
+    def refuse(body, **_k):
+        raise agentmail_broker.BrokerError(
+            "attachment refused: not this one", code="AgentMailRefused"
+        )
+
+    monkeypatch.setattr(trust.outbound_send.agentmail_broker, "send_message", refuse)
+    result = trust._dispatch_internal_message(
+        to=["staff@firm.example"],
+        subject="s",
+        text="body",
+        session_id="s1",
+        attachments=[descriptor()],
+    )
     assert not result.sent and result.attachment_refused
-    assert am_calls == [] and captured == []
 
 
 def test_no_attachment_keeps_the_transport_call_unchanged(monkeypatch):

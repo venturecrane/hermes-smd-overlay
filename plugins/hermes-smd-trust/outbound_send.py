@@ -118,17 +118,25 @@ class AttachmentSendError(OutboundSendError):
 
 
 class AgentMailAttachmentError(AgentMailSendError, AttachmentSendError):
-    """AgentMail carries no outbound attachment on this overlay (refused loudly)."""
+    """The attachments on an AgentMail send were refused, here or by the broker."""
 
 
 class MsGraphAttachmentError(MsGraphSendError, AttachmentSendError):
     """The broker refused the attachment on a Graph send."""
 
 
+#: What the broker's Graph verb carries: ONE workbook (ss-console
+#: ``msgraph_attachments``). Held here too, so a Graph seat refuses anything
+#: else before the broker is asked, exactly as it did before PDFs existed.
+_MSGRAPH_MAX_ATTACHMENTS = 1
+_MSGRAPH_CONTENT_TYPES = frozenset({outbound_attachment.XLSX_CONTENT_TYPE})
+
+
 def _attachment_copies(attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Validated four-key copies of ``attachments``; raises on any bad entry, so
-    the transport never forwards a descriptor the shared validator rejects."""
-    if len(attachments) > outbound_attachment.MAX_ATTACHMENTS:
+    """Validated four-key copies of a Graph send's ``attachments``; raises on
+    any bad entry, so the transport never forwards a descriptor the shared
+    validator rejects or the Graph verb cannot carry."""
+    if len(attachments) > _MSGRAPH_MAX_ATTACHMENTS:
         raise MsGraphAttachmentError("refusing to send: too many attachments")
     copies: list[dict[str, str]] = []
     for item in attachments:
@@ -136,8 +144,21 @@ def _attachment_copies(attachments: list[dict[str, Any]]) -> list[dict[str, str]
             descriptor, _ = outbound_attachment.validate(item)
         except outbound_attachment.AttachmentError as exc:
             raise MsGraphAttachmentError(f"refusing to send: {exc}") from exc
+        if descriptor["content_type"] not in _MSGRAPH_CONTENT_TYPES:
+            raise MsGraphAttachmentError(
+                "refusing to send: this seat's mail transport carries only a workbook"
+            )
         copies.append(descriptor)
     return copies
+
+
+def _agentmail_attachment_copies(attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Validated four-key copies of an AgentMail send's ``attachments``: the
+    whole set the shared validator allows (``validate_all``), or a raise."""
+    try:
+        return [d for d, _ in outbound_attachment.validate_all(list(attachments))]
+    except outbound_attachment.AttachmentError as exc:
+        raise AgentMailAttachmentError(f"refusing to send: {exc}") from exc
 
 
 # ss#2258: `_request_json`, `resolve_inbox_id` and `seat_inbox_address` were
@@ -212,18 +233,27 @@ def send_message(
     body-conformance stamps for the row (routing_leg / rendered_body_sha256 /
     body_variant), filtered broker-side through a closed allowlist.
 
-    ``attachments`` are REFUSED here, loudly (:class:`AgentMailAttachmentError`):
-    the AgentMail verb carries none, and dropping one silently would deliver a
-    message that says "attached" with nothing attached. The caller retries
-    without it.
+    ``attachments`` is a KEYWORD, never a payload field (``attachments`` is not
+    in :data:`_SEND_BODY_FIELDS`, so a model's tool-call args carrying one are
+    not forwarded). Only the trust plugin's out-of-turn sender passes it, from
+    a pre_run or SMD-staged envelope the model cannot write. The set is
+    re-validated here (``outbound_attachment.validate_all``) and forwarded as
+    the pinned four-key descriptors; the broker re-validates them and builds
+    AgentMail's attachment parts. Any refusal of the attachments, here or by
+    the broker, raises :class:`AgentMailAttachmentError`, never a send with
+    them silently dropped: a message that says "attached" over nothing is the
+    defect this exists to prevent. An invitation send carries no other
+    attachment.
     """
-    if attachments:
-        raise AgentMailAttachmentError(
-            "refusing to send: this seat's mail transport carries no attachments"
-        )
     body = _send_body(payload)
     if not body.get("to"):
         raise AgentMailSendError("refusing to send: payload has no recipient")
+    if attachments:
+        if "calendar" in body:
+            raise AgentMailAttachmentError(
+                "refusing to send: an invitation carries no other attachment"
+            )
+        body["attachments"] = _agentmail_attachment_copies(attachments)
     _claim_or_refuse(AgentMailOutcomeUnknown, body)
     keep_hold = False
     send = sender or agentmail_broker.send_message
@@ -245,6 +275,8 @@ def send_message(
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
         # to the operator than a generic delivery failure.
+        if attachments and "attachment" in str(exc).lower():
+            raise AgentMailAttachmentError(f"broker refused the send: {exc}") from exc
         raise AgentMailSendError(f"broker refused the send: {exc}") from exc
     except agentmail_broker.AgentMailBrokerNotReached as exc:
         raise AgentMailSendError(f"broker transmit unavailable, nothing was sent: {exc}") from exc

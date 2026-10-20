@@ -32,7 +32,10 @@ gate). The fallback ladder per dispatch:
    same message goes again without it, using the pre_run's
    ``body_without_attachment`` when present (``body_variant``
    ``full_no_attachment``). A malformed attachment is stripped up front and
-   never invalidates the entry;
+   never invalidates the entry. An entry that says ``attachments_required:
+   true`` (an SMD-staged send, :mod:`shared.staged_send`) has no rung 2 and no
+   skeleton: the files ARE the message, so if any one of them is stripped or
+   refused NOTHING sends and the note says so;
 1. full body refused by a gate -> dispatch the authored skeleton (still
    ``templated=True``, still the full gate, never an attachment);
 2. skeleton also refused, or transport failure -> NOTHING sends; the context
@@ -403,6 +406,14 @@ def _attachment_plan(entry: dict, skill: str) -> tuple[list[dict], str, int]:
     return attachments, rung2, len(stripped)
 
 
+def _required_attachments_note(skill: str, who: str) -> str:
+    return (
+        f"Your {skill} message to {who} was not sent: its attachments could not "
+        "be included, and it does not go without them. Report that in one plain "
+        "line; do not compose, attach or send anything yourself."
+    )
+
+
 def dispatch_prerendered(session_id: str) -> str | None:
     """Dispatch this cron session's pre-rendered envelope, if one binds.
 
@@ -453,14 +464,26 @@ def dispatch_prerendered(session_id: str) -> str | None:
             dispatch_ref = digest_reply_ref.mint_dispatch_ref()
             audit_base = {"skill_name": routine.skill, "dispatch_ref": dispatch_ref}
             # The participant fence: a routine's send answers no email, so it
-            # rides the routine's authored lane (send_anchor.routine_lane).
+            # rides the routine's authored lane (send_anchor.routine_lane). A
+            # seat whose skill opted its scheduled turns into the roster lane
+            # (``settings.recipients: roster``, a MANAGED cron job) gets that
+            # lane here too: the same scheduler fact that admits this turn's
+            # own sends to the roster (send_anchor.routine_turn_lane).
             fence_lane = send_anchor.routine_lane(routine.skill)
+            if fence_lane == send_anchor.LANE_ESCALATION:
+                fence_lane = send_anchor.routine_turn_lane(session_id) or fence_lane
             if isinstance(entry.get("routing_leg"), str) and entry["routing_leg"]:
                 audit_base["routing_leg"] = entry["routing_leg"]
             # Rung 1 carries the workbook (when one survived validation); the
             # sender stamps attachment_sha256 on the row from the bytes it sent.
             attachments, rung2_body, stripped = _attachment_plan(entry, routine.skill)
             stripped_total += stripped
+            required = entry.get("attachments_required") is True
+            who = _recipients_phrase(recipients)
+            if required and (stripped or not attachments):
+                # The files are the message: none goes without all of them.
+                lines.append(_required_attachments_note(routine.skill, who))
+                continue
             # Every attachment stripped: the full body would say "attached" over
             # nothing, so the first send is already the no-attachment body.
             without_attachment = bool(stripped) and not attachments
@@ -480,6 +503,14 @@ def dispatch_prerendered(session_id: str) -> str | None:
                 },
                 **({"attachments": attachments} if attachments else {}),
             )
+            if not result.sent and required and result.attachment_refused:
+                logger.info(
+                    "prerendered_dispatch: %s required attachments refused (%s); nothing sent",
+                    routine.skill,
+                    result.reason,
+                )
+                lines.append(_required_attachments_note(routine.skill, who))
+                continue
             if not result.sent and attachments and result.attachment_refused:
                 # Rung 2: the attachment, and only the attachment, was refused.
                 # The body already passed every gate; send it without the
@@ -584,7 +615,7 @@ def dispatch_prerendered(session_id: str) -> str | None:
                 )
                 continue
             skeleton = entry.get("skeleton_body")
-            if isinstance(skeleton, str) and skeleton.strip():
+            if isinstance(skeleton, str) and skeleton.strip() and not required:
                 fallback = send_dispatch.dispatch(
                     to=recipients,
                     subject=str(entry["subject"]),

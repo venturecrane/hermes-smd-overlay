@@ -73,8 +73,8 @@ def test_send_takes_no_credential_and_no_inbox():
     # audit_extra (WS-RENDER) is attribution FOR the broker's row, filtered
     # broker-side through a closed allowlist — not an identity or credential
     # channel, so the control below still holds.
-    # attachments (statute-watch v2) exists only to be REFUSED on this transport
-    # (see test_agentmail_refuses_an_attachment_loudly).
+    # attachments (statute-watch v2, PDFs since the SMD-staged send) is a
+    # keyword from code the model cannot reach (see test_outbound_pdf.py).
     # anchor and lane (participant fence) say which request the send answers
     # and which authored lane sends it; neither names a From.
     assert params == {
@@ -175,13 +175,28 @@ def test_an_unreachable_broker_is_not_reported_as_a_refusal():
 
 
 # ---------------------------------------------------------------------------
-# Attachments: refused loudly on AgentMail (statute-watch v2)
+# Attachments on AgentMail: carried, re-validated, never silently dropped
 # ---------------------------------------------------------------------------
 
 
-def test_agentmail_refuses_an_attachment_loudly():
+def test_agentmail_carries_a_validated_attachment():
+    """The verb now carries attachments (was refused, statute-watch v2). What
+    reaches the broker is the pinned four-key descriptor, nothing else."""
+    from tests.test_attachment_scan import descriptor
+
+    mod = _load()
+    captured: list = []
+    mod.send_message(
+        payload={"to": "a@b.com", "text": "hi"},
+        sender=_sender(captured),
+        attachments=[{**descriptor(), "extra": "dropped"}],
+    )
+    assert captured[0]["attachments"] == [descriptor()]
+
+
+def test_agentmail_refuses_a_malformed_attachment_loudly():
     """No silent drop: a message whose body says "attached" must not go out
-    with nothing attached. The refusal is typed so the caller retries without."""
+    with nothing attached. The refusal is typed so the caller can decide."""
     from tests.test_attachment_scan import descriptor
 
     mod = _load()
@@ -190,7 +205,7 @@ def test_agentmail_refuses_an_attachment_loudly():
         mod.send_message(
             payload={"to": "a@b.com", "text": "hi"},
             sender=_sender(captured),
-            attachments=[descriptor()],
+            attachments=[{**descriptor(), "sha256": "0" * 64}],
         )
     assert captured == []
     # And the refusal is still an AgentMail send error for older callers.
