@@ -1377,7 +1377,7 @@ def _persona_config(
         "customer_id": customer.get("customer_id"),
         "customer_name": customer.get("customer_name"),
         "vertical": customer.get("vertical"),
-        "model": customer.get("model"),
+        "model": _model_block(customer),
         "persona": {
             "name": persona.get("name"),
             "title": persona.get("title"),
@@ -1623,6 +1623,27 @@ def _persona_config(
 # runtime's Anthropic credential; a non-Claude seat gets nothing, because a
 # Claude model id on another provider would fail the same call differently.
 _TITLE_GENERATION_MODEL = "claude-haiku-5-5"
+
+
+def _model_block(customer: dict[str, Any]) -> Any:
+    """``model`` for the profile config: a Claude model names its provider.
+
+    Hermes reads ``model.provider`` from config to decide whether the main model
+    can see images (``tools/vision_tools.py::check_vision_requirements`` ->
+    ``agent/image_routing.py``). Given a bare string it reads the provider as
+    blank, resolves image input to "text", and ``vision_analyze`` fails its
+    check and is dropped from the tool surface without a word, on every
+    platform that names the ``vision`` toolset. The chat runtime still worked,
+    because it auto-detects Anthropic from the key, so nothing else showed it.
+    Captain Mark then told Scott it could not read the screenshot he emailed
+    (2026-10-20). Measured on the seat: bare string -> check False, this
+    shape -> check True. A non-Claude model keeps the bare string, since naming
+    a provider we have not authored would be a guess.
+    """
+    model = customer.get("model")
+    if isinstance(model, str) and model.strip().lower().startswith("claude"):
+        return {"default": model.strip(), "provider": "anthropic"}
+    return model
 
 
 def _title_generation_pin(customer: dict[str, Any]) -> dict[str, Any]:
