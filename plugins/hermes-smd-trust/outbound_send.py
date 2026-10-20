@@ -97,14 +97,16 @@ def _unknown(
     return cls(f"{OUTCOME_UNKNOWN_PREFIX}: {detail}")
 
 
-def _refuse_a_repeat(cls: type[SendOutcomeUnknown], body: dict[str, Any]) -> None:
-    """Raise ``cls`` when this exact body's outcome is already unknown, so a
-    resend never reaches the broker. Nothing is sent."""
-    if unknown_sends.held(body):
+def _claim_or_refuse(cls: type[SendOutcomeUnknown], body: dict[str, Any]) -> None:
+    """Hold ``body`` for the send about to start, or raise ``cls`` when an
+    identical message is already in flight or has an unknown outcome, so a
+    resend never reaches the broker. The caller releases the hold on a known
+    outcome (``unknown_sends.release``); :func:`_unknown` keeps it."""
+    if not unknown_sends.claim(body):
         logger.error("hermes-smd-trust: refused a repeat of a send whose outcome is unknown")
         raise cls(
-            f"{OUTCOME_UNKNOWN_PREFIX}: an identical message's outcome is already unknown "
-            "on this seat, so it was not sent again"
+            f"{OUTCOME_UNKNOWN_PREFIX}: an identical message is already in flight or has "
+            "an unknown outcome on this seat, so it was not sent again"
         )
 
 
@@ -222,7 +224,8 @@ def send_message(
     body = _send_body(payload)
     if not body.get("to"):
         raise AgentMailSendError("refusing to send: payload has no recipient")
-    _refuse_a_repeat(AgentMailOutcomeUnknown, body)
+    _claim_or_refuse(AgentMailOutcomeUnknown, body)
+    keep_hold = False
     send = sender or agentmail_broker.send_message
     kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
     if audit_extra:
@@ -237,6 +240,7 @@ def send_message(
         message_id = send(body, **kwargs)
     except agentmail_broker.BrokerError as exc:
         if workspace_broker.send_outcome_unknown(exc):
+            keep_hold = True
             raise _unknown(AgentMailOutcomeUnknown, body, exc, "agentmail") from exc
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
@@ -245,7 +249,12 @@ def send_message(
     except agentmail_broker.AgentMailBrokerNotReached as exc:
         raise AgentMailSendError(f"broker transmit unavailable, nothing was sent: {exc}") from exc
     except agentmail_broker.AgentMailBrokerUnavailable as exc:
+        keep_hold = True
         raise _unknown(AgentMailOutcomeUnknown, body, exc, "agentmail") from exc
+    finally:
+        if not keep_hold:
+            # A known outcome, sent or refused: the in-flight hold is over.
+            unknown_sends.release(body)
     if not isinstance(message_id, str) or not message_id:
         # A 2xx with no id is still a successful send per AgentMail; surface a
         # placeholder so the caller can audit delivery without failing the turn.
@@ -332,7 +341,8 @@ def send_via_msgraph(
         raise MsGraphSendError("refusing to send: payload has no recipient")
     if attachments:
         body["attachments"] = _attachment_copies(attachments)
-    _refuse_a_repeat(MsGraphOutcomeUnknown, body)
+    _claim_or_refuse(MsGraphOutcomeUnknown, body)
+    keep_hold = False
     send = sender or msgraph_broker.send_message
     kwargs: dict[str, Any] = {"session_id": session_id, "matter_ref": matter_ref}
     if audit_extra:
@@ -347,6 +357,7 @@ def send_via_msgraph(
         # Checked before the attachment test: a lost answer is not a refusal of
         # the attachment, and resending without it would be the duplicate.
         if workspace_broker.send_outcome_unknown(exc):
+            keep_hold = True
             raise _unknown(MsGraphOutcomeUnknown, body, exc, "msgraph") from exc
         # A refusal the broker made and recorded. Its message names the reason
         # (an unauthored recipient, a blocked domain), which is far more useful
@@ -357,7 +368,12 @@ def send_via_msgraph(
     except msgraph_broker.MsGraphBrokerNotReached as exc:
         raise MsGraphSendError(f"broker transmit unavailable, nothing was sent: {exc}") from exc
     except msgraph_broker.MsGraphBrokerUnavailable as exc:
+        keep_hold = True
         raise _unknown(MsGraphOutcomeUnknown, body, exc, "msgraph") from exc
+    finally:
+        if not keep_hold:
+            # A known outcome, sent or refused: the in-flight hold is over.
+            unknown_sends.release(body)
     # ss-console#2499. Graph's 202 still carries no id, but the broker now stamps
     # an X-SMD-Audit-Row header on the message and looks that message up in Sent
     # Items to learn its RFC2822 id. That id is what a firm can find in its own

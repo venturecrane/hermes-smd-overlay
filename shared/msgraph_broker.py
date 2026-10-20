@@ -36,15 +36,22 @@ from shared.workspace_broker import BrokerError, BrokerNotReached, BrokerReplyUn
 
 SOCKET_ENV = "SMD_WORKSPACE_BROKER_SOCKET"
 
-#: Longer than the broker's WHOLE send, not one Graph call, so a slow Graph
-#: response surfaces as the broker's typed error (which carries a reason and an
-#: audit row) rather than as a socket timeout here (which carries neither, and
-#: leaves the outcome unknown). The broker's worst case is about 105s: two token
-#: mints and the sendMail POST at 15s each (ss-console ``msgraph_ops.TIMEOUT_S``),
-#: then the Sent Items lookup's three 15s reads after 5s of pauses
-#: (``_SENT_LOOKUP_BACKOFF_S``), plus the intent and confirm row writes. At 30s a
-#: send that succeeded in 40 was reported to the agent as unknown.
-SEND_TIMEOUT_SECONDS = 120.0
+#: UNDER Hermes's 30s hook budget, and that bound wins over every other.
+#:
+#: Several sends run inside a hook: the approved send and the send-as decision
+#: (``pre_llm_call``), the withheld notice (``pre_tool_call``). Hermes abandons a
+#: hook callback at 30s (``hermes_cli/plugins_dispatch.py``
+#: ``_HOOK_CALLBACK_TIMEOUT_SECS``), skips that callback for every session while
+#: it is still running, and suppresses it for 60s more. A send that outlives the
+#: hook therefore loses its "do not resend" note AND takes the trust gate down
+#: for the whole seat. Waiting here past 30s buys nothing.
+#:
+#: So a send slower than this is reported as UNKNOWN, which is honest: the
+#: broker keeps going and writes its row, the overlay pages, and the agent says
+#: SMD is checking. The broker's own worst case (two token mints, the POST and
+#: the Sent Items lookup, about 105s) is far longer than this, but it is the
+#: cold, everything-slow case, not the usual one.
+SEND_TIMEOUT_SECONDS = 25.0
 
 
 class MsGraphBrokerUnavailable(RuntimeError):

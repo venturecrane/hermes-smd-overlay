@@ -849,8 +849,12 @@ def test_an_operations_request_whose_answer_was_lost_is_neither_withdrawn_nor_re
     reply = mod._operations_request({"summary": "a digest"}, session_id="sess-1")
     assert reply == ops_request.UNKNOWN_REPLY
     assert "send it to SMD themselves" not in reply
-    assert not any(r.get("action") == "ops_withdraw" for r in state["requests"])
     assert not any("withdraw" in str(r.get("action")) for r in state["requests"])
+    # Asked again: the open row answers duplicate_of, and the reply still must
+    # not claim the request was passed on.
+    state["ops_duplicate_of"] = OPS
+    again = mod._operations_request({"summary": "a digest"}, session_id="sess-1")
+    assert again == ops_request.UNKNOWN_REPLY
 
 
 def test_an_outcome_letter_whose_answer_was_lost_counts_as_reported(plugin):

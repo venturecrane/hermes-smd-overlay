@@ -320,11 +320,21 @@ def test_agentmail_timeout_after_the_write_is_unknown(broker, monkeypatch):
         stop.set()
 
 
-def test_the_send_timeout_outlasts_the_brokers_worst_case():
-    """At 30s a Graph send that took 40 (send plus the Sent Items lookup) came
-    back unknown. The broker's worst case is about 105s."""
-    assert msgraph_broker.SEND_TIMEOUT_SECONDS >= 110
-    assert agentmail_broker.SEND_TIMEOUT_SECONDS >= 110
+#: Hermes abandons a hook callback after this long (pinned Hermes
+#: ``hermes_cli/plugins_dispatch.py`` ``_HOOK_CALLBACK_TIMEOUT_SECS``).
+HERMES_HOOK_BUDGET_S = 30.0
+
+
+def test_the_send_timeout_fits_inside_a_hook():
+    """Sends run inside pre_llm_call and pre_tool_call. A send that outlives the
+    hook is abandoned with its "do not resend" note undelivered, and Hermes
+    then skips that hook seat-wide. The client must give up first and report
+    the outcome as unknown."""
+    assert msgraph_broker.SEND_TIMEOUT_SECONDS < HERMES_HOOK_BUDGET_S
+    assert agentmail_broker.SEND_TIMEOUT_SECONDS < HERMES_HOOK_BUDGET_S
+    # And still past the broker's own 15s vendor timeout, so a slow vendor
+    # usually comes back as the broker's typed answer rather than as unknown.
+    assert agentmail_broker.SEND_TIMEOUT_SECONDS > 15.0
 
 
 # ---------------------------------------------------------------------------
@@ -544,6 +554,110 @@ def test_the_out_of_turn_sender_reports_a_refusal_as_not_sent(internal_seat, bro
     broker(REFUSED)
     result = _internal_send()
     assert result.sent is False and result.outcome_unknown is False
+
+
+# ---------------------------------------------------------------------------
+# Replies: they reach the broker without outbound_send, so they are classified
+# where they are sent, and a lost answer counts as carried.
+# ---------------------------------------------------------------------------
+
+
+def _reply_mod():
+    return load_plugin("hermes-smd-reply")
+
+
+@pytest.mark.parametrize("handler", [TRANSPORT_ERROR, _hang_up])
+def test_an_agentmail_reply_with_a_lost_answer_is_outcome_unknown(broker, handler):
+    relay = _reply_mod().relay
+    broker(handler)
+    with pytest.raises(relay.RelayOutcomeUnknown):
+        relay.send_reply(message_id="am-1", text="ok", html="")
+
+
+def test_an_agentmail_reply_refusal_is_not_unknown(broker):
+    relay = _reply_mod().relay
+    broker(REFUSED)
+    with pytest.raises(relay.RelaySendError) as caught:
+        relay.send_reply(message_id="am-1", text="ok", html="")
+    assert not isinstance(caught.value, relay.RelayOutcomeUnknown)
+
+
+def test_an_agentmail_reply_that_never_reached_the_broker_is_not_unknown(monkeypatch):
+    relay = _reply_mod().relay
+    _no_broker(monkeypatch)
+    with pytest.raises(relay.RelaySendError) as caught:
+        relay.send_reply(message_id="am-1", text="ok", html="")
+    assert not isinstance(caught.value, relay.RelayOutcomeUnknown)
+
+
+def test_a_graph_reply_with_a_lost_answer_is_outcome_unknown(broker):
+    mod = _reply_mod()
+    broker(GRAPH_TRANSPORT_ERROR)
+    with pytest.raises(mod.relay.RelayOutcomeUnknown):
+        mod._send_msgraph_reply("graph-1", "ok", "")
+
+
+def _act_pending():
+    import types
+
+    return types.SimpleNamespace(readback="[act 1234] turn on X", confirmed=None, in_flight=False)
+
+
+def test_an_act_line_whose_answer_was_lost_is_not_sent_a_second_time():
+    """post_llm_call and on_session_end both settle an owed act line. On main a
+    lost answer released the claim and the second hook sent the line again."""
+    import types
+
+    mod = _reply_mod()
+    act_delivery = mod.act_delivery
+    calls: list[str] = []
+
+    def send(_mid: str, body: str) -> str:
+        calls.append(body)
+        raise mod.relay.RelayOutcomeUnknown("reply: outcome unknown, it may have been sent")
+
+    ledger = act_delivery.TransmittedBodies()
+    origin = types.SimpleNamespace(message_id="m1")
+    outcomes = [
+        act_delivery.deliver_if_owed(
+            "s1",
+            pending=_act_pending(),
+            origin=origin,
+            ledger=ledger,
+            send=send,
+            on_sent=lambda *a: None,
+            on_failed=lambda *a: None,
+        )
+        for _hook in ("post_llm_call", "on_session_end")
+    ]
+    assert outcomes == ["failed", "carried"]
+    assert len(calls) == 1
+
+
+def test_an_act_line_that_was_certainly_not_sent_can_be_tried_again():
+    import types
+
+    mod = _reply_mod()
+    act_delivery = mod.act_delivery
+    calls: list[str] = []
+
+    def send(_mid: str, body: str) -> str:
+        calls.append(body)
+        raise mod.relay.RelaySendError("broker refused the reply: not on inbound_allow_from")
+
+    ledger = act_delivery.TransmittedBodies()
+    origin = types.SimpleNamespace(message_id="m1")
+    for _hook in ("post_llm_call", "on_session_end"):
+        act_delivery.deliver_if_owed(
+            "s1",
+            pending=_act_pending(),
+            origin=origin,
+            ledger=ledger,
+            send=send,
+            on_sent=lambda *a: None,
+            on_failed=lambda *a: None,
+        )
+    assert len(calls) == 2
 
 
 def test_dispatch_result_carries_outcome_unknown():

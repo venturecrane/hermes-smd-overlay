@@ -6,8 +6,16 @@ instruction is not a control. So every such send is remembered here by the
 digest of its wire body, and the same body is refused, without a broker call,
 for :data:`HOLD_S` afterwards: through the send tool, an approved replay, or any
 out-of-turn sender, because all of them reach the broker through
-``outbound_send``. A reworded message is not caught; the instruction still
-covers that.
+``outbound_send``. Replies do not (``hermes-smd-reply`` calls the reply verbs
+itself); that plugin instead treats a reply with a lost answer as carried, so
+neither a redraft nor the end-of-turn act line sends it again. A reworded
+message is not caught; the instruction still covers that. The hold is per
+process: a separate process (the webhook gate child) has its own.
+
+A SEND IN FLIGHT IS HELD TOO, from the moment it is handed to the broker
+until its outcome is known, so an identical send racing it (a second thread, a
+sweeper pass) cannot reach the broker either. A known outcome, sent or
+refused, releases it; only an unknown one keeps it.
 
 THE HOLD IS BOUNDED IN TIME on purpose. A routine can legitimately send the
 same text again ("nothing due today"), and a permanent memory would silence it
@@ -60,6 +68,29 @@ def hold(body: dict[str, Any], *, now: float | None = None) -> None:
             _HELD.popitem(last=False)
 
 
+def claim(body: dict[str, Any], *, now: float | None = None) -> bool:
+    """Hold this body for a send about to start. False, holding nothing new,
+    when it is already held (in flight, or its outcome is unknown). The test
+    and the hold happen under one lock, so two racing sends cannot both pass."""
+    key = _digest(body)
+    now = time.monotonic() if now is None else now
+    with _LOCK:
+        stamp = _HELD.get(key)
+        if stamp is not None and now - stamp < HOLD_S:
+            return False
+        _HELD[key] = now
+        _HELD.move_to_end(key)
+        while len(_HELD) > _MAX:
+            _HELD.popitem(last=False)
+        return True
+
+
+def release(body: dict[str, Any]) -> None:
+    """Forget this body: its send finished with a known outcome."""
+    with _LOCK:
+        _HELD.pop(_digest(body), None)
+
+
 def held(body: dict[str, Any], *, now: float | None = None) -> bool:
     """True when this exact wire body's outcome went unknown within the hold."""
     key = _digest(body)
@@ -97,4 +128,4 @@ def _reset_for_tests() -> None:
         _HELD.clear()
 
 
-__all__ = ["HOLD_S", "hold", "held", "page"]
+__all__ = ["HOLD_S", "claim", "hold", "held", "page", "release"]

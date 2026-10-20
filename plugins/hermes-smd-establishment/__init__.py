@@ -465,6 +465,14 @@ _MAX_REFUSALS = 8
 _OPERATIONS_SENT: OrderedDict[str, int] = OrderedDict()
 _MAX_OPERATIONS = 8
 
+#: Operations requests whose email to SMD had its answer lost
+#: (``DispatchResult.outcome_unknown``). Their rows stay open, so a second ask
+#: comes back ``duplicate_of``; this is what keeps that ask from being told the
+#: request was passed on, which nobody knows. Per process, like the register
+#: above; a restart forgets it, which costs one possibly-false sentence.
+_OPS_OUTCOME_UNKNOWN: OrderedDict[str, None] = OrderedDict()
+_MAX_OPS_OUTCOME_UNKNOWN = 64
+
 #: Sessions in which SMD's answer to an operations request was RECORDED this
 #: turn (ss-console#2546, the second wave). Read for exactly one thing: the
 #: confirmation matcher is skipped on that turn, because the message that
@@ -2555,8 +2563,10 @@ def _dispatch_outcome_letter(
     may be out, so the row counts as reported and the sweeper does not send it
     again. This module otherwise prefers a duplicate to a silence, but that
     trade is for a letter that certainly did not go; one that may have gone is
-    a duplicate the reader cannot tell from a second decision. The broker's
-    intent row with no result is what pages SMD to settle it.
+    a duplicate the reader cannot tell from a second decision. Once marked, the
+    console's work-health view (ss-console ``work_health_sources``) treats the
+    request as closed, so what settles it is the overlay's
+    ``send_outcome_unknown`` page and the broker's intent row with no result.
     """
     if _is_ops_row(row):
         notification = rule_dispatch.notify_ops_outcome(
@@ -3000,6 +3010,10 @@ def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
         return ops_request.REFUSED_REPLY.format(reason=reason)
     proposal_id = str(recorded.get("proposal_id") or "")
     if recorded.get("duplicate_of"):
+        if proposal_id in _OPS_OUTCOME_UNKNOWN:
+            # The open row is one whose email's answer was lost: nobody knows
+            # that SMD has it, so "I have passed your request" would be a guess.
+            return ops_request.UNKNOWN_REPLY
         # The same person, the same request, already in front of SMD. A second
         # email would put two tags on the desk only one of which answering would
         # close, and the person is owed the same sentence either way: it was
@@ -3037,6 +3051,10 @@ def _operations_request(args: dict[str, Any], **kwargs: Any) -> str:
             proposal_id,
             result.reason,
         )
+        if proposal_id:
+            _OPS_OUTCOME_UNKNOWN[proposal_id] = None
+            while len(_OPS_OUTCOME_UNKNOWN) > _MAX_OPS_OUTCOME_UNKNOWN:
+                _OPS_OUTCOME_UNKNOWN.popitem(last=False)
         return ops_request.UNKNOWN_REPLY
     if not result.sent:
         reason = result.reason or "the send was refused"

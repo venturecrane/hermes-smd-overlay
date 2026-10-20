@@ -155,7 +155,11 @@ def deliver_if_owed(
     try:
         sent_id = send(message_id, body_for(line))
     except Exception as exc:  # noqa: BLE001 - every failure is reported, none is swallowed
-        ledger.release(session_id, line)
+        if not getattr(exc, "outcome_unknown", False):
+            # Certainly not sent: give the claim back so a later pass can try.
+            # A lost answer keeps it, because the line may already be in the
+            # person's inbox and a second pass would send it twice.
+            ledger.release(session_id, line)
         on_failed(line, f"{exc.__class__.__name__}: {exc}")
         return "failed"
     on_sent(line, str(sent_id or ""))
