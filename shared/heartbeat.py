@@ -1461,6 +1461,7 @@ def build_payload(
     gateway_supervisor_state: str | None = None,
     gateway_restarts_last_hour: int | None = None,
     audit_write_failures: int | None = None,
+    audit_write_failure_reasons: dict[str, int] | None = None,
     audit_head: str | None = None,
     audit_rows: int | None = None,
     send_refusals: int | None = None,
@@ -1579,6 +1580,11 @@ def build_payload(
     # cannot answer (no .smd dir), and the console holds what it last knew.
     if audit_write_failures is not None:
         payload["audit_write_failures"] = audit_write_failures
+    # The same tally, explained: lost rows by reason class and action_type
+    # (shared.audit_failure_counter.loss_key). Cumulative like the count, so the
+    # console diffs it against the prior beat. {} is a real "nothing explained".
+    if audit_write_failure_reasons is not None:
+        payload["audit_write_failure_reasons"] = audit_write_failure_reasons
     # ss-console #2500: the off-Machine chain pin. Read in the same pass as
     # last_audit_ts (read_audit_facts), so the head and the count always
     # describe one moment of the ledger. Both omitted on a ledger that has no
@@ -1994,10 +2000,15 @@ class HeartbeatEmitter:
         # failures happen in the AGENT process and in cron pre_run children,
         # and this beat runs in the gate. Fail-soft like every other read here.
         audit_write_failures: int | None = None
+        audit_write_failure_reasons: dict[str, int] | None = None
         try:
-            from shared.audit_failure_counter import read_audit_write_failures
+            from shared.audit_failure_counter import (
+                read_audit_write_failure_reasons,
+                read_audit_write_failures,
+            )
 
             audit_write_failures = read_audit_write_failures()
+            audit_write_failure_reasons = read_audit_write_failure_reasons()
         except Exception as exc:  # noqa: BLE001 — heartbeat stays fail-soft
             logger.debug("heartbeat: audit-write-failure tally read failed: %s", exc)
         # ADR 0062: surface the sticky-stop ladder level so the fleet view can
@@ -2058,6 +2069,7 @@ class HeartbeatEmitter:
             gateway_supervisor_state=loop.supervisor_state if loop is not None else None,
             gateway_restarts_last_hour=loop.restarts_last_hour if loop is not None else None,
             audit_write_failures=audit_write_failures,
+            audit_write_failure_reasons=audit_write_failure_reasons,
             audit_head=ledger.head,
             audit_rows=ledger.rows,
             send_refusals=ledger.send_refusals,

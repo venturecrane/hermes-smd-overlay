@@ -34,13 +34,28 @@ would hide failures that happened just before a crash.
 
 Growth: one byte per lost row, on a volume, forever. A seat that loses ten
 thousand rows has a ten-kilobyte file and a much larger problem.
+
+WHY A REASON FILE BESIDE IT (2026-10-20). The count says THAT rows were lost and
+nothing else. The reason was a rate-limited WARNING in the losing process's own
+log: on a seat that is a file nobody may read (it carries client content), at
+most once per five minutes per process, and Sentry saw it only as a breadcrumb.
+So "captain-mark lost 2 rows after each release" was countable and could not be
+explained. Each loss now also appends one line to
+``audit_write_failures.reasons``: a reason CLASS from a closed vocabulary
+(:data:`REASONS`) and, when known, the row's ``action_type``. Both are
+constants of the code, never content: no recipient, no matter, no message
+text, no metadata. The heartbeat reports the histogram and the console names
+the classes in its warning. The tally stays the count of record; the reason
+file explains it and is never used to compute it.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
+from collections import Counter
 from pathlib import Path
 
 from shared.audit_status import NoAuditWarner
@@ -56,8 +71,45 @@ _WARNER = NoAuditWarner()
 #: Relative to HERMES_HOME, alongside ``audit_status.json`` and
 #: ``webhook_surface.json`` — same directory, same volume, same crossing.
 _TALLY_RELPATH = Path(".smd") / "audit_write_failures.tally"
+_REASONS_RELPATH = Path(".smd") / "audit_write_failures.reasons"
 
 _DEFAULT_HERMES_HOME = "/opt/data"
+
+#: Why a row was lost. Closed: a class outside this set is recorded as
+#: ``unclassified``, so a caller can never put free text in the file.
+REASONS = frozenset(
+    {
+        "socket_unset",  # SMD_AUDIT_BROKER_SOCKET unset on a broker seat
+        "bad_row",  # the row did not have the contract's column count
+        "broker_unreachable",  # nothing listening, and this writer may not hold
+        "broker_io",  # the socket failed after connect: the row may have landed
+        "broker_bad_reply",  # the broker answered something that is not JSON
+        "refused_not_gateway",  # generic audit_append from a pid that is not the gateway
+        "broker_refused",  # any other broker refusal
+        "gap_full",  # the gateway's gap buffer was full
+        "gap_deadline",  # the broker stayed unreachable past the retry deadline
+        "gap_exit",  # rows still held when the gateway's interpreter exited
+        "gap_dead_gateway",  # rows a killed gateway held, counted at the next boot
+        "gap_flush_error",  # the gap retry thread hit an unexpected error
+        "direct_write_failed",  # the direct (non-broker) D1 write failed
+        "unclassified",
+    }
+)
+_UNCLASSIFIED = "unclassified"
+_ACTION_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_KEY_RE = re.compile(r"([a-z][a-z_]{0,39})(?::([A-Z][A-Z0-9_]{0,63}))?")
+#: A reasons file is read whole on every beat; past this it is read from the end.
+_REASONS_READ_CAP_BYTES = 256 * 1024
+#: Distinct keys reported per beat. More than this is not a pattern to read.
+_MAX_REASON_KEYS = 32
+
+
+def loss_key(reason: str | None, action_type: str | None = None) -> str:
+    """``reason[:ACTION_TYPE]``, both checked against closed shapes."""
+    cls = reason if reason in REASONS else _UNCLASSIFIED
+    if isinstance(action_type, str) and _ACTION_TYPE_RE.fullmatch(action_type):
+        return f"{cls}:{action_type}"
+    return cls
 
 
 def tally_path(hermes_home: str | None = None) -> Path:
@@ -65,7 +117,13 @@ def tally_path(hermes_home: str | None = None) -> Path:
     return Path(home) / _TALLY_RELPATH
 
 
-def record_audit_write_failure(context: str, *, hermes_home: str | None = None) -> bool:
+def record_audit_write_failure(
+    context: str,
+    *,
+    reason: str | None = None,
+    action_type: str | None = None,
+    hermes_home: str | None = None,
+) -> bool:
     """Tally one lost audit row. Best-effort; NEVER raises.
 
     Returns True when the byte was appended. Returns False — silently as far
@@ -80,7 +138,9 @@ def record_audit_write_failure(context: str, *, hermes_home: str | None = None) 
     importing the audit stack can never write to a developer's filesystem.
 
     ``context`` is logged, never written to the file: the tally is a count, and
-    a count cannot leak a matter reference or a recipient.
+    a count cannot leak a matter reference or a recipient. ``reason`` and
+    ``action_type`` go to the sibling reasons file as one :func:`loss_key`
+    line, after the byte, so a reason write that fails never costs the count.
     """
     path = tally_path(hermes_home)
     if not path.parent.is_dir():
@@ -100,8 +160,33 @@ def record_audit_write_failure(context: str, *, hermes_home: str | None = None) 
         return False
     finally:
         os.close(fd)
-    _WARNER.warn(logger, f"audit row lost ({context}); tallied in {path}")
+    key = loss_key(reason, action_type)
+    _append_reason(path.parent / _REASONS_RELPATH.name, key)
+    _WARNER.warn(logger, f"audit row lost [{key}] ({context}); tallied in {path}")
     return True
+
+
+def _append_reason(path: Path, key: str) -> None:
+    """One line, one O_APPEND write: atomic across writers like the tally byte."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError as exc:
+        logger.warning("audit_failure_counter: cannot open reasons (%s): %s", path, exc)
+        return
+    try:
+        os.write(fd, key.encode("ascii") + b"\n")
+    except OSError as exc:
+        logger.warning("audit_failure_counter: reason append failed (%s): %s", path, exc)
+    finally:
+        os.close(fd)
+
+
+def _seat_home(hermes_home: str | None) -> Path:
+    home = Path(hermes_home or os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
+    # A caller running inside a profile home still answers for the whole seat.
+    if home.parent.name == "profiles":
+        home = home.parent.parent
+    return home
 
 
 def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
@@ -129,10 +214,7 @@ def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
     history without moving a byte, and a writer in any profile is counted the
     moment it writes.
     """
-    home = Path(hermes_home or os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
-    # A caller running inside a profile home still answers for the whole seat.
-    if home.parent.name == "profiles":
-        home = home.parent.parent
+    home = _seat_home(hermes_home)
     root = tally_path(str(home))
     if not root.parent.is_dir():
         return None
@@ -169,4 +251,52 @@ def _tally_size(path: Path, *, required: bool) -> int | None:
     return st.st_size
 
 
-__all__ = ["tally_path", "record_audit_write_failure", "read_audit_write_failures"]
+def read_audit_write_failure_reasons(hermes_home: str | None = None) -> dict[str, int] | None:
+    """Lost rows by :func:`loss_key`, summed over the seat and profile homes.
+
+    ``None`` exactly when :func:`read_audit_write_failures` would say the seat
+    cannot answer (no ``.smd``); ``{}`` when nothing explained has been lost.
+    Rows lost before the reasons file existed have a tally byte and no line, so
+    the histogram's total can be below the tally; it is never above it except
+    by a write the tally itself dropped. Lines that do not have the key shape
+    are skipped, so a damaged file reports less, never something invented.
+    """
+    home = _seat_home(hermes_home)
+    if not (home / ".smd").is_dir():
+        return None
+    counts: Counter[str] = Counter()
+    paths = [home / _REASONS_RELPATH, *sorted((home / "profiles").glob(f"*/{_REASONS_RELPATH}"))]
+    for path in paths:
+        counts.update(_read_reason_keys(path))
+    return dict(counts.most_common(_MAX_REASON_KEYS))
+
+
+def _read_reason_keys(path: Path) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    try:
+        with open(path, "rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            if size > _REASONS_READ_CAP_BYTES:
+                fh.seek(size - _REASONS_READ_CAP_BYTES)
+                fh.readline()  # drop the partial first line
+            raw = fh.read()
+    except FileNotFoundError:
+        return counts
+    except OSError as exc:
+        logger.warning("audit_failure_counter: cannot read reasons (%s): %s", path, exc)
+        return counts
+    for line in raw.decode("ascii", errors="replace").splitlines():
+        match = _KEY_RE.fullmatch(line.strip())
+        if match and match.group(1) in REASONS:
+            counts[match.group(0)] += 1
+    return counts
+
+
+__all__ = [
+    "REASONS",
+    "loss_key",
+    "tally_path",
+    "record_audit_write_failure",
+    "read_audit_write_failures",
+    "read_audit_write_failure_reasons",
+]

@@ -202,8 +202,15 @@ class AuditLogWriter:
                 event.skill_name,
                 exc,
             )
+            if isinstance(exc, AuditWriteError):
+                # The broker client already tallied this row when it raised.
+                # Wrapping it in a second AuditWriteError counted every lost
+                # observational row TWICE (the constructor tallies).
+                raise
             raise AuditWriteError(
-                f"audit_log INSERT failed for action_type={event.action_type}"
+                f"audit_log INSERT failed for action_type={event.action_type}",
+                reason="direct_write_failed",
+                action_type=event.action_type,
             ) from exc
 
         return ulid
