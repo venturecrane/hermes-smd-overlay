@@ -238,6 +238,10 @@ def _append_at(dfd: int, name: str, data: bytes) -> bool:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return False
+        # The entrypoint's umask 027 would make these 0640 root:root, which the
+        # agent-uid heartbeat cannot read; a regular file root owns, opened
+        # without following a link, is safe to chmod by fd.
+        os.fchmod(fd, 0o644)
         os.write(fd, data)
         return True
     except OSError as exc:
@@ -361,14 +365,24 @@ def read_audit_write_failure_reasons(hermes_home: str | None = None) -> dict[str
 def _read_reason_keys(path: Path) -> Counter[str]:
     counts: Counter[str] = Counter()
     try:
-        with open(path, "rb") as fh:
-            size = os.fstat(fh.fileno()).st_size
-            if size > _REASONS_READ_CAP_BYTES:
-                fh.seek(size - _REASONS_READ_CAP_BYTES)
-                fh.readline()  # drop the partial first line
-            raw = fh.read()
+        # No link, no FIFO, no device: a planted /dev/zero would read forever
+        # and a FIFO would block the heartbeat. Never more than the cap.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return counts
+    except OSError as exc:
+        logger.warning("audit_failure_counter: cannot read reasons (%s): %s", path, exc)
+        return counts
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                logger.warning("audit_failure_counter: reasons %s is not a regular file", path)
+                return counts
+            if st.st_size > _REASONS_READ_CAP_BYTES:
+                fh.seek(st.st_size - _REASONS_READ_CAP_BYTES)
+                fh.readline()  # drop the partial first line
+            raw = fh.read(_REASONS_READ_CAP_BYTES)
     except OSError as exc:
         logger.warning("audit_failure_counter: cannot read reasons (%s): %s", path, exc)
         return counts

@@ -230,6 +230,24 @@ def test_a_root_writer_refuses_a_root_dir_others_can_write(machine_home, monkeyp
     assert counter.record_audit_write_failure("x", reason="gap_exit") is False
 
 
+def test_root_files_stay_readable_under_the_entrypoint_umask(machine_home, monkeypatch):
+    """entrypoint.sh runs the root pollers under umask 027; 0640 root files
+    would leave the agent-uid heartbeat unable to read root's reasons."""
+    monkeypatch.setattr(counter, "_is_root", lambda: True)
+    old = os.umask(0o027)
+    try:
+        assert counter.record_audit_write_failure("x", reason="gap_exit")
+    finally:
+        os.umask(old)
+    for name in ("audit_write_failures.tally", "audit_write_failures.reasons"):
+        assert (machine_home / ".smd-root" / name).stat().st_mode & 0o777 == 0o644
+
+
+def test_a_reader_never_follows_a_link_or_reads_a_device(machine_home):
+    (machine_home / ".smd" / "audit_write_failures.reasons").symlink_to("/dev/zero")
+    assert counter.read_audit_write_failure_reasons() == {}
+
+
 def test_a_non_root_writer_keeps_using_the_agent_dir(machine_home):
     assert counter.record_audit_write_failure("x", reason="gap_exit") is True
     assert (machine_home / ".smd" / "audit_write_failures.tally").read_bytes() == b"\x01"
