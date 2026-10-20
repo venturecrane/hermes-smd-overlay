@@ -594,8 +594,14 @@ def emit_skills_write(*, audit_client: Any, slug: str, result: SkillsApplyResult
         "retired": list(result.retired[:64]),
     }
     params = agent_event_params(action_type="CONFIG_WRITE", metadata=metadata)
+    # The root skills applier, not the agent (agent_event_params' default).
+    params[3] = "skills-applier"
+    params[4] = "operator"
     try:
-        audit_client.execute(INSERT_SQL, *params)
+        # Root poller: the generic append admits only the gateway (see
+        # config_applier/applier.py _emit_config_write).
+        write = getattr(audit_client, "execute_config_write", None) or audit_client.execute
+        write(INSERT_SQL, *params)
         return True
     except Exception as exc:  # noqa: BLE001 — audit never undoes an install
         logger.warning("skills_applier: CONFIG_WRITE audit emission failed (%s)", exc)

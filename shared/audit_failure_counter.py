@@ -74,6 +74,9 @@ _TALLY_RELPATH = Path(".smd") / "audit_write_failures.tally"
 _REASONS_RELPATH = Path(".smd") / "audit_write_failures.reasons"
 
 _DEFAULT_HERMES_HOME = "/opt/data"
+#: Root writers' own loss directory, beside the agent's ``.smd`` (see
+#: :func:`_record_as_root`).
+_ROOT_DIRNAME = ".smd-root"
 
 #: Why a row was lost. Closed: a class outside this set is recorded as
 #: ``unclassified``, so a caller can never put free text in the file.
@@ -98,8 +101,11 @@ REASONS = frozenset(
 _UNCLASSIFIED = "unclassified"
 _ACTION_TYPE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 _KEY_RE = re.compile(r"([a-z][a-z_]{0,39})(?::([A-Z][A-Z0-9_]{0,63}))?")
-#: A reasons file is read whole on every beat; past this it is read from the end.
-_REASONS_READ_CAP_BYTES = 256 * 1024
+#: A reasons file is read whole on every beat; past this it is read from the end
+#: (about 130,000 losses at ~30 bytes a line). The console keeps a per-key
+#: high-water mark, so a key whose count falls out of the window is never
+#: re-reported as new.
+_REASONS_READ_CAP_BYTES = 4 * 1024 * 1024
 #: Distinct keys reported per beat. More than this is not a pattern to read.
 _MAX_REASON_KEYS = 32
 
@@ -146,6 +152,9 @@ def record_audit_write_failure(
     if not path.parent.is_dir():
         logger.debug("audit_failure_counter: no tally dir at %s; not counted", path.parent)
         return False
+    key = loss_key(reason, action_type)
+    if _is_root():
+        return _record_as_root(path, key, context)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     except OSError as exc:
@@ -160,10 +169,86 @@ def record_audit_write_failure(
         return False
     finally:
         os.close(fd)
-    key = loss_key(reason, action_type)
     _append_reason(path.parent / _REASONS_RELPATH.name, key)
     _WARNER.warn(logger, f"audit row lost [{key}] ({context}); tallied in {path}")
     return True
+
+
+def _is_root() -> bool:
+    return os.geteuid() == 0
+
+
+def root_dir(hermes_home: str | None = None) -> Path:
+    """Where ROOT writers keep their losses: ``<seat home>/.smd-root``."""
+    return seat_home(hermes_home) / _ROOT_DIRNAME
+
+
+def _record_as_root(agent_tally: Path, key: str, context: str) -> bool:
+    """Tally a root writer's loss in a root-owned directory. Never raises.
+
+    WHY NOT ``.smd`` (review 2026-10-20). ``.smd`` belongs to the agent uid, and
+    a root ``open()`` there follows whatever the agent planted: a symlink named
+    like the tally to ``/etc/shadow`` or the ledger would have root append to it,
+    and the follow-up chown that kept the file readable handed the agent its
+    ownership. So root never writes into an agent-owned directory. It keeps its
+    own ``.smd-root`` (root-owned, 0755, files 0644, which the agent-uid
+    heartbeat can read), reached through a directory fd that is checked to be a
+    real directory owned by root and writable by nobody else, and every file is
+    opened relative to that fd with ``O_NOFOLLOW``. Nothing is chowned.
+    """
+    home = seat_home(str(agent_tally.parent.parent))
+    dpath = home / _ROOT_DIRNAME
+    try:
+        os.mkdir(dpath, 0o755)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        logger.warning("audit_failure_counter: cannot create %s: %s", dpath, exc)
+        return False
+    try:
+        dfd = os.open(dpath, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        logger.warning("audit_failure_counter: refusing %s (not a plain directory): %s", dpath, exc)
+        return False
+    try:
+        st = os.fstat(dfd)
+        if st.st_uid != os.geteuid() or st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            logger.warning(
+                "audit_failure_counter: refusing %s: not root-owned or writable by others", dpath
+            )
+            return False
+        if not _append_at(dfd, _TALLY_RELPATH.name, b"\x01"):
+            return False
+        _append_at(dfd, _REASONS_RELPATH.name, key.encode("ascii") + b"\n")
+    finally:
+        os.close(dfd)
+    _WARNER.warn(logger, f"audit row lost [{key}] ({context}); tallied in {dpath}")
+    return True
+
+
+def _append_at(dfd: int, name: str, data: bytes) -> bool:
+    """One O_APPEND write to ``name`` inside ``dfd``, never through a link."""
+    try:
+        fd = os.open(
+            name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o644, dir_fd=dfd
+        )
+    except OSError as exc:
+        logger.warning("audit_failure_counter: cannot open root %s: %s", name, exc)
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        # The entrypoint's umask 027 would make these 0640 root:root, which the
+        # agent-uid heartbeat cannot read; a regular file root owns, opened
+        # without following a link, is safe to chmod by fd.
+        os.fchmod(fd, 0o644)
+        os.write(fd, data)
+        return True
+    except OSError as exc:
+        logger.warning("audit_failure_counter: root %s append failed: %s", name, exc)
+        return False
+    finally:
+        os.close(fd)
 
 
 def _append_reason(path: Path, key: str) -> None:
@@ -181,7 +266,7 @@ def _append_reason(path: Path, key: str) -> None:
         os.close(fd)
 
 
-def _seat_home(hermes_home: str | None) -> Path:
+def seat_home(hermes_home: str | None = None) -> Path:
     home = Path(hermes_home or os.environ.get("HERMES_HOME") or _DEFAULT_HERMES_HOME)
     # A caller running inside a profile home still answers for the whole seat.
     if home.parent.name == "profiles":
@@ -214,7 +299,7 @@ def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
     history without moving a byte, and a writer in any profile is counted the
     moment it writes.
     """
-    home = _seat_home(hermes_home)
+    home = seat_home(hermes_home)
     root = tally_path(str(home))
     if not root.parent.is_dir():
         return None
@@ -222,6 +307,8 @@ def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
     if root_count is None:
         return None
     total = root_count
+    # Root writers' losses (the appliers), kept apart from the agent's dir.
+    total += _tally_size(home / _ROOT_DIRNAME / _TALLY_RELPATH.name, required=False) or 0
     for profile_tally in sorted((home / "profiles").glob(f"*/{_TALLY_RELPATH}")):
         # A broken PROFILE tally is skipped, not fatal: the seat can still give an
         # honest lower bound from the files it can read, and the warning names it.
@@ -232,7 +319,7 @@ def read_audit_write_failures(hermes_home: str | None = None) -> int | None:
 def _tally_size(path: Path, *, required: bool) -> int | None:
     """Byte count of one tally file; 0 when absent; None when it cannot answer."""
     try:
-        st = path.stat()
+        st = path.lstat()  # a planted link is not a tally
     except FileNotFoundError:
         return 0
     except OSError as exc:
@@ -261,11 +348,15 @@ def read_audit_write_failure_reasons(hermes_home: str | None = None) -> dict[str
     by a write the tally itself dropped. Lines that do not have the key shape
     are skipped, so a damaged file reports less, never something invented.
     """
-    home = _seat_home(hermes_home)
+    home = seat_home(hermes_home)
     if not (home / ".smd").is_dir():
         return None
     counts: Counter[str] = Counter()
-    paths = [home / _REASONS_RELPATH, *sorted((home / "profiles").glob(f"*/{_REASONS_RELPATH}"))]
+    paths = [
+        home / _REASONS_RELPATH,
+        home / _ROOT_DIRNAME / _REASONS_RELPATH.name,
+        *sorted((home / "profiles").glob(f"*/{_REASONS_RELPATH}")),
+    ]
     for path in paths:
         counts.update(_read_reason_keys(path))
     return dict(counts.most_common(_MAX_REASON_KEYS))
@@ -274,14 +365,24 @@ def read_audit_write_failure_reasons(hermes_home: str | None = None) -> dict[str
 def _read_reason_keys(path: Path) -> Counter[str]:
     counts: Counter[str] = Counter()
     try:
-        with open(path, "rb") as fh:
-            size = os.fstat(fh.fileno()).st_size
-            if size > _REASONS_READ_CAP_BYTES:
-                fh.seek(size - _REASONS_READ_CAP_BYTES)
-                fh.readline()  # drop the partial first line
-            raw = fh.read()
+        # No link, no FIFO, no device: a planted /dev/zero would read forever
+        # and a FIFO would block the heartbeat. Never more than the cap.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return counts
+    except OSError as exc:
+        logger.warning("audit_failure_counter: cannot read reasons (%s): %s", path, exc)
+        return counts
+    try:
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                logger.warning("audit_failure_counter: reasons %s is not a regular file", path)
+                return counts
+            if st.st_size > _REASONS_READ_CAP_BYTES:
+                fh.seek(st.st_size - _REASONS_READ_CAP_BYTES)
+                fh.readline()  # drop the partial first line
+            raw = fh.read(_REASONS_READ_CAP_BYTES)
     except OSError as exc:
         logger.warning("audit_failure_counter: cannot read reasons (%s): %s", path, exc)
         return counts
@@ -299,4 +400,6 @@ __all__ = [
     "record_audit_write_failure",
     "read_audit_write_failures",
     "read_audit_write_failure_reasons",
+    "seat_home",
+    "root_dir",
 ]

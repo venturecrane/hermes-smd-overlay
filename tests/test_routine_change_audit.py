@@ -14,6 +14,7 @@ Three seams, tested where each one lives:
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -278,3 +279,55 @@ def test_no_writer_means_no_attempt(home) -> None:
     plugin = _audit_plugin()
     append_routine_change(persona_slug="crane", skill="a", enabled=True, schedule="@daily")
     plugin._drain_routine_changes_to_ledger(None)  # must not raise
+
+
+def test_the_gateway_in_a_profile_home_drains_the_volume_spool(tmp_path, monkeypatch) -> None:
+    """bootstrap spools under /opt/data; `hermes -p <profile>` runs the gateway
+    with HERMES_HOME=/opt/data/profiles/<profile>. Reading its own home found
+    nothing, so every routine change went unrecorded (2026-10-20)."""
+    plugin = _audit_plugin()
+    append_routine_change(
+        persona_slug="crane", skill="a", enabled=True, schedule="@daily", hermes_home=str(tmp_path)
+    )
+    profile = tmp_path / "profiles" / "crane"
+    profile.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setenv("SMD_AUDIT_BROKER_SOCKET", "/run/x.sock")
+    monkeypatch.setenv("SMD_GATEWAY_PID", str(os.getpid()))
+    writer = _RecordingWriter()
+    plugin._drain_routine_changes_to_ledger(writer)
+    assert [e.skill_name for e in writer.events] == ["a"]
+
+
+def test_a_process_that_is_not_the_gateway_leaves_the_spool_alone(home, monkeypatch) -> None:
+    """A one-shot that loads the plugin must not consume the spool: the broker
+    would refuse every row and the changes would be gone."""
+    plugin = _audit_plugin()
+    append_routine_change(persona_slug="crane", skill="a", enabled=True, schedule="@daily")
+    monkeypatch.setenv("SMD_AUDIT_BROKER_SOCKET", "/run/x.sock")
+    monkeypatch.setenv("SMD_GATEWAY_PID", str(os.getpid() + 1))
+    writer = _RecordingWriter()
+    plugin._drain_routine_changes_to_ledger(writer)
+    assert writer.events == []
+    monkeypatch.setenv("SMD_GATEWAY_PID", str(os.getpid()))
+    plugin._drain_routine_changes_to_ledger(writer)
+    assert [e.skill_name for e in writer.events] == ["a"]
+
+
+def test_undated_backlog_is_kept_off_the_ledger_and_on_the_volume(home) -> None:
+    """The broker stamps ts at arrival, and ROUTINE_* rows reach the client's
+    activity feed. Lines spooled before spooled_at existed would show months of
+    old changes as happening today, so they are set aside, not written."""
+    plugin = _audit_plugin()
+    append_routine_change(persona_slug="crane", skill="new", enabled=True, schedule="@daily")
+    with open(spool_path(), "a", encoding="utf-8") as fh:
+        fh.write(
+            '{"schema":"smd.routine_change/1","persona_slug":"crane","skill":"old",'
+            '"enabled":false,"schedule":null}\n'
+        )
+    writer = _RecordingWriter()
+    plugin._drain_routine_changes_to_ledger(writer)
+    assert [e.skill_name for e in writer.events] == ["new"]
+    assert writer.events[0].metadata["spooled_at"].endswith("Z")
+    backlog = (home / ".smd" / "routine_changes.backlog.jsonl").read_text()
+    assert '"skill":"old"' in backlog

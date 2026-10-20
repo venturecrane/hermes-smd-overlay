@@ -338,8 +338,16 @@ def _emit_config_write(
     # metadata). input_digest[7] = old config, output_digest[8] = new config.
     params[7] = old_digest
     params[8] = new_digest
+    # The root applier wrote this, applying authored config: not the agent
+    # (agent_event_params' default), which a compliance export would misread.
+    params[3] = "config-applier"
+    params[4] = "operator"
     try:
-        audit_client.execute(INSERT_SQL, *params)
+        # The broker client's root verb (this process is a root poller, never
+        # the gateway, so the generic append is refused); the direct D1 client
+        # has no such verb and writes the INSERT itself.
+        write = getattr(audit_client, "execute_config_write", None) or audit_client.execute
+        write(INSERT_SQL, *params)
         return True
     except Exception as exc:  # noqa: BLE001 — audit failure never undoes the write
         logger.warning(

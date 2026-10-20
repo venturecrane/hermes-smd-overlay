@@ -451,6 +451,25 @@ class BrokerAuditClient:
             self._gap.hold(payload, self._send)
         return 1
 
+    def execute_config_write(self, sql: str, *params: Any) -> int:
+        """Ship one CONFIG_WRITE row via the root-only broker verb.
+
+        The config and skills appliers run as ROOT pollers, not as the gateway,
+        so the generic ``audit_append`` refused every row they wrote and every
+        live config apply and skills release landed with no record (found
+        2026-10-20). ``config_write_append`` admits root alone and locks the
+        row's ``action_type`` to ``CONFIG_WRITE``, the same shape as the
+        webhook gate's verb below, so it cannot forge any other row.
+        """
+        if len(params) != len(COLUMNS):
+            raise AuditWriteError(
+                f"audit broker: expected {len(COLUMNS)} params for {COLUMNS!r}, got {len(params)}",
+                reason="bad_row",
+            )
+        row = dict(zip(COLUMNS[2:], params[2:], strict=True))
+        self._request({"action": "config_write_append", "row": row})
+        return 1
+
     def execute_suppressed_webhook(self, sql: str, *params: Any) -> int:
         """Ship one WEBHOOK_SUPPRESSED row via the uid-gated broker verb.
 

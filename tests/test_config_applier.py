@@ -563,3 +563,36 @@ def test_apply_refuses_when_the_current_config_is_unreadable(tmp_path, current):
     assert result.outcome is ApplyOutcome.REJECTED
     assert any("unreadable" in r for r in result.reasons)
     assert volume.read_bytes() == current
+
+
+class _RootVerbAudit(FakeAudit):
+    """A broker client: has the root CONFIG_WRITE verb beside the generic one."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.config_rows: list[tuple[str, tuple]] = []
+
+    def execute(self, sql: str, *params):
+        raise AssertionError("the generic append refuses a root poller; never use it here")
+
+    def execute_config_write(self, sql: str, *params):
+        self.config_rows.append((sql, params))
+        return 1
+
+
+def test_apply_records_through_the_root_verb_when_the_client_has_it(tmp_path):
+    """The applier is a ROOT poller, never the gateway, so the generic
+    audit_append refused every CONFIG_WRITE it wrote and every live apply
+    landed unrecorded (2026-10-20)."""
+    audit = _RootVerbAudit()
+    result = apply(
+        s3_client=FakeS3({KEY: VALID}),
+        bucket=BUCKET,
+        slug=SLUG,
+        volume_path=tmp_path / "customer.yaml",
+        audit_client=audit,
+        prev_epoch=1,
+    )
+    assert result.audited is True
+    assert len(audit.config_rows) == 1
+    assert audit.config_rows[0][1][COLUMNS.index("action_type")] == "CONFIG_WRITE"
