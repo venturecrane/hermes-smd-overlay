@@ -248,6 +248,22 @@ def test_a_reader_never_follows_a_link_or_reads_a_device(machine_home):
     assert counter.read_audit_write_failure_reasons() == {}
 
 
+def test_a_planted_fifo_never_blocks_the_reader(machine_home):
+    """A FIFO named like the reasons file would block open() forever with no
+    writer; the heartbeat must not hang on it."""
+    import threading as _t
+
+    os.mkfifo(machine_home / ".smd" / "audit_write_failures.reasons")
+    result: list = []
+    reader = _t.Thread(
+        target=lambda: result.append(counter.read_audit_write_failure_reasons()), daemon=True
+    )
+    reader.start()
+    reader.join(timeout=3)
+    assert not reader.is_alive(), "the reader blocked on a FIFO"
+    assert result == [{}]
+
+
 def test_a_non_root_writer_keeps_using_the_agent_dir(machine_home):
     assert counter.record_audit_write_failure("x", reason="gap_exit") is True
     assert (machine_home / ".smd" / "audit_write_failures.tally").read_bytes() == b"\x01"
