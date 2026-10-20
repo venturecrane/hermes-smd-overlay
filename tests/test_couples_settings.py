@@ -616,3 +616,26 @@ def test_the_tools_register_only_on_a_seat_with_people(monkeypatch, tmp_path):
     load_plugin("hermes-smd-couples-settings").register(ctx)
     assert sorted(ctx.tools) == ["couples_settings_change", "couples_settings_read"]
     space._reset_cache_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# Today, in the couple's own timezone (captain-mark 2026-10-19)
+# ---------------------------------------------------------------------------
+
+
+def test_today_is_the_couples_local_date_not_utc():
+    """01:09Z on 2026-10-20 is still Monday evening in Arizona: "start tomorrow"
+    means Tuesday there. FALSIFIER: compute the date without astimezone()."""
+    from shared import couples_settings_text as cst
+
+    now = datetime(2026, 10, 20, 1, 9, tzinfo=timezone.utc)
+    assert cst.today_text("America/Phoenix", now) == "Monday, October 19, 2026"
+    assert cst.today_text("Europe/London", now) == "Tuesday, October 20, 2026"
+    assert cst.today_text(None, now) is None
+    assert cst.today_text("Not/AZone", now) is None
+
+
+def test_settings_read_carries_today(seat, monkeypatch):
+    set_timezone(seat, monkeypatch)
+    out = read(seat)
+    assert isinstance(out["today"], str) and out["today"].count(",") == 2
