@@ -10,6 +10,7 @@ relayed; the setting is).
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 from shared import couples_settings as cs
@@ -122,8 +123,24 @@ def describe(changes: list[cs.Change], before: dict[str, Any], cfg: space_mod.Sp
     return "\n".join(f"- {line}" for line in lines)
 
 
+def today_text(tz: Any, now: dt.datetime | None = None) -> str | None:
+    """``Monday, October 19, 2026``: today's date in the couple's timezone, or
+    None when no timezone is set. A request such as "starting tomorrow" is
+    resolved against this, never against the model's own idea of the date: on
+    captain-mark (2026-10-19, an Arizona evening, already Tuesday in UTC) "start
+    tomorrow" became Monday routines."""
+    zone = cs.couples_gate._zone(tz)
+    if zone is None:
+        return None
+    local = (now or dt.datetime.now(dt.timezone.utc)).astimezone(zone)
+    return f"{local:%A}, {local:%B} {local.day}, {local.year}"
+
+
 def view(
-    doc: dict[str, Any], current: space_mod.Space, cfg: space_mod.SpaceConfig
+    doc: dict[str, Any],
+    current: space_mod.Space,
+    cfg: space_mod.SpaceConfig,
+    now: dt.datetime | None = None,
 ) -> dict[str, Any]:
     """What this space may see: the couple's shared settings, this person's own,
     and the routines visible here (``couples_settings.routine_visible``)."""
@@ -131,6 +148,7 @@ def view(
     out: dict[str, Any] = {
         "people": [{"id": p.id, "name": p.name} for p in cfg.people],
         "timezone": tz,
+        "today": today_text(tz, now),
         "checkin_topics": list(doc.get("checkin_topics") or []),
         "routines": [
             {
@@ -170,4 +188,12 @@ def quiet_conflicts(doc: dict[str, Any], people: list[str]) -> list[tuple[dict[s
     return out
 
 
-__all__ = ["clock", "days_text", "describe", "quiet_conflicts", "routine_text", "view"]
+__all__ = [
+    "clock",
+    "days_text",
+    "describe",
+    "quiet_conflicts",
+    "routine_text",
+    "today_text",
+    "view",
+]
