@@ -218,6 +218,12 @@ def _index_request(
             internet_message_id=internet_message_id,
             sender=dto.from_addr,
             subject=dto.subject,
+            # The thread ties a follow-up to the request whose job it is
+            # about; the opening is the person's OWN words (the reader's text
+            # where the provider strips the quote), so a reply on a held job
+            # pages SMD with what they said (shared.request_cards, held_reply).
+            thread_ref=dto.thread_ref,
+            body=dto.reply_text or dto.body_text,
         )
     except Exception:  # noqa: BLE001 — a card is never worth a routing failure
         logger.debug("hermes-smd-webhook-router: request index skipped", exc_info=True)

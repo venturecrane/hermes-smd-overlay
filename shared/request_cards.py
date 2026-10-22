@@ -14,7 +14,13 @@ When a firm person emails an Operator seat, SMD (team@smd.services) gets:
   ``docs/runbooks/operator/lane-proof.md``): once per held job, from the hold
   note the root daemon writes on its ledger row (a scheduled run with no
   request is carded on its own), and once per seat for an in-turn skill the
-  replying session read that is not proven (answered, never held).
+  replying session read that is not proven (answered, never held);
+* a ``held_reply`` card the moment a person writes again in the thread of a
+  request whose job is HELD (2026-10-22: an attorney answered the Operator's
+  one hold question in the thread, "just leave it out", and SMD learned it an
+  hour later from his forward to the Captain). The card carries the person's
+  own opening words and the held job's id; the Operator cannot record a
+  decision on a held job, so the reader of this card does.
 
 The seat decides; ss-console sends. This module is the seat half, hosted by the
 gate's heartbeat ticker (``shared.heartbeat``): :func:`decide` is the pure
@@ -254,43 +260,43 @@ def _session_calls(conn: sqlite3.Connection, sessions: list[str], horizon: str) 
 #: One fixed statement per lane (no table name is ever composed into SQL).
 _JOB_SQL = {
     "demand": (
-        "SELECT request_ref, state, reason, matter_number, updated_at, attempt FROM demand_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, attempt, id FROM demand_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     "drafting": (
-        "SELECT request_ref, state, reason, matter_number, updated_at, attempt FROM drafting_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, attempt, id FROM drafting_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     "medchron": (
-        "SELECT request_ref, state, reason, matter_number, updated_at, attempt FROM medchron_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, attempt, id FROM medchron_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     # A litigation status job spans the firm's matters and files to the firm's
     # library matter, so it names no matter on its card.
     "litigation": (
-        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at, attempt FROM litigation_jobs"
-        " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
+        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at, attempt, id"
+        " FROM litigation_jobs WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
 }
 #: The same reads for a ledger older than the ``attempt`` column: attempt 1.
 _JOB_SQL_NO_ATTEMPT = {
     "demand": (
-        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt FROM demand_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt, id FROM demand_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     "drafting": (
-        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt FROM drafting_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt, id FROM drafting_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     "medchron": (
-        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt FROM medchron_jobs"
+        "SELECT request_ref, state, reason, matter_number, updated_at, 1 AS attempt, id FROM medchron_jobs"
         " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
     # A litigation status job spans the firm's matters and files to the firm's
     # library matter, so it names no matter on its card.
     "litigation": (
-        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at, 1 AS attempt FROM litigation_jobs"
-        " WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
+        "SELECT request_ref, state, reason, NULL AS matter_number, updated_at, 1 AS attempt, id"
+        " FROM litigation_jobs WHERE substr(updated_at,1,19) >= ? ORDER BY updated_at"
     ),
 }
 
@@ -309,7 +315,7 @@ def _job_rows(conn: sqlite3.Connection, refs: list[str], horizon: str) -> dict[s
             if "no such table" in str(exc):
                 continue
             raise
-        for ref, state, reason, matter, updated_at, attempt in rows:
+        for ref, state, reason, matter, updated_at, attempt, job_id in rows:
             if ref not in wanted:
                 continue
             out[str(ref)] = {
@@ -319,6 +325,7 @@ def _job_rows(conn: sqlite3.Connection, refs: list[str], horizon: str) -> dict[s
                 "matter": matter,
                 "updated_at": updated_at,
                 "attempt": attempt if isinstance(attempt, int) and attempt > 0 else 1,
+                "id": job_id if isinstance(job_id, str) and _JOB_ID_RE.match(job_id) else None,
             }
     return out
 
@@ -633,10 +640,71 @@ def decide(
                     },
                 }
             )
+    cards.extend(_held_reply_cards(requests, jobs, done))
     if proofs is not None:
         cards.extend(held)
         cards.extend(_in_turn_cards(requests, sent_by_vid, calls_by_session, proofs, done, now))
     cards.sort(key=lambda c: (c["event_at"], c["card_key"]))
+    return cards
+
+
+def _job_of(req: dict, jobs: dict[str, dict]) -> dict | None:
+    return jobs.get(str(req.get("internet_message_id") or "")) or jobs.get(
+        str(req["vendor_message_id"])
+    )
+
+
+def _held_reply_cards(requests: list[dict], jobs: dict[str, dict], done: set[str]) -> list[dict]:
+    """One card per message a person wrote in the thread of a request whose job
+    is HELD, at once (no quiet wait: SMD is the one who has to act). The
+    thread is the provider's conversation id, recorded at intake; the request
+    whose job it is about is the earliest message in that thread with a job.
+    The message that queued the job is not a follow-up to itself."""
+    by_thread: dict[str, list[dict]] = {}
+    for req in requests:
+        thread = req.get("thread_ref")
+        if isinstance(thread, str) and thread:
+            by_thread.setdefault(thread, []).append(req)
+    cards: list[dict] = []
+    for members in by_thread.values():
+        members.sort(key=lambda r: float(r["received_at"]))
+        origin = next((r for r in members if _job_of(r, jobs) is not None), None)
+        if origin is None:
+            continue
+        job = _job_of(origin, jobs)
+        if job is None or job["state"] != "held":
+            continue
+        asked = datetime.fromtimestamp(float(origin["received_at"]), tz=timezone.utc)
+        for req in members:
+            if req is origin or float(req["received_at"]) <= float(origin["received_at"]):
+                continue
+            vid = str(req["vendor_message_id"])
+            key = card_key(vid, "held_reply")
+            if key in done:
+                continue
+            wrote = datetime.fromtimestamp(float(req["received_at"]), tz=timezone.utc)
+            cards.append(
+                {
+                    "card_key": key,
+                    "kind": "held_reply",
+                    **_base(req),
+                    "event_at": _iso(wrote),
+                    "minutes": _minutes(asked, wrote),
+                    "reply_opening": None,
+                    "request_opening": _clip(req.get("request_opening"), 300),
+                    "matter": _clip(job["matter"], 60),
+                    "tools": [],
+                    "replies": 0,
+                    "refused": 0,
+                    "failed": 0,
+                    "job": {
+                        "lane": job["lane"],
+                        "state": "held",
+                        "reason": _reason_token(job["reason"]),
+                        "id": job.get("id"),
+                    },
+                }
+            )
     return cards
 
 
