@@ -62,10 +62,19 @@ CREATE TABLE IF NOT EXISTS requests (
   sender              TEXT,
   subject             TEXT,
   reply_opening       TEXT,
-  opening_at          REAL
+  opening_at          REAL,
+  thread_ref          TEXT,
+  request_opening     TEXT
 )
 """
 _CREATE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_requests_received ON requests(received_at)"
+#: Columns added after the first seats wrote this file (2026-10-22: the thread a
+#: message belongs to, and the requester's own opening words, so a follow-up on a
+#: HELD job can be carded with what the person said). CREATE IF NOT EXISTS does
+#: not add them to an existing table; ``_connect`` does, once, by name.
+_ADDED_COLUMNS = (("thread_ref", "TEXT"), ("request_opening", "TEXT"))
+#: The text columns custody nulls after TEXT_RETENTION_DAYS.
+_TEXT_COLUMNS = ("sender", "subject", "reply_opening", "request_opening")
 
 
 def db_path() -> str:
@@ -82,15 +91,19 @@ def _connect(path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(_CREATE_SQL)
     conn.execute(_CREATE_INDEX_SQL)
+    present = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
+    for name, kind in _ADDED_COLUMNS:
+        if name not in present:
+            conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {kind}")
     return conn
 
 
 def _custody(conn: sqlite3.Connection, now: float) -> None:
     """Null old text, delete old rows. Runs inside every write's transaction."""
+    sets = ", ".join(f"{c}=NULL" for c in _TEXT_COLUMNS)
+    some = " OR ".join(f"{c} IS NOT NULL" for c in _TEXT_COLUMNS)
     conn.execute(
-        "UPDATE requests SET sender=NULL, subject=NULL, reply_opening=NULL "
-        "WHERE received_at < ? AND (sender IS NOT NULL OR subject IS NOT NULL "
-        "OR reply_opening IS NOT NULL)",
+        f"UPDATE requests SET {sets} WHERE received_at < ? AND ({some})",
         (now - TEXT_RETENTION_DAYS * 86400.0,),
     )
     conn.execute(
@@ -115,7 +128,8 @@ _SALUTATION_RE = re.compile(
 
 
 def reply_opening(body: object) -> str | None:
-    """The first ~240 characters of a reply after its salutation line.
+    """The first ~240 characters of a message after its salutation line (a
+    reply's, or since 2026-10-22 the requester's own).
 
     The salutation is the first non-empty line when it greets (``Hi Name,``) or
     is a short line ending in a comma. Whitespace is collapsed; the cut lands on
@@ -150,11 +164,19 @@ def record_inbound(
     sender: object = "",
     subject: object = "",
     received_at: float | None = None,
+    thread_ref: object = "",
+    body: object = "",
     path: str | None = None,
 ) -> bool:
     """Index one person's request at intake. First write wins (a redelivered
     message does not move its received time). Returns whether a row was
-    written; never raises."""
+    written; never raises.
+
+    ``thread_ref`` is the provider's conversation id, the same for every
+    message in one thread, so a follow-up can be tied to the request whose job
+    it is about. ``body`` is the person's own words (the reader's text, never
+    the quoted history), kept as their opening the way a reply's is: when they
+    write again on a HELD job, that opening is what SMD is paged with."""
     if not isinstance(vendor_message_id, str) or not vendor_message_id:
         return False
     now = time.time()
@@ -168,7 +190,7 @@ def record_inbound(
             _custody(conn, now)
             cur = conn.execute(
                 "INSERT OR IGNORE INTO requests (vendor_message_id, internet_message_id, "
-                "received_at, sender, subject) VALUES (?,?,?,?,?)",
+                "received_at, sender, subject, thread_ref, request_opening) VALUES (?,?,?,?,?,?,?)",
                 (
                     vendor_message_id[:512],
                     (internet_message_id[:512] if isinstance(internet_message_id, str) else "")
@@ -176,6 +198,8 @@ def record_inbound(
                     float(received_at if received_at is not None else now),
                     _clean(sender, SENDER_MAX),
                     _clean(subject, SUBJECT_MAX),
+                    _clean(thread_ref, 512),
+                    reply_opening(body),
                 ),
             )
         return cur.rowcount == 1
@@ -228,8 +252,8 @@ def read_requests(since: float, *, path: str | None = None) -> list[dict]:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT vendor_message_id, internet_message_id, received_at, sender, subject, "
-            "reply_opening, opening_at FROM requests WHERE received_at >= ? "
-            "ORDER BY received_at",
+            "reply_opening, opening_at, thread_ref, request_opening FROM requests "
+            "WHERE received_at >= ? ORDER BY received_at",
             (since,),
         ).fetchall()
         return [dict(row) for row in rows]

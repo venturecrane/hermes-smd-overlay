@@ -857,3 +857,175 @@ def test_the_leg_sends_a_resumed_ending_once_after_a_legacy_card(ledger) -> None
     poster = _Poster()
     _leg(ledger, poster, store=store)
     assert [c for c in poster.calls if c[2]["kind"] == "job_done"] == []
+
+
+# ---------------------------------------------------------------------------
+# held_reply: a person writes again in the thread of a request whose job is HELD
+# (2026-10-22: an attorney answered the Operator's hold question in the thread
+# and SMD learned it an hour later from his forward to the Captain)
+# ---------------------------------------------------------------------------
+
+HELD_JOB = "01M5J9RGY9G9FFXYBZ3CH59XBY"
+
+
+def _thread(minutes_ago: float, vid: str, imid: str | None, words: str | None, thread="conv-1"):
+    return _request(
+        minutes_ago,
+        vendor_message_id=vid,
+        internet_message_id=imid,
+        thread_ref=thread,
+        request_opening=words,
+        reply_opening=None,
+    )
+
+
+def _hold_medchron(ledger: _Ledger, minutes_ago: float) -> None:
+    ledger.conn.execute(
+        "INSERT INTO medchron_jobs (id, created_at, updated_at, state, matter_number, "
+        "request_ref, reason) VALUES (?,?,?,?,?,?,?)",
+        (
+            HELD_JOB,
+            _ts(minutes_ago + 90),
+            _ts(minutes_ago),
+            "held",
+            "200530",
+            IMID,
+            "identity: an emailed attachment names a different person than the client",
+        ),
+    )
+    ledger.conn.commit()
+
+
+def test_record_inbound_keeps_the_thread_and_the_requesters_own_opening(tmp_path) -> None:
+    path = str(tmp_path / "r.db")
+    assert ri.record_inbound(
+        vendor_message_id=VID,
+        subject="Linda Curtis/matter number 200530",
+        sender="chris@firm.example",
+        thread_ref="AAQkAG-conversation",
+        body="Hi,\n\nJust leave it out of the chronology.\n\nCordially,",
+        path=path,
+    )
+    row = ri.read_requests(0, path=path)[0]
+    assert row["thread_ref"] == "AAQkAG-conversation"
+    assert row["request_opening"] == "Just leave it out of the chronology. Cordially,"
+
+
+def test_an_index_written_before_the_thread_columns_gains_them(tmp_path) -> None:
+    # FALSIFIER: CREATE TABLE IF NOT EXISTS alone leaves the old table without
+    # the two columns, and the first record_inbound on a live seat raises inside
+    # the hook (swallowed: every card after the deploy silently lost).
+    path = str(tmp_path / "r.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE requests (vendor_message_id TEXT PRIMARY KEY, internet_message_id TEXT, "
+        "received_at REAL NOT NULL, sender TEXT, subject TEXT, reply_opening TEXT, opening_at REAL)"
+    )
+    conn.execute(
+        "INSERT INTO requests (vendor_message_id, received_at, sender, subject) VALUES (?,?,?,?)",
+        ("old", time.time(), "a@b", "s"),
+    )
+    conn.commit()
+    conn.close()
+    assert ri.record_inbound(
+        vendor_message_id="new", sender="a@b", subject="t", thread_ref="c", body="w", path=path
+    )
+    rows = {r["vendor_message_id"]: r for r in ri.read_requests(0, path=path)}
+    assert rows["old"]["thread_ref"] is None and rows["old"]["request_opening"] is None
+    assert rows["new"]["thread_ref"] == "c" and rows["new"]["request_opening"] == "w"
+
+
+def test_custody_nulls_the_requesters_opening_with_the_other_text(tmp_path) -> None:
+    path = str(tmp_path / "r.db")
+    now = time.time()
+    ri.record_inbound(
+        vendor_message_id="old",
+        sender="a@b",
+        subject="s",
+        body="leave it out",
+        received_at=now - 8 * 86400,
+        path=path,
+    )
+    ri.record_inbound(vendor_message_id="new", sender="a@b", subject="s", path=path)
+    rows = {r["vendor_message_id"]: r for r in ri.read_requests(0, path=path)}
+    assert rows["old"]["request_opening"] is None
+
+
+def test_a_follow_up_on_a_held_job_is_carded_at_once_with_the_persons_words(ledger) -> None:
+    # FALSIFIER: before 2026-10-22 the follow-up produced only a `replied` card
+    # (the Operator's words), minutes after the Operator answered it; nothing
+    # carried what the person said and nothing said the job was held.
+    _hold_medchron(ledger, 30)
+    first = _thread(120, VID, IMID, "I would like a med chron run on client Linda Curtis.")
+    follow = _thread(
+        10, "graph-msg-2", "<def@firm.example>", "Just leave it out of the chronology."
+    )
+    cards = _decide(ledger, [first, follow])
+    # The job's own hold cards once under the first request (job_done); the
+    # follow-up cards separately, with the person's words.
+    assert _kinds(cards) == ["job_done", "held_reply"]
+    card = cards[1]
+    assert card["card_key"] == rc.card_key("graph-msg-2", "held_reply")
+    assert card["request_opening"] == "Just leave it out of the chronology."
+    assert card["reply_opening"] is None
+    assert card["minutes"] == 110  # from the request that queued the job
+    assert card["matter"] == "200530"
+    assert card["job"] == {
+        "lane": "medchron",
+        "state": "held",
+        "reason": "identity",
+        "id": HELD_JOB,
+    }
+    assert card["who"] == "paralegal@firm.example"
+    # Once sent, never again; a third message is its own card.
+    done = {card["card_key"], cards[0]["card_key"]}
+    assert _decide(ledger, [first, follow], done=done) == []
+    third = _thread(5, "graph-msg-3", "<ghi@firm.example>", "Any update?")
+    later = _decide(ledger, [first, follow, third], done=done)
+    assert [c["card_key"] for c in later] == [rc.card_key("graph-msg-3", "held_reply")]
+
+
+def test_the_message_that_queued_the_job_and_a_delivered_job_card_no_follow_up(ledger) -> None:
+    _hold_medchron(ledger, 30)
+    first = _thread(120, VID, IMID, "Run it.")
+    assert "held_reply" not in _kinds(_decide(ledger, [first]))  # the job's own ending cards it
+    ledger.conn.execute("UPDATE medchron_jobs SET state='delivered'")
+    ledger.conn.commit()
+    follow = _thread(10, "graph-msg-2", "<def@firm.example>", "Thanks!")
+    assert "held_reply" not in _kinds(_decide(ledger, [first, follow]))
+
+
+def test_a_follow_up_with_no_thread_or_in_another_thread_is_not_a_held_reply(ledger) -> None:
+    _hold_medchron(ledger, 30)
+    first = _thread(120, VID, IMID, "Run it.")
+    stray = _thread(10, "graph-msg-9", "<zzz@firm.example>", "Unrelated.", thread="conv-2")
+    bare = _request(10, vendor_message_id="graph-msg-8", internet_message_id=None, thread_ref=None)
+    assert "held_reply" not in _kinds(_decide(ledger, [first, stray, bare]))
+
+
+def test_a_held_follow_up_with_no_words_still_cards_and_an_unknown_job_id_is_none(ledger) -> None:
+    ledger.job("medchron_jobs", "held", 30, reason="identity: x")  # id "jheld", not a ULID
+    first = _thread(120, VID, IMID, "Run it.")
+    follow = _thread(10, "graph-msg-2", "<def@firm.example>", None)
+    [card] = [c for c in _decide(ledger, [first, follow]) if c["kind"] == "held_reply"]
+    assert card["request_opening"] is None and card["job"]["id"] is None
+
+
+def test_router_indexes_the_thread_and_the_persons_words(tmp_path, monkeypatch) -> None:
+    from tests.test_inbound import _signed_kwargs
+
+    mod = _rostered_router(tmp_path, monkeypatch)
+    mod.on_pre_gateway_dispatch(
+        **_signed_kwargs(
+            _mail(
+                "Colleague <colleague@firm.example>",
+                "m-int",
+                thread_id="thread-7",
+                extracted_text="Just leave it out.",
+            ),
+            event_id="e1",
+        )
+    )
+    [row] = ri.read_requests(0)
+    assert row["thread_ref"] == "thread-7"
+    assert row["request_opening"] == "Just leave it out."
