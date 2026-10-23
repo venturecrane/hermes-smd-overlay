@@ -1096,6 +1096,18 @@ def register(ctx) -> None:
             exc_info=True,
         )
 
+    # The request index (shared.request_index) is written by this plugin at
+    # intake and read, read-only, by the gate process on every tick. Bring the
+    # file to the current schema NOW, so a column a newer image added is present
+    # seconds after the deploy rather than on the next inbound message; until
+    # then every card on the seat rode on the reader tolerating the older shape
+    # (Sentry SMD-OPERATOR-2S, 2026-10-22). Never raises.
+    if not request_index.converge():
+        logger.warning(
+            "hermes-smd-webhook-router: the request index did not converge to the current "
+            "schema; cards depend on the gate's reader tolerating the older file"
+        )
+
     try:
         secrets_map = require("SMD_CUSTOMER_SLUG", "SMD_D1_AUDIT_BINDING")
         _CUSTOMER_SLUG = secrets_map["SMD_CUSTOMER_SLUG"]

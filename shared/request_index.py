@@ -71,8 +71,28 @@ _CREATE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_requests_received ON request
 #: Columns added after the first seats wrote this file (2026-10-22: the thread a
 #: message belongs to, and the requester's own opening words, so a follow-up on a
 #: HELD job can be carded with what the person said). CREATE IF NOT EXISTS does
-#: not add them to an existing table; ``_connect`` does, once, by name.
+#: not add them to an existing table. Two halves keep an older file working, and
+#: a column added here needs both: the WRITER adds them (``_connect``, once, by
+#: name; ``converge`` runs it at agent boot so the file catches up seconds after
+#: a deploy, not on the next piece of client mail), and the READER projects its
+#: columns against what the file has (``read_requests``), because the gate reads
+#: this file read-only from another process and a read that names a column the
+#: writer has not added yet fails every card on the seat (Sentry SMD-OPERATOR-2S).
 _ADDED_COLUMNS = (("thread_ref", "TEXT"), ("request_opening", "TEXT"))
+#: Every column a reader returns, in SELECT order. The one list the writer's
+#: schema and the reader's projection share: a column missing from the file
+#: reads as None.
+_READ_COLUMNS = (
+    "vendor_message_id",
+    "internet_message_id",
+    "received_at",
+    "sender",
+    "subject",
+    "reply_opening",
+    "opening_at",
+    "thread_ref",
+    "request_opening",
+)
 #: The text columns custody nulls after TEXT_RETENTION_DAYS.
 _TEXT_COLUMNS = ("sender", "subject", "reply_opening", "request_opening")
 
@@ -96,6 +116,29 @@ def _connect(path: str) -> sqlite3.Connection:
         if name not in present:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {kind}")
     return conn
+
+
+def converge(*, path: str | None = None) -> bool:
+    """Bring the index file to the current schema now, writing no row.
+
+    Called at agent boot by the intake writer (the router plugin), so a file
+    written by an older image gains its columns seconds after a deploy instead
+    of on the next inbound message. The gate reads this file from another
+    process, read-only; until the writer has converged it, every card on the
+    seat depends on the reader tolerating the older shape. Returns whether the
+    file is at the current schema; never raises."""
+    target = path or db_path()
+    try:
+        conn = _connect(target)
+        try:
+            present = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
+            conn.commit()
+        finally:
+            conn.close()
+        return all(name in present for name, _kind in _ADDED_COLUMNS)
+    except Exception:  # noqa: BLE001 — a boot never fails on the card index
+        logger.error("request_index: could not converge %s", target, exc_info=True)
+        return False
 
 
 def _custody(conn: sqlite3.Connection, now: float) -> None:
@@ -240,29 +283,45 @@ def record_reply_opening(in_reply_to: object, body: object, *, path: str | None 
 
 def read_requests(since: float, *, path: str | None = None) -> list[dict]:
     """Every indexed request received at or after ``since``, READ-ONLY (the
-    gate's side). ``[]`` when the file does not exist yet; raises on a file
-    that exists and cannot be read, so the caller can tell "none" from "could
-    not look" and skip the tick rather than decide on an empty list."""
+    gate's side). ``[]`` when the file does not exist yet, or exists without
+    the table (nothing has been indexed); raises on a file that exists and
+    cannot be read, so the caller can tell "none" from "could not look" and
+    skip the tick rather than decide on an empty list.
+
+    The reader never assumes the writer has caught up: it selects the columns
+    the file HAS (one read snapshot with the probe) and returns every column
+    in :data:`_READ_COLUMNS`, None for one the file does not have yet. A seat
+    that has indexed nothing since a deploy that added a column still cards.
+    """
     target = path or db_path()
     if not os.path.exists(target):
         return []
     conn = sqlite3.connect(f"file:{target}?mode=ro", uri=True, timeout=5)
     try:
         conn.execute("PRAGMA busy_timeout=2000")
-        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        present = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
+        if not present:
+            return []
+        selected = [c for c in _READ_COLUMNS if c in present]
         rows = conn.execute(
-            "SELECT vendor_message_id, internet_message_id, received_at, sender, subject, "
-            "reply_opening, opening_at, thread_ref, request_opening FROM requests "
-            "WHERE received_at >= ? ORDER BY received_at",
+            f"SELECT {', '.join(selected)} FROM requests WHERE received_at >= ? "
+            "ORDER BY received_at",
             (since,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        out = []
+        for row in rows:
+            record = dict.fromkeys(_READ_COLUMNS)
+            record.update(zip(selected, row, strict=True))
+            out.append(record)
+        return out
     finally:
         conn.close()
 
 
 __all__ = [
     "DEFAULT_DB_PATH",
+    "converge",
     "ROW_RETENTION_DAYS",
     "TEXT_RETENTION_DAYS",
     "db_path",
