@@ -935,6 +935,102 @@ def test_an_index_written_before_the_thread_columns_gains_them(tmp_path) -> None
     assert rows["new"]["thread_ref"] == "c" and rows["new"]["request_opening"] == "w"
 
 
+_OLD_INDEX_SQL = (
+    "CREATE TABLE requests (vendor_message_id TEXT PRIMARY KEY, internet_message_id TEXT, "
+    "received_at REAL NOT NULL, sender TEXT, subject TEXT, reply_opening TEXT, opening_at REAL)"
+)
+
+
+def _write_old_index(path: str) -> None:
+    """The seven-column file every seat had before 2026-10-22, with one row."""
+    conn = sqlite3.connect(path)
+    conn.execute(_OLD_INDEX_SQL)
+    conn.execute(
+        "INSERT INTO requests (vendor_message_id, received_at, sender, subject) VALUES (?,?,?,?)",
+        ("old", time.time(), "a@b", "s"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_the_gate_reads_an_index_older_than_its_columns_without_a_write(tmp_path) -> None:
+    # FALSIFIER (Sentry SMD-OPERATOR-2S, 2026-10-22): the gate reads this file
+    # read-only from another process, and on a seat with no inbound since the
+    # deploy nothing has run the writer's ALTER. On the previous reader this
+    # raised OperationalError "no such column: thread_ref" on every tick and the
+    # whole card leg failed. The reader must not depend on a write having
+    # happened.
+    path = str(tmp_path / "r.db")
+    _write_old_index(path)
+    rows = ri.read_requests(0, path=path)
+    assert [r["vendor_message_id"] for r in rows] == ["old"]
+    assert rows[0]["sender"] == "a@b" and rows[0]["subject"] == "s"
+    assert rows[0]["thread_ref"] is None and rows[0]["request_opening"] is None
+    assert set(rows[0]) == set(ri._READ_COLUMNS)
+    # And the file is still the old shape: the reader did not migrate it.
+    conn = sqlite3.connect(path)
+    present = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    conn.close()
+    assert "thread_ref" not in present
+
+
+def test_a_file_without_the_table_reads_as_nothing_indexed(tmp_path) -> None:
+    # A connect that died before CREATE TABLE leaves a valid, empty SQLite
+    # file. That is "none", not "could not look".
+    path = str(tmp_path / "r.db")
+    sqlite3.connect(path).close()
+    assert ri.read_requests(0, path=path) == []
+
+
+def test_a_file_that_is_not_sqlite_still_raises(tmp_path) -> None:
+    # The contract the leg relies on: "could not look" raises, so the tick is
+    # skipped rather than decided on a false empty list.
+    path = tmp_path / "r.db"
+    path.write_text("not a database")
+    with pytest.raises(sqlite3.DatabaseError):
+        ri.read_requests(0, path=str(path))
+
+
+def test_converge_brings_an_old_index_to_the_current_schema_without_a_row(tmp_path) -> None:
+    # The writer's half: at agent boot the file catches up, so the gate stops
+    # depending on tolerance seconds after a deploy, not on the next message.
+    path = str(tmp_path / "r.db")
+    _write_old_index(path)
+    assert ri.converge(path=path) is True
+    conn = sqlite3.connect(path)
+    present = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    count = conn.execute("SELECT count(*) FROM requests").fetchone()[0]
+    conn.close()
+    assert {"thread_ref", "request_opening"} <= present
+    assert count == 1
+
+
+def test_converge_never_raises_on_an_unopenable_path(tmp_path, caplog) -> None:
+    bad = str(tmp_path / "missing-dir" / "r.db")
+    with caplog.at_level(logging.ERROR, logger="shared.request_index"):
+        assert ri.converge(path=bad) is False
+    assert any("could not converge" in r.getMessage() for r in caplog.records)
+
+
+def test_the_router_converges_the_index_at_boot(tmp_path, monkeypatch) -> None:
+    # The boot hook is the router's register(): an old file is current before
+    # any webhook arrives.
+    path = str(tmp_path / "r.db")
+    _write_old_index(path)
+    monkeypatch.setenv("SMD_REQUEST_INDEX_DB_PATH", path)
+    plugin = load_plugin("hermes-smd-webhook-router")
+
+    class _Ctx:
+        def register_hook(self, *_a, **_k) -> None:
+            pass
+
+    plugin.register(_Ctx())
+    conn = sqlite3.connect(path)
+    present = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    conn.close()
+    assert {"thread_ref", "request_opening"} <= present
+
+
 def test_custody_nulls_the_requesters_opening_with_the_other_text(tmp_path) -> None:
     path = str(tmp_path / "r.db")
     now = time.time()
